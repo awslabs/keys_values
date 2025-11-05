@@ -1,0 +1,19 @@
+#!/bin/bash
+# Script that adds license to all python files, run with ./license-add.sh
+set -e
+
+add_license_folder() {
+	folder=$1
+	echo "adding license to folder $folder"
+	for i in $(find $folder -name '*.py');
+	do
+	  if ! grep -q Copyright $i
+	  then
+	  	echo "adding license to $i"
+	    cat copyright.txt $i > $i.new && mv $i.new $i
+	  fi
+	done
+}
+
+add_license_folder "keys_values/"
+add_license_folder "test/"

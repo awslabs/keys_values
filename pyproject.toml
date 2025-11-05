@@ -1,0 +1,30 @@
+[project]
+name = "keys_values"
+version = "0.1.dev1"
+description = "Efficient Inference, Fine-tuning and Key-value Caching on top of LitGPT"
+authors = [
+    { name = "Matthias Seeger", email = "mseeger@gmail.com" },
+]
+readme = "README.md"
+license = { file = "LICENSE" }
+
+urls.homepage = "https://github.com/awslabs/keys_values"
+scripts.keys_values = "keys_values.__main__:main"
+
+dependencies = [
+    "torchao",
+    "filelock",
+]
+
+[tool.setuptools.packages.find]
+include = [
+    "keys_values",
+    "keys_values.*",
+]
+exclude = []
+
+[tool.setuptools.package-data]
+keys_values = [
+    "LICENSE",
+    "README.md",
+]
