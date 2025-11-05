@@ -134,13 +134,11 @@ are values for `<qname>`:
 
 * "default": No quantization. KV cache buffers stored in same datatype as
   weights (set by `--precision`).
-* "torch-quantized8" or "bnb-quantized8": KV cache buffers quantized to
-  8 bits. For 16 bit weights, this saves a factor of 2.
-* "bnb-quantized4": KV cache buffers quantized to 4 bits. For 16 bit weights,
-  this saves a factor of 4.
-
-**Note**: 4-bit quantization with PyTorch `ao` is planned, but not yet
-implemented.
+* "torch-quantized8", "bnb-quantized8", "ao-quantized8": KV cache buffers
+  quantized to 8 bits. For 16 bit weights, this saves a factor of 2.
+* "bnb-quantized4", "ao-quantized4": KV cache buffers quantized to 4 bits.
+  For 16 bit weights, this saves a factor of 4. At this moment, neither
+  `bitsandbytes` nor `torchao` support 4 bit quantization on CPU.
 
 Next, here are further relevant parameters determining GPU memory usage in
 the second stage:
