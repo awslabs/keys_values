@@ -11,11 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 
 import torch
 
 from keys_values.array_limit import TemporaryArrayLimit
+from keys_values.kvcache.buffers import KVCacheBuffersParams
 from keys_values.kvcache.quantize.pytorch import TorchBasicQuantizer
 from keys_values.kvcache.utils import bits_for_torch_dtype
 
@@ -70,11 +71,9 @@ class TorchAOQuantizer(TorchBasicQuantizer):
         if blocksize % 2 == 1:
             raise ValueError(f"blocksize = {blocksize} must be even")
 
-    @property
     def _quant_buffer_blocksize(self) -> int:
         return self.blocksize if not self._is_4bit else self.blocksize // 2
 
-    @property
     def _quant_buffer_dtype(self) -> torch.dtype:
         return torch.uint8
 
@@ -128,9 +127,9 @@ class TorchAOQuantizer(TorchBasicQuantizer):
             target_dtype=self.target_dtype,
         )
         int_data = quant_tensor.tensor_impl.get_plain()[0]
-        if int_data.dtype != self._quant_buffer_dtype or int_data.shape != input_float.shape:
+        if int_data.dtype != self._quant_buffer_dtype() or int_data.shape != input_float.shape:
             raise NotImplementedError(
-                f"int_data.dtype = {int_data.dtype} [should be {self._quant_buffer_dtype}], "
+                f"int_data.dtype = {int_data.dtype} [should be {self._quant_buffer_dtype()}], "
                 f"int_data.shape = {int_data.shape} [should be {input_float.shape}]. "
                 "Check 'torchao' sources. Maybe something changed?"
             )
@@ -173,3 +172,32 @@ class TorchAOQuantizer(TorchBasicQuantizer):
     @staticmethod
     def supported_target_dtypes() -> Tuple[torch.dtype, ...]:
         return ALLOWED_TARGET_DTYPES
+
+    @staticmethod
+    def _quant_buffer_blocksize_num_channels_apriori(
+        params: KVCacheBuffersParams, **kwargs,
+    ) -> Tuple[int, int]:
+        num_bits = kwargs.get("num_bits")
+        if num_bits is None:
+            raise IndexError("Argument 'num_bits' is missing")
+        elif num_bits not in (4, 8):
+            raise ValueError(f"num_bits = {num_bits}, must be 4 or 8")
+        blocksize, num_channels = TorchBasicQuantizer._quant_buffer_blocksize_num_channels_apriori(
+            params, **kwargs,
+        )
+        if num_bits == 4:
+            blocksize /= 2
+        return blocksize, num_channels
+
+    @staticmethod
+    def size_estimate_apriori(
+        params: KVCacheBuffersParams, **kwargs,
+    ) -> Tuple[int, Dict[str, int]]:
+        blocksize, num_channels = TorchAOQuantizer._quant_buffer_blocksize_num_channels_apriori(
+            params, **kwargs,
+        )
+        sz_buffer = blocksize * num_channels * TorchAOQuantizer._quant_buffer_dtype_bits_apriori(
+            params, **kwargs,
+        )
+        sz_states = 2 * num_channels * bits_for_torch_dtype(torch.float32)
+        return sz_buffer + sz_states, dict(buffer=sz_buffer, q_states=sz_states)

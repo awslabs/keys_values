@@ -19,7 +19,6 @@ from torch.nn import functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from keys_values.attention import (
-    FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA,
     scaled_dot_product_attention_in_blocks,
     DefaultKeysAndValues,
 )
@@ -28,6 +27,7 @@ from keys_values.attention_utils import (
     create_temp_array,
     sdpa_attention_weights,
     slice_as_flat,
+    FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA,
 )
 from keys_values.kvcache.utils import expand_index
 

@@ -11,36 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Tuple, Dict, Callable, List, Any
+from typing import Optional
 
 import torch
 
 from litgpt.config import Config
 
-from keys_values.attention import KeysAndValues
-from keys_values.kvcache.base import (
-    DefaultKVCacheReplayLog,
-    KVCacheParams,
-    KVCacheReplayLog,
-)
-from keys_values.kvcache.basics import KVCacheWithBuffers
-from keys_values.kvcache.buffers import (
-    DefaultKVCacheBuffers,
-    KVCacheBuffers,
-    KVCacheBuffersParams,
-    positions_wrap_around,
-)
-from keys_values.kvcache.utils import bitsize_of, bits_for_torch_dtype
+from keys_values.attention import DefaultKeysAndValues
+from keys_values.kvcache.basics import LastRecentlyInsertedKVCache
+from keys_values.kvcache.buffers import KVCacheBuffers
 
 
-class LastRecentlyInsertedAltKVCache(KVCacheWithBuffers):
+class LastRecentlyInsertedAltKVCache(LastRecentlyInsertedKVCache):
     """
     Implements :class:`LastRecentlyInsertedKVCache` in a different way. Namely,
-    buffer slots have the same ordering as tokens, and we use square
-    `is_causal=True` MHA for every chunk.
-
-    For now, this is just to check whether this is competitive for not too
-    large chunk sizes. This class does not yet work with gradient computation!
+    we call "training" `is_causal=True` MHA for every chunk. By exchanging the
+    new KV information with that currently at the right end, the causal
+    attention mask works out. Note that internally, we use the same buffer
+    organization as in other caches.
 
     """
     def __init__(
@@ -56,13 +44,6 @@ class LastRecentlyInsertedAltKVCache(KVCacheWithBuffers):
             buffers: KV cache buffers to be used
         """
         super().__init__(config, buffers, block_idx, **base_kwargs)
-        # May not be really needed:
-        self.register_buffer(
-            "token_pos",
-            torch.zeros(buffers.cache_length, device=buffers.device, dtype=torch.int),
-            persistent=False,
-        )
-        self._next_token_pos = None
 
     @staticmethod
     def from_config(
@@ -85,129 +66,166 @@ class LastRecentlyInsertedAltKVCache(KVCacheWithBuffers):
             dtype: Data type for buffers
 
         """
-        buffers_kwargs = KVCacheWithBuffers.extract_default_buffers_kwargs(base_kwargs)
-        buffers = KVCacheWithBuffers.create_default_buffers(
-            config=config,
-            max_batch_size=max_batch_size,
-            cache_length=cache_length,
-            device=device,
-            dtype=dtype,
-            **buffers_kwargs,
+        tmp_cache = LastRecentlyInsertedKVCache.from_config(
+            config,
+            max_batch_size,
+            cache_length,
+            block_idx,
+            device,
+            dtype,
+            **base_kwargs,
         )
         return LastRecentlyInsertedAltKVCache(
-            config, buffers, block_idx, **base_kwargs,
+            config, tmp_cache.kv_buffers, block_idx, **base_kwargs,
         )
 
-    @property
-    def next_token_pos(self) -> Optional[int]:
-        return self._next_token_pos
-
-    @property
-    def max_prefill_length(self) -> Optional[int]:
-        return None  # This KV cache can be prefilled with any length
-
-    @property
-    def max_tokens_forward(self) -> int:
-        return self.cache_length
-
-    def _forward_internal(
+    # We overwrite :math:`forward`, but still make use of :meth:`_prefill`
+    # and :meth:`forward` internally.
+    def forward(
         self,
+        query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
-    ) -> KeysAndValues:
-        if self._next_token_pos is None:
-            raise IndexError("Cache needs to be initialized with 'prefill' before being used")
-        num = key.shape[2]
-        positions = positions_wrap_around(
-            num=num,
-            current=self.next_position,
-            start=0,
-            end=self.cache_length,
-            batch_size=self.batch_size,
-            n_query_groups=self.n_query_groups,
-            device=self.device,
-        )
-        k_and_v = self.kv_buffers.forward(
-            positions=positions,
-            key=key,
-            value=value,
-        )
-        np = self.next_position
-        num1 = min(num, self.cache_length - np)
-        diff = num - num1
-        ntp = self._next_token_pos
-        self.token_pos[np:(np + num1)] = torch.arange(
-            ntp, ntp + num1, device=self.device, dtype=torch.int
-        )
-        if diff > 0:
-            self.token_pos[:diff] = torch.arange(
-                ntp + num1, ntp + num, device=self.device, dtype=torch.int
+        input_pos: int,
+    ) -> torch.Tensor:
+        self._forward_check_args(query, key, value, token_idx, input_pos)
+        for_prefill = input_pos == 0
+        num = query.shape[2]
+        self.mha.set_seq_length(input_pos + num, device=query.device)
+
+        current_next_position = self.next_position
+        need_to_modify = False
+        if for_prefill:
+            self._prefill(key, value, token_idx)
+            # In this case, `k_and_v` can vend both keys and values at the same
+            # time.
+            k_and_v = DefaultKeysAndValues(key, value)
+        else:
+            # We first extend the cache normally, overwriting information
+            # starting from `current_next_position`
+            need_to_modify = (
+                self.current_length + num > self.cache_length > num and
+                current_next_position + num != self.cache_length
             )
-        self.next_position = (np + num) % self.cache_length
-        if self._replay_log is not None:
-            if not isinstance(self._replay_log, DefaultKVCacheReplayLog):
-                raise IndexError("Cannot switch on replay logging in the middle of inference run. Call 'prefill'.")
-            self._replay_log.append_token_chunk(token_idx)
-        self._next_token_pos += num
-        return k_and_v
+            k_and_v = self._forward(key, value, token_idx)
 
-    def _update(self, *args, **kwargs):
-        pass
+        if need_to_modify:
+            # Rearrange KV info in `k_and_v` and extend `query`. We can then
+            # call MHA in default causal mode
+            old_keys = k_and_v.keys()
+            old_values = k_and_v.values()
+            # R1 = [start1, end1), where `key`, `value` was written to
+            # R2 = [start2, end2), final `num` slots. This is where `key`,
+            #      `value` need to land
+            start1 = current_next_position
+            end1 = start1 + num
+            end2 = self.cache_length
+            start2 = end2 - num
+            if end1 <= start2:
+                # R1 left of R2, no overlap
+                new_keys = torch.cat(
+                    (
+                        old_keys[:, :, :start1, :],
+                        old_keys[:, :, start2:, :],  # R2
+                        old_keys[:, :, end1:start2, :],
+                        old_keys[:, :, start1:end1, :],  # R1
+                    ),
+                    dim=2,
+                )
+                new_values = torch.cat(
+                    (
+                        old_values[:, :, :start1, :],
+                        old_values[:, :, start2:, :],
+                        old_values[:, :, end1:start2, :],
+                        old_values[:, :, start1:end1, :],
+                    ),
+                    dim=2,
+                )
+            elif start1 < start2:
+                # R1 left of R2, R1, R2 overlap, but R1 not split into two.
+                # R1 = [R1a, R1b], R2 = [R2a, R2b], but R2a has been overwritten
+                # by R1b
+                new_keys = torch.cat(
+                    (
+                        old_keys[:, :, :start1, :],
+                        old_keys[:, :, end1:, :],  # R2b
+                        old_keys[:, :, start1:end1, :],  # R1
+                    ),
+                    dim=2,
+                )
+                new_values = torch.cat(
+                    (
+                        old_values[:, :, :start1, :],
+                        old_values[:, :, end1:, :],
+                        old_values[:, :, start1:end1, :],
+                    ),
+                    dim=2,
+                )
+            else:
+                # R1 right of R2, splits into two
+                # R1 = [R1a, R2b], R2 = [R2a, R2b], R2b overwritten by R1a
+                end1b = end1 - self.cache_length
+                end2a = start2 + end1b
+                if end1b <= start2:
+                    new_keys = torch.cat(
+                        (
+                            old_keys[:, :, start2:end2a, :],  # R2a
+                            old_keys[:, :, end1b:start2, :],
+                            old_keys[:, :, start1:, :],  # R1a
+                            old_keys[:, :, :end1b, :],  # R1b
+                        ),
+                        dim=2,
+                    )
+                    new_values = torch.cat(
+                        (
+                            old_values[:, :, start2:end2a, :],
+                            old_values[:, :, end1b:start2, :],
+                            old_values[:, :, start1:, :],
+                            old_values[:, :, :end1b, :],
+                        ),
+                        dim=2,
+                    )
+                else:
+                    # Can happen if `num` is large. R1a overwrites R2b, but
+                    # a part of R1b also overwrites a part of R2a. Say that
+                    # R2* is the part of R2 not overwritten by R1, namely
+                    # R2* = [end1b, start1). Then, the whole range is
+                    # covered as [R1b, R2*, R1a]
+                    new_keys = torch.cat(
+                        (
+                            old_keys[:, :, end1b:start1, :],  # R2*
+                            old_keys[:, :, start1:, :],  # R1a
+                            old_keys[:, :, :end1b, :],  # R1b
+                        ),
+                        dim=2,
+                    )
+                    new_values = torch.cat(
+                        (
+                            old_values[:, :, end1b:start1, :],
+                            old_values[:, :, start1:, :],
+                            old_values[:, :, :end1b, :],
+                        ),
+                        dim=2,
+                    )
+            k_and_v = DefaultKeysAndValues(new_keys, new_values)
+            fill_left = torch.zeros(
+                (1, 1, 1, 1), dtype=query.dtype, device=query.device,
+            ).expand(*query.shape[:2], self.cache_length - num, query.shape[-1])
+            query = torch.cat((fill_left, query), dim=2)
+            for_prefill = True  # Use MHA as in prefill
+            input_pos = 0
 
-    def _prefill_internal(
-        self,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        token_idx: torch.Tensor,
-    ):
-        init_length = key.shape[2]
-        eff_init_length = min(init_length, self.cache_length)
-        if eff_init_length < init_length:
-            key = key[:, :, -eff_init_length:, :]
-            value = value[:, :, -eff_init_length:, :]
-        self.kv_buffers.prefill(key, value)
-        self._next_token_pos = init_length
-        self.token_pos[:eff_init_length] = torch.arange(
-            init_length - eff_init_length,
-            init_length,
-            dtype=self.token_pos.dtype,
-            device=self.device,
+        # Multi-head self-attention main computation
+        y, _ = self.mha(
+            query=query,
+            k_and_v=k_and_v,
+            block_idx=self.block_idx,
+            input_pos=input_pos,
+            return_attn_weights=False,
+            token_positions=None if for_prefill else self.token_positions(),
         )
+        if need_to_modify:
+            y = y[:, (-num):, :]
 
-    def token_positions(self) -> torch.Tensor:
-        return self.token_pos[:self.current_length].reshape(1, 1, -1).expand(
-            self.batch_size, self.n_query_groups, -1
-        )
-
-    def size_estimate(self) -> Tuple[int, Dict[str, int]]:
-        tk_p = bitsize_of(self.token_pos)
-        sz_total, dct_sz = self.kv_buffers.size_estimate()
-        return sz_total + tk_p, {**dct_sz, "token_pos": tk_p}
-
-    @classmethod
-    def size_estimate_apriori(cls, params: KVCacheParams, **kwargs) -> Tuple[int, Dict[str, int]]:
-        """
-        `cache_length` is required in `kwargs`. If `buffer_type` is given in
-        `kwargs`, the size for this type is used, otherwise for the default
-        type `DefaultKVCacheBuffers`.
-
-        """
-        buff_params = KVCacheBuffersParams.from_params(params)
-        buffer_type = kwargs.get("buffer_type", DefaultKVCacheBuffers)
-        sz_total, dct_sz = buffer_type.size_estimate_apriori(
-            buff_params, cache_length=params.cache_length, **kwargs,
-        )
-        tk_p = params.cache_length * bits_for_torch_dtype(torch.int)
-        return sz_total + tk_p, {**dct_sz, "token_pos": tk_p}
-
-    def switch_replay_logging(self, status: bool):
-        if status:
-            raise NotImplementedError("Replay logging not yet supported")
-
-    @property
-    def do_replay_logging(self) -> bool:
-        return False
-
-    def get_replay_log(self) -> Optional[KVCacheReplayLog]:
-        return None
+        return y

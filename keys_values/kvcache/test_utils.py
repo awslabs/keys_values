@@ -21,7 +21,7 @@ from litgpt.config import Config
 
 from keys_values.attention import (
     KeysAndValues,
-    scaled_dot_product_attention,
+    eager_scaled_dot_product_attention,
     DefaultKeysAndValues,
 )
 from keys_values.attention_utils import build_mask_cache
@@ -30,6 +30,10 @@ from keys_values.kvcache.buffers import DefaultKVCacheBuffers
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.gradient.accumulate import GradientAccumulator
 from keys_values.kvcache.gradient.checkpoints import KVCacheBufferCheckpoints
+
+
+# Tests run quite slowly for "mps". If this changes, switch this to True
+RUN_TESTS_FOR_MPS = False
 
 
 def create_kv_cache(
@@ -98,7 +102,7 @@ def compute_attn_weights(
         device=query.device,
         dtype=query.dtype,
     )
-    _, attn_weights = scaled_dot_product_attention(
+    _, attn_weights = eager_scaled_dot_product_attention(
         query=query,
         k_and_v=k_and_v,
         scale_factor=1.0 / math.sqrt(head_size),
@@ -219,7 +223,7 @@ def exchange_kv_cache_checkpoints(accumulator: GradientAccumulator):
 
 def available_backends() -> List[torch.device]:
     result = [torch.device("cpu")]
-    if torch.backends.mps.is_available():
+    if RUN_TESTS_FOR_MPS and torch.backends.mps.is_available():
         result.append(torch.device("mps"))
     if torch.cuda.is_available():
         result.append(torch.device("cuda:0"))
@@ -253,3 +257,21 @@ def filter_cache_names(names: List[str]) -> List[str]:
         return [
             name for name in names if not cache_name_is_bitsandbytes(name)
         ]
+
+
+def random_args_cache_forward(
+    params: KVCacheParams, num: int, vocab_size: int,
+) -> Dict[str, torch.Tensor]:
+    query = random_tensor(params, num=num, is_query=True)
+    kv = random_keys_values(params, num=num)
+    idx = torch.randint(
+        low=0,
+        high=vocab_size,
+        size=(params.max_batch_size, num),
+    )
+    return {
+        "query": query,
+        "key": kv[0],
+        "value": kv[1],
+        "token_idx": idx,
+    }

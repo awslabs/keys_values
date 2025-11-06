@@ -32,7 +32,7 @@ from keys_values.attention import (
     DefaultKeysAndValues,
     MultiHeadSelfAttention,
     do_softcapping,
-    scaled_dot_product_attention,
+    eager_scaled_dot_product_attention,
 )
 from keys_values.attention_utils import (
     build_mask_cache,
@@ -107,7 +107,7 @@ def test_scaled_dot_product_attention(n_head, n_query_groups):
         k_and_v = DefaultKeysAndValues(key, value)
         scale = 1.0 / math.sqrt(head_size)
 
-        result, scores = scaled_dot_product_attention(
+        result, scores = eager_scaled_dot_product_attention(
             query,
             k_and_v,
             scale_factor=scale,
@@ -122,7 +122,7 @@ def test_scaled_dot_product_attention(n_head, n_query_groups):
         key_bc = key.repeat_interleave(q_per_kv, dim=1)
         value_bc = value.repeat_interleave(q_per_kv, dim=1)
         k_and_v_bc = DefaultKeysAndValues(key_bc, value_bc)
-        result_cmp, scores_cmp = scaled_dot_product_attention(
+        result_cmp, scores_cmp = eager_scaled_dot_product_attention(
             query,
             k_and_v_bc,
             scale_factor=scale,
