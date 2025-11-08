@@ -1,6 +1,19 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License").
+# You may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from itertools import product
 import random
-from typing import List, Tuple
+from typing import List
 
 import torch
 import pytest
@@ -9,10 +22,7 @@ from litgpt.config import Config
 
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.factory import KVCacheFactory
-from keys_values.kvcache.test_utils import (
-    random_keys_values,
-    random_tensor,
-)
+from keys_values.kvcache.test_utils import random_args_cache_forward
 
 
 def args_compare_variants() -> List[tuple]:
@@ -42,19 +52,6 @@ def args_compare_variants() -> List[tuple]:
         )
     ]
     return result
-
-
-def create_tensors(
-    params: KVCacheParams, num: int, vocab_size: int,
-) -> Tuple[torch.Tensor, ...]:
-    query = random_tensor(params, num=num, is_query=True)
-    kv = random_keys_values(params, num=num)
-    idx = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(params.max_batch_size, num),
-    )
-    return (query,) + kv + (idx,)
 
 
 @pytest.mark.parametrize(
@@ -108,28 +105,16 @@ def test_compare_variants(batch_size, current_length, q_len, next_pos, tol_kwarg
         # Prefill
         num = min(current_length, cache_length)
         if prefill is None:
-            prefill = create_tensors(params, num, vocab_size)
+            prefill = random_args_cache_forward(params, num, vocab_size)
         _input_pos = 0
-        cache(
-            query=prefill[0],
-            key=prefill[1],
-            value=prefill[2],
-            token_idx=prefill[3],
-            input_pos=_input_pos,
-        )
+        cache(**prefill, input_pos=_input_pos)
         _input_pos += num
         # Insert
         if current_length == cache_length:
             num = next_pos
             if insert is None:
-                insert = create_tensors(params, num, vocab_size)
-            cache(
-                query=insert[0],
-                key=insert[1],
-                value=insert[2],
-                token_idx=insert[3],
-                input_pos=_input_pos,
-            )
+                insert = random_args_cache_forward(params, num, vocab_size)
+            cache(**insert, input_pos=_input_pos)
             _input_pos += num
         input_pos = _input_pos
     # Same code is run: Must be the same
@@ -143,14 +128,6 @@ def test_compare_variants(batch_size, current_length, q_len, next_pos, tol_kwarg
     results = []
     for cache in caches:
         if insert is None:
-            insert = create_tensors(params, q_len, vocab_size)
-        results.append(
-            cache(
-                query=insert[0],
-                key=insert[1],
-                value=insert[2],
-                token_idx=insert[3],
-                input_pos=input_pos,
-            )
-        )
+            insert = random_args_cache_forward(params, q_len, vocab_size)
+        results.append(cache(**insert, input_pos=input_pos))
     torch.testing.assert_close(results[0], results[1], **tol_kwargs)

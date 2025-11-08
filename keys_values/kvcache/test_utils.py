@@ -253,3 +253,21 @@ def filter_cache_names(names: List[str]) -> List[str]:
         return [
             name for name in names if not cache_name_is_bitsandbytes(name)
         ]
+
+
+def random_args_cache_forward(
+    params: KVCacheParams, num: int, vocab_size: int,
+) -> Dict[str, torch.Tensor]:
+    query = random_tensor(params, num=num, is_query=True)
+    kv = random_keys_values(params, num=num)
+    idx = torch.randint(
+        low=0,
+        high=vocab_size,
+        size=(params.max_batch_size, num),
+    )
+    return {
+        "query": query,
+        "key": kv[0],
+        "value": kv[1],
+        "token_idx": idx,
+    }

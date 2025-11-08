@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from itertools import product
 import random
 
 import torch
@@ -20,8 +21,8 @@ from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     tensor_is_simple,
-    random_keys_values,
-    random_tensor,
+    random_args_cache_forward,
+    available_backends,
 )
 
 
@@ -51,26 +52,20 @@ def test_last_recent(name):
     if max_prefill_length is not None and num_prefill > max_prefill_length:
         num_prefill = max_prefill_length
 
-    keys, values = random_keys_values(params, num=num_insert)
-    queries = random_tensor(params, num=num_insert, is_query=True)
-    token_idx = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(params.max_batch_size, num_insert),
-    )
+    data = random_args_cache_forward(params, num_insert, vocab_size)
     kv_cache(
-        query=queries[:, :, :num_prefill, :],
-        key=keys[:, :, :num_prefill, :],
-        value=values[:, :, :num_prefill, :],
-        token_idx=token_idx[:, :num_prefill],
+        query=data["query"][:, :, :num_prefill, :],
+        key=data["key"][:, :, :num_prefill, :],
+        value=data["value"][:, :, :num_prefill, :],
+        token_idx=data["token_idx"][:, :num_prefill],
         input_pos=0,
     )
     for pos in range(num_prefill, num_insert):
         kv_cache(
-            query=queries[:, :, pos:(pos + 1), :],
-            key=keys[:, :, pos:(pos + 1), :],
-            value=values[:, :, pos:(pos + 1), :],
-            token_idx=token_idx[:, pos:(pos + 1)],
+            query=data["query"][:, :, pos:(pos + 1), :],
+            key=data["key"][:, :, pos:(pos + 1), :],
+            value=data["value"][:, :, pos:(pos + 1), :],
+            token_idx=data["token_idx"][:, pos:(pos + 1)],
             input_pos=pos,
         )
 
@@ -85,14 +80,25 @@ def test_last_recent(name):
 
 
 @pytest.mark.parametrize(
-    "dtype", [torch.bfloat16, torch.float16, torch.float32],
+    "dtype, tol_kwargs, device",
+    [
+        a + (b,) for a, b in product(
+            [
+                (torch.bfloat16, dict(atol=0.0005, rtol=0.03)),
+                (torch.float16, dict(atol=0.00015, rtol=0.01)),
+                (torch.float32, dict()),
+            ],
+            available_backends(),
+        )
+    ],
 )
-def test_incremental_versus_singlepass(dtype):
+def test_incremental_versus_singlepass(dtype, tol_kwargs, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
     name = "dense-default"
+    print(f"dtype = {dtype}, device = {device}")
 
     params = KVCacheParams(
         max_batch_size=3,
@@ -100,7 +106,7 @@ def test_incremental_versus_singlepass(dtype):
         cache_length=128,
         head_size=8,
         n_head=4,
-        device=torch.device("cpu"),
+        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length
@@ -111,43 +117,31 @@ def test_incremental_versus_singlepass(dtype):
         num_prefill = max_prefill_length
     num_insert = max_prefill_length if max_prefill_length is not None else cache_length
 
-    keys, values = random_keys_values(params, num=num_insert)
-    queries = random_tensor(params, num=num_insert, is_query=True)
-    token_idx = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(params.max_batch_size, num_insert),
-    )
+    data = random_args_cache_forward(params, num_insert, vocab_size)
     # Compute MHA in a single shot
-    y_sshot = kv_cache(
-        query=queries,
-        key=keys,
-        value=values,
-        token_idx=token_idx,
-        input_pos=0,
-    )
+    y_sshot = kv_cache(**data, input_pos=0)
     should_be = torch.arange(
-        num_insert, dtype=kv_cache.token_positions().dtype,
+        num_insert, dtype=kv_cache.token_positions().dtype, device=device,
     ).view(1, 1, -1).expand(params.max_batch_size, params.n_query_groups, -1)
     assert (should_be == kv_cache.token_positions()[:, :, :num_insert]).all().item()
     # Compute MHA in steps
     y_parts = []
     y_parts.append(
         kv_cache(
-            query=queries[:, :, :num_prefill, :],
-            key=keys[:, :, :num_prefill, :],
-            value=values[:, :, :num_prefill, :],
-            token_idx=token_idx[:, :num_prefill],
+            query=data["query"][:, :, :num_prefill, :],
+            key=data["key"][:, :, :num_prefill, :],
+            value=data["value"][:, :, :num_prefill, :],
+            token_idx=data["token_idx"][:, :num_prefill],
             input_pos=0,
         )
     )
     for pos in range(num_prefill, num_insert):
         y_parts.append(
             kv_cache(
-                query=queries[:, :, pos:(pos + 1), :],
-                key=keys[:, :, pos:(pos + 1), :],
-                value=values[:, :, pos:(pos + 1), :],
-                token_idx=token_idx[:, pos:(pos + 1)],
+                query=data["query"][:, :, pos:(pos + 1), :],
+                key=data["key"][:, :, pos:(pos + 1), :],
+                value=data["value"][:, :, pos:(pos + 1), :],
+                token_idx=data["token_idx"][:, pos:(pos + 1)],
                 input_pos=pos,
             )
         )
@@ -155,11 +149,15 @@ def test_incremental_versus_singlepass(dtype):
     assert kv_cache.current_length == num_insert
     assert (should_be == kv_cache.token_positions()[:, :, :num_insert]).all().item()
     print(f"0:{num_prefill}")
-    torch.testing.assert_close(y_parts[0], y_sshot[:, :num_prefill, :])
+    torch.testing.assert_close(
+        y_parts[0], y_sshot[:, :num_prefill, :], **tol_kwargs,
+    )
     # Incremental computation is not very close to single-shot for 16-bit
     # data types. This is because different code is used (PyTorch kernels with
     # `is_causal=True` for single-shot, own code for incremental)
     if dtype == torch.float32:
         for pos, yp in zip(range(num_prefill, num_insert), y_parts[1:]):
             print(f"{pos}:{pos + 1}")
-            torch.testing.assert_close(yp, y_sshot[:, pos:(pos + 1), :])
+            torch.testing.assert_close(
+                yp, y_sshot[:, pos:(pos + 1), :], **tol_kwargs,
+            )

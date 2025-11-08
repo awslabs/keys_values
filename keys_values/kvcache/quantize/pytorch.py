@@ -96,12 +96,12 @@ class TorchBasicQuantizer(Quantizer):
         if self.blocks_over_heads:
             self.blocksize = n_query_groups * head_size
             self._quant_shape = (
-                batch_size, cache_length, self._quant_buffer_blocksize,
+                batch_size, cache_length, self._quant_buffer_blocksize(),
             )
         else:
             self.blocksize = head_size
             self._quant_shape = (
-                batch_size * n_query_groups, cache_length, self._quant_buffer_blocksize,
+                batch_size * n_query_groups, cache_length, self._quant_buffer_blocksize(),
             )
         self._validate_blocksize(self.blocksize)
 
@@ -118,7 +118,6 @@ class TorchBasicQuantizer(Quantizer):
             self._device = self.quant_buffer.device
         return self._device
 
-    @property
     def _quant_buffer_blocksize(self) -> int:
         """
         Some subclasses may represent `quant_buffer` with a different
@@ -130,7 +129,6 @@ class TorchBasicQuantizer(Quantizer):
         """
         return self.blocksize
 
-    @property
     def _quant_buffer_dtype(self) -> torch.dtype:
         """
         Some subclasses may represent `quant_buffer` with a different
@@ -158,7 +156,7 @@ class TorchBasicQuantizer(Quantizer):
             self._init_blocksize_quant_shape()
             shape = self._quant_shape
             self.quant_buffer = torch.empty(
-                shape, dtype=self._quant_buffer_dtype, device=device,
+                shape, dtype=self._quant_buffer_dtype(), device=device,
             )
             self.quant_scales = torch.zeros(
                 shape[:-1], dtype=torch.float32, device=device,
@@ -210,7 +208,7 @@ class TorchBasicQuantizer(Quantizer):
                 input_float=_values,
                 scales=scales,
                 zero_points=zero_points,
-            ).view(-1, csize, self._quant_buffer_blocksize)
+            ).view(-1, csize, self._quant_buffer_blocksize())
             scales = scales.view(-1, csize)
             zero_points = zero_points.view(-1, csize)
             dim0 = self._buffer_dim0
@@ -272,7 +270,7 @@ class TorchBasicQuantizer(Quantizer):
             raise IndexError("Quantizer buffers are not allocated")
         dim0 = self._buffer_dim0
         q_x = self.quant_buffer[:dim0, start:end, :]
-        q_blocksize = self._quant_buffer_blocksize
+        q_blocksize = self._quant_buffer_blocksize()
         assert q_x.shape[-1] == q_blocksize  # Sanity check
         scales = self.quant_scales[:dim0, start:end]
         zero_points = self.quant_zero_points[:dim0, start:end]
@@ -325,9 +323,9 @@ class TorchBasicQuantizer(Quantizer):
         return sz_buffer + sz_states, dict(buffer=sz_buffer, q_states=sz_states)
 
     @staticmethod
-    def size_estimate_apriori(
+    def _quant_buffer_blocksize_num_channels_apriori(
         params: KVCacheBuffersParams, **kwargs,
-    ) -> Tuple[int, Dict[str, int]]:
+    ) -> Tuple[int, int]:
         cache_length = kwargs.get("cache_length")
         if cache_length is None:
             raise IndexError("Argument 'cache_length' is missing")
@@ -338,23 +336,30 @@ class TorchBasicQuantizer(Quantizer):
             raise IndexError("Argument 'blocks_over_heads' is missing")
         else:
             blocks_over_heads = bool(blocks_over_heads)
-        source_dtype = params.dtype
-        if source_dtype is None:
-            raise IndexError("Argument 'params.dtype' must be given")
-        else:
-            assert isinstance(source_dtype, torch.dtype)
-        target_dtype = kwargs.get("target_dtype")
-        if target_dtype is None:
-            raise IndexError("Argument 'target_dtype' is missing")
-        else:
-            assert isinstance(target_dtype, torch.dtype)
         if blocks_over_heads:
             blocksize = params.n_query_groups * params.head_size
             num_channels = params.max_batch_size * cache_length
         else:
             blocksize = params.head_size
             num_channels = params.max_batch_size * params.n_query_groups * cache_length
-        sz_buffer = blocksize * num_channels * bits_for_torch_dtype(target_dtype)
+        return blocksize, num_channels
+
+    @staticmethod
+    def _quant_buffer_dtype_bits_apriori(
+        params: KVCacheBuffersParams, **kwargs,
+    ) -> int:
+        return 8
+
+    @staticmethod
+    def size_estimate_apriori(
+        params: KVCacheBuffersParams, **kwargs,
+    ) -> Tuple[int, Dict[str, int]]:
+        blocksize, num_channels = TorchBasicQuantizer._quant_buffer_blocksize_num_channels_apriori(
+            params, **kwargs,
+        )
+        sz_buffer = blocksize * num_channels * TorchBasicQuantizer._quant_buffer_dtype_bits_apriori(
+            params, **kwargs,
+        )
         sz_states = 2 * num_channels * bits_for_torch_dtype(torch.float32)
         return sz_buffer + sz_states, dict(buffer=sz_buffer, q_states=sz_states)
 
@@ -411,7 +416,7 @@ class TorchBasicQuantizerState(QuantizerState):
             quantizer._quant_shape[2],
         )
         self.quant_buffer = torch.zeros(
-            shape, dtype=quantizer._quant_buffer_dtype, device=device,
+            shape, dtype=quantizer._quant_buffer_dtype(), device=device,
         )
         self.quant_scales = torch.zeros(
             shape[:-1], dtype=torch.float32, device=device,
