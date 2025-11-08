@@ -13,6 +13,7 @@
 # limitations under the License.
 import csv
 from dataclasses import replace
+from filelock import FileLock, Timeout
 import random
 from pathlib import Path
 import time
@@ -22,25 +23,35 @@ import torch
 
 from litgpt.config import Config, name_to_config
 
+from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.test_utils import random_args_cache_forward
 
 
-# TODO: Use file locking as well!
 def append_results(
     results: List[Dict[str, Any]],
     result_path: Path,
-):
-    fieldnames = sorted(results[0].keys())
-    mode = "a" if result_path.exists() else "w"
-    with result_path.open(mode) as fp:
-        writer = csv.writer(fp, delimiter=",")
-        if mode == "w":
-            writer.writerow(fieldnames)
-            for record in results:
-                row = [record[name] for name in fieldnames]
-                writer.writerow(row)
+) -> bool:
+    lock_path = result_path.with_suffix(".lock")
+    lock = FileLock(lock_path, timeout=1)
+    try:
+        with lock.acquire(timeout=1):
+            fieldnames = sorted(results[0].keys())
+            mode = "a" if result_path.exists() else "w"
+            with result_path.open(mode) as fp:
+                writer = csv.writer(fp, delimiter=",")
+                if mode == "w":
+                    writer.writerow(fieldnames)
+                for record in results:
+                    row = [record[name] for name in fieldnames]
+                    writer.writerow(row)
+    except Timeout:
+        return False
+    finally:
+        lock.release()
+        lock_path.unlink()
+        return True
 
 
 def main(
@@ -51,6 +62,7 @@ def main(
     device: torch.device,
     result_path: Path,
     num_repeats: int,
+    warmup_repeats: int = 2,
 ):
     """
     Profiles times to run :meth:`forward` for caches "lastrec" and
@@ -60,6 +72,7 @@ def main(
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
+    on_gpu = torch.cuda.is_available()
 
     params = KVCacheParams(
         max_batch_size=batch_size,
@@ -70,85 +83,99 @@ def main(
         dtype=dtype,
         device=device,
     )
+    cache_kwargs = {
+        "tmp_array_limit_gb": TemporaryArrayLimit(
+            init_val=4, name="attention_forward_temp_size_gb",
+        )
+    }
     names = ["lastrec-default", "lastrec-alt-default"]
     print(f"Comparing caches: {names}")
     result_fixed = dict()
-    for key in ("n_head", "n_query_groups", "head_size", "batch_size", "dtype", "device"):
+    for key in ("n_head", "n_query_groups", "head_size", "max_batch_size", "dtype", "device"):
         val = getattr(params, key)
         print(f"{key} = {getattr(params, key)}")
         result_fixed[key] = str(val) if key in {"dtype", "device"} else val
 
     for cache_length, chunk_size in setups:
         print(f"\ncache_length = {cache_length}, chunk_size = {chunk_size}")
+        # Create caches
         params = replace(params, cache_length=cache_length)
-        rows = []
-        for repeat in range(num_repeats):
-            next_pos = random.randint(0, cache_length - 1)
-            # Create and prepare caches
-            caches = []
-            prefill = None
-            insert = None
-            input_pos = 0
-            for name in names:
-                cache = KVCacheFactory.create_single(
-                    name=name,
-                    config=config,
-                    max_batch_size=batch_size,
-                    cache_length=cache_length,
-                    block_idx=0,
-                    device=device,
-                    dtype=dtype,
-                )
-                caches.append(cache)
-                # Prefill
-                num = cache_length
-                if prefill is None:
-                    prefill = random_args_cache_forward(
-                        params, num, config.padded_vocab_size,
-                    )
-                _input_pos = 0
-                cache(**prefill, input_pos=_input_pos)
-                _input_pos += num
-                # Insert
-                num = next_pos
-                if insert is None:
-                    insert = random_args_cache_forward(
-                        params, num, config.padded_vocab_size,
-                    )
-                cache(**insert, input_pos=_input_pos)
-                _input_pos += num
-                input_pos = _input_pos
-            # Profile times for forward
-            result = dict(
-                result_fixed,
+        caches = [
+            KVCacheFactory.create_single(
+                name=name,
+                config=config,
+                max_batch_size=batch_size,
                 cache_length=cache_length,
-                chunk_size=chunk_size,
-                next_pos=next_pos,
-                repeat=repeat,
+                block_idx=0,
+                device=device,
+                dtype=dtype,
+                cache_kwargs=cache_kwargs,
             )
-            insert = None
-            for name, cache in zip(names, caches):
-                num = chunk_size
-                if insert is None:
-                    insert = random_args_cache_forward(
-                        params, num, config.padded_vocab_size,
-                    )
-                forward_time = time.perf_counter()
-                y = cache(**insert, input_pos=input_pos)
-                time_in_ms = (time.perf_counter() - forward_time) * 1000
-                _name = name.replace("-", "_")
-                result[f"time_{_name}"] = time_in_ms
-            rows.append(result)
+            for name in names
+        ]
+        rows = []
+        for repeat in [None] * warmup_repeats + list(range(num_repeats)):
+            next_pos = random.randint(0, cache_length - 1)
+            if repeat is not None:
+                result = dict(
+                    result_fixed,
+                    cache_length=cache_length,
+                    chunk_size=chunk_size,
+                    next_pos=next_pos,
+                    repeat=repeat,
+                )
+            prefill = None
+            insert1 = None
+            insert2 = None
+            with torch.no_grad():
+                for name, cache in zip(names, caches):
+                    # Prefill (prepare)
+                    input_pos = 0
+                    num = cache_length
+                    if prefill is None:
+                        prefill = random_args_cache_forward(
+                            params, num, config.padded_vocab_size,
+                        )
+                    cache(**prefill, input_pos=input_pos)
+                    input_pos += num
+                    # Insert (prepare)
+                    num = next_pos
+                    if insert1 is None:
+                        insert1 = random_args_cache_forward(
+                            params, num, config.padded_vocab_size,
+                        )
+                    cache(**insert1, input_pos=input_pos)
+                    input_pos += num
+                    # Insert (measure)
+                    num = chunk_size
+                    if insert2 is None:
+                        insert2 = random_args_cache_forward(
+                            params, num, config.padded_vocab_size,
+                        )
+                    if on_gpu:
+                        torch.cuda.current_stream().synchronize()
+                    forward_time = time.perf_counter()
+                    y = cache(**insert2, input_pos=input_pos)
+                    if on_gpu:
+                        torch.cuda.current_stream().synchronize()
+                    time_in_ms = (time.perf_counter() - forward_time) * 1000
+                    if repeat is not None:
+                        _name = name.replace("-", "_")
+                        result[f"time_{_name}"] = time_in_ms
+
+            if repeat is not None:
+                rows.append(result)
 
         # Append results to file
         print(f"Append to {result_path}")
-        append_results(rows, result_path)
+        done = False
+        while not done:
+            done = append_results(rows, result_path)
+            if not done:
+                time.sleep(0.1)
 
 
 if __name__ == "__main__":
-    # Setup for Qwen3-4B
-    model_name = "Qwen3-4B"
-    config = name_to_config[model_name]
     batch_size = 3
     dtype = torch.bfloat16
     device = torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
@@ -157,14 +184,18 @@ if __name__ == "__main__":
     cache_length = 2 ** 15
     setups = [
         (cache_length, chunk_size)
-        for chunk_size in [2 ** 9, 2 ** 10, 2 ** 11] + list(range(2048, 2 ** 14, 2048))
+        for chunk_size in [2 ** 8, 2 ** 9, 2 ** 10, 2 ** 11] + list(range(2048, 2 ** 14, 2048))
     ]
-    main(
-        setups,
-        config,
-        batch_size,
-        dtype,
-        device,
-        result_path,
-        num_repeats,
-    )
+    model_names = ["Qwen3-4B"]
+    for model_name in model_names:
+        print(f"\nRunning for {model_name} setup")
+        config = Config(**name_to_config[model_name])
+        main(
+            setups,
+            config,
+            batch_size,
+            dtype,
+            device,
+            result_path,
+            num_repeats,
+        )
