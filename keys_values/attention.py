@@ -16,7 +16,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 from torch.nn import functional as F
-from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.nn.attention import SDPBackend
 
 from litgpt.config import Config
 
@@ -26,21 +26,10 @@ from keys_values.attention_utils import (
     attention_compute_weighted_values,
     build_mask_cache,
     build_mask_slice,
-    filter_sdpa_kernels,
     create_temp_array,
     sdpa_attention_weights,
-    slice_as_flat,
+    slice_as_flat, pytorch_scaled_dot_product_attention,
 )
-
-
-# Currently, `torch.nn.functional.scaled_dot_product_attention` does not
-# properly support the case `enabla_gqa=True` (i.e., keys and values have
-# less heads than queries). In this case, it is best to extend keys and
-# values, which requires extra memory, but allows for efficient kernels to
-# be used.
-# Once PyTorch supports `enabla_gqa=True` properly at least with some fused
-# kernels (such as flash attention), this flag can be switched to `False`.
-FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA = True
 
 
 class KeysAndValues:
@@ -145,7 +134,6 @@ class MultiHeadSelfAttention:
     ) -> None:
         self.config = config
         self._sdpa_kernels = sdpa_kernels
-        self._sdpa_kernels_filtered = False
         self.use_eager_sdpa_always = use_eager_sdpa_always
         self.set_tmp_array_limit_gb(tmp_array_limit_gb)
         if self.config.attention_logit_softcapping is not None:
@@ -288,35 +276,6 @@ class MultiHeadSelfAttention:
         else:
             return SDPA_IMPL_PYTORCH
 
-    def _filter_sdpa_kernels(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_mask: Optional[torch.Tensor],
-        dropout_p: float,
-        is_causal: bool,
-        enable_gqa: bool,
-        **kwargs,
-    ):
-        if self._sdpa_kernels is not None and not self._sdpa_kernels_filtered:
-            if isinstance(self._sdpa_kernels, list):
-                kernels = self._sdpa_kernels
-            else:
-                kernels = [self._sdpa_kernels]
-            new_kernels = filter_sdpa_kernels(
-                sdpa_kernels=kernels,
-                query=query,
-                key=key,
-                value=value,
-                attn_mask=attn_mask,
-                dropout_p=dropout_p,
-                is_causal=is_causal,
-                enable_gqa=enable_gqa,
-            )
-            self._sdpa_kernels = new_kernels if new_kernels else None
-            self._sdpa_kernels_filtered = True
-
     def _get_scale_factor(self):
         return 1.0 / math.sqrt(self.config.attention_scores_scalar or self.config.head_size)
 
@@ -361,34 +320,14 @@ class MultiHeadSelfAttention:
             # We need `key` and `value` at the same time here. For the training
             # use case, this will be the case, since `k_and_v` is the default
             # in this case.
-            key = k_and_v.keys()
-            value = k_and_v.values()
-            is_causal = mask is None
-            enable_gqa = self.config.n_query_groups < self.config.n_head
-            if enable_gqa and FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA:
-                # Some efficient kernels have not implemented
-                # `enabla_gqa=True`. It is better to extend keys, values in
-                # this case.
-                q_per_kv = self.config.n_head // self.config.n_query_groups
-                key = key.repeat_interleave(q_per_kv, dim=1)
-                value = value.repeat_interleave(q_per_kv, dim=1)
-                enable_gqa = False
-            kwargs = dict(
+            y = pytorch_scaled_dot_product_attention(
                 query=query,
-                key=key,
-                value=value,
-                attn_mask=mask,
-                dropout_p=0.0,
-                scale=scale_factor,
-                is_causal=is_causal,
-                enable_gqa=enable_gqa,
+                key=k_and_v.keys(),
+                value=k_and_v.values(),
+                scale_factor=scale_factor,
+                sdpa_kernels=self.sdpa_kernels,
+                mask=mask,
             )
-            self._filter_sdpa_kernels(**kwargs)
-            if self._sdpa_kernels is not None:
-                with sdpa_kernel(self._sdpa_kernels):
-                    y = F.scaled_dot_product_attention(**kwargs)
-            else:
-                y = F.scaled_dot_product_attention(**kwargs)
             scores = None
         return y.transpose(1, 2), scores
 

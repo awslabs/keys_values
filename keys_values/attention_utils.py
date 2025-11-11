@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 import math
 
 import torch
@@ -20,7 +20,17 @@ from torch.backends.cuda import (
     can_use_efficient_attention,
     can_use_flash_attention,
 )
-from torch.nn.attention import SDPAParams, SDPBackend
+from torch.nn import functional as F
+from torch.nn.attention import SDPAParams, SDPBackend, sdpa_kernel
+
+
+# Currently, `F.scaled_dot_product_attention` does not properly support the
+# case `enabla_gqa=True` (i.e., keys and values have less heads than
+# queries). In this case, it is best to extend keys and values, which requires
+# extra memory, but allows for efficient kernels to be used.
+# Once PyTorch supports `enabla_gqa=True` properly at least with some fused
+# kernels (such as flash attention), this flag can be switched to `False`.
+FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA = True
 
 
 def filter_sdpa_kernels(
@@ -429,3 +439,47 @@ def sample_token_positions(
                 input_pos, input_pos + q_len, **index_kwargs,
             )
     return token_positions
+
+
+def pytorch_scaled_dot_product_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    scale_factor: float,
+    sdpa_kernels: Union[SDPBackend, List[SDPBackend]],
+    mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    is_causal = mask is None
+    n_head = query.shape[1]
+    n_query_groups = key.shape[1]
+    enable_gqa = n_query_groups < n_head
+    if enable_gqa and FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA:
+        # Some efficient kernels have not implemented
+        # `enabla_gqa=True`. It is better to extend keys, values in
+        # this case.
+        q_per_kv = n_head // n_query_groups
+        key = key.repeat_interleave(q_per_kv, dim=1)
+        value = value.repeat_interleave(q_per_kv, dim=1)
+        enable_gqa = False
+    kwargs = dict(
+        query=query,
+        key=key,
+        value=value,
+        attn_mask=mask,
+        dropout_p=0.0,
+        scale=scale_factor,
+        is_causal=is_causal,
+        enable_gqa=enable_gqa,
+    )
+    if sdpa_kernels is not None:
+        if not isinstance(sdpa_kernels, list):
+            sdpa_kernels = [sdpa_kernels]
+        sdpa_kernels = filter_sdpa_kernels(sdpa_kernels=sdpa_kernels, **kwargs)
+        if not sdpa_kernels:
+            sdpa_kernels = None
+    if sdpa_kernels is not None:
+        with sdpa_kernel(sdpa_kernels):
+            y = F.scaled_dot_product_attention(**kwargs)
+    else:
+        y = F.scaled_dot_product_attention(**kwargs)
+    return y

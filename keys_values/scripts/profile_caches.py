@@ -21,7 +21,7 @@ from typing import List, Tuple, Dict, Any
 
 import torch
 
-from litgpt.config import Config, name_to_config
+from litgpt.config import Config
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.kvcache.base import KVCacheParams
@@ -189,7 +189,7 @@ if __name__ == "__main__":
     model_names = ["Qwen3-4B"]
     for model_name in model_names:
         print(f"\nRunning for {model_name} setup")
-        config = Config(**name_to_config[model_name])
+        config = Config.from_name(model_name)
         main(
             setups,
             config,

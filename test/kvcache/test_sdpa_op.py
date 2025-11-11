@@ -18,11 +18,11 @@ import torch
 from torch.nn import functional as F
 import pytest
 
-from keys_values.attention import FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA
 from keys_values.attention_utils import (
     build_mask_slice,
     sample_token_positions,
     ENTRIES_PER_GB,
+    FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA,
 )
 from keys_values.kvcache.gradient.accumulate import copy_requires_grad
 from keys_values.kvcache.gradient.sdpa_op import SDPAFunction, sdpa_backward
