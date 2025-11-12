@@ -32,6 +32,10 @@ from keys_values.kvcache.gradient.accumulate import GradientAccumulator
 from keys_values.kvcache.gradient.checkpoints import KVCacheBufferCheckpoints
 
 
+# Tests run quite slowly for "mps". If this changes, switch this to True
+RUN_TESTS_FOR_MPS = False
+
+
 def create_kv_cache(
     name: str,
     params: KVCacheParams,
@@ -219,7 +223,7 @@ def exchange_kv_cache_checkpoints(accumulator: GradientAccumulator):
 
 def available_backends() -> List[torch.device]:
     result = [torch.device("cpu")]
-    if torch.backends.mps.is_available():
+    if RUN_TESTS_FOR_MPS and torch.backends.mps.is_available():
         result.append(torch.device("mps"))
     if torch.cuda.is_available():
         result.append(torch.device("cuda:0"))

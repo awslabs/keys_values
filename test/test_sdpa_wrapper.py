@@ -24,7 +24,6 @@ from keys_values.attention import (
     DefaultKeysAndValues,
     scaled_dot_product_attention_in_blocks,
 )
-from keys_values.attention_utils import build_mask_slice
 from keys_values.kvcache.test_utils import available_backends
 from keys_values.sdpa_wrapper import scaled_dot_product_attention as wrapper_sdpa
 
@@ -52,7 +51,10 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
     torch.random.manual_seed(seed)
 
     num_repeats = 32
-    dtype = torch.bfloat16
+    if device == torch.device("mps"):
+        dtype = torch.float32
+    else:
+        dtype = torch.bfloat16
     gen_kwargs = dict(dtype=dtype, device=device)
     index_kwargs = dict(dtype=torch.int64, device=device)
     assert_kwargs = dict(atol=0.0005, rtol=0.05)
@@ -63,6 +65,7 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
         SDPBackend.MATH,
     ]
 
+    print(f"n_head={n_head}, n_query_groups={n_query_groups}, device={device}")
     for repeat in range(num_repeats):
         head_size = 2 ** random.randint(3, 6)
         batch_size = random.randint(1, 5)
@@ -71,37 +74,49 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
         # Sample data: For `token_positions`, we iterate between two
         # cases: Overlap / no overlap between the two parts which are
         # exchanged
-        # TODO! Overlap case!
-        # No overlap case
-        q_len = random.randint(1, kv_len // 2)
         token_positions = torch.zeros(
             (batch_size, n_query_groups, kv_len), **index_kwargs,
         )
-        left_sz = kv_len - q_len
-        s1 = input_pos + q_len - left_sz
-        l1 = left_sz
-        l2 = s1
-        for b in range(batch_size):
-            for h in range(n_query_groups):
-                token_positions[b, h, :left_sz] = torch.randperm(
-                    l1, **index_kwargs,
-                ) + s1
-                token_positions[b, h, left_sz:] = torch.randperm(
-                    l2, **index_kwargs,
-                )[:q_len]
+        if repeat % 2 == 0:
+            # No overlap case
+            q_len = random.randint(1, kv_len // 2)
+            left_sz = kv_len - q_len
+            s1 = input_pos + q_len - left_sz
+            l1 = left_sz
+            l2 = s1
+            for b in range(batch_size):
+                for h in range(n_query_groups):
+                    token_positions[b, h, :left_sz] = torch.randperm(
+                        l1, **index_kwargs,
+                    ) + s1
+                    token_positions[b, h, left_sz:] = torch.randperm(
+                        l2, **index_kwargs,
+                    )[:q_len]
+        else:
+            # Overlap case
+            q_len = random.randint(kv_len // 10, kv_len // 2)
+            s1 = input_pos + q_len - kv_len
+            done = False
+            for _ in range(50):
+                num_overlap = 0
+                for b in range(batch_size):
+                    for h in range(n_query_groups):
+                        slice = torch.randperm(kv_len, **index_kwargs) + s1
+                        num_overlap += (slice[(-q_len):] >= input_pos).sum().item()
+                        token_positions[b, h, :] = slice
+                if num_overlap >= 10:
+                    done = True
+                    break
+            if not done:
+                print("Did not manage to reach overlap threshold")
+        print(f"repeat {repeat}:")
+        print(f"head_size={head_size}, batch_size={batch_size}, kv_len={kv_len}, input_pos={input_pos}, q_len={q_len}")
         shape = (batch_size, n_head, q_len, head_size)
         query = torch.randn(shape, **gen_kwargs)
         shape = (batch_size, n_query_groups, kv_len, head_size)
         key = torch.randn(shape, **gen_kwargs)
         value = torch.randn(shape, **gen_kwargs)
         scale_factor = 1.0 / math.sqrt(head_size)
-        mask = build_mask_slice(
-            input_pos=input_pos,
-            num=q_len,
-            token_positions=token_positions,
-            n_head=n_head,
-            dtype=dtype,
-        )
 
         # Compute in two ways and compare
         output1 = wrapper_sdpa(
@@ -122,6 +137,5 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
             input_pos=input_pos,
             token_positions=token_positions,
             sliding_window_size=None,
-
         )
         torch.testing.assert_close(output1, output2, **assert_kwargs)
