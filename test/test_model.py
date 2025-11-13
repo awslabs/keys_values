@@ -1514,9 +1514,9 @@ def test_sdpa_choice(config):
         # best effort, if the GPU can load it
         pytest.xfail()
 
-    model.mha.scaled_dot_product_attention = partial(
+    model.mha.eager_scaled_dot_product_attention = partial(
         assert_sdpa_backend,
-        model.mha.scaled_dot_product_attention,
+        model.mha.eager_scaled_dot_product_attention,
     )
 
     if SUPPORTS_FLASH_ATTENTION:
@@ -1589,9 +1589,9 @@ def test_sdpa_choice_kv_cache(config):
 
     for block in model.transformer.h:
         kv_cache = block.attn.kv_cache
-        kv_cache.mha.scaled_dot_product_attention = partial(
+        kv_cache.mha.eager_scaled_dot_product_attention = partial(
             assert_sdpa_backend,
-            kv_cache.mha.scaled_dot_product_attention,
+            kv_cache.mha.eager_scaled_dot_product_attention,
         )
 
     if SUPPORTS_FLASH_ATTENTION:

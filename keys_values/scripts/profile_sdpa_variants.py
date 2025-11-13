@@ -44,7 +44,6 @@ def main(
     on_gpu = torch.cuda.is_available()
     device = torch.device("cuda", 0) if on_gpu else torch.device("cpu")
 
-    gen_kwargs = dict(dtype=dtype, device=device)
     index_kwargs = dict(dtype=torch.int64, device=device)
     sdpa_kernels = [
         SDPBackend.FLASH_ATTENTION,

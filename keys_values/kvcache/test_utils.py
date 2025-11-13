@@ -21,7 +21,7 @@ from litgpt.config import Config
 
 from keys_values.attention import (
     KeysAndValues,
-    scaled_dot_product_attention,
+    eager_scaled_dot_product_attention,
     DefaultKeysAndValues,
 )
 from keys_values.attention_utils import build_mask_cache
@@ -102,7 +102,7 @@ def compute_attn_weights(
         device=query.device,
         dtype=query.dtype,
     )
-    _, attn_weights = scaled_dot_product_attention(
+    _, attn_weights = eager_scaled_dot_product_attention(
         query=query,
         k_and_v=k_and_v,
         scale_factor=1.0 / math.sqrt(head_size),

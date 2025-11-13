@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Callable
 
 import torch
 from torch.nn import functional as F
@@ -30,6 +30,7 @@ from keys_values.attention_utils import (
     sdpa_attention_weights,
     slice_as_flat, pytorch_scaled_dot_product_attention,
 )
+from keys_values.sdpa_wrapper import scaled_dot_product_attention as qpadded_sdpa
 
 
 class KeysAndValues:
@@ -85,6 +86,11 @@ SDPA_IMPL_EAGER_BLOCKS = 1
 
 SDPA_IMPL_EAGER_NO_BLOCKS = 2
 
+SDPA_IMPL_QPADDED_PYTORCH = 3
+
+
+UseEagerPredicate = Callable[[int, int], bool]
+
 
 class MultiHeadSelfAttention:
     """
@@ -107,10 +113,15 @@ class MultiHeadSelfAttention:
 
     There are different ways how SDPA is computed, see also
     :meth:`_use_eager_sdpa`:
-    - 0: PyTorch kernel (see above).
-    - 1: Eager (own) implementation, using blocking to limit GPU memory
-        usage.
-    - 2: Eager (own) implementation without blocking.
+    - :const:`SDPA_IMPL_PYTORCH`: PyTorch kernel (see above). Only used for
+        prefill (`input_pos=0`)
+    - :const:`SDPA_IMPL_EAGER_BLOCKS`: Eager (own) implementation, using
+        blocking to limit GPU memory usage.
+    - :const:`SDPA_IMPL_EAGER_NO_BLOCKS: Eager (own) implementation without
+        blocking. Worst choice.
+    - :const:`SDPA_IMPL_QPADDED_PYTORCH: Variant of PyTorch kernel, where
+        `query` is zero-padded. This is implemented in
+        :func:`sdpa_wrapper.scaled_dot_product_attention`
 
     PyTorch kernels are most efficient for the `is_causal=True` case
     (where queries and keys are over the same tokens), but do not return
@@ -124,6 +135,22 @@ class MultiHeadSelfAttention:
     with attention logit softcapping, or if `k_and_v` cannot return keys
     and values in parallel.
 
+    The decision between :const:`SDPA_IMPL_EAGER_BLOCKS` and
+    :const:`SDPA_IMPL_QPADDED_PYTORCH` is taken based on
+    `use_eager_kernel(kv_len, q_len)`. If this returns `True`, we use
+    :const:`SDPA_IMPL_EAGER_BLOCKS`, otherwise we use
+    :const:`SDPA_IMPL_QPADDED_PYTORCH`. The rule should in general be of
+    the form:
+    ```
+        use_eager_kernel(kv_len, q_len) = q_len <= thresh(kv_len)
+    ```
+    This is because :const:`SDPA_IMPL_QPADDED_PYTORCH` is faster from a
+    certain value of `q_len` upwards. It also requires less temporary
+    memory.
+
+    TODO: Run experiments to calibrate default `use_eager_kernel` on P4
+    instance.
+
     """
     def __init__(
         self,
@@ -131,6 +158,7 @@ class MultiHeadSelfAttention:
         sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
         use_eager_sdpa_always: bool = False,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        use_eager_kernel: Optional[UseEagerPredicate] = None,
     ) -> None:
         self.config = config
         self._sdpa_kernels = sdpa_kernels
@@ -144,6 +172,10 @@ class MultiHeadSelfAttention:
                 "out of GPU memory. Consider using a model without attention "
                 "logit softcapping."
             )
+        if use_eager_kernel is None:
+            # This is a good choice for `kv_len = 32768`
+            use_eager_kernel = lambda kv_len, q_len: q_len < 512
+        self._use_eager_kernel = use_eager_kernel
 
     @property
     def sdpa_kernels(self) -> Union[SDPBackend, List[SDPBackend]]:
@@ -202,9 +234,14 @@ class MultiHeadSelfAttention:
         sliding_window_size = self._get_sliding_window_size(block_idx)
         B, _, T, _ = query.shape
         mask = None
-        use_eager_sdpa = self._use_eager_sdpa(return_attn_weights, is_causal)
-        if use_eager_sdpa != SDPA_IMPL_EAGER_BLOCKS:
-            sdpa_is_eager = use_eager_sdpa != SDPA_IMPL_PYTORCH
+        use_eager_sdpa = self._use_eager_sdpa(
+            return_attn_weights=return_attn_weights,
+            is_causal=is_causal,
+            q_len=query.shape[2],
+            kv_len=k_and_v.keys().shape[2],
+        )
+        if use_eager_sdpa in (SDPA_IMPL_PYTORCH, SDPA_IMPL_EAGER_NO_BLOCKS):
+            sdpa_is_eager = use_eager_sdpa == SDPA_IMPL_EAGER_NO_BLOCKS
             if sdpa_is_eager or sliding_window_size is not None or not is_causal:
                 # Build attention mask
                 mask_dtype = torch.float32 if sdpa_is_eager else query.dtype
@@ -254,6 +291,8 @@ class MultiHeadSelfAttention:
         self,
         return_attn_weights: bool,
         is_causal: bool,
+        q_len: int,
+        kv_len: int,
     ) -> int:
         """
         Decides on what SDPA implementation can be used, depending on
@@ -262,6 +301,8 @@ class MultiHeadSelfAttention:
         Args:
             return_attn_weights: Attention weights have to be returned?
             is_causal: Causal case (queries, keys over same tokens)?
+            q_len: Length of queries
+            kv_len: Length of keys, values
 
         Returns:
             Type of SDPA implementation: 0 (PyTorch kernel),
@@ -271,8 +312,12 @@ class MultiHeadSelfAttention:
         """
         if self.config.attention_logit_softcapping is not None:
             return SDPA_IMPL_EAGER_NO_BLOCKS
-        if return_attn_weights or self.use_eager_sdpa_always or not is_causal:
-            return SDPA_IMPL_EAGER_BLOCKS
+        must_eager = return_attn_weights or self.use_eager_sdpa_always
+        if must_eager or not is_causal:
+            if must_eager or self._use_eager_kernel(kv_len, q_len):
+                return SDPA_IMPL_EAGER_BLOCKS
+            else:
+                return SDPA_IMPL_QPADDED_PYTORCH
         else:
             return SDPA_IMPL_PYTORCH
 
@@ -297,11 +342,39 @@ class MultiHeadSelfAttention:
         # - Attention scores need to be returned; or
         # - Logit softcapping is required; or
         # - We cannot access keys and values from `k_and_v` in parallel
-        use_eager_sdpa = self._use_eager_sdpa(return_attn_weights, input_pos == 0)
-        if use_eager_sdpa != SDPA_IMPL_PYTORCH:
+        use_eager_sdpa = self._use_eager_sdpa(
+            return_attn_weights=return_attn_weights,
+            is_causal=input_pos == 0,
+            q_len=query.shape[2],
+            kv_len=k_and_v.keys().shape[2],
+        )
+        scores = None
+        if use_eager_sdpa == SDPA_IMPL_QPADDED_PYTORCH:
+            y = qpadded_sdpa(
+                query=query,
+                key=k_and_v.keys(),
+                value=k_and_v.values(),
+                scale_factor=scale_factor,
+                input_pos=input_pos,
+                token_positions=token_positions,
+                sdpa_kernels=self.sdpa_kernels,
+            )
+        elif use_eager_sdpa == SDPA_IMPL_PYTORCH:
+            # We need `key` and `value` at the same time here. For the training
+            # use case, this will be the case, since `k_and_v` is the default
+            # in this case.
+            y = pytorch_scaled_dot_product_attention(
+                query=query,
+                key=k_and_v.keys(),
+                value=k_and_v.values(),
+                scale_factor=scale_factor,
+                sdpa_kernels=self.sdpa_kernels,
+                mask=mask,
+            )
+        else:
             if use_eager_sdpa == SDPA_IMPL_EAGER_NO_BLOCKS:
                 assert mask is not None or query.shape[2] == 1
-            y, scores = scaled_dot_product_attention(
+            y, scores = eager_scaled_dot_product_attention(
                 query=query,
                 k_and_v=k_and_v,
                 scale_factor=scale_factor,
@@ -314,21 +387,6 @@ class MultiHeadSelfAttention:
                 attention_logit_softcapping=self.config.attention_logit_softcapping,
                 tmp_array_limit_gb=self.tmp_array_limit_gb_value(),
             )
-            if not return_attn_weights:
-                scores = None
-        else:
-            # We need `key` and `value` at the same time here. For the training
-            # use case, this will be the case, since `k_and_v` is the default
-            # in this case.
-            y = pytorch_scaled_dot_product_attention(
-                query=query,
-                key=k_and_v.keys(),
-                value=k_and_v.values(),
-                scale_factor=scale_factor,
-                sdpa_kernels=self.sdpa_kernels,
-                mask=mask,
-            )
-            scores = None
         return y.transpose(1, 2), scores
 
 
@@ -339,7 +397,7 @@ def do_softcapping(x: torch.Tensor, thresh: Optional[float]) -> torch.Tensor:
         return x
 
 
-def scaled_dot_product_attention(
+def eager_scaled_dot_product_attention(
     query: torch.Tensor,
     k_and_v: KeysAndValues,
     scale_factor: float,
