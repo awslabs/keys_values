@@ -23,124 +23,6 @@ def _extend_index(index: torch.Tensor, head_size: int) -> torch.Tensor:
     return index.unsqueeze(-1).expand(-1, -1, -1, head_size)
 
 
-def _reorder(
-    x: torch.Tensor,
-    index_gat: torch.Tensor,
-    index_scat: torch.Tensor,
-    do_single_step: bool,
-) -> torch.Tensor:
-    """
-    Exchange two parts of size `(batch_size, n_query_groups, q_len, head_size)`
-    in `x`. One is `x.gather(2, index_gat)`, the other is
-    `x[:, :, (-q_len):, :]`. `index_gat[b, h, :]` and `index_scat[b, h, :]`
-    have the same values, but in different orderings. `index_scat` is used
-    with `scatter`. This is needed in order to not make mistakes when there
-    are overlaps.
-
-    """
-    q_len = index_gat.shape[-1]
-    _, _, kv_len, head_size = x.shape
-    x_new = x.gather(2, _extend_index(index_gat, head_size))
-    x_right = x[:, :, (-q_len):, :]
-    if not do_single_step:
-        x = x.scatter(2, _extend_index(index_scat, head_size), x_right.clone())
-        x = torch.cat((x[:, :, :(-q_len), :], x_new), dim=2)
-    else:
-        # Note: `index_scat`, `index_right` can overlap, in which case the
-        # outcome of `scatter` can be non-deterministic. Does this matter?
-        # Does it make a difference time-wise?
-        index_right = torch.arange(
-            kv_len - q_len, kv_len, dtype=index_gat.dtype, device=index_gat.device,
-        )[None, None, :].expand(*x.shape[:2], -1)
-        x = x.scatter(
-            2,
-            index=_extend_index(
-                torch.cat((index_scat, index_right), dim=-1), head_size,
-            ),
-            src=torch.cat((x_right, x_new), dim=2),
-        )
-    return x
-
-
-def _extract_index_gather_scatter(
-    token_positions: torch.Tensor,
-    input_pos: int,
-    q_len: int,
-    check_token_pos: bool,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Determines two indexes which are used to permute `key`, `value` so
-    that information corresponding to the largest token positions
-    `>= input_pos` moves to the right end.
-
-    Both `index_gat`, `index_scat` contain the same entries, namely the
-    positions of entries `>= input_pos` in `token_positions`. But they
-    are ordered differently:
-    - `index_gat`: Order in which entries `range(index_pos,
-        index_pos + q_len)` appear in `token_positions`.
-    - `index_scat`: `index_sorted` is permuted by the inverse of the
-        permutation which sorts`token_positions[:, :, (-q_len):]`.
-
-    This ensures that things work out if there are overlaps between
-    `index_sorted` and the right end of length `q_len`.
-    See technical report for details.
-
-    Args:
-        token_positions: Token positions in KV cache
-        input_pos: Position in input sequence, must be `> 0`
-        q_len: Length of query sequence
-        check_token_pos: If `True`, check that `token_positions` is valid.
-            Use this for testing.
-
-    Returns:
-        `(index_gat, index_scat)`, each of shape
-        `(batch_size, n_query_groups, q_len)`. See above.
-
-    """
-    batch_size, n_query_groups, _ = token_positions.shape
-    new_entries_mask = token_positions >= input_pos
-    if check_token_pos:
-        dummy = new_entries_mask.sum(dim=-1)
-        if not (dummy == q_len).all().item():
-            raise ValueError(
-                f"token_positions must have entries [{input_pos}, {input_pos + q_len}) in every slice. dummy = {dummy}")
-    nz0, nz1, nz2 = new_entries_mask.nonzero(as_tuple=True)
-    if check_token_pos:
-        kwargs = dict(dtype=nz0.dtype, device=nz0.device)
-        nz0_should_be = torch.arange(batch_size, **kwargs)[:, None, None].expand(
-            -1, n_query_groups, q_len).flatten()
-        if not nz0.equal(nz0_should_be):
-            raise ValueError(f"nz0 = {nz0}, must equal to {nz0_should_be}")
-        nz1_should_be = torch.arange(n_query_groups, **kwargs)[None, :, None].expand(
-            batch_size, -1, q_len).flatten()
-        if not nz1.equal(nz1_should_be):
-            raise ValueError(f"nz1 = {nz1}, must equal to {nz1_should_be}")
-    elif nz2.numel() != batch_size * n_query_groups * q_len:
-        raise ValueError(
-            f"Invalid token_positions: Number of entries in [{input_pos}, {input_pos + q_len}) must be {batch_size * n_query_groups * q_len}, but is {nz2.numel()}")
-    index_sorted = nz2.view(batch_size, n_query_groups, q_len)
-    # `index_gat`: Order in which entries `range(index_pos, index_pos + q_len)`
-    # appear in `token_positions`.
-    new_positions = token_positions[nz0, nz1, nz2].view(
-        batch_size, n_query_groups, q_len,
-    ) - input_pos
-    index_gat = torch.zeros_like(index_sorted).scatter(
-        -1, index=new_positions, src=index_sorted,
-    )
-    # index_scat`: `index_sorted` is permuted by the inverse of the
-    # permutation which sorts`token_positions[:, :, (-q_len):]`
-    sort_final = torch.argsort(token_positions[:, :, (-q_len):], dim=-1)
-    inv_sort_final = torch.zeros_like(sort_final).scatter(
-        -1,
-        index=sort_final,
-        src=torch.arange(
-            q_len, dtype=sort_final.dtype, device=sort_final.device,
-        )[None, None, :].expand(batch_size, n_query_groups, -1),
-    )
-    index_scat = index_sorted.gather(-1, inv_sort_final)
-    return index_gat, index_scat
-
-
 def scaled_dot_product_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -149,8 +31,6 @@ def scaled_dot_product_attention(
     input_pos: int,
     token_positions: Optional[torch.Tensor],
     sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
-    check_token_pos: bool = False,
-    kind: int = 0,
 ) -> torch.Tensor:
     """
     Wraps `F.scaled_dot_product_attention` in a way which supports
@@ -186,10 +66,6 @@ def scaled_dot_product_attention(
             built up.
         sdpa_kernels: Kernels to be used for SDPA can be restricted by
             `sdpa_kernels`.
-        check_token_pos: If `True`, check that `token_positions` is valid.
-            Use this for testing.
-        kind: Different ways to compute: 0 original two-step, 1 original
-            one-step, 2 sorting `token_positions`
 
     Returns:
         Attention outputs, shape `(batch_size, n_heads, q_len, head_size)`
@@ -207,8 +83,6 @@ def scaled_dot_product_attention(
     _, n_query_groups, kv_len, _ = key.shape
     if not (0 < q_len < kv_len):
         raise ValueError(f"Must have 0 < q_len = {q_len} < kv_len = {kv_len}. Don't use this for prefill")
-    if kind not in (0, 1, 2):
-        raise ValueError(f"kind = {kind}, must be 0, 1 or 2")
     if sdpa_kernels is None:
         sdpa_kernels = []
 
@@ -218,22 +92,18 @@ def scaled_dot_product_attention(
     else:
         # Reorder entries in `key`, `value`, so that new entries are on the
         # right. New entries are those with `token_positions >= input_pos`.
+        # Note: This simple solution just reorders all entries in `key`,
+        # `buffer`, using the index which sorts `token_positions`.
+        # We implemented an alternative which exchanges smaller parts of
+        # `key`, `value`, but this does not end up being faster
+        # (see `sdpa_wrapper_old` module).
         if token_positions.shape != key.shape[:-1]:
             raise ValueError(f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible")
-        if kind < 2:
-            index_gat, index_scat = _extract_index_gather_scatter(
-                token_positions, input_pos, q_len, check_token_pos,
-            )
-            do_single_step = kind == 1
-            key = _reorder(key, index_gat, index_scat, do_single_step)
-            value = _reorder(value, index_gat, index_scat, do_single_step)
-        else:
-            # Alternative: Simpler, but
-            sort_index = _extend_index(
-                torch.argsort(token_positions, dim=-1), head_size,
-            )
-            key = key.gather(2, sort_index)
-            value = value.gather(2, sort_index)
+        sort_index = _extend_index(
+            torch.argsort(token_positions, dim=-1), head_size,
+        )
+        key = key.gather(2, sort_index)
+        value = value.gather(2, sort_index)
 
     # At this point, the new entries in `key`, `value`, corresponding to the
     # `query` tokens, are on the right end. Causal masking works if `query`

@@ -25,6 +25,7 @@ from litgpt.config import Config
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.test_utils import random_args_cache_forward
 from keys_values.sdpa_wrapper import scaled_dot_product_attention
+from keys_values.sdpa_wrapper_old import scaled_dot_product_attention as wrap_sdpa_old
 
 
 @torch.inference_mode()
@@ -70,8 +71,9 @@ def main(
         for repeat in [None] * warmup_repeats + list(range(num_repeats)):
             # Sample input data
             data = random_args_cache_forward(
-                params, chunk_size, config.padded_vocab_size,
+                params, cache_length, config.padded_vocab_size,
             )
+            data["query"] = data["query"][:, :, :chunk_size, :]
             token_positions = torch.randint(
                 low=0,
                 high=input_pos - 1,
@@ -98,7 +100,10 @@ def main(
                 if on_gpu:
                     torch.cuda.current_stream().synchronize()
                 forward_time = time.perf_counter()
-                y = scaled_dot_product_attention(**sdpa_kwargs, kind=kind)
+                if kind < 2:
+                    y = wrap_sdpa_old(**sdpa_kwargs, kind=kind)
+                else:
+                    y = scaled_dot_product_attention(**sdpa_kwargs)
                 if on_gpu:
                     torch.cuda.current_stream().synchronize()
                 time_in_ms = (time.perf_counter() - forward_time) * 1000
@@ -112,9 +117,9 @@ def main(
 
 
 if __name__ == "__main__":
-    batch_size = 3
+    batch_size = 8
     dtype = torch.bfloat16
-    num_repeats = 10
+    num_repeats = 50
     cache_length = 32768
     chunk_sizes = [256, 512, 1024, 2048, 4096]
     config = Config.from_name("Qwen3-4B")
