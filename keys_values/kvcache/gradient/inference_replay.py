@@ -28,7 +28,6 @@ from keys_values.kvcache.basics import (
     KVCacheWithBuffers,
 )
 from keys_values.kvcache.buffers import KVCacheBuffers, PositionsType
-from keys_values.kvcache.lastrec_alt import LastRecentlyInsertedAltKVCache
 from keys_values.model import GPT
 
 
@@ -300,62 +299,6 @@ class InferenceLastRecentlyInsertedReplayCache(
         InferenceReplayCacheMixin._validate_token_idx(self, token_idx)
 
 
-class InferenceLastRecentlyInsertedAltReplayCache(
-    LastRecentlyInsertedAltKVCache, InferenceReplayCacheMixin
-):
-    def __init__(
-        self,
-        config: Config,
-        buffers: KVCacheBuffers,
-        block_idx: int,
-        replay_log: LastRecentlyInsertedKVCacheReplayLog,
-        **base_kwargs,
-    ):
-        LastRecentlyInsertedAltKVCache.__init__(
-            self,
-            config=config,
-            buffers=buffers,
-            block_idx=block_idx,
-            **base_kwargs,
-        )
-        InferenceReplayCacheMixin.__init__(self)
-        if len(replay_log) == 0:
-            raise ValueError("replay_log must not be empty")
-        if self.device != replay_log.device:
-            raise ValueError(f"self.device = {self.device}, replay_log.device = {self.replay_log.device}: must be the same")
-        self.replay_log = replay_log
-
-    @property
-    def next_token_pos(self) -> Optional[int]:
-        return super().next_token_pos
-
-    @property
-    def current_length(self) -> int:
-        return super().current_length
-
-    @property
-    def cache_length(self) -> Optional[int]:
-        return super().cache_length
-
-    @property
-    def device(self) -> torch.device:
-        return super().device
-
-    @property
-    def batch_size(self) -> Optional[int]:
-        return super().batch_size
-
-    @property
-    def n_query_groups(self) -> int:
-        return super().n_query_groups
-
-    def next_positions(self, num: int) -> Optional[torch.Tensor]:
-        return InferenceReplayCacheMixin.next_positions(self, num)
-
-    def _validate_token_idx(self, token_idx: torch.Tensor):
-        InferenceReplayCacheMixin._validate_token_idx(self, token_idx)
-
-
 def inference_replay_cache_factory(
     kv_cache: KVCacheWithBuffers,
     config: Config,
@@ -373,8 +316,6 @@ def inference_replay_cache_factory(
     )
     if isinstance(kv_cache, DenseKVCache):
         return InferenceDenseReplayCache(**kwargs)
-    elif isinstance(kv_cache, LastRecentlyInsertedAltKVCache):
-        return InferenceLastRecentlyInsertedAltReplayCache(**kwargs)
     elif isinstance(kv_cache, LastRecentlyInsertedKVCache):
         return InferenceLastRecentlyInsertedReplayCache(**kwargs)
     elif isinstance(kv_cache, AttnWeightsKVCache):
