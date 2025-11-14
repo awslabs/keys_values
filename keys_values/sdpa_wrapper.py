@@ -31,7 +31,8 @@ def scaled_dot_product_attention(
     input_pos: int,
     token_positions: Optional[torch.Tensor],
     sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
-) -> torch.Tensor:
+    do_filter_kernels: bool = False,
+) -> Tuple[torch.Tensor, Optional[List[SDPBackend]]]:
     """
     Wraps `F.scaled_dot_product_attention` in a way which supports
     `q_len < kv_len` and reordered `key`, `value` according to `token_positions`.
@@ -112,10 +113,12 @@ def scaled_dot_product_attention(
         (1, 1, 1, 1), dtype=query.dtype, device=query.device,
     ).expand(batch_size, n_head, kv_len - q_len, head_size)
     query = torch.cat((fill_left, query), dim=2)
-    return pytorch_scaled_dot_product_attention(
+    full_y, filtered_kernels = pytorch_scaled_dot_product_attention(
         query=query,
         key=key,
         value=value,
         scale_factor=scale_factor,
         sdpa_kernels=sdpa_kernels,
-    )[:, :, (-q_len):, :].clone()
+        do_filter_kernels=do_filter_kernels,
+    )
+    return full_y[:, :, (-q_len):, :].clone(), filtered_kernels

@@ -22,6 +22,7 @@ from keys_values.kvcache.test_utils import (
     create_kv_cache,
     tensor_is_simple,
     random_args_cache_forward,
+    range_from_args,
     available_backends,
 )
 
@@ -53,21 +54,9 @@ def test_last_recent(name):
         num_prefill = max_prefill_length
 
     data = random_args_cache_forward(params, num_insert, vocab_size)
-    kv_cache(
-        query=data["query"][:, :, :num_prefill, :],
-        key=data["key"][:, :, :num_prefill, :],
-        value=data["value"][:, :, :num_prefill, :],
-        token_idx=data["token_idx"][:, :num_prefill],
-        input_pos=0,
-    )
+    kv_cache(**range_from_args(data, 0, num_prefill), input_pos=0)
     for pos in range(num_prefill, num_insert):
-        kv_cache(
-            query=data["query"][:, :, pos:(pos + 1), :],
-            key=data["key"][:, :, pos:(pos + 1), :],
-            value=data["value"][:, :, pos:(pos + 1), :],
-            token_idx=data["token_idx"][:, pos:(pos + 1)],
-            input_pos=pos,
-        )
+        kv_cache(**range_from_args(data, pos, pos + 1), input_pos=pos)
 
     current_length = min(cache_length, num_insert)
     assert kv_cache.current_length == current_length
@@ -127,23 +116,11 @@ def test_incremental_versus_singlepass(dtype, tol_kwargs, device):
     # Compute MHA in steps
     y_parts = []
     y_parts.append(
-        kv_cache(
-            query=data["query"][:, :, :num_prefill, :],
-            key=data["key"][:, :, :num_prefill, :],
-            value=data["value"][:, :, :num_prefill, :],
-            token_idx=data["token_idx"][:, :num_prefill],
-            input_pos=0,
-        )
+        kv_cache(**range_from_args(data, 0, num_prefill), input_pos=0)
     )
     for pos in range(num_prefill, num_insert):
         y_parts.append(
-            kv_cache(
-                query=data["query"][:, :, pos:(pos + 1), :],
-                key=data["key"][:, :, pos:(pos + 1), :],
-                value=data["value"][:, :, pos:(pos + 1), :],
-                token_idx=data["token_idx"][:, pos:(pos + 1)],
-                input_pos=pos,
-            )
+            kv_cache(**range_from_args(data, pos, pos + 1), input_pos=pos)
         )
 
     assert kv_cache.current_length == num_insert

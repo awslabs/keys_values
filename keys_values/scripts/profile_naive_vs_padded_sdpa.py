@@ -11,12 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from email.quoprimime import header_length
 from functools import partial
 import math
 from pathlib import Path
 import random
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple, Set
 
 from scipy.optimize import root_scalar
 import torch
@@ -109,6 +110,7 @@ def measure_naive_time(
     return ret
 
 
+@torch.inference_mode()
 def find_chunk_size(
     params: KVCacheParams,
     num_repeats: int,
@@ -145,7 +147,7 @@ def find_chunk_size(
         data = sample_inputs(params, chunk_size, input_pos)
         torch.cuda.current_stream().synchronize()
         forward_time = time.perf_counter()
-        y = scaled_dot_product_attention(
+        y, _ = scaled_dot_product_attention(
             query=data["query"],
             key=data["key"],
             value=data["value"],
@@ -189,21 +191,27 @@ def find_chunk_size(
         f_right = root_func(bracket[1])
         if f_left > 0:
             print(f"f({bracket[0]}) = {f_left} > 0: Always use query-padded SDPA for cache_lenght = {params.cache_length}")
+            always_left = True
+        elif f_right < 0:
+            print(f"f({bracket[1]}) = {f_right} < 0: Never use query-padded SDPA for cache_lenght = {params.cache_length}")
+            always_left = False
+        else:
+            print(f"f({bracket[0]}) = {f_left} <= 0 <= {f_right} = f({bracket[1]}): Seems fine to me. Pick the one closer to 0.")
+            always_left = abs(f_left) <= abs(f_right)
+        if always_left:
             return {
                 "chunk_size": bracket[0],
                 "converged": False,
                 "flag": "Always use query-padded SDPA",
-                "records": [],
+                "records": records,
             }
-        if f_right < 0:
-            print(f"f({bracket[1]}) = {f_right} < 0: Never use query-padded SDPA for cache_lenght = {params.cache_length}")
+        else:
             return {
                 "chunk_size": bracket[1],
                 "converged": False,
                 "flag": "Never use query-padded SDPA",
-                "records": [],
+                "records": records,
             }
-        raise ex
 
     chunk_size = round(result.root)
     if result.converged:
@@ -229,9 +237,6 @@ def main(
     warmup_steps: int = 2,
     tmp_array_limit_gb: float = 4,
 ):
-    """
-
-    """
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -242,6 +247,7 @@ def main(
         batch_size=batch_size,
         n_head=config.n_head,
         n_query_groups=config.n_query_groups,
+        head_size=config.head_size,
         dtype=str(dtype),
     )
 
@@ -275,26 +281,57 @@ def main(
             )
 
 
+def fingerprint(config: Config) -> Tuple[int, int, int]:
+    return (config.n_head, config.n_query_groups, config.head_size)
+
+
 if __name__ == "__main__":
-    batch_size = 4
     dtype = torch.bfloat16
     num_repeats = 20
+    batch_sizes = [1, 2, 3, 4, 8]
     cache_lengths = [4096, 6144, 8192, 12288, 16384, 24576, 32768]
-    # TODO:
-    # Depends on:
-    # (n_head, n_query_group, head_size)
-    # - Run over several models
-    # - Don't repeat if tuple is already there
-    # Also different batch sizes
-    config = Config.from_name("Qwen3-4B")
-    result_path = Path("./qlen_thresholds.csv")
-    all_evals_path = Path("./qlen_thresholds_all_evals.csv")
-    main(
-        config,
-        batch_size,
-        cache_lengths,
-        dtype,
-        all_evals_path,
-        result_path,
-        num_repeats,
-    )
+    # We play through quite some config's here, but the calibration only
+    # depends on `(n_head, n_query_groups, head_size)`, so we skip over
+    # configs if this tuple has already been measured.
+    config_names = [
+        "Qwen2.5-0.5B",   # (14, 2, 64)
+        "Qwen2.5-1.5B",   # (12, 2, 128)
+        "Qwen2.5-3B",     # (16, 2, 128)
+        "Qwen2.5-7B",     # (28, 4, 128)
+        "Qwen2.5-14B",    # (40, 8, 128)
+        "Qwen3-0.6B",     # (16, 8, 128)
+        "Qwen3-1.7B",     # (16, 8, 128) [skip]
+        "Qwen3-4B",       # (32, 8, 128)
+        "Qwen3-8B",       # (32, 8, 128) [skip]
+        "Qwen3-14B",      # (40, 8, 128) [skip]
+        "Qwen3-32B",      # (64, 8, 128)
+        "Llama-2-7b-hf",  # (32, 32, 128)
+        "Llama-2-13b-hf", # (40, 40, 128)
+        "Llama-3-8B",     # (32, 8, 128) [skip]
+        "Llama-3.1-8B",   # (32, 8, 128) [skip]
+        "Llama-3.2-1B",   # (32, 8, 64)
+        "Llama-3.2-3B",   # (24, 8, 128)
+    ]
+    config_names = ["Llama-2-13b-hf"]
+    batch_sizes = [8]
+    result_path = Path("./qlen_thresholds_extra.csv")
+    all_evals_path = Path("./qlen_thresholds_all_evals_extra.csv")
+    fingerprints_done: Set[Tuple[int, int, int]] = set()
+    for name in config_names:
+        config = Config.from_name(name)
+        fp = fingerprint(config)
+        if fp not in fingerprints_done:
+            for batch_size in batch_sizes:
+                print(f"\nConfig[{name}], batch_size = {batch_size}")
+                main(
+                    config,
+                    batch_size,
+                    cache_lengths,
+                    dtype,
+                    all_evals_path,
+                    result_path,
+                    num_repeats,
+                )
+            fingerprints_done.add(fp)
+        else:
+            print(f"\nConfig[{name}] already covered: {fp}")

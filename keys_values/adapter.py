@@ -35,6 +35,7 @@ from keys_values.model import (
     Block as BaseBlock,
     CausalSelfAttention as BaseCausalSelfAttention,
 )
+from keys_values.use_eager_kernel import transform_mha_kwargs
 
 
 class GPT(BaseModel):
@@ -56,7 +57,9 @@ class GPT(BaseModel):
                 ln_f=config.norm_class(config.n_embd, eps=config.norm_eps),
             )
         )
-        self.mha = MultiHeadSelfAttention(config, **mha_kwargs)
+        self.mha = MultiHeadSelfAttention(
+            config, **transform_mha_kwargs(mha_kwargs, config),
+        )
         self.max_seq_length = self.config.block_size
         self._start_of_layer_hook = None
         # Have dense KV caches been created by `set_kv_caches`?
@@ -146,6 +149,7 @@ class CausalSelfAttention(BaseCausalSelfAttention):
                 k_and_v=a_k_and_v,
                 input_pos=0,  # ensures that PyTorch kernel is used
                 token_positions=None,
+                sdpa_mode=None,
                 sliding_window_size=None,
                 mask=amask,
                 return_attn_weights=False,

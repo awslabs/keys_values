@@ -26,7 +26,6 @@ from keys_values.kvcache.basics import (
 )
 from keys_values.kvcache.buffers import KVCacheBuffersParams, DefaultKVCacheBuffers
 from keys_values.kvcache.h2o import H2OKVCache, VLengthH2OKVCache, H2OOriginalKVCache
-from keys_values.kvcache.lastrec_alt import LastRecentlyInsertedAltKVCache
 from keys_values.kvcache.qh2o import QuantizedH2OKVCache, QuantizedVLengthH2OKVCache
 from keys_values.kvcache.quant_buffers import (
     QuantizedKVCacheBuffers,
@@ -50,7 +49,6 @@ _SUPPORTED_CACHES = (
     ("qh2o", QuantizedH2OKVCache, False),
     ("qh2o-vlen", QuantizedVLengthH2OKVCache, False),
     ("h2o-orig", H2OOriginalKVCache, True),
-    ("lastrec-alt", LastRecentlyInsertedAltKVCache, True),
 )
 
 SUPPORTED_QUANTIZERS = {
@@ -627,7 +625,6 @@ REMOVE_KEYS = {
     "qh2o": (),
     "qh2o-vlen": (),
     "h2o-orig": ("replay_log_blocksize", "grace_period", "normalize_scores", "combination_constant", "scratch_blocksize"),
-    "lastrec-alt": ("replay_log_blocksize", "grace_period", "normalize_scores" "combination_constant", "scratch_blocksize"),
 }
 
 

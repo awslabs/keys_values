@@ -20,11 +20,19 @@ import pytest
 import torch
 from torch.nn.attention import SDPBackend
 
+from litgpt.config import Config
+
 from keys_values.attention import (
     DefaultKeysAndValues,
     scaled_dot_product_attention_in_blocks,
 )
-from keys_values.kvcache.test_utils import available_backends
+from keys_values.kvcache.base import KVCacheParams
+from keys_values.kvcache.factory import KVCacheFactory
+from keys_values.kvcache.test_utils import (
+    available_backends,
+    random_args_cache_forward,
+    range_from_args,
+)
 from keys_values.sdpa_wrapper import scaled_dot_product_attention as wrapper_sdpa
 
 
@@ -119,7 +127,7 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
         scale_factor = 1.0 / math.sqrt(head_size)
 
         # Compute in two ways and compare
-        output1 = wrapper_sdpa(
+        output1, sdpa_kernels = wrapper_sdpa(
             query=query,
             key=key,
             value=value,
@@ -127,6 +135,7 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
             input_pos=input_pos,
             token_positions=token_positions,
             sdpa_kernels=sdpa_kernels,
+            do_filter_kernels=True,
         )
         output2, _ = scaled_dot_product_attention_in_blocks(
             query=query,
@@ -138,3 +147,97 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
             sliding_window_size=None,
         )
         torch.testing.assert_close(output1, output2, **assert_kwargs)
+
+
+@pytest.mark.parametrize(
+    "device, dtype, tol_kwargs",
+    [
+        (a,) + b for a, b in product(
+            available_backends(),
+            [
+                (torch.float32, dict()),
+                (torch.bfloat16, dict(atol=0.0005, rtol=0.03)),
+                (torch.float16, dict(atol=0.0005, rtol=0.03)),
+            ],
+        )
+    ]
+)
+@torch.inference_mode()
+def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
+    seed = 31415927
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+
+    torch.set_default_dtype(dtype)  # Set default dtype
+    batch_size = 5
+    n_head = 8
+    n_query_groups = 4
+    cache_length = 512
+    head_size = 64
+    vocab_size = 48
+    tokens_per_chunk = [cache_length - 1, 1, 8, 4, 8, 2, 8, 2, 8, 8]
+    seq_length = sum(tokens_per_chunk)
+
+    config = Config(
+        n_layer=1,
+        n_head=n_head,
+        n_query_groups=n_query_groups,
+        n_embd=n_head * head_size,
+        block_size=seq_length,
+        vocab_size=vocab_size,
+        rotary_percentage=1,
+    )
+    params = KVCacheParams.from_config(
+        config=config,
+        max_batch_size=batch_size,
+        cache_length=cache_length,
+        device=device,
+        dtype=dtype,
+    )
+    kwargs = dict(
+        name="lastrec-default",
+        config=config,
+        max_batch_size=batch_size,
+        cache_length=cache_length,
+        block_idx=0,
+        device=device,
+        dtype=dtype,
+    )
+    # Choice between `SDPA_IMPL_EAGER_BLOCKS` and `SDPA_IMPL_QPADDED_PYTORCH`:
+    # Always `SDPA_IMPL_EAGER_BLOCKS`:
+    cache_old = KVCacheFactory.create_single(
+        **kwargs,
+        cache_kwargs=dict(
+            use_eager_kernel = lambda kv_len, q_len: True,
+        ),
+    )
+    cache_new = KVCacheFactory.create_single(**kwargs)
+    assert cache_old.mha._use_eager_kernel is not None
+    data = random_args_cache_forward(
+        params, num=seq_length, vocab_size=vocab_size,
+    )
+
+    outputs = []
+    for cache in (cache_old, cache_new):
+        input_pos = 0
+        parts = []
+        for num in tokens_per_chunk:
+            parts.append(
+                cache(
+                    **range_from_args(data, input_pos, input_pos + num),
+                    input_pos=input_pos,
+                )
+            )
+            input_pos += num
+        outputs.append(torch.cat(parts, dim=1))
+
+    input_pos = 0
+    for num in tokens_per_chunk:
+        end = input_pos + num
+        print(f"Comparing {input_pos}:{end}")
+        torch.testing.assert_close(
+            outputs[0][:, input_pos:end, :],
+            outputs[1][:, input_pos:end, :],
+            **tol_kwargs,
+        )
+        input_pos = end
