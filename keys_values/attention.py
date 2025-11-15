@@ -148,9 +148,6 @@ class MultiHeadSelfAttention:
     certain value of `q_len` upwards. It also requires less temporary
     memory.
 
-    TODO: Run experiments to calibrate default `use_eager_kernel` on P4
-    instance.
-
     """
     def __init__(
         self,

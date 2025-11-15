@@ -32,6 +32,7 @@ from keys_values.optimize.module_wrapper import (
     FlatVectors,
     ParameterStructure,
 )
+from keys_values.use_eager_kernel import transform_mha_kwargs
 
 
 def parent_of_parameter(
@@ -99,7 +100,9 @@ class GPTFullWrapper(GPTFull):
                 ln_f=components["ln_f"],
             )
         )
-        self.mha = MultiHeadSelfAttention(config, **mha_kwargs)
+        self.mha = MultiHeadSelfAttention(
+            config, **transform_mha_kwargs(mha_kwargs, config),
+        )
         self.max_seq_length = config.block_size
         self._start_of_layer_hook = None
         self._default_kv_cache = False
@@ -143,7 +146,9 @@ class GPTLoRAWrapper(GPTLoRA):
                 ln_f=components["ln_f"],
             )
         )
-        self.mha = MultiHeadSelfAttention(config, **mha_kwargs)
+        self.mha = MultiHeadSelfAttention(
+            config, **transform_mha_kwargs(mha_kwargs, config),
+        )
         self.max_seq_length = config.block_size
         self._start_of_layer_hook = None
         self._default_kv_cache = False
@@ -169,7 +174,9 @@ class GPTStackBlocks(GPTFull):
 
         self.transformer = nn.ModuleDict(dict(h=nn.ModuleList(components)))
         self.lm_head = None
-        self.mha = MultiHeadSelfAttention(config, **mha_kwargs)
+        self.mha = MultiHeadSelfAttention(
+            config, **transform_mha_kwargs(mha_kwargs, config),
+        )
         self.max_seq_length = config.block_size
         self._default_kv_cache = False
 

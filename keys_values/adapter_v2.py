@@ -37,11 +37,12 @@ from keys_values.adapter import (
 from keys_values.attention import MultiHeadSelfAttention
 from keys_values.kvcache.base import KVCache
 from keys_values.model import Block as BaseBlock
+from keys_values.use_eager_kernel import transform_mha_kwargs
 
 
 class GPT(BaseModel):
     # Copy & paste from :class:`model.GPT`. Note that :class:`Block` is new here.
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, **mha_kwargs) -> None:
         nn.Module.__init__(self)
         assert config.padded_vocab_size is not None
         self.config = config
@@ -58,7 +59,9 @@ class GPT(BaseModel):
                 ln_f=config.norm_class(config.n_embd, eps=config.norm_eps),
             )
         )
-        self.mha = MultiHeadSelfAttention(config)
+        self.mha = MultiHeadSelfAttention(
+            config, **transform_mha_kwargs(mha_kwargs, config),
+        )
         self.max_seq_length = self.config.block_size
         self._start_of_layer_hook = None
         # Have dense KV caches been created by `set_kv_cache`?

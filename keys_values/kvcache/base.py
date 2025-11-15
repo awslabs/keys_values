@@ -23,6 +23,7 @@ from keys_values.attention import (
     KeysAndValues,
     MultiHeadSelfAttention,
 )
+from keys_values.use_eager_kernel import transform_mha_kwargs
 
 
 @dataclass(frozen=True)
@@ -331,7 +332,9 @@ class DefaultKVCache(KVCache):
             head_size=head_size,
         )
         if mha is None:
-            self.mha = MultiHeadSelfAttention(config, **mha_kwargs)
+            self.mha = MultiHeadSelfAttention(
+                config, **transform_mha_kwargs(mha_kwargs, config),
+            )
         else:
             self.mha = mha
 

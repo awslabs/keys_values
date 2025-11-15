@@ -38,6 +38,7 @@ from keys_values.attention import (
     do_softcapping,
 )
 from keys_values.kvcache.base import KVCacheParams, KVCache
+from keys_values.use_eager_kernel import transform_mha_kwargs
 
 
 # See `GPT.set_start_of_layer_hook`. A start of layer hook is called just before
@@ -71,7 +72,9 @@ class GPT(nn.Module):
                 ln_f=config.norm_class(config.n_embd, eps=config.norm_eps),
             )
         )
-        self.mha = MultiHeadSelfAttention(config, **mha_kwargs)
+        self.mha = MultiHeadSelfAttention(
+            config, **transform_mha_kwargs(mha_kwargs, config),
+        )
         self.max_seq_length = config.block_size
         self._start_of_layer_hook = None
         # Have dense KV caches been created by `set_kv_caches`?

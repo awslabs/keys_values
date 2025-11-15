@@ -42,6 +42,7 @@ from keys_values.attention_utils import (
 )
 from keys_values.kvcache.base import KVCache
 from keys_values.model import GPT, CausalSelfAttention
+from keys_values.use_eager_kernel import transform_mha_kwargs
 
 
 @pytest.mark.parametrize(
@@ -492,7 +493,9 @@ def test_multi_head_attention_for_gemma(model_name, dtype):
     torch.testing.assert_close(cos_new, cos_old)
     torch.testing.assert_close(sin_new, sin_old)
 
-    mha = MultiHeadSelfAttention(config)
+    mha = MultiHeadSelfAttention(
+        config, **transform_mha_kwargs(dict(), config)
+    )
     shape = (batch_size, T, config.n_embd)
     for rep in range(num_repeats):
         block_idx = rep % 2
