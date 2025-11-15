@@ -149,6 +149,7 @@ class CausalSelfAttention(BaseCausalSelfAttention):
                 k_and_v=a_k_and_v,
                 input_pos=0,  # ensures that PyTorch kernel is used
                 token_positions=None,
+                sdpa_mode=None,
                 sliding_window_size=None,
                 mask=amask,
                 return_attn_weights=False,
