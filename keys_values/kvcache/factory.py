@@ -625,7 +625,6 @@ REMOVE_KEYS = {
     "qh2o": (),
     "qh2o-vlen": (),
     "h2o-orig": ("replay_log_blocksize", "grace_period", "normalize_scores", "combination_constant", "scratch_blocksize"),
-    "lastrec-alt": ("replay_log_blocksize", "grace_period", "normalize_scores" "combination_constant", "scratch_blocksize"),
 }
 
 

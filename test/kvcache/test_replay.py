@@ -235,11 +235,6 @@ def test_training_replay(cache_name, cache_kwargs):
     device = torch.device("cpu")
     dtype = torch.bfloat16
     torch.set_default_dtype(dtype)  # Set default dtype
-    if cache_name.startswith("lastrec-alt"):
-        tol_kwargs = dict(atol=0.005, rtol=2)
-    else:
-        tol_kwargs = dict()
-
     batch_size = 5
     n_head = 8
     n_query_groups = 4
@@ -348,6 +343,5 @@ def test_training_replay(cache_name, cache_kwargs):
         torch.testing.assert_close(
             outputs_orig[:, input_pos:end, :],
             outputs_replayed[:, input_pos:end, :],
-            **tol_kwargs,
         )
-        input_pos += num
+        input_pos = end

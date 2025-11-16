@@ -275,3 +275,14 @@ def random_args_cache_forward(
         "value": kv[1],
         "token_idx": idx,
     }
+
+
+def range_from_args(
+    data: Dict[str, torch.Tensor], start: int, end: int,
+) -> Dict[str, torch.Tensor]:
+    return {
+        "query": data["query"][:, :, start:end, :],
+        "key": data["key"][:, :, start:end, :],
+        "value": data["value"][:, :, start:end, :],
+        "token_idx": data["token_idx"][:, start:end],
+    }

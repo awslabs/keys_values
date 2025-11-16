@@ -135,7 +135,7 @@ def transform_mha_kwargs(
     batch_size: int = 1,
     default_factory: Optional[DefaultUseEagerKernel] = None,
 ) -> Dict[str, Any]:
-    if mha_kwargs.get("use_eager_kernel") is not None:
+    if mha_kwargs.get("use_eager_kernel") is not None or mha_kwargs.get("use_eager_sdpa_always", False):
         return mha_kwargs
     if default_factory is None:
         default_factory = DefaultUseEagerKernel()
