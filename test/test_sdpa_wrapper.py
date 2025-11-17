@@ -34,7 +34,6 @@ from keys_values.kvcache.test_utils import (
     range_from_args,
 )
 from keys_values.sdpa_wrapper import scaled_dot_product_attention as wrapper_sdpa
-from keys_values.use_eager_kernel import DefaultUseEagerKernel
 
 
 @pytest.mark.parametrize(
@@ -149,14 +148,21 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
         torch.testing.assert_close(output1, output2, **assert_kwargs)
 
 
-@pytest.mark.parametrize("device", available_backends())
+# TODO:
+# Fails for 16-bit types, works for float32
+@pytest.mark.parametrize(
+    "device, dtype",
+    product(
+        available_backends(),
+        [torch.float32, torch.bfloat16, torch.float16],
+    )
+)
 @torch.inference_mode()
-def test_wrapper_with_lastrec_cache(device):
+def test_wrapper_with_lastrec_cache(device, dtype):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
 
-    dtype = torch.bfloat16
     torch.set_default_dtype(dtype)  # Set default dtype
     batch_size = 5
     n_head = 8
@@ -192,11 +198,14 @@ def test_wrapper_with_lastrec_cache(device):
         device=device,
         dtype=dtype,
     )
+    # Choice between `SDPA_IMPL_EAGER_BLOCKS` and `SDPA_IMPL_QPADDED_PYTORCH`:
+    # Always `SDPA_IMPL_EAGER_BLOCKS`:
     cache_old = KVCacheFactory.create_single(
         **kwargs,
-        cache_kwargs=dict(use_eager_sdpa_always=True),
+        cache_kwargs=dict(
+            use_eager_kernel = lambda kv_len, q_len: True,
+        ),
     )
-    assert cache_old.mha._use_eager_kernel is None
     cache_new = KVCacheFactory.create_single(**kwargs)
     assert cache_old.mha._use_eager_kernel is not None
     data = random_args_cache_forward(
