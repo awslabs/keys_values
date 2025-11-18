@@ -147,7 +147,7 @@ def find_chunk_size(
         data = sample_inputs(params, chunk_size, input_pos)
         torch.cuda.current_stream().synchronize()
         forward_time = time.perf_counter()
-        y = scaled_dot_product_attention(
+        y, _ = scaled_dot_product_attention(
             query=data["query"],
             key=data["key"],
             value=data["value"],

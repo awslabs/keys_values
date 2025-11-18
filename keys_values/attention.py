@@ -103,8 +103,12 @@ class MultiHeadSelfAttention:
     concern (e.g., if MHA is used in training mode, to compute gradients),
     `sdpa_kernels=SDPBackend.EFFICIENT_ATTENTION` is recommended.
 
-    If `sdpa_kernels` is used, their availabilities are checked upon the
-    first call, and a warning is printed if some are not available.
+    If `filter_sdpa_kernels` is `True`, the kernels in `sdpa_kernels` are
+    filtered in the first call, removing those which are not supported for
+    the calls here. In subsequent calls, the filtered list is used.
+
+    NOTE: `filter_sdpa_kernels=True` can lead to problems with `torch.compile`.
+    In this case, set `filter_sdpa_kernels=False`.
 
     If `use_eager_sdpa_always=True`,
     `torch.nn.functional.scaled_dot_product_attention` is never used.
@@ -158,10 +162,11 @@ class MultiHeadSelfAttention:
         use_eager_sdpa_always: bool = False,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
         use_eager_kernel: Optional[UseEagerPredicate] = None,
+        filter_sdpa_kernels: bool = True,
     ) -> None:
         self.config = config
         self._sdpa_kernels = sdpa_kernels
-        self._do_filter_kernels = True  # Only in first call
+        self._do_filter_kernels = filter_sdpa_kernels
         self.use_eager_sdpa_always = use_eager_sdpa_always
         self.set_tmp_array_limit_gb(tmp_array_limit_gb)
         if self.config.attention_logit_softcapping is not None:

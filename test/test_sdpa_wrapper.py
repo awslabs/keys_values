@@ -127,7 +127,7 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
         scale_factor = 1.0 / math.sqrt(head_size)
 
         # Compute in two ways and compare
-        output1 = wrapper_sdpa(
+        output1, sdpa_kernels = wrapper_sdpa(
             query=query,
             key=key,
             value=value,
@@ -135,6 +135,7 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
             input_pos=input_pos,
             token_positions=token_positions,
             sdpa_kernels=sdpa_kernels,
+            do_filter_kernels=True,
         )
         output2, _ = scaled_dot_product_attention_in_blocks(
             query=query,

@@ -494,14 +494,12 @@ def pytorch_scaled_dot_product_attention(
         is_causal=is_causal,
         enable_gqa=enable_gqa,
     )
-    if sdpa_kernels is not None:
-        if not isinstance(sdpa_kernels, list):
-            sdpa_kernels = [sdpa_kernels]
+    if not isinstance(sdpa_kernels, list):
+        sdpa_kernels = [sdpa_kernels]
+    if sdpa_kernels:
         if do_filter_kernels:
             sdpa_kernels = filter_sdpa_kernels(sdpa_kernels=sdpa_kernels, **kwargs)
-        if not sdpa_kernels:
-            sdpa_kernels = None
-    if sdpa_kernels is not None:
+    if sdpa_kernels:
         with sdpa_kernel(sdpa_kernels):
             y = F.scaled_dot_product_attention(**kwargs)
     else:

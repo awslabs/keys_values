@@ -102,7 +102,7 @@ def main(
                 if kind < 2:
                     y = wrap_sdpa_old(**sdpa_kwargs, kind=kind)
                 else:
-                    y = scaled_dot_product_attention(**sdpa_kwargs)
+                    y, _ = scaled_dot_product_attention(**sdpa_kwargs)
                 if on_gpu:
                     torch.cuda.current_stream().synchronize()
                 time_in_ms = (time.perf_counter() - forward_time) * 1000
