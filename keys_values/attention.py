@@ -313,10 +313,11 @@ class MultiHeadSelfAttention:
         must_eager = return_attn_weights or self.use_eager_sdpa_always
         if must_eager or not is_causal:
             #if must_eager or self._use_eager_kernel(kv_len, q_len):
-            if must_eager:
-                return SDPA_IMPL_EAGER_BLOCKS
-            else:
-                return SDPA_IMPL_QPADDED_PYTORCH
+            #if must_eager:
+            #    return SDPA_IMPL_EAGER_BLOCKS
+            #else:
+            #    return SDPA_IMPL_QPADDED_PYTORCH
+            return SDPA_IMPL_EAGER_BLOCKS
         else:
             return SDPA_IMPL_PYTORCH
 
@@ -373,13 +374,14 @@ class MultiHeadSelfAttention:
                 mask=mask,
             )
         else:
-            if sdpa_mode == SDPA_IMPL_EAGER_NO_BLOCKS:
+            use_blocking = sdpa_mode == SDPA_IMPL_EAGER_BLOCKS
+            if not use_blocking:
                 assert mask is not None or query.shape[2] == 1
             y, scores = eager_scaled_dot_product_attention(
                 query=query,
                 k_and_v=k_and_v,
                 scale_factor=scale_factor,
-                use_blocking=sdpa_mode == SDPA_IMPL_EAGER_BLOCKS,
+                use_blocking=use_blocking,
                 return_attn_weights=return_attn_weights,
                 input_pos=input_pos,
                 token_positions=token_positions,

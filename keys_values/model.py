@@ -72,9 +72,10 @@ class GPT(nn.Module):
                 ln_f=config.norm_class(config.n_embd, eps=config.norm_eps),
             )
         )
-        self.mha = MultiHeadSelfAttention(
-            config, **transform_mha_kwargs(mha_kwargs, config),
-        )
+        #self.mha = MultiHeadSelfAttention(
+        #    config, **transform_mha_kwargs(mha_kwargs, config),
+        #)
+        self.mha = MultiHeadSelfAttention(config, **mha_kwargs)  # DEBUG
         self.max_seq_length = config.block_size
         self._start_of_layer_hook = None
         # Have dense KV caches been created by `set_kv_caches`?
