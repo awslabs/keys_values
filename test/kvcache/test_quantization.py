@@ -37,38 +37,33 @@ from keys_values.kvcache.test_utils import (
     create_kv_cache,
     random_tensor,
     random_keys_values,
-    device_for_cache_name,
+    cache_names_and_devices,
+    random_args_cache_forward,
 )
 from keys_values.model import GPT
 
 
-QUANTIZERS_ON_CPU = ["torch-quantized8"]
-
-QUANTIZERS_ON_GPU = ["bnb-quantized8", "bnb-quantized4", "ao-quantized8", "ao-quantized4"]
-
-
-def _supported_quantizers() -> List[str]:
-    qnames = QUANTIZERS_ON_CPU.copy()
-    if torch.cuda.is_available():
-        qnames.extend(QUANTIZERS_ON_GPU)
-    return qnames
+def args_for_one_cache(cname: str) -> List[tuple]:
+    return [
+        (a, b) + c for a, b, c in product(
+            [torch.float32, torch.float16, torch.bfloat16],
+            [False, True],
+            cache_names_and_devices(
+                filter_name=lambda name: name.startswith(cname) and not name.endswith("default"),
+            ),
+        )
+    ]
 
 
 @pytest.mark.parametrize(
-    "dtype, blocks_over_heads, qname",
-    product(
-        [torch.float32, torch.float16, torch.bfloat16],
-        [False, True],
-        QUANTIZERS_ON_CPU,
-    ),
+    "dtype, blocks_over_heads, name, device",
+    args_for_one_cache("dense"),
 )
-def test_quantization_error(dtype, blocks_over_heads, qname):
+def test_quantization_error(dtype, blocks_over_heads, name, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
-    name = "dense-" + qname
-    device = device_for_cache_name(name)
-    print(f"dtype={dtype}, blocks_over_heads={blocks_over_heads}, qname={qname}, device={device}")
+    print(f"dtype={dtype}, blocks_over_heads={blocks_over_heads}, name={name}, device={device}")
 
     head_sizes = (16, 32, 64)
     params = [
@@ -126,25 +121,15 @@ def test_quantization_error(dtype, blocks_over_heads, qname):
         assert num_lt < total_sz / 4
 
 
-def args_concatenation() -> List[tuple]:
-    return list(
-        product(
-            _supported_quantizers(),
-            [torch.float32, torch.float16, torch.bfloat16],
-            [False, True],
-        )
-    )
-
-
 @pytest.mark.parametrize(
-    "qname, dtype, blocks_over_heads", args_concatenation(),
+    "dtype, blocks_over_heads, name, device",
+    args_for_one_cache("lastrec"),
 )
-def test_concatenation(qname: str, dtype: torch.dtype, blocks_over_heads: bool):
+def test_concatenation(dtype, blocks_over_heads, name, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
-    device = device_for_cache_name(qname)
-    print(f"qname={qname}, dtype={dtype}, blocks_over_heads={blocks_over_heads}, device={device}")
+    print(f"name={name}, dtype={dtype}, blocks_over_heads={blocks_over_heads}, device={device}")
 
     vocab_size = 128
     params = KVCacheParams(
@@ -157,17 +142,11 @@ def test_concatenation(qname: str, dtype: torch.dtype, blocks_over_heads: bool):
         dtype=dtype,
     )
     cache_length = params.cache_length
-    kv_cache = create_kv_cache(
-        "lastrec-" + qname, params, blocks_over_heads=blocks_over_heads,
+    kv_cache = create_kv_cache(name, params, blocks_over_heads=blocks_over_heads)
+    data = random_args_cache_forward(
+        params, num=cache_length, vocab_size=vocab_size,
     )
-    keys, values = random_keys_values(params, cache_length)
-    token_ids = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(params.max_batch_size, cache_length),
-        device=device,
-    )
-    kv_cache._prefill(keys, values, token_ids)
+    kv_cache._prefill(data["key"], data["value"], data["token_idx"])
     positions = torch.zeros(
         (params.max_batch_size, params.n_query_groups, 7),
         dtype=torch.int64,
@@ -185,13 +164,13 @@ def test_concatenation(qname: str, dtype: torch.dtype, blocks_over_heads: bool):
 
 
 @pytest.mark.parametrize(
-    "qname, dtype, blocks_over_heads", args_concatenation(),
+    "dtype, blocks_over_heads, name, device",
+    args_for_one_cache("lastrec"),
 )
-def test_quantizer_states(qname: str, dtype: torch.dtype, blocks_over_heads: bool):
+def test_quantizer_states(dtype, blocks_over_heads, name, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
-    device = device_for_cache_name(qname)
 
     vocab_size = 128
     params = KVCacheParams(
@@ -204,16 +183,11 @@ def test_quantizer_states(qname: str, dtype: torch.dtype, blocks_over_heads: boo
         dtype=dtype,
     )
     cache_length = params.cache_length
-    kv_cache = create_kv_cache(
-        "lastrec-" + qname, params, blocks_over_heads=blocks_over_heads,
+    kv_cache = create_kv_cache(name, params, blocks_over_heads=blocks_over_heads)
+    data = random_args_cache_forward(
+        params, num=cache_length, vocab_size=vocab_size,
     )
-    keys, values = random_keys_values(params, cache_length)
-    token_ids = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(params.max_batch_size, cache_length),
-    )
-    kv_cache._prefill(keys, values, token_ids)
+    kv_cache._prefill(data["key"], data["value"], data["token_idx"])
     kv_buffers = kv_cache.kv_buffers
     quantizer_k = kv_buffers.quantizer_k
     quantizer_v = kv_buffers.quantizer_v
@@ -390,7 +364,7 @@ def test_bitsandbytes_with_blocks_over_heads(
     qname, batch_size, n_query_groups, head_size, shape, is_valid,
 ):
     name = "lastrec-" + qname
-    device = device_for_cache_name(name)
+    device = torch.device("cuda:0")
     print(f"qname={qname}, batch_size={batch_size}, n_query_groups={n_query_groups}, head_size={head_size}, shape={shape}, is_valid={is_valid}")
     params = KVCacheParams(
         max_batch_size=batch_size,
@@ -470,24 +444,21 @@ def check_same_events(
 
 
 def args_quantized_buffers_write_back() -> List[tuple]:
-    dtypes = [torch.float32, torch.bfloat16, torch.float16]
-    cnames = ["lastrec", "h2o"]
-    return list(product(_supported_quantizers(), dtypes, cnames))
+    args = []
+    for cname in ("lastrec", "h2o"):
+        args.extend([(a, c, d) for a, b, c, d in args_for_one_cache(cname) if b])
+    return args
 
 
 @pytest.mark.parametrize(
-    "qname, dtype, cname",
-    args_quantized_buffers_write_back(),
+    "dtype, name, device", args_quantized_buffers_write_back(),
 )
-def test_quantized_buffers_write_back(qname, dtype, cname):
+def test_quantized_buffers_write_back(dtype, name, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
-
-    name = cname + "-" + qname
     batch_size = 4
     cache_length = 64
-    device = device_for_cache_name(name)
 
     config = Config(
         n_layer=8,
@@ -541,23 +512,11 @@ def test_quantized_buffers_write_back(qname, dtype, cname):
         num_prefill = cache_length
     for c_comm, c_sep in zip(caches_common, caches_separate):
         c_sep.kv_buffers.dequant_buffers.start_debug_event_protocol()
-        query = random_tensor(params, num=num_prefill, is_query=True)
-        key, value = random_keys_values(params, num_prefill)
-        token_idx = torch.randint(
-            low=0,
-            high=config.vocab_size,
-            size=(batch_size, num_prefill),
-            device=device,
+        data = random_args_cache_forward(
+            params, num=num_prefill, vocab_size=config.vocab_size,
         )
-        kwargs = dict(
-            query=query,
-            key=key,
-            value=value,
-            token_idx=token_idx,
-            input_pos=input_pos,
-        )
-        c_comm(**kwargs)
-        c_sep(**kwargs)
+        c_comm(**data, input_pos=input_pos)
+        c_sep(**data, input_pos=input_pos)
     write_back_all(caches_common)
     write_back_all(caches_separate)
     check_same_events(caches_common[0], caches_separate)
@@ -574,23 +533,11 @@ def test_quantized_buffers_write_back(qname, dtype, cname):
             # If this is not done, the dequant buffers content is used without
             # reading from quantized, which gives differences
             c_sep.kv_buffers.drop_association()
-            query = random_tensor(params, num=q_len, is_query=True)
-            key, value = random_keys_values(params, q_len)
-            token_idx = torch.randint(
-                low=0,
-                high=config.vocab_size,
-                size=(batch_size, q_len),
-                device=device,
+            data = random_args_cache_forward(
+                params, num=q_len, vocab_size=config.vocab_size,
             )
-            kwargs = dict(
-                query=query,
-                key=key,
-                value=value,
-                token_idx=token_idx,
-                input_pos=input_pos,
-            )
-            c_comm(**kwargs)
-            c_sep(**kwargs)
+            c_comm(**data, input_pos=input_pos)
+            c_sep(**data, input_pos=input_pos)
         write_back_all(caches_common)
         write_back_all(caches_separate)
         check_same_events(caches_common[0], caches_separate)

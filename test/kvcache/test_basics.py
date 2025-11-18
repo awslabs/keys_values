@@ -24,17 +24,23 @@ from keys_values.kvcache.test_utils import (
     random_args_cache_forward,
     range_from_args,
     available_backends,
+    product_with_devices,
 )
 
 
 @pytest.mark.parametrize(
-    "name", ["lastrec-default", "lastrec-torch-quantized8"],
+    "name, device",
+    product(
+        ["lastrec-default", "lastrec-torch-quantized8"],
+        available_backends(),
+    )
 )
-def test_last_recent(name):
+def test_last_recent(name, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
+    dtype = torch.bfloat16
 
     params = KVCacheParams(
         max_batch_size=3,
@@ -42,8 +48,8 @@ def test_last_recent(name):
         cache_length=32,
         head_size=8,
         n_head=4,
-        device=torch.device("cpu"),
-        dtype=torch.bfloat16,
+        device=device,
+        dtype=dtype,
     )
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params)
@@ -70,16 +76,13 @@ def test_last_recent(name):
 
 @pytest.mark.parametrize(
     "dtype, tol_kwargs, device",
-    [
-        a + (b,) for a, b in product(
-            [
-                (torch.bfloat16, dict(atol=0.0005, rtol=0.03)),
-                (torch.float16, dict(atol=0.00015, rtol=0.01)),
-                (torch.float32, dict()),
-            ],
-            available_backends(),
-        )
-    ],
+    product_with_devices(
+        [
+            (torch.bfloat16, dict(atol=0.0005, rtol=0.03)),
+            (torch.float16, dict(atol=0.00015, rtol=0.01)),
+            (torch.float32, dict()),
+        ],
+    ),
 )
 def test_incremental_versus_singlepass(dtype, tol_kwargs, device):
     seed = 31415927

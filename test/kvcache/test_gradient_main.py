@@ -24,14 +24,18 @@ from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.gradient.main import LongContextGradientModel
-from keys_values.kvcache.test_utils import create_kv_cache, copy_gradients
+from keys_values.kvcache.test_utils import (
+    create_kv_cache,
+    copy_gradients,
+    available_backends,
+)
 from keys_values.model import GPT
 
 
 def args_complete_gradient_computation():
     return [
-        a + b
-        for a, b in product(
+        a + b + (c,)
+        for a, b, c in product(
             [
                 ("lastrec", dict()),
                 ("h2o", {"replay_log_blocksize": 64}),
@@ -41,20 +45,22 @@ def args_complete_gradient_computation():
                 ([128, 128],),
                 ([96, 128],),
             ],
+            available_backends(),
         )
     ]
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths",
+    "cache_name, cache_kwargs, cache_lengths, device",
     args_complete_gradient_computation(),
 )
-def test_complete_gradient_computation(cache_name, cache_kwargs, cache_lengths):
+def test_complete_gradient_computation(
+    cache_name, cache_kwargs, cache_lengths, device,
+):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
 
-    device = torch.device("cpu")
     dtype = torch.float32
     torch.set_default_dtype(dtype)  # Set default dtype
 

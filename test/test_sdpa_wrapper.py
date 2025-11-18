@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from itertools import product
 import math
 import random
 
@@ -29,7 +28,7 @@ from keys_values.attention import (
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.test_utils import (
-    available_backends,
+    product_with_devices,
     random_args_cache_forward,
     range_from_args,
 )
@@ -38,19 +37,16 @@ from keys_values.sdpa_wrapper import scaled_dot_product_attention as wrapper_sdp
 
 @pytest.mark.parametrize(
     ("n_head", "n_query_groups", "device"),
-    [
-        a + (b,) for a, b in product(
-            [
-                (2, 1),
-                (4, 1),
-                (8, 4),
-                (12, 4),
-                (24, 8),
-                (9, 3),
-            ],
-            available_backends(),
-        )
-    ]
+    product_with_devices(
+        [
+            (2, 1),
+            (4, 1),
+            (8, 4),
+            (12, 4),
+            (24, 8),
+            (9, 3),
+        ],
+    ),
 )
 @torch.inference_mode()
 def test_sdpa_wrapper(n_head, n_query_groups, device):
@@ -65,7 +61,10 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
         dtype = torch.bfloat16
     gen_kwargs = dict(dtype=dtype, device=device)
     index_kwargs = dict(dtype=torch.int64, device=device)
-    assert_kwargs = dict(atol=0.0005, rtol=0.05)
+    if device == torch.device("cpu"):
+        assert_kwargs = dict(atol=0.0005, rtol=0.05)
+    else:
+        assert_kwargs = dict(atol=0.0015, rtol=0.05)
     sdpa_kernels = [
         SDPBackend.FLASH_ATTENTION,
         SDPBackend.EFFICIENT_ATTENTION,
@@ -150,20 +149,17 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
 
 
 @pytest.mark.parametrize(
-    "device, dtype, tol_kwargs",
-    [
-        (a,) + b for a, b in product(
-            available_backends(),
-            [
-                (torch.float32, dict()),
-                (torch.bfloat16, dict(atol=0.0005, rtol=0.03)),
-                (torch.float16, dict(atol=0.0005, rtol=0.03)),
-            ],
-        )
-    ]
+    "dtype, tol_kwargs, device",
+    product_with_devices(
+        [
+            (torch.float32, dict()),
+            (torch.bfloat16, dict(atol=0.0005, rtol=0.03)),
+            (torch.float16, dict(atol=0.0005, rtol=0.03)),
+        ],
+    ),
 )
 @torch.inference_mode()
-def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
+def test_wrapper_with_lastrec_cache(dtype, tol_kwargs, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)

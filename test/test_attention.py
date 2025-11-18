@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from itertools import product
 import math
 import random
 from typing import Optional, Tuple
@@ -41,29 +42,35 @@ from keys_values.attention_utils import (
     ENTRIES_PER_GB,
 )
 from keys_values.kvcache.base import KVCache
+from keys_values.kvcache.test_utils import (
+    product_with_devices,
+    available_backends,
+)
 from keys_values.model import GPT, CausalSelfAttention
 from keys_values.use_eager_kernel import transform_mha_kwargs
 
 
 @pytest.mark.parametrize(
-    ("n_head", "n_query_groups"),
-    (
-        (2, 1),
-        (4, 1),
-        (8, 4),
-        (12, 4),
-        (24, 8),
-        (9, 3),
+    ("n_head", "n_query_groups", "device"),
+    product_with_devices(
+        [
+            (2, 1),
+            (4, 1),
+            (8, 4),
+            (12, 4),
+            (24, 8),
+            (9, 3),
+        ],
     ),
 )
 @torch.inference_mode()
-def test_scaled_dot_product_attention(n_head, n_query_groups):
+def test_scaled_dot_product_attention(n_head, n_query_groups, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
     num_repeats = 32
     dtype = torch.bfloat16
-    mask_kwargs = dict(dtype=dtype, device=torch.device("cpu"))
+    mask_kwargs = dict(dtype=dtype, device=device)
     assert_kwargs = dict(atol=0.0005, rtol=0.05)
     sliding_window_size = None
 
@@ -87,6 +94,7 @@ def test_scaled_dot_product_attention(n_head, n_query_groups):
                 0,
                 len_key,
                 dtype=torch.int64,
+                device=device,
             ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
             input_pos = len_key // 2
             mask = build_mask_slice(
@@ -101,10 +109,10 @@ def test_scaled_dot_product_attention(n_head, n_query_groups):
             input_pos = len_key // 2
             token_positions = None
         shape = (batch_size, n_head, len_query, head_size)
-        query = torch.randn(shape, dtype=dtype)
+        query = torch.randn(shape, **mask_kwargs)
         shape = (batch_size, n_query_groups, len_key, head_size)
-        key = torch.randn(shape, dtype=dtype)
-        value = torch.randn(shape, dtype=dtype)
+        key = torch.randn(shape, **mask_kwargs)
+        value = torch.randn(shape, **mask_kwargs)
         k_and_v = DefaultKeysAndValues(key, value)
         scale = 1.0 / math.sqrt(head_size)
 
@@ -145,14 +153,16 @@ def test_scaled_dot_product_attention(n_head, n_query_groups):
 
 
 @pytest.mark.parametrize(
-    ("sliding_window_size", "batch_size", "n_query_groups"),
-    (
-        (None, 1, 1),
-        (None, 4, 16),
-        (4, 1, 1),
-        (4, 2, 32),
-        (128, 1, 1),
-        (128, 4, 16),
+    ("sliding_window_size", "batch_size", "n_query_groups", "device"),
+    product_with_devices(
+        [
+            (None, 1, 1),
+            (None, 4, 16),
+            (4, 1, 1),
+            (4, 2, 32),
+            (128, 1, 1),
+            (128, 4, 16),
+        ]
     ),
 )
 @torch.inference_mode()
@@ -160,6 +170,7 @@ def test_build_mask_slice(
     sliding_window_size: Optional[int],
     batch_size: int,
     n_query_groups: int,
+    device: torch.device,
 ):
     seed = 31415927
     random.seed(seed)
@@ -202,10 +213,13 @@ def test_build_mask_slice(
 
 
 @pytest.mark.parametrize(
-    "dtype",
-    [torch.float32, torch.float16, torch.bfloat16],
+    "dtype, device",
+    product(
+        [torch.float32, torch.float16, torch.bfloat16],
+        available_backends(),
+    ),
 )
-def test_mask_sliding_window(dtype):
+def test_mask_sliding_window(dtype, device):
     """
     Compares `mask` used in MHA in training mode in old code (using
     `mask_cache`) and new code, using a setup from
@@ -452,14 +466,14 @@ def rope_cache_OLD(
 
 
 @pytest.mark.parametrize(
-    "model_name",
-    ["gemma-2-27b", "gemma-3-27b-it"],
+    "model_name, dtype, device",
+    product(
+        ["gemma-2-27b", "gemma-3-27b-it"],
+        [torch.float32, torch.float16, torch.bfloat16],
+        available_backends(),
+    ),
 )
-@pytest.mark.parametrize(
-    "dtype",
-    [torch.float32, torch.float16, torch.bfloat16],
-)
-def test_multi_head_attention_for_gemma(model_name, dtype):
+def test_multi_head_attention_for_gemma(model_name, dtype, device):
     """
     Compares multi-head attention in old and current code, using a
     setup from :func:`test_against_original_gemma_2` above.
@@ -481,15 +495,16 @@ def test_multi_head_attention_for_gemma(model_name, dtype):
         rotary_percentage=1.0,
         rope_indices=[0, 1] if is_gemma_3 else None,
     )
+    kwargs = dict(dtype=dtype, device=device)
 
     # Obtain RoPE parameters and compare
-    model_new = GPT(config).to(dtype=dtype)
+    model_new = GPT(config).to(**kwargs)
     model_new.max_seq_length = T
     cos_new = model_new.cos.unsqueeze(0)
     sin_new = model_new.sin.unsqueeze(0)
     cos_old, sin_old = rope_cache_OLD(config)
-    cos_old = cos_old.unsqueeze(0).to(dtype=dtype)
-    sin_old = sin_old.unsqueeze(0).to(dtype=dtype)
+    cos_old = cos_old.unsqueeze(0).to(**kwargs)
+    sin_old = sin_old.unsqueeze(0).to(**kwargs)
     torch.testing.assert_close(cos_new, cos_old)
     torch.testing.assert_close(sin_new, sin_old)
 
@@ -502,19 +517,20 @@ def test_multi_head_attention_for_gemma(model_name, dtype):
         attn_new = CausalSelfAttention(
             config,
             block_idx=block_idx,
-        ).to(dtype=dtype)
+        ).to(**kwargs)
         attn_old = CausalSelfAttention_OLD(
             config,
             block_idx=block_idx,
-        ).to(dtype=dtype)
+        ).to(**kwargs)
         # Ensure they have the same weights
         attn_old.load_state_dict(attn_new.state_dict())
-        inputs = torch.randn(shape, dtype=dtype)
+        inputs = torch.randn(shape, **kwargs)
         token_idx = torch.randint(
             0,
             config.padded_vocab_size,
             (batch_size, T),
             dtype=torch.int64,
+            device=device,
         )
         if is_gemma_3:
             _cos = cos_new[..., config.rope_indices[block_idx]]
@@ -563,15 +579,17 @@ def _get_token_positions(
 
 
 @pytest.mark.parametrize(
-    "seq_len, sliding_window_size",
-    [
-        (128, None),
-        (21, None),
-        (128, 16),
-        (21, 12),
-    ],
+    "seq_len, sliding_window_size, device",
+    product_with_devices(
+        [
+            (128, None),
+            (21, None),
+            (128, 16),
+            (21, 12),
+        ],
+    ),
 )
-def test_build_mask(seq_len, sliding_window_size):
+def test_build_mask(seq_len, sliding_window_size, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -581,14 +599,14 @@ def test_build_mask(seq_len, sliding_window_size):
     tp_kwargs = dict(
         batch_size=batch_size,
         n_query_groups=n_query_groups,
-        device=torch.device("cpu"),
+        device=device,
     )
 
     mask_full = build_mask_cache(
         max_seq_length=seq_len,
         sliding_window_size=sliding_window_size,
+        device=device,
         dtype=torch.float32,
-        device=torch.device("cpu"),
     )[None, None, :, :].expand(batch_size, n_query_groups, -1, -1)
     token_positions = _get_token_positions(0, seq_len, **tp_kwargs)
     for _ in range(num_repeats):
@@ -620,20 +638,22 @@ def test_build_mask(seq_len, sliding_window_size):
 
 
 @pytest.mark.parametrize(
-    ("n_head", "n_query_groups", "q_len", "kv_len", "dtype", "sliding_window_size"),
-    (
-        (4, 2, 128, 512, torch.float16, None),
-        (4, 4, 8, 256, torch.bfloat16, None),
-        (8, 4, 128, 128, torch.float16, None),
-        (12, 4, 16, 512, torch.bfloat16, None),
-        (24, 8, 2, 512, torch.float16, None),
-        (9, 3, 128, 512, torch.bfloat16, None),
-        (12, 4, 16, 512, torch.float16, 12),
-        (24, 8, 2, 512, torch.bfloat16, 64),
-        (9, 3, 128, 512, torch.float16, 96),
+    ("n_head", "n_query_groups", "q_len", "kv_len", "dtype", "sliding_window_size", "device"),
+    product_with_devices(
+        [
+            (4, 2, 128, 512, torch.float16, None),
+            (4, 4, 8, 256, torch.bfloat16, None),
+            (8, 4, 128, 128, torch.float16, None),
+            (12, 4, 16, 512, torch.bfloat16, None),
+            (24, 8, 2, 512, torch.float16, None),
+            (9, 3, 128, 512, torch.bfloat16, None),
+            (12, 4, 16, 512, torch.float16, 12),
+            (24, 8, 2, 512, torch.bfloat16, 64),
+            (9, 3, 128, 512, torch.float16, 96),
+        ],
     ),
 )
-def test_attention_in_blocks(n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size):
+def test_attention_in_blocks(n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -653,7 +673,8 @@ def test_attention_in_blocks(n_head, n_query_groups, q_len, kv_len, dtype, slidi
         rotary_percentage=1.0,
     )
 
-    print(f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}")
+    print(f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}, device={device}")
+    kwargs = dict(dtype=dtype, device=device)
     for repeat in range(num_repeats):
         head_size = 2 ** random.randint(3, 6)
         batch_size = random.randint(1, 5)
@@ -664,13 +685,18 @@ def test_attention_in_blocks(n_head, n_query_groups, q_len, kv_len, dtype, slidi
             token_positions = None
         else:
             token_positions = sample_token_positions(
-                batch_size, n_query_groups, q_len, kv_len, input_pos,
+                batch_size,
+                n_query_groups,
+                q_len,
+                kv_len,
+                input_pos,
+                device=device,
             )
         shape = (batch_size, n_head, q_len, head_size)
-        query = torch.randn(shape, dtype=dtype)
+        query = torch.randn(shape, **kwargs)
         shape = (batch_size, n_query_groups, kv_len, head_size)
-        key = torch.randn(shape, dtype=dtype)
-        value = torch.randn(shape, dtype=dtype)
+        key = torch.randn(shape, **kwargs)
+        value = torch.randn(shape, **kwargs)
         k_and_v = DefaultKeysAndValues(key, value)
         print(f"query {query.shape}, key {key.shape}, value {value.shape}")
         if token_positions is not None:

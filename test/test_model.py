@@ -61,7 +61,11 @@ from litgpt.scripts.convert_hf_checkpoint import (
 from litgpt.scripts.convert_lit_checkpoint import qkv_reassemble as make_qkv_interleaved
 from litgpt.utils import _RunIf
 
-from keys_values.attention import DefaultKeysAndValues
+from keys_values.attention import (
+    DefaultKeysAndValues,
+    SDPA_IMPL_PYTORCH,
+    SDPA_IMPL_EAGER_NO_BLOCKS,
+)
 from keys_values.model import GPT, CausalSelfAttention
 
 
@@ -1454,6 +1458,56 @@ SUPPORTS_FLASH_ATTENTION = (
 )
 
 
+def assert_sdpa_backend(
+    original_fn, config, enable_gqa, expected, query, k_and_v, **kwargs,
+):
+    sdpa_mode = kwargs.get("sdpa_mode")
+    exp_mode = SDPA_IMPL_PYTORCH if config.attention_logit_softcapping is None else SDPA_IMPL_EAGER_NO_BLOCKS
+    assert sdpa_mode == exp_mode, f"sdpa_mode = {sdpa_mode} != {exp_mode}"
+    # This is also done in `MultiHeadSelfAttention.scaled_dot_product_attention`
+    mask = kwargs.get("mask")
+    if mask is None and enable_gqa:
+        # Some efficient kernels have not implemented
+        # `enabla_gqa=True`. It is better to extend keys, values in
+        # this case.
+        key = k_and_v.keys()
+        value = k_and_v.values()
+        q_per_kv = config.n_head // config.n_query_groups
+        key = key.repeat_interleave(q_per_kv, dim=1)
+        value = value.repeat_interleave(q_per_kv, dim=1)
+        assert query.shape[1] == key.shape[1]
+        _k_and_v = DefaultKeysAndValues(key, value)
+        _enable_gqa = False
+    else:
+        _enable_gqa = enable_gqa
+        _k_and_v = k_and_v
+
+    # SDPAParams gained an additional argument in PyTorch 2.5
+    args = [_enable_gqa] if hasattr(SDPAParams, "enable_gqa") else []
+    params = SDPAParams(query, _k_and_v.keys(), _k_and_v.values(), mask, 0.0, True, *args)
+    if expected is SDPBackend.FLASH_ATTENTION:
+        assert flash_sdp_enabled(), "flash_sdp_enabled() is False"
+        if config.sliding_window_size is None:
+            assert can_use_flash_attention(params, True), "can_use_flash_attention(params, True) is False"
+    elif expected is SDPBackend.EFFICIENT_ATTENTION:
+        assert mem_efficient_sdp_enabled(), "mem_efficient_sdp_enabled() is False"
+        if (not enable_gqa) or mask is None:
+            # At present, `SDPBackend.EFFICIENT_ATTENTION` does not support
+            # `enabla_gqa=True` and a mask specified
+            assert can_use_efficient_attention(params, True), "can_use_efficient_attention(params, True) is False"
+    elif expected is SDPBackend.MATH:
+        assert math_sdp_enabled(), "math_sdp_enabled() is False"
+    else:
+        raise NotImplementedError
+    return original_fn(query, k_and_v, **kwargs)
+
+
+@_RunIf(min_cuda_gpus=1)
+def test_flash_attention_sdpa():
+    if SUPPORTS_FLASH_ATTENTION:
+        assert flash_sdp_enabled(), "flash_sdp_enabled() is False"
+
+
 @_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize("config", deepcopy(config_module.configs), ids=[c["name"] for c in config_module.configs])
 @torch.inference_mode()
@@ -1466,46 +1520,6 @@ def test_sdpa_choice(config):
     config = config_module.Config(**config)
     enable_gqa = config.n_query_groups < config.n_head
 
-    def assert_sdpa_backend(original_fn, query, k_and_v, **kwargs):
-        # SDPAParams gained an additional argument in PyTorch 2.5
-        args = []
-        # This is also done in `MultiHeadSelfAttention.scaled_dot_product_attention`
-        mask = kwargs.get("mask")
-        if mask is None and enable_gqa:
-            # Some efficient kernels have not implemented
-            # `enabla_gqa=True`. It is better to extend keys, values in
-            # this case.
-            key = k_and_v.keys()
-            value = k_and_v.values()
-            q_per_kv = config.n_head // config.n_query_groups
-            key = key.repeat_interleave(q_per_kv, dim=1)
-            value = value.repeat_interleave(q_per_kv, dim=1)
-            assert query.shape[1] == key.shape[1]
-            _k_and_v = DefaultKeysAndValues(key, value)
-            _enable_gqa = False
-        else:
-            _enable_gqa = enable_gqa
-            _k_and_v = k_and_v
-
-        if hasattr(SDPAParams, "enable_gqa"):
-            args.append(_enable_gqa)
-        params = SDPAParams(query, _k_and_v.keys(), _k_and_v.values(), mask, 0.0, True, *args)
-        if expected is SDPBackend.FLASH_ATTENTION:
-            assert flash_sdp_enabled(), "flash_sdp_enabled() is False"
-            if config.sliding_window_size is None:
-                assert can_use_flash_attention(params, True), "can_use_flash_attention(params, True) is False"
-        elif expected is SDPBackend.EFFICIENT_ATTENTION:
-            assert mem_efficient_sdp_enabled(), "mem_efficient_sdp_enabled() is False"
-            if (not enable_gqa) or mask is None:
-                # At present, `SDPBackend.EFFICIENT_ATTENTION` does not support
-                # `enabla_gqa=True` and a mask specified
-                assert can_use_efficient_attention(params, True), "can_use_efficient_attention(params, True) is False"
-        elif expected is SDPBackend.MATH:
-            assert math_sdp_enabled(), "math_sdp_enabled() is False"
-        else:
-            raise NotImplementedError
-        return original_fn(query, k_and_v, **kwargs)
-
     try:
         with torch.device("cuda"):
             model = GPT(config)
@@ -1514,19 +1528,29 @@ def test_sdpa_choice(config):
         # best effort, if the GPU can load it
         pytest.xfail()
 
-    model.mha.eager_scaled_dot_product_attention = partial(
-        assert_sdpa_backend,
-        model.mha.eager_scaled_dot_product_attention,
-    )
-
+    reset_meth = model.mha.scaled_dot_product_attention
     if SUPPORTS_FLASH_ATTENTION:
-        expected = SDPBackend.FLASH_ATTENTION
+        model.mha.scaled_dot_product_attention = partial(
+            assert_sdpa_backend,
+            model.mha.scaled_dot_product_attention,
+            config,
+            enable_gqa,
+            SDPBackend.FLASH_ATTENTION,
+        )
         with torch.backends.cuda.sdp_kernel(enable_mem_efficient=False):
             model(x)
+        model.mha.scaled_dot_product_attention = reset_meth
 
-    expected = SDPBackend.EFFICIENT_ATTENTION if config.head_size % 8 == 0 else SDPBackend.MATH
+    model.mha.scaled_dot_product_attention = partial(
+        assert_sdpa_backend,
+        model.mha.scaled_dot_product_attention,
+        config,
+        enable_gqa,
+        SDPBackend.EFFICIENT_ATTENTION if config.head_size % 8 == 0 else SDPBackend.MATH,
+    )
     with torch.backends.cuda.sdp_kernel(enable_flash=False):
         model(x)
+    model.mha.scaled_dot_product_attention = reset_meth
 
 
 @_RunIf(min_cuda_gpus=1)
@@ -1538,45 +1562,6 @@ def test_sdpa_choice_kv_cache(config):
     config = config_module.Config(**config)
     enable_gqa = config.n_query_groups < config.n_head
 
-    def assert_sdpa_backend(original_fn, query, k_and_v, **kwargs):
-        # SDPAParams gained an additional argument in PyTorch 2.5
-        args = []
-        # This is also done in `MultiHeadSelfAttention.scaled_dot_product_attention`
-        mask = kwargs.get("mask")
-        if mask is None and enable_gqa:
-            # Some efficient kernels have not implemented
-            # `enabla_gqa=True`. It is better to extend keys, values in
-            # this case.
-            key = k_and_v.keys()
-            value = k_and_v.values()
-            q_per_kv = config.n_head // config.n_query_groups
-            key = key.repeat_interleave(q_per_kv, dim=1)
-            value = value.repeat_interleave(q_per_kv, dim=1)
-            assert query.shape[1] == key.shape[1]
-            _k_and_v = DefaultKeysAndValues(key, value)
-            _enable_gqa = False
-        else:
-            _enable_gqa = enable_gqa
-            _k_and_v = k_and_v
-
-        if hasattr(SDPAParams, "enable_gqa"):
-            args.append(_enable_gqa)
-        params = SDPAParams(query, _k_and_v.keys(), _k_and_v.values(), mask, 0.0, True, *args)
-        if expected is SDPBackend.FLASH_ATTENTION:
-            assert flash_sdp_enabled(), "flash_sdp_enabled() is False"
-            assert can_use_flash_attention(params, True), "can_use_flash_attention(params, True) is False"
-        elif expected is SDPBackend.EFFICIENT_ATTENTION:
-            assert mem_efficient_sdp_enabled(), "mem_efficient_sdp_enabled() is False"
-            if (not enable_gqa) or mask is None:
-                # At present, `SDPBackend.EFFICIENT_ATTENTION` does not support
-                # `enabla_gqa=True` and a mask specified
-                assert can_use_efficient_attention(params, True), "can_use_efficient_attention(params, True) is False"
-        elif expected is SDPBackend.MATH:
-            assert math_sdp_enabled(), "math_sdp_enabled() is False"
-        else:
-            raise NotImplementedError
-        return original_fn(query, k_and_v, **kwargs)
-
     try:
         with torch.device("cuda"):
             model = GPT(config)
@@ -1587,24 +1572,40 @@ def test_sdpa_choice_kv_cache(config):
         # best effort, if the GPU can load it
         pytest.xfail()
 
-    for block in model.transformer.h:
-        kv_cache = block.attn.kv_cache
-        kv_cache.mha.eager_scaled_dot_product_attention = partial(
-            assert_sdpa_backend,
-            kv_cache.mha.eager_scaled_dot_product_attention,
-        )
+    sdpa_wrapper = partial(
+        assert_sdpa_backend,
+        model.mha.scaled_dot_product_attention,
+        config,
+        enable_gqa,
+    )
+
+    reset_meth = [
+        (block.attn.kv_cache, block.attn.kv_cache.mha.scaled_dot_product_attention)
+        for block in model.transformer.h
+    ]
 
     if SUPPORTS_FLASH_ATTENTION:
         # flash attention does not support an attention mask
-        expected = SDPBackend.MATH
+        for cache, _ in reset_meth:
+            cache.mha.scaled_dot_product_attention = partial(
+                sdpa_wrapper, SDPBackend.MATH,
+            )
         with torch.backends.cuda.sdp_kernel(enable_mem_efficient=False):
             model(x, input_pos=0)
+        for cache, reset in reset_meth:
+            cache.mha.scaled_dot_product_attention = reset
 
     expected = (
         SDPBackend.EFFICIENT_ATTENTION if config.head_size % 8 == 0 and config.n_query_groups != 1 else SDPBackend.MATH
     )
+    for cache, _ in reset_meth:
+        cache.mha.scaled_dot_product_attention = partial(
+            sdpa_wrapper, expected,
+        )
     with torch.backends.cuda.sdp_kernel(enable_flash=False):
         model(x, input_pos=0)
+    for cache, reset in reset_meth:
+        cache.mha.scaled_dot_product_attention = reset
 
 
 @_RunIf(min_cuda_gpus=2, standalone=True)

@@ -28,6 +28,7 @@ from keys_values.kvcache.test_utils import (
     create_kv_cache,
     copy_gradients,
     exchange_kv_cache_checkpoints,
+    available_backends,
 )
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.cell import GetInputSlice, WriteOutputsSlice
@@ -51,8 +52,8 @@ def make_write_outputs_slice(x: torch.Tensor) -> WriteOutputsSlice:
 
 def args_gradient_row_of_cells():
     return [
-        a + b
-        for a, b in product(
+        a + b + (c,)
+        for a, b, c in product(
             [
                 ("lastrec", dict()),
                 ("h2o", {"replay_log_blocksize": 64}),
@@ -64,18 +65,26 @@ def args_gradient_row_of_cells():
                 ([512, 512], [511, 1, 8, 4, 8, 2, 8, 2, 8, 8], [2, 3, 3, 2]),
                 ([512, 504], [503, 1, 4, 4, 8, 4, 8, 2, 8, 2, 8, 8], [2, 2, 3, 3, 2]),
             ],
+            available_backends(),
         )
     ]
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell", args_gradient_row_of_cells(),
+    "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, device",
+    args_gradient_row_of_cells(),
 )
-def test_gradient_row_of_cells(cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell):
+def test_gradient_row_of_cells(
+    cache_name,
+    cache_kwargs,
+    cache_lengths,
+    tokens_per_chunk,
+    chunks_per_cell,
+    device,
+):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
-    device = torch.device("cpu")
     print(f"cache_name={cache_name}, cache_kwargs={cache_kwargs}")
     print(f"cache_length={cache_lengths}\ntokens_per_chunk={tokens_per_chunk}\nchunks_per_cell={chunks_per_cell}")
 
@@ -140,7 +149,7 @@ def test_gradient_row_of_cells(cache_name, cache_kwargs, cache_lengths, tokens_p
         device=device,
         dtype=dtype,
     )
-    gpt_model = GPT(config)
+    gpt_model = GPT(config).to(device=device)
     gpt_model.set_start_of_layer_hook(start_of_layer_hook)
     token_idxs = torch.randint(
         low=0,

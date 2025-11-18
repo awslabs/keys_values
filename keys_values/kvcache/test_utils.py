@@ -11,9 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple, Optional, List, Dict
+from typing import Tuple, Optional, List, Dict, Callable
 import math
 from functools import partial
+from itertools import product
 
 import torch
 
@@ -238,7 +239,7 @@ def cache_name_is_ao(name: str) -> bool:
     return name[:-1].endswith("ao-quantized")
 
 
-def cache_name_gpu_only(name:str) -> bool:
+def cache_name_gpu_only(name: str) -> bool:
     return cache_name_is_bitsandbytes(name) or cache_name_is_ao(name)
 
 
@@ -255,8 +256,34 @@ def filter_cache_names(names: List[str]) -> List[str]:
         return names
     else:
         return [
-            name for name in names if not cache_name_is_bitsandbytes(name)
+            name for name in names if not cache_name_gpu_only(name)
         ]
+
+
+def cache_names_and_devices(
+    only_cpu: bool = False,
+    filter_name: Callable[[str], bool] = None,
+) -> List[Tuple[str, torch.device]]:
+    if filter_name is None:
+        filter_name = lambda name: True
+    result = []
+    for name, device in product(
+        KVCacheFactory.supported_names(), available_backends(),
+    ):
+        if filter_name(name):
+            is_cpu = device.type != "cuda"
+            if (is_cpu and not cache_name_gpu_only(name)) or (not is_cpu and not only_cpu):
+                result.append((name, device))
+    return result
+
+
+def product_with_devices(list_tuples: List[tuple]) -> List[tuple]:
+    return [
+        a + (b,) for a, b in product(
+            list_tuples,
+            available_backends(),
+        )
+    ]
 
 
 def random_args_cache_forward(

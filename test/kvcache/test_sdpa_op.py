@@ -26,24 +26,27 @@ from keys_values.attention_utils import (
 )
 from keys_values.kvcache.gradient.accumulate import copy_requires_grad
 from keys_values.kvcache.gradient.sdpa_op import SDPAFunction, sdpa_backward
+from keys_values.kvcache.test_utils import product_with_devices
 
 
 @pytest.mark.parametrize(
-    ("n_head", "n_query_groups", "q_len", "kv_len", "dtype", "sliding_window_size"),
-    (
-        (4, 2, 128, 512, torch.float32, None),
-        (4, 4, 1, 256, torch.float32, None),
-        (8, 4, 128, 128, torch.float32, None),
-        (12, 4, 16, 512, torch.float32, None),
-        (24, 8, 2, 512, torch.float16, None),
-        (9, 3, 128, 512, torch.bfloat16, None),
-        (16, 16, 128, 512, torch.float16, None),
-        (12, 4, 16, 512, torch.float32, 12),
-        (24, 8, 2, 512, torch.float16, 64),
-        (9, 3, 128, 512, torch.bfloat16, 96),
+    ("n_head", "n_query_groups", "q_len", "kv_len", "dtype", "sliding_window_size", "device"),
+    product_with_devices(
+        [
+            (4, 2, 128, 512, torch.float32, None),
+            (4, 4, 1, 256, torch.float32, None),
+            (8, 4, 128, 128, torch.float32, None),
+            (12, 4, 16, 512, torch.float32, None),
+            (24, 8, 2, 512, torch.float16, None),
+            (9, 3, 128, 512, torch.bfloat16, None),
+            (16, 16, 128, 512, torch.float16, None),
+            (12, 4, 16, 512, torch.float32, 12),
+            (24, 8, 2, 512, torch.float16, 64),
+            (9, 3, 128, 512, torch.bfloat16, 96),
+        ],
     ),
 )
-def test_sdpa_op_gradients(n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size):
+def test_sdpa_op_gradients(n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -54,7 +57,8 @@ def test_sdpa_op_gradients(n_head, n_query_groups, q_len, kv_len, dtype, sliding
     q_per_kv = n_head // n_query_groups
     enable_gqa = n_query_groups < n_head
 
-    print(f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}")
+    print(f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}, device={device}")
+    kwargs = dict(device=device, dtype=dtype)
     for repeat in range(num_repeats):
         head_size = 2 ** random.randint(3, 6)
         batch_size = random.randint(1, 5)
@@ -63,13 +67,18 @@ def test_sdpa_op_gradients(n_head, n_query_groups, q_len, kv_len, dtype, sliding
             token_positions = None
         else:
             token_positions = sample_token_positions(
-                batch_size, n_query_groups, q_len, kv_len, input_pos,
+                batch_size,
+                n_query_groups,
+                q_len,
+                kv_len,
+                input_pos,
+                device=device,
             )
         shape = (batch_size, n_head, q_len, head_size)
-        _query = torch.randn(shape, dtype=dtype)
+        _query = torch.randn(shape, **kwargs)
         shape = (batch_size, n_query_groups, kv_len, head_size)
-        _key = torch.randn(shape, dtype=dtype)
-        _value = torch.randn(shape, dtype=dtype)
+        _key = torch.randn(shape, **kwargs)
+        _value = torch.randn(shape, **kwargs)
         print(f"query {_query.shape}, key {_key.shape}, value {_value.shape}")
         if token_positions is not None:
             print(f"token_positions {token_positions.shape}")
@@ -145,22 +154,24 @@ def test_sdpa_op_gradients(n_head, n_query_groups, q_len, kv_len, dtype, sliding
 
 
 @pytest.mark.parametrize(
-    ("n_head", "n_query_groups", "q_len", "kv_len", "dtype", "sliding_window_size"),
-    (
-        (4, 2, 128, 512, torch.float16, None),
-        (4, 4, 8, 256, torch.bfloat16, None),
-        (8, 4, 128, 128, torch.float16, None),
-        (12, 4, 16, 512, torch.bfloat16, None),
-        (24, 8, 2, 512, torch.float16, None),
-        (9, 3, 128, 512, torch.bfloat16, None),
-        (16, 16, 128, 512, torch.bfloat16, None),
-        (16, 16, 128, 512, torch.float16, None),
-        (12, 4, 16, 512, torch.float16, 12),
-        (24, 8, 2, 512, torch.bfloat16, 64),
-        (9, 3, 128, 512, torch.float16, 96),
+    ("n_head", "n_query_groups", "q_len", "kv_len", "dtype", "sliding_window_size", "device"),
+    product_with_devices(
+        [
+            (4, 2, 128, 512, torch.float16, None),
+            (4, 4, 8, 256, torch.bfloat16, None),
+            (8, 4, 128, 128, torch.float16, None),
+            (12, 4, 16, 512, torch.bfloat16, None),
+            (24, 8, 2, 512, torch.float16, None),
+            (9, 3, 128, 512, torch.bfloat16, None),
+            (16, 16, 128, 512, torch.bfloat16, None),
+            (16, 16, 128, 512, torch.float16, None),
+            (12, 4, 16, 512, torch.float16, 12),
+            (24, 8, 2, 512, torch.bfloat16, 64),
+            (9, 3, 128, 512, torch.float16, 96),
+        ],
     ),
 )
-def test_sdpa_backward(n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size):
+def test_sdpa_backward(n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -169,7 +180,8 @@ def test_sdpa_backward(n_head, n_query_groups, q_len, kv_len, dtype, sliding_win
     is_causal = q_len == kv_len
     input_pos = seq_len - q_len if not is_causal else 0
 
-    print(f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}")
+    print(f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}, device={device}")
+    kwargs = dict(device=device, dtype=dtype)
     for repeat in range(num_repeats):
         head_size = 2 ** random.randint(3, 6)
         batch_size = random.randint(1, 5)
@@ -180,14 +192,19 @@ def test_sdpa_backward(n_head, n_query_groups, q_len, kv_len, dtype, sliding_win
             token_positions = None
         else:
             token_positions = sample_token_positions(
-                batch_size, n_query_groups, q_len, kv_len, input_pos,
+                batch_size,
+                n_query_groups,
+                q_len,
+                kv_len,
+                input_pos,
+                device=device,
             )
         shape = (batch_size, n_head, q_len, head_size)
-        query = torch.randn(shape, dtype=dtype)
-        grad_attn_output = torch.randn(shape, dtype=dtype)
+        query = torch.randn(shape, **kwargs)
+        grad_attn_output = torch.randn(shape, **kwargs)
         shape = (batch_size, n_query_groups, kv_len, head_size)
-        key = torch.randn(shape, dtype=dtype)
-        value = torch.randn(shape, dtype=dtype)
+        key = torch.randn(shape, **kwargs)
+        value = torch.randn(shape, **kwargs)
         print(f"query {query.shape}, key {key.shape}, value {value.shape}")
         if token_positions is not None:
             print(f"token_positions {token_positions.shape}")

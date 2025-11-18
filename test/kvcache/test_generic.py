@@ -29,27 +29,31 @@ from keys_values.kvcache.test_utils import (
     tensor_is_simple,
     random_keys_values,
     random_tensor,
-    device_for_cache_name,
     cache_name_gpu_only,
+    cache_names_and_devices,
+    product_with_devices,
 )
 
 
 def args_store_retrieve() -> List[tuple]:
-    return [
+    names = [
         (name, dict()) for name in KVCacheFactory.supported_names()
         if name.endswith("-default")
     ] + [
         ("h2o-default", dict(grace_period=3)),
         ("h2o-vlen-default", dict(grace_period=3)),
     ]
+    return product_with_devices(names)
 
 
-@pytest.mark.parametrize("name, kwargs", args_store_retrieve())
-def test_store_retrieve(name, kwargs):
+@pytest.mark.parametrize(
+    "name, kwargs, device", args_store_retrieve())
+def test_store_retrieve(name, kwargs, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
+    dtype = torch.bfloat16
 
     params = KVCacheParams(
         max_batch_size=3,
@@ -57,8 +61,8 @@ def test_store_retrieve(name, kwargs):
         cache_length=32,
         head_size=8,
         n_head=4,
-        device=torch.device("cpu"),
-        dtype=torch.bfloat16,
+        device=device,
+        dtype=dtype,
     )
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params, **kwargs)
@@ -121,25 +125,14 @@ def test_store_retrieve(name, kwargs):
         )
 
 
-def args_prefill() -> List[str]:
-    if torch.cuda.is_available():
-        return KVCacheFactory.supported_names()
-    else:
-        return [
-            name
-            for name in KVCacheFactory.supported_names()
-            if not cache_name_gpu_only(name)
-        ]
-
-
-@pytest.mark.parametrize("name", args_prefill())
-def test_prefill(name):
+@pytest.mark.parametrize("name, device", cache_names_and_devices())
+def test_prefill(name, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
     num_compares = 3
     vocab_size = 128
-    device = device_for_cache_name(name)
+    dtype = torch.bfloat16
 
     params = KVCacheParams(
         max_batch_size=2,
@@ -148,7 +141,7 @@ def test_prefill(name):
         head_size=64,
         n_head=2,
         device=device,
-        dtype=torch.bfloat16,
+        dtype=dtype,
     )
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params)
@@ -209,16 +202,17 @@ def _normalize_key(name: str) -> str:
 
 
 def _filter_func(record: tuple) -> bool:
-    name, batch_size, _, (_, n_query_groups), head_size, _, _ = record
+    (name, _), batch_size, _, (_, n_query_groups), head_size, _, _ = record
     shape = (batch_size, n_query_groups, 1, head_size)
     return cache_name_gpu_only(name) or determine_blocksize(shape) is not None
 
 
 def args_size_estimate() -> List[tuple]:
     excludes = {"h2o-vlen", "qh2o-vlen", "h2o-orig"}
-    names = [
-        name for name in args_prefill() if split_name(name)[0] not in excludes
-    ]  # 7 on CPU, 15 on GPU
+    names_devices = [
+        tup for tup in cache_names_and_devices()
+        if split_name(tup[0])[0] not in excludes
+    ]
     batch_sizes = [1, 3]  # 2
     cache_lengths = [32, 28]  # 2
     n_head_groups = [(4, 2), (4, 4), (8, 1)]  # 3
@@ -226,9 +220,9 @@ def args_size_estimate() -> List[tuple]:
     dtypes = [torch.bfloat16, torch.float32]  # 2
     boh_lst = [False, True]  # 2
     result = [
-        record[:3] + record[3] + record[4:]
+        record[0] + record[1:3] + record[3] + record[4:]
         for record in product(
-            names,
+            names_devices,
             batch_sizes,
             cache_lengths,
             n_head_groups,
@@ -242,11 +236,12 @@ def args_size_estimate() -> List[tuple]:
 
 
 @pytest.mark.parametrize(
-    "name, batch_size, cache_length, n_head, n_query_groups, head_size, dtype, blocks_over_heads",
+    "name, device, batch_size, cache_length, n_head, n_query_groups, head_size, dtype, blocks_over_heads",
     args_size_estimate(),
 )
 def test_size_estimate(
     name,
+    device,
     batch_size,
     cache_length,
     n_head,
@@ -260,7 +255,6 @@ def test_size_estimate(
     torch.random.manual_seed(seed)
     vocab_size = 128
     n_layer = 4
-    device = device_for_cache_name(name)
 
     params = KVCacheParams(
         max_batch_size=batch_size,

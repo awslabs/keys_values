@@ -33,9 +33,7 @@ from keys_values.kvcache.gradient.train_attn_weights_replay import (
 )
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
-    device_for_cache_name,
-    filter_cache_names,
-    cache_name_gpu_only,
+    cache_names_and_devices,
 )
 from keys_values.model import GPT
 
@@ -67,32 +65,25 @@ def _cache_kwargs(name: str) -> Dict[str, Any]:
 
 
 def args_inference_replay():
-    names = filter_cache_names(
-        [
-            name for name in KVCacheFactory.supported_names()
-            if not name.startswith("dense") and not name.startswith("h2o-orig")
-        ]
+    names_devices = cache_names_and_devices(
+        filter_name=lambda name: not (name.startswith("dense") or name.startswith("h2o-orig"))
     )
-    result = [(name, _cache_kwargs(name)) for name in names]
+    result = [(name, device, _cache_kwargs(name)) for name, device in names_devices]
     result += [
-        (name, dict(_cache_kwargs(name), grace_period=10))
-        for name in names
+        (name, device, dict(_cache_kwargs(name), grace_period=10))
+        for name, device in names_devices
         if split_name(name)[0] in ("h2o", "h2o-vlen", "qh2o")
     ]
-    if not torch.cuda.is_available():
-        result = [x for x in result if not cache_name_gpu_only(x[0])]
     return result
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs", args_inference_replay(),
+    "cache_name, device, cache_kwargs", args_inference_replay(),
 )
-def test_inference_replay(cache_name, cache_kwargs):
+def test_inference_replay(cache_name, device, cache_kwargs):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
-
-    device = device_for_cache_name(cache_name)
     dtype = torch.bfloat16
     torch.set_default_dtype(dtype)  # Set default dtype
 
@@ -217,28 +208,32 @@ def args_training_replay():
         else:
             return dict()
 
-    names = [
-        name for name in KVCacheFactory.supported_names()
-        if split_name(name)[1] == "default" and split_name(name)[0] not in ("dense", "h2o-orig")
+    names_devices = cache_names_and_devices(
+        filter_name=lambda name: (
+            split_name(name)[1] == "default" and
+            split_name(name)[0] not in ("dense", "h2o-orig")
+        ),
+    )
+    result1 = [
+        (name, device, _cache_kwargs(name), tol_kwargs(name))
+        for name, device in names_devices
     ]
-    result1 = [(name, _cache_kwargs(name), tol_kwargs(name)) for name in names]
     result2 = [
-        (name, dict(_cache_kwargs(name), grace_period=10), dict())
-        for name in names
+        (name, device, dict(_cache_kwargs(name), grace_period=10), dict())
+        for name, device in names_devices
         if split_name(name)[0] in ("h2o", "h2o-vlen")
     ]
     return result1 + result2
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, tol_kwargs", args_training_replay(),
+    "cache_name, device, cache_kwargs, tol_kwargs", args_training_replay(),
 )
-def test_training_replay(cache_name, cache_kwargs, tol_kwargs):
+def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
 
-    device = torch.device("cpu")
     dtype = torch.bfloat16
     torch.set_default_dtype(dtype)  # Set default dtype
     batch_size = 5
@@ -281,7 +276,7 @@ def test_training_replay(cache_name, cache_kwargs, tol_kwargs):
         device=device,
         dtype=dtype,
     )
-    model = GPT(config)
+    model = GPT(config).to(device=device)
     kv_cache = create_kv_cache(
         name=cache_name,
         params=params,

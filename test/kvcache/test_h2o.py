@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from itertools import product
 import random
 
 import torch
@@ -25,12 +26,22 @@ from keys_values.kvcache.test_utils import (
     tensor_is_simple,
     random_keys_values,
     random_tensor,
+    available_backends,
+    product_with_devices,
+    random_args_cache_forward,
+    range_from_args,
 )
 from keys_values.kvcache.utils import expand_index
 
 
-@pytest.mark.parametrize("name", ["h2o-default", "h2o-vlen-default"])
-def test_grace_period(name):
+@pytest.mark.parametrize(
+    "name, device",
+    product(
+        ["h2o-default", "h2o-vlen-default"],
+        available_backends(),
+    )
+)
+def test_grace_period(name, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -42,7 +53,7 @@ def test_grace_period(name):
         cache_length=64,
         head_size=8,
         n_head=4,
-        device=torch.device("cpu"),
+        device=device,
         dtype=torch.bfloat16,
     )
     cache_length = params.cache_length
@@ -116,13 +127,15 @@ def compute_scores(
 
 
 @pytest.mark.parametrize(
-    "name, kwargs, v_length",
-    [
-        ("h2o-default", dict(normalize_scores=False), False),
-        ("h2o-vlen-default", dict(normalize_scores=False), True),
-    ]
+    "name, kwargs, v_length, device",
+    product_with_devices(
+        [
+            ("h2o-default", dict(normalize_scores=False), False),
+            ("h2o-vlen-default", dict(normalize_scores=False), True),
+        ],
+    ),
 )
-def test_h2o_scores(name, kwargs, v_length):
+def test_h2o_scores(name, kwargs, v_length, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -134,7 +147,7 @@ def test_h2o_scores(name, kwargs, v_length):
         cache_length=64,
         head_size=8,
         n_head=4,
-        device=torch.device("cpu"),
+        device=device,
         dtype=torch.bfloat16,
     )
     cache_length = params.cache_length
@@ -189,7 +202,8 @@ def test_h2o_scores(name, kwargs, v_length):
             )
 
 
-def test_token_pos_and_pos_log():
+@pytest.mark.parametrize("device", available_backends())
+def test_token_pos_and_pos_log(device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -203,7 +217,7 @@ def test_token_pos_and_pos_log():
         cache_length=64,
         head_size=8,
         n_head=4,
-        device=torch.device("cpu"),
+        device=device,
         dtype=torch.bfloat16,
     )
     cache_length = params.cache_length
@@ -212,28 +226,16 @@ def test_token_pos_and_pos_log():
     kv_cache.switch_replay_logging(True)
     num_insert = cache_length + 5
     num_prefill = cache_length - 2
-    keys, values = random_keys_values(params, num=num_insert)
-    queries = random_tensor(params, num=num_insert, is_query=True)
-    token_idxs = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(params.max_batch_size, num_insert),
-    )
+    data = random_args_cache_forward(params, num=num_insert, vocab_size=vocab_size)
     token_chunks = []
     # Prefill up to cache_length - 2
-    token_idx = token_idxs[:, :num_prefill]
-    kv_cache(
-        query=queries[:, :, :num_prefill, :],
-        key=keys[:, :, :num_prefill, :],
-        value=values[:, :, :num_prefill, :],
-        token_idx=token_idx,
-        input_pos=0,
-    )
-    token_chunks.append(token_idx)
+    data_part = range_from_args(data, 0, num_prefill)
+    kv_cache(**data_part, input_pos=0)
+    token_chunks.append(data_part["token_idx"])
     # Checks
     assert kv_cache.next_token_pos == num_prefill
     other = torch.arange(
-        0, num_prefill, dtype=torch.int
+        0, num_prefill, dtype=torch.int, device=device,
     ).view(1, 1, -1).expand(*shape, -1)
     torch.testing.assert_close(kv_cache.token_pos[:, :, :num_prefill], other)
     # Try to insert too large of a piece
@@ -241,38 +243,26 @@ def test_token_pos_and_pos_log():
     pos = num_prefill
     num = cache_length - num_prefill + 1
     with pytest.raises(ValueError):
-        kv_cache(
-            query=queries[:, :, pos:(pos + num), :],
-            key=keys[:, :, pos:(pos + num), :],
-            value=values[:, :, pos:(pos + num), :],
-            token_idx=token_idxs[:, pos:(pos + num)],
-            input_pos=pos,
-        )
+        kv_cache(**range_from_args(data, pos, pos + num), input_pos=pos)
     # Insert to fill up the cache
     num = cache_length - num_prefill
     assert kv_cache.max_tokens_forward == num
-    token_idx = token_idxs[:, pos:(pos + num)]
-    kv_cache(
-        query=queries[:, :, pos:(pos + num), :],
-        key=keys[:, :, pos:(pos + num), :],
-        value=values[:, :, pos:(pos + num), :],
-        token_idx=token_idx,
-        input_pos=pos,
-    )
+    data_part = range_from_args(data, pos, pos + num)
+    kv_cache(**data_part, input_pos=pos)
     k_and_v = kv_cache.get_keys_values()
-    token_chunks.append(token_idx)
+    token_chunks.append(data_part["token_idx"])
     pos = cache_length
     # Checks
     assert kv_cache.next_token_pos == pos
     other = torch.arange(
-        0, pos, dtype=torch.int
+        0, pos, dtype=torch.int, device=device,
     ).view(1, 1, -1).expand(*shape, -1)
     torch.testing.assert_close(kv_cache.token_pos[:, :, :pos], other)
-    torch.testing.assert_close(k_and_v.keys(), keys[:, :, :pos, :])
-    torch.testing.assert_close(k_and_v.values(), values[:, :, :pos, :])
+    torch.testing.assert_close(k_and_v.keys(), data["key"][:, :, :pos, :])
+    torch.testing.assert_close(k_and_v.values(), data["value"][:, :, :pos, :])
     # Test eviction decisions based on scores
     scores = compute_scores(
-        queries[:, :, :pos, :],
+        data["query"][:, :, :pos, :],
         k_and_v=k_and_v,
         num_prefill=num_prefill,
         v_length=False,
@@ -282,23 +272,17 @@ def test_token_pos_and_pos_log():
     torch.testing.assert_close(next_positions, kv_cache.next_positions(pos))
     # Insert chunk and evict due to scores
     num = 4
-    token_idx = token_idxs[:, pos:(pos + num)]
-    kv_cache(
-        query=queries[:, :, pos:(pos + num), :],
-        key=keys[:, :, pos:(pos + num), :],
-        value=values[:, :, pos:(pos + num), :],
-        token_idx=token_idx,
-        input_pos=pos,
-    )
+    data_part = range_from_args(data, pos, pos + num)
+    kv_cache(**data_part, input_pos=pos)
     k_and_v = kv_cache.get_keys_values()
-    token_chunks.append(token_idx)
+    token_chunks.append(data_part["token_idx"])
     # Checks
     assert kv_cache.next_token_pos == pos + num
-    keys_expected = keys[:, :, :cache_length, :].clone()
-    values_expected = values[:, :, :cache_length, :].clone()
+    keys_expected = data["key"][:, :, :cache_length, :].clone()
+    values_expected = data["value"][:, :, :cache_length, :].clone()
     index = expand_index(next_positions[:, :, :num], params.head_size)
-    keys_expected.scatter_(-2, index, keys[:, :, pos:(pos + num), :])
-    values_expected.scatter_(-2, index, values[:, :, pos:(pos + num), :])
+    keys_expected.scatter_(-2, index, data["key"][:, :, pos:(pos + num), :])
+    values_expected.scatter_(-2, index, data["value"][:, :, pos:(pos + num), :])
     torch.testing.assert_close(k_and_v.keys(), keys_expected)
     torch.testing.assert_close(k_and_v.values(), values_expected)
     # Check slot position log
@@ -310,4 +294,6 @@ def test_token_pos_and_pos_log():
     assert len(replay_log.slot_positions) == 1
     dtype = replay_log.slot_positions[0].dtype
     block = next_positions[:, :, :num].to(dtype=dtype)
-    torch.testing.assert_close(replay_log.slot_positions[0], block)
+    torch.testing.assert_close(
+        replay_log.slot_positions[0].to(device=device), block,
+    )

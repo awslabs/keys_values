@@ -423,8 +423,9 @@ def sample_token_positions(
     q_len: int,
     kv_len: int,
     input_pos: int,
+    device: torch.device,
 ) -> torch.Tensor:
-    index_kwargs = dict(dtype=torch.int64, device=torch.device("cpu"))
+    index_kwargs = dict(dtype=torch.int64, device=device)
     token_positions = torch.zeros(
         (batch_size, n_query_groups, kv_len), **index_kwargs,
     )
