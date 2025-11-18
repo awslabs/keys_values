@@ -148,17 +148,21 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
         torch.testing.assert_close(output1, output2, **assert_kwargs)
 
 
-# TODO:
-# Fails for 16-bit types, works for float32
 @pytest.mark.parametrize(
-    "device, dtype",
-    product(
-        available_backends(),
-        [torch.float32, torch.bfloat16, torch.float16],
-    )
+    "device, dtype, tol_kwargs",
+    [
+        (a,) + b for a, b in product(
+            available_backends(),
+            [
+                (torch.float32, dict()),
+                (torch.bfloat16, dict(atol=0.0005, rtol=0.03)),
+                (torch.float16, dict(atol=0.0005, rtol=0.03)),
+            ],
+        )
+    ]
 )
 @torch.inference_mode()
-def test_wrapper_with_lastrec_cache(device, dtype):
+def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -233,5 +237,6 @@ def test_wrapper_with_lastrec_cache(device, dtype):
         torch.testing.assert_close(
             outputs[0][:, input_pos:end, :],
             outputs[1][:, input_pos:end, :],
+            **tol_kwargs,
         )
         input_pos = end

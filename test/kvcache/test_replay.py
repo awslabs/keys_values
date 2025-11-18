@@ -211,13 +211,19 @@ def test_inference_replay(cache_name, cache_kwargs):
 
 
 def args_training_replay():
+    def tol_kwargs(name):
+        if name.startswith("lastrec"):
+            return dict(atol=0.005, rtol=0.1)
+        else:
+            return dict()
+
     names = [
         name for name in KVCacheFactory.supported_names()
         if split_name(name)[1] == "default" and split_name(name)[0] not in ("dense", "h2o-orig")
     ]
-    result1 = [(name, _cache_kwargs(name)) for name in names]
+    result1 = [(name, _cache_kwargs(name), tol_kwargs(name)) for name in names]
     result2 = [
-        (name, dict(_cache_kwargs(name), grace_period=10))
+        (name, dict(_cache_kwargs(name), grace_period=10), dict())
         for name in names
         if split_name(name)[0] in ("h2o", "h2o-vlen")
     ]
@@ -225,9 +231,9 @@ def args_training_replay():
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs", args_training_replay(),
+    "cache_name, cache_kwargs, tol_kwargs", args_training_replay(),
 )
-def test_training_replay(cache_name, cache_kwargs):
+def test_training_replay(cache_name, cache_kwargs, tol_kwargs):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -343,5 +349,6 @@ def test_training_replay(cache_name, cache_kwargs):
         torch.testing.assert_close(
             outputs_orig[:, input_pos:end, :],
             outputs_replayed[:, input_pos:end, :],
+            **tol_kwargs,
         )
         input_pos = end

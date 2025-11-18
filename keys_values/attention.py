@@ -174,7 +174,7 @@ class MultiHeadSelfAttention:
         if use_eager_kernel is None and not use_eager_sdpa_always:
             # This is a good choice for `kv_len = 32768`
             use_eager_kernel = lambda kv_len, q_len: q_len < 512
-        self._use_eager_kernel = use_eager_kernel
+        #self._use_eager_kernel = use_eager_kernel
 
     @property
     def sdpa_kernels(self) -> Union[SDPBackend, List[SDPBackend]]:
@@ -312,7 +312,8 @@ class MultiHeadSelfAttention:
             return SDPA_IMPL_EAGER_NO_BLOCKS
         must_eager = return_attn_weights or self.use_eager_sdpa_always
         if must_eager or not is_causal:
-            if must_eager or self._use_eager_kernel(kv_len, q_len):
+            #if must_eager or self._use_eager_kernel(kv_len, q_len):
+            if must_eager:
                 return SDPA_IMPL_EAGER_BLOCKS
             else:
                 return SDPA_IMPL_QPADDED_PYTORCH
