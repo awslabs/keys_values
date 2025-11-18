@@ -447,8 +447,31 @@ def pytorch_scaled_dot_product_attention(
     value: torch.Tensor,
     scale_factor: float,
     sdpa_kernels: Union[SDPBackend, List[SDPBackend]],
+    do_filter_kernels: bool = False,
     mask: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, Optional[List[SDPBackend]]]:
+    """
+    If you call this repeatedly and want to filter `sdpa_kernels`, use
+    `do_filter_kernels=True` for the first call, which returns the filtered
+    list of kernels, and pass that in subsequent calls (with
+    `do_filter_kernels=False`). Otherwise, you will get graph breaks when
+    using `torch.compile`.
+
+    Args:
+        query: Query tensor, `(bs, nh_q, q_len, hs)`
+        key: Key tensor, `(bs, nh_k, kv_len, hs)`
+        value: Value tensor, `(bs, nh_k, kv_len, hs)`
+        scale_factor: Scale factor for SDPA
+        sdpa_kernels: Kernels to be considered, in this order
+        do_filter_kernels: See above
+        mask: Mask tensor, optional
+
+    Returns:
+          `(y, filtered_sdpa_kernels)`, where `y` is the SDPA output, and
+          `filtered_sdpa_kernels` is the filtered list of SDPA kernels
+          if `do_filter_kernels=True`, and `None` otherwise.
+
+    """
     is_causal = mask is None
     n_head = query.shape[1]
     n_query_groups = key.shape[1]
@@ -474,7 +497,8 @@ def pytorch_scaled_dot_product_attention(
     if sdpa_kernels is not None:
         if not isinstance(sdpa_kernels, list):
             sdpa_kernels = [sdpa_kernels]
-        sdpa_kernels = filter_sdpa_kernels(sdpa_kernels=sdpa_kernels, **kwargs)
+        if do_filter_kernels:
+            sdpa_kernels = filter_sdpa_kernels(sdpa_kernels=sdpa_kernels, **kwargs)
         if not sdpa_kernels:
             sdpa_kernels = None
     if sdpa_kernels is not None:
@@ -482,4 +506,4 @@ def pytorch_scaled_dot_product_attention(
             y = F.scaled_dot_product_attention(**kwargs)
     else:
         y = F.scaled_dot_product_attention(**kwargs)
-    return y
+    return y, sdpa_kernels if do_filter_kernels else None

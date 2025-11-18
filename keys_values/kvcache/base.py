@@ -332,10 +332,9 @@ class DefaultKVCache(KVCache):
             head_size=head_size,
         )
         if mha is None:
-            #self.mha = MultiHeadSelfAttention(
-            #    config, **transform_mha_kwargs(mha_kwargs, config),
-            #)
-            self.mha = MultiHeadSelfAttention(config, **mha_kwargs)  # DEBUG
+            self.mha = MultiHeadSelfAttention(
+                config, **transform_mha_kwargs(mha_kwargs, config),
+            )
         else:
             self.mha = mha
 

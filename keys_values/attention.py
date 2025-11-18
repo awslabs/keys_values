@@ -161,6 +161,7 @@ class MultiHeadSelfAttention:
     ) -> None:
         self.config = config
         self._sdpa_kernels = sdpa_kernels
+        self._do_filter_kernels = True  # Only in first call
         self.use_eager_sdpa_always = use_eager_sdpa_always
         self.set_tmp_array_limit_gb(tmp_array_limit_gb)
         if self.config.attention_logit_softcapping is not None:
@@ -174,7 +175,7 @@ class MultiHeadSelfAttention:
         if use_eager_kernel is None and not use_eager_sdpa_always:
             # This is a good choice for `kv_len = 32768`
             use_eager_kernel = lambda kv_len, q_len: q_len < 512
-        #self._use_eager_kernel = use_eager_kernel
+        self._use_eager_kernel = use_eager_kernel
 
     @property
     def sdpa_kernels(self) -> Union[SDPBackend, List[SDPBackend]]:
@@ -312,12 +313,10 @@ class MultiHeadSelfAttention:
             return SDPA_IMPL_EAGER_NO_BLOCKS
         must_eager = return_attn_weights or self.use_eager_sdpa_always
         if must_eager or not is_causal:
-            #if must_eager or self._use_eager_kernel(kv_len, q_len):
-            #if must_eager:
-            #    return SDPA_IMPL_EAGER_BLOCKS
-            #else:
-            #    return SDPA_IMPL_QPADDED_PYTORCH
-            return SDPA_IMPL_EAGER_BLOCKS
+            if must_eager or self._use_eager_kernel(kv_len, q_len):
+                return SDPA_IMPL_EAGER_BLOCKS
+            else:
+                return SDPA_IMPL_QPADDED_PYTORCH
         else:
             return SDPA_IMPL_PYTORCH
 
@@ -352,7 +351,7 @@ class MultiHeadSelfAttention:
                 kv_len=k_and_v.keys().shape[2],
             )
         if sdpa_mode == SDPA_IMPL_QPADDED_PYTORCH:
-            y = qpadded_sdpa(
+            y, filtered_kernels = qpadded_sdpa(
                 query=query,
                 key=k_and_v.keys(),
                 value=k_and_v.values(),
@@ -360,19 +359,27 @@ class MultiHeadSelfAttention:
                 input_pos=input_pos,
                 token_positions=token_positions,
                 sdpa_kernels=self.sdpa_kernels,
+                do_filter_kernels=self._do_filter_kernels,
             )
+            if self._do_filter_kernels:
+                self._do_filter_kernels = False
+                self._sdpa_kernels = filtered_kernels
         elif sdpa_mode == SDPA_IMPL_PYTORCH:
             # We need `key` and `value` at the same time here. For the training
             # use case, this will be the case, since `k_and_v` is the default
             # in this case.
-            y = pytorch_scaled_dot_product_attention(
+            y, filtered_kernels = pytorch_scaled_dot_product_attention(
                 query=query,
                 key=k_and_v.keys(),
                 value=k_and_v.values(),
                 scale_factor=scale_factor,
                 sdpa_kernels=self.sdpa_kernels,
+                do_filter_kernels=self._do_filter_kernels,
                 mask=mask,
             )
+            if self._do_filter_kernels:
+                self._do_filter_kernels = False
+                self._sdpa_kernels = filtered_kernels
         else:
             use_blocking = sdpa_mode == SDPA_IMPL_EAGER_BLOCKS
             if not use_blocking:
