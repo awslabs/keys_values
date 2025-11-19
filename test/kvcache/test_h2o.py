@@ -27,7 +27,6 @@ from keys_values.kvcache.test_utils import (
     random_keys_values,
     random_tensor,
     available_backends,
-    product_with_devices,
     random_args_cache_forward,
     range_from_args,
 )
@@ -103,44 +102,45 @@ def compute_scores(
     k_and_v: DefaultKeysAndValues,
     num_prefill: int,
     v_length: bool,
-    normalize_scores: bool = False,
 ) -> torch.Tensor:
     T, head_size = queries.shape[-2:]
-    attn_weights = compute_attn_weights(query=queries, k_and_v=k_and_v)
-    # Note that `attn_weights` is lower triangular
-    if not v_length:
-        scores = attn_weights[:, :, num_prefill:, :]
-    else:
-        v_norm = vector_norm(
-            k_and_v.values(), dim=-1, dtype=torch.float32,
-        ).unsqueeze(2).to(dtype=attn_weights.dtype)
-        scores = attn_weights[:, :, num_prefill:, :] * v_norm
-        scores = scores / scores.sum(dim=-1, keepdim=True)
-    scores = scores.sum(dim=2).to(dtype=torch.float32)
-    if normalize_scores:
-        num_gen = T - num_prefill
-        denom = torch.arange(
-            T, 0, -1, device=queries.device, dtype=scores.dtype
-        ).minimum(num_gen)
-        scores = scores / denom.view(1, 1, -1)
+    scores = torch.zeros(
+        queries.shape[:-1], dtype=torch.float32, device=queries.device,
+    )
+    keys = k_and_v.keys()
+    values = k_and_v.values()
+    for pos in range(num_prefill, T):
+        k_and_v_red = DefaultKeysAndValues(
+            keys=keys[:, :, :(pos + 1), :],
+            values=values[:, :, :(pos + 1), :],
+        )
+        _attn_weights = compute_attn_weights(
+            query=queries[:, :, pos:(pos + 1), :],
+            k_and_v=k_and_v_red,
+        )
+        if v_length:
+            v_norm = vector_norm(k_and_v_red.values(), dim=-1, dtype=torch.float32)
+            _attn_weights *= v_norm
+            _attn_weights /= _attn_weights.sum(dim=-1, keepdim=True)
+        scores[:, :, :(pos + 1)] += _attn_weights
     return scores
 
 
 @pytest.mark.parametrize(
-    "name, kwargs, v_length, device",
-    product_with_devices(
-        [
-            ("h2o-default", dict(normalize_scores=False), False),
-            ("h2o-vlen-default", dict(normalize_scores=False), True),
-        ],
+    "name, dtype, device",
+    product(
+        ["h2o-default", "h2o-vlen-default"],
+        [torch.float32, torch.bfloat16, torch.float16],
+        available_backends(),
     ),
 )
-def test_h2o_scores(name, kwargs, v_length, device):
+def test_h2o_scores(name, dtype, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
 
+    v_length = "vlen" in name
     params = KVCacheParams(
         max_batch_size=3,
         n_query_groups=4,
@@ -148,10 +148,10 @@ def test_h2o_scores(name, kwargs, v_length, device):
         head_size=8,
         n_head=4,
         device=device,
-        dtype=torch.bfloat16,
+        dtype=dtype,
     )
     cache_length = params.cache_length
-    kv_cache = create_kv_cache(name, params, **kwargs)
+    kv_cache = create_kv_cache(name, params)
     num_prefill = min(random.randint(cache_length // 3, cache_length // 2), kv_cache.max_prefill_length)
     step = (cache_length - num_prefill) // 3
     test_positions = (
@@ -172,7 +172,7 @@ def test_h2o_scores(name, kwargs, v_length, device):
         token_idx=token_idx[:, :num_prefill],
         input_pos=0,
     )
-    print(f"test_positions: {test_positions}\nnum_prefill = {num_prefill}")
+    print(f"test_positions: {test_positions}\nnum_prefill = {num_prefill}, v_length={v_length}, cache_length={cache_length}")
     for pos in range(num_prefill, cache_length - 1):
         kv_cache(
             query=queries[:, :, pos:(pos + 1), :],
@@ -181,19 +181,18 @@ def test_h2o_scores(name, kwargs, v_length, device):
             token_idx=token_idx[:, pos:(pos + 1)],
             input_pos=pos,
         )
-        k_and_v = DefaultKeysAndValues(
-            keys[:, :, :(pos + 1), :], values[:, :, :(pos + 1), :]
-        )
         # Note: `kv_cache.scores` are normalized only once the cache is full!
         if pos in test_positions:
             # Compare scores
             other = compute_scores(
                 queries[:, :, :(pos + 1), :],
-                k_and_v=k_and_v,
+                k_and_v=DefaultKeysAndValues(
+                    keys[:, :, :(pos + 1), :], values[:, :, :(pos + 1), :],
+                ),
                 num_prefill=num_prefill,
                 v_length=v_length,
             )
-            print(f"v_length={v_length}, pos={pos}, cache_length={cache_length}")
+            print(f"pos={pos}")
             torch.testing.assert_close(
                 kv_cache.scores[:, :, :(pos + 1)],
                 other,
@@ -202,8 +201,14 @@ def test_h2o_scores(name, kwargs, v_length, device):
             )
 
 
-@pytest.mark.parametrize("device", available_backends())
-def test_token_pos_and_pos_log(device):
+@pytest.mark.parametrize(
+    "dtype, device",
+    product(
+        [torch.float32, torch.bfloat16, torch.float16],
+        available_backends()
+    ),
+)
+def test_token_pos_and_pos_log(dtype, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -218,7 +223,7 @@ def test_token_pos_and_pos_log(device):
         head_size=8,
         n_head=4,
         device=device,
-        dtype=torch.bfloat16,
+        dtype=dtype,
     )
     cache_length = params.cache_length
     shape = (params.max_batch_size, params.n_query_groups)

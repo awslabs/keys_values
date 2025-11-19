@@ -201,7 +201,7 @@ class KVCache(torch.nn.Module):
                 `num <= max_tokens_forward` if `input_pos > 0`, and
                 `num <= max_prefill_length` if `input_pos == 0`. Must be
                 position encoded.
-            key: New keys, `(atch_size, n_query_groups, num, head_size)`.
+            key: New keys, `(batch_size, n_query_groups, num, head_size)`.
                 Must be position encoded.
             value: New values, `(batch_size, n_query_groups, num, head_size)`
             token_idx: Token indices of input sequence, `(batch_size, num)`.
@@ -403,7 +403,7 @@ class DefaultKVCache(KVCache):
 
         # Multi-head self-attention main computation
         return_attn_weights = (not for_prefill) and self.update_requires_attn_weights()
-        y, scores = self.mha(
+        y, attn_weights = self.mha(
             query=query,
             k_and_v=k_and_v,
             block_idx=self.block_idx,
@@ -411,9 +411,9 @@ class DefaultKVCache(KVCache):
             return_attn_weights=return_attn_weights,
             token_positions=None if for_prefill else self.token_positions(),
         )
-        if scores is not None and return_attn_weights:
+        if attn_weights is not None and return_attn_weights:
             # Pass attention weights to KV cache
-            self._update(attn_weights=scores)
+            self._update(attn_weights=attn_weights, query_length=num)
 
         return y
 
@@ -453,8 +453,8 @@ class DefaultKVCache(KVCache):
 
         One important example are KV caches based on the Heavy Hitter Oracle
         (H2O) proposal. These require the attention weights from the current
-        MLA computation to be passed, and :meth:`update_requires_attn_weights`
-        has to return `True`.
+        MLA computation (summed over query axis) to be passed, and
+        :meth:`update_requires_attn_weights` has to return `True`.
 
         Note: The extra information typically scales with `num`, the number of
         tokens :meth:`forward` was called for.
@@ -473,10 +473,12 @@ class DefaultKVCache(KVCache):
 
         Returns:
             If `True`, :meth:`update` requires argument `attn_weights`, which
-            passes current attention weights as
-            `(batch_size, n_query_groups, num, T)` tensor, where
-            `T <= cache_length` is the current cache length, and `num` is the
-            number of tokens in the last recent :meth:`forward` call.
+            passes current attention weights, summed over the query axis, as
+            `(batch_size, n_query_groups, T)` tensor, where
+            `T <= cache_length` is the current cache length. Independent of
+            `dtype` of other tensors, this tensor has `dtype=float32`.
+            The query axis size is the number of tokens in the last recent
+            :meth:`forward` call.
 
         """
         return False

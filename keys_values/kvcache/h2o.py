@@ -56,6 +56,7 @@ class H2OKVCache(AttnWeightsKVCache):
         block_idx: int,
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
+        detach_attn_weights: bool = False,
         normalize_scores: bool = False,
         **base_kwargs,
     ):
@@ -65,6 +66,7 @@ class H2OKVCache(AttnWeightsKVCache):
             block_idx=block_idx,
             grace_period=grace_period,
             replay_log_blocksize=replay_log_blocksize,
+            detach_attn_weights=detach_attn_weights,
             **base_kwargs,
         )
         self.normalize_scores = normalize_scores
@@ -117,12 +119,15 @@ class H2OKVCache(AttnWeightsKVCache):
     def _compute_scores(
         self,
         attn_weights: torch.Tensor,
+        query_length: int,
     ) -> Optional[torch.Tensor]:
         # Map weights to instantaneous scores, accumulate them. Sum over
         # dimension 2 (`num` tokens)
+        if attn_weights.dtype != torch.float32:
+            raise ValueError(f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}")
         self.scores[
             :self.batch_size, :, :self.current_length
-        ] += self._instantaneous_score(attn_weights).sum(dim=2).to(dtype=torch.float32)
+        ] += self._instantaneous_score(attn_weights, query_length)
         scores = None
         if self.current_length == self.cache_length:
             # Exclude the grace region, so that these tokens are not evicted
@@ -145,14 +150,19 @@ class H2OKVCache(AttnWeightsKVCache):
             scores = self._modify_scores(scores)
         return scores
 
-    def _instantaneous_score(self, attn_weights: torch.Tensor) -> torch.Tensor:
+    def _instantaneous_score(
+        self,
+        attn_weights: torch.Tensor,
+        query_length: int,
+    ) -> torch.Tensor:
         """
         Computes score values for this round from attention weights. These score
         values are accumulated.
 
         Args:
             attn_weights: Attention weights, shape
-            `(batch_size, n_query_heads, num, current_length)`
+                `(batch_size, n_query_heads, current_length)`
+            query_length: Size of query axis
 
         Returns:
             Instantaneous score values, same shape and dtype as `attn_weights`.
@@ -199,13 +209,14 @@ class VLengthInstantScoreMixin:
     """
     Same as H2O in :class:`H2OKVCache`, but the instantaneous score is
     modified to take the length of V vectors into account.
+
     """
     def get_v_norm(self) -> torch.Tensor:
         """
         Returns:
             Norms of V along final dimension, shape
-            `(batch_size, n_query_heads, current_length)`, dtype
-            `torch.float32`.
+            `(batch_size, n_query_heads, current_length)`, dtype`torch.float32`.
+
         """
         raise NotImplementedError()
 
@@ -224,23 +235,24 @@ class VLengthInstantScoreMixin:
     def next_positions(self) -> torch.Tensor:
         raise NotImplementedError()
 
-    def _instantaneous_score(self, attn_weights: torch.Tensor) -> torch.Tensor:
+    def _instantaneous_score(
+        self,
+        attn_weights: torch.Tensor,
+        query_length: int,
+    ) -> torch.Tensor:
         """
         The score is the attention weight times the v vector norm, normalized
-        to sum to 1 over the cache length dimension.
+        to sum to 1 over the cache length dimension, then multiplied by
+        `query_length`.
 
-        Args:
-            attn_weights: Attention weights, shape
-            `(batch_size, n_query_heads, num, current_length)`
-
-        Returns:
-            Instantaneous score values, same shape and dtype as `attn_weights`.
+        NOTE: If we obtained the attention weights NOT summed over the query
+        axis, we could first normalize to sum to 1 over the cache length
+        dimension, then sum over the query axis, which may be a better score.
+        But we do not obtain the full attention weights.
 
         """
-        scores = self.get_v_norm().unsqueeze(2).to(
-            dtype=attn_weights.dtype
-        ) * attn_weights
-        return scores / scores.sum(dim=-1, keepdim=True)  # Normalize
+        scores = self.get_v_norm() * attn_weights
+        return (scores / scores.sum(dim=-1, keepdim=True)) * query_length
 
     def _initial_scores_in_forward(
         self,
@@ -277,6 +289,7 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         block_idx: int,
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
+        detach_attn_weights: bool = False,
         normalize_scores: bool = False,
         **base_kwargs,
     ):
@@ -286,6 +299,7 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
             block_idx,
             grace_period,
             replay_log_blocksize,
+            detach_attn_weights,
             normalize_scores,
             **base_kwargs,
         )
@@ -339,8 +353,14 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
     def _score_buffer_names(cls) -> List[str]:
         return super()._score_buffer_names() + [cls.get_name_v_norm()]
 
-    def _instantaneous_score(self, attn_weights: torch.Tensor) -> torch.Tensor:
-        return VLengthInstantScoreMixin._instantaneous_score(self, attn_weights)
+    def _instantaneous_score(
+        self,
+        attn_weights: torch.Tensor,
+        query_length: int,
+    ) -> torch.Tensor:
+        return VLengthInstantScoreMixin._instantaneous_score(
+            self, attn_weights, query_length,
+        )
 
     def _initial_scores_in_forward(
         self,
@@ -437,9 +457,12 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
     def _compute_scores(
         self,
         attn_weights: torch.Tensor,
+        query_length: int,
     ) -> Optional[torch.Tensor]:
-        # Sum over the batch dimension 0, and over dimension 2 ('num')
-        aggregated_weights = attn_weights.sum(2).sum(0, keepdim=True).to(dtype=torch.float32)
+        if attn_weights.dtype != torch.float32:
+            raise ValueError(f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}")
+        # Sum over the batch dimension 0
+        aggregated_weights = attn_weights.sum(0, keepdim=True)
         self.scores[:self.batch_size, :, :self.current_length] += aggregated_weights
         if self.current_length == self.cache_length:
             return self.scores[:self.batch_size]

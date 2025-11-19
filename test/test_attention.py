@@ -116,7 +116,7 @@ def test_scaled_dot_product_attention(n_head, n_query_groups, device):
         k_and_v = DefaultKeysAndValues(key, value)
         scale = 1.0 / math.sqrt(head_size)
 
-        result, scores = eager_scaled_dot_product_attention(
+        result, attn_weights = eager_scaled_dot_product_attention(
             query,
             k_and_v,
             scale_factor=scale,
@@ -131,7 +131,7 @@ def test_scaled_dot_product_attention(n_head, n_query_groups, device):
         key_bc = key.repeat_interleave(q_per_kv, dim=1)
         value_bc = value.repeat_interleave(q_per_kv, dim=1)
         k_and_v_bc = DefaultKeysAndValues(key_bc, value_bc)
-        result_cmp, scores_cmp = eager_scaled_dot_product_attention(
+        result_cmp, attn_weights_cmp = eager_scaled_dot_product_attention(
             query,
             k_and_v_bc,
             scale_factor=scale,
@@ -142,14 +142,14 @@ def test_scaled_dot_product_attention(n_head, n_query_groups, device):
             sliding_window_size=sliding_window_size,
             mask=mask,
         )
-        scores_cmp = scores_cmp.view(
-            batch_size, n_query_groups, -1, len_query, len_key,
-        ).to(torch.float32).mean(dim=2).to(dtype)
+        attn_weights_cmp = attn_weights_cmp.view(
+            batch_size, n_query_groups, -1, len_key,
+        ).mean(dim=2)
         msg = (
             f"bs={batch_size}, hs={head_size}, nh_q={n_head}, nh_k={n_query_groups}, len_q={len_query}, len_k={len_key}"
         )
         torch.testing.assert_close(result, result_cmp, **assert_kwargs), msg
-        torch.testing.assert_close(scores, scores_cmp, **assert_kwargs), msg
+        torch.testing.assert_close(attn_weights, attn_weights_cmp, **assert_kwargs), msg
 
 
 @pytest.mark.parametrize(

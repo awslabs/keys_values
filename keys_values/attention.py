@@ -99,9 +99,9 @@ class MultiHeadSelfAttention:
     default KV cache implementation :class:`DefaultKVCache`.
 
     Kernels to be used for SDPA can be restricted by `sdpa_kernels`. By
-    default, the choice is down to the method itself. If GPU memory is a
-    concern (e.g., if MHA is used in training mode, to compute gradients),
-    `sdpa_kernels=SDPBackend.EFFICIENT_ATTENTION` is recommended.
+    default, the choice is down to the method itself. If you supply a list,
+    they are tried in that order, the first supported one is used.
+    "Supported" depends on the arguments of calling SDPA with.
 
     If `filter_sdpa_kernels` is `True`, the kernels in `sdpa_kernels` are
     filtered in the first call, removing those which are not supported for
@@ -111,14 +111,17 @@ class MultiHeadSelfAttention:
     In this case, set `filter_sdpa_kernels=False`.
 
     If `use_eager_sdpa_always=True`,
-    `torch.nn.functional.scaled_dot_product_attention` is never used.
+    `torch.nn.functional.scaled_dot_product_attention` is never used. Use
+    this for debugging or testing only.
 
     Usage of different kernels:
 
     There are different ways how SDPA is computed, see also
     :meth:`_sdpa_mode`:
-    - :const:`SDPA_IMPL_PYTORCH`: PyTorch kernel (see above). Only used for
-        prefill (`input_pos=0`)
+    - :const:`SDPA_IMPL_PYTORCH`: PyTorch SDPA kernel (see above). Only
+        used for prefill (`input_pos=0`). This is because this is all
+        PyTorch SDPA reliably supports at the moment (their C++
+        default implementation is quite useless).
     - :const:`SDPA_IMPL_QPADDED_PYTORCH: Variant of PyTorch kernel, where
         `query` is zero-padded. This is implemented in
         :func:`sdpa_wrapper.scaled_dot_product_attention`. Cannot be used
@@ -127,32 +130,30 @@ class MultiHeadSelfAttention:
         blocking to limit GPU memory usage.
     - :const:`SDPA_IMPL_EAGER_NO_BLOCKS: Eager (own) implementation without
         blocking. This is the worst, it is chosen only if
-        `config.attention_logit_softcapping` is not `None`.
+        `config.attention_logit_softcapping` is not `None` (because I
+        can't be bothered to extend the blocking implementation to this
+        case).
 
     PyTorch kernels are most efficient for the `is_causal=True` case
     (where queries and keys are over the same tokens), but do not return
     attention weights. While they can be called for `is_causal=False`, they
     require an explicit mask matrix to be passed, which can lead to OOM errors.
-    We do not use them in this case. They also do not work with attention logit
-    softcapping, or if `k_and_v` cannot return keys and values in parallel.
+    We do not use them in this case.
 
-    Our eager implementation uses blocking in order to limit GPU memory
-    usage (except for input and output arguments). This does not work
-    with attention logit softcapping, or if `k_and_v` cannot return keys
-    and values in parallel.
-
-    The decision between :const:`SDPA_IMPL_EAGER_BLOCKS` and
-    :const:`SDPA_IMPL_QPADDED_PYTORCH` is taken based on
-    `use_eager_kernel(kv_len, q_len)`. If this returns `True`, we use
-    :const:`SDPA_IMPL_EAGER_BLOCKS`, otherwise we use
-    :const:`SDPA_IMPL_QPADDED_PYTORCH`. The rule should in general be of
-    the form:
+    If attention weights are not needed, the decision between
+    :const:`SDPA_IMPL_EAGER_BLOCKS` and :const:`SDPA_IMPL_QPADDED_PYTORCH` is
+    taken based on `use_eager_kernel(kv_len, q_len)`. If this returns `True`,
+    we use :const:`SDPA_IMPL_EAGER_BLOCKS`, otherwise we use
+    :const:`SDPA_IMPL_QPADDED_PYTORCH`. The rule should in general be of the
+    form:
     ```
         use_eager_kernel(kv_len, q_len) = q_len <= thresh(kv_len)
     ```
     This is because :const:`SDPA_IMPL_QPADDED_PYTORCH` is faster from a
     certain value of `q_len` upwards. It also requires less temporary
     memory.
+
+    Look at :class:`DefaultUseEagerKernel` for choosing `use_eager_kernel`.
 
     """
     def __init__(
@@ -219,7 +220,9 @@ class MultiHeadSelfAttention:
             block_idx: Index of block (or layer) in model
             input_pos: Position in input sequence. Defaults to 0
             return_attn_weights: If this is `True` and `input_pos > 0`, the
-                attention weights (or scores) are returned as second argument
+                attention weights (summed over query axis) are returned as
+                second argument. Here, `attn_weights.dtype=float32` independent
+                of `query.dtype`.
             token_positions: Required if `input_pos > 0`. Contains token
                 positions in KV cache. This is needed to select the correct
                 part of the mask matrix
@@ -244,6 +247,7 @@ class MultiHeadSelfAttention:
             is_causal=is_causal,
             q_len=query.shape[2],
             kv_len=k_and_v.keys().shape[2],
+            sliding_window_size=sliding_window_size,
         )
         if sdpa_mode in (SDPA_IMPL_PYTORCH, SDPA_IMPL_EAGER_NO_BLOCKS):
             sdpa_is_eager = sdpa_mode == SDPA_IMPL_EAGER_NO_BLOCKS
@@ -273,7 +277,7 @@ class MultiHeadSelfAttention:
                         sliding_window_size=sliding_window_size,
                     ).detach()
 
-        y, scores = self.scaled_dot_product_attention(
+        attn_outputs, attn_weights = self.scaled_dot_product_attention(
             query=query,
             k_and_v=k_and_v,
             input_pos=input_pos if input_pos is not None else 0,
@@ -284,8 +288,8 @@ class MultiHeadSelfAttention:
             return_attn_weights=return_attn_weights,
         )
         # Re-assemble all head outputs side by side.
-        y = y.reshape(batch_size, seq_length, -1)
-        return y, scores
+        attn_outputs = attn_outputs.reshape(batch_size, seq_length, -1)
+        return attn_outputs, attn_weights
 
     def _get_sliding_window_size(self, block_idx: int) -> Optional[int]:
         apply_sliding_window_attention = (
@@ -299,6 +303,7 @@ class MultiHeadSelfAttention:
         is_causal: bool,
         q_len: int,
         kv_len: int,
+        sliding_window_size: Optional[int],
     ) -> int:
         """
         Decides on what SDPA implementation can be used, depending on
@@ -318,7 +323,7 @@ class MultiHeadSelfAttention:
             return SDPA_IMPL_EAGER_NO_BLOCKS
         must_eager = return_attn_weights or self.use_eager_sdpa_always
         if must_eager or not is_causal:
-            if must_eager or self._use_eager_kernel(kv_len, q_len):
+            if must_eager or sliding_window_size is not None or self._use_eager_kernel(kv_len, q_len):
                 return SDPA_IMPL_EAGER_BLOCKS
             else:
                 return SDPA_IMPL_QPADDED_PYTORCH
@@ -347,16 +352,17 @@ class MultiHeadSelfAttention:
         # - Attention scores need to be returned; or
         # - Logit softcapping is required; or
         # - We cannot access keys and values from `k_and_v` in parallel
-        scores = None
+        attn_weights = None
         if sdpa_mode is None:
             sdpa_mode = self._sdpa_mode(
                 return_attn_weights=return_attn_weights,
                 is_causal=input_pos == 0,
                 q_len=query.shape[2],
                 kv_len=k_and_v.keys().shape[2],
+                sliding_window_size=sliding_window_size,
             )
         if sdpa_mode == SDPA_IMPL_QPADDED_PYTORCH:
-            y, filtered_kernels = qpadded_sdpa(
+            attn_outputs, filtered_kernels = qpadded_sdpa(
                 query=query,
                 key=k_and_v.keys(),
                 value=k_and_v.values(),
@@ -373,7 +379,7 @@ class MultiHeadSelfAttention:
             # We need `key` and `value` at the same time here. For the training
             # use case, this will be the case, since `k_and_v` is the default
             # in this case.
-            y, filtered_kernels = pytorch_scaled_dot_product_attention(
+            attn_outputs, filtered_kernels = pytorch_scaled_dot_product_attention(
                 query=query,
                 key=k_and_v.keys(),
                 value=k_and_v.values(),
@@ -389,7 +395,7 @@ class MultiHeadSelfAttention:
             use_blocking = sdpa_mode == SDPA_IMPL_EAGER_BLOCKS
             if not use_blocking:
                 assert mask is not None or query.shape[2] == 1
-            y, scores = eager_scaled_dot_product_attention(
+            attn_outputs, attn_weights = eager_scaled_dot_product_attention(
                 query=query,
                 k_and_v=k_and_v,
                 scale_factor=scale_factor,
@@ -402,7 +408,7 @@ class MultiHeadSelfAttention:
                 attention_logit_softcapping=self.config.attention_logit_softcapping,
                 tmp_array_limit_gb=self.tmp_array_limit_gb_value(),
             )
-        return y.transpose(1, 2), scores
+        return attn_outputs.transpose(1, 2), attn_weights
 
 
 def do_softcapping(x: torch.Tensor, thresh: Optional[float]) -> torch.Tensor:
@@ -424,29 +430,30 @@ def eager_scaled_dot_product_attention(
     mask: Optional[torch.Tensor] = None,
     attention_logit_softcapping: Optional[float] = None,
     tmp_array_limit_gb: Optional[float] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     if not use_blocking:
         dtype = query.dtype
-        key = k_and_v.keys().to(torch.float32)
-        query = query.to(torch.float32)
-        scores = attention_compute_scores(query, key) * scale_factor
-        scores = do_softcapping(scores, attention_logit_softcapping)
+        n_head = query.shape[1]
+        query32 = query.to(torch.float32)
+        key32 = k_and_v.keys().to(torch.float32)
+        attn_weights = attention_compute_scores(query32, key32) * scale_factor
+        attn_weights = do_softcapping(attn_weights, attention_logit_softcapping)
         if mask is not None:
-            scores = scores + mask.to(torch.float32)
-        scores = F.softmax(scores, dim=-1)
-        value = k_and_v.values().to(torch.float32)
-        result = attention_compute_weighted_values(scores, value).to(dtype)
+            attn_weights = attn_weights + mask.to(torch.float32)
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        del query32, key32
+        value32 = k_and_v.values().to(torch.float32)
+        result = attention_compute_weighted_values(attn_weights, value32).to(dtype)
         if return_attn_weights:
-            _, n_head, q_len, _ = query.shape
-            batch_size, n_query_groups, kv_len, _ = value.shape
-            scores = scores.to(dtype)
+            batch_size, n_query_groups, kv_len, _ = value32.shape
+            attn_weights = attn_weights.sum(dim=2)
             if n_head != n_query_groups:
-                scores = scores.view(
-                    batch_size, n_query_groups, -1, q_len, kv_len,
+                attn_weights = attn_weights.view(
+                    batch_size, n_query_groups, -1, kv_len,
                 ).mean(dim=2)
         else:
-            scores = None
-        return result, scores
+            attn_weights = None
+        return result, attn_weights
     else:
         assert attention_logit_softcapping is None  # Sanity check
         return scaled_dot_product_attention_in_blocks(
@@ -488,22 +495,13 @@ def scaled_dot_product_attention_in_blocks(
     )
     # Iterate over slices along `q_len` dimension
     output_parts = []
-    if return_attn_weights:
-        # Note: Cannot use `torch.cat` to assemble from parts, this
-        # gives OOM for large sizes
-        attn_weights = torch.empty(
-            (batch_size, n_query_groups, q_len, kv_len),
-            dtype=dtype,
-            device=device,
-        )
-    else:
-        attn_weights = None
+    attn_weights = 0
     start = 0
     for _ in range(num_splits):
         end = min(start + tmp_len, q_len)
         sz = end - start
         _input_pos = input_pos + start
-        # Subfunctions assume these arrays are flat:
+        # Functions assume these arrays are flat:
         _tmp_array = slice_as_flat(tmp_array, sz)
         # Attention weights -> `attn_weights_part`
         # Note: This creates a new matrix `attn_weights_part`, but this is
@@ -531,7 +529,7 @@ def scaled_dot_product_attention_in_blocks(
                     dim=2,
                     out=source,
                 )
-            attn_weights[:, :, start:end, :] = source
+            attn_weights = source.sum(dim=2) + attn_weights
         # Compute attention outputs part
         # - attn_weights_part (bs, nh_q, sz, kv_len)
         # - value32 (bs, nh_k, kv_len, hs)
@@ -545,6 +543,6 @@ def scaled_dot_product_attention_in_blocks(
 
     # Combine
     output = torch.cat(output_parts, dim=2)
-    # Sanity check:
-    assert output.shape == (batch_size, n_head, q_len, value32.shape[-1]), (output.shape, (batch_size, n_head, q_len, value32.shape[-1]))
+    if not return_attn_weights:
+        attn_weights = None
     return output, attn_weights
