@@ -15,6 +15,7 @@ from typing import Optional, Tuple, Dict, List, Any
 from dataclasses import dataclass
 
 import torch
+from torchvision.transforms.v2 import query_size
 
 from litgpt.config import Config
 
@@ -326,7 +327,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         block_idx: int,
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
-        detach_scores: bool = False,
+        detach_attn_weights: bool = False,
         **base_kwargs,
     ):
         """
@@ -340,7 +341,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             grace_period: Grace period, see header comment. Defaults to 0
                 (no grace period)
             replay_log_blocksize: See header comment.
-            detach_scores: If `True`, `attn_weights` are not detached before
+            detach_attn_weights: If `True`, `attn_weights` are not detached before
                 passing it into score computations. This can create a very
                 complex computation graph. Defaults to `False`.
 
@@ -354,7 +355,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             raise ValueError(f"replay_log_blocksize must be positive, but got {replay_log_blocksize}")
         self.grace_period = grace_period
         self.replay_log_blocksize = replay_log_blocksize
-        self._detach_scores = detach_scores
+        self._detach_attn_weights = detach_attn_weights
         shape = (buffers.max_batch_size, self.n_query_groups, buffers.cache_length)
         self.register_buffer(
             "token_pos",
@@ -590,41 +591,50 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
 
     def _update(self, *args, **kwargs):
         """
-        Needs argument `attn_weights` to be passed. This method needs to set
-        `self.next_positions` to the slot position where :meth:`forward` is to
-        write the new key, value information. If `grace_period > 0` and the
-        cache is full, entries in `self.next_positions` must be smaller than
-        `self.cache_lenght - self.grace_period`.
+        Needs arguments `attn_weights` and `query_length` to be passed. This
+        method needs to set `self.next_positions` to the slot position where
+        :meth:`forward` is to write the new key, value information. If
+        `grace_period > 0` and the cache is full, entries in
+        `self.next_positions` must be smaller than `self.cache_length
+        - self.grace_period`.
 
         Args:
             attn_weights: Attention weights for the multi-head attention
-                computation done just after the last recent :meth:`forward` call.
-                Shape must be `(batch_size, n_query_groups, num, T)`, where
-                `T <= cache_length` is the current cache length, and `num` is the
-                number of tokens in the last recent :meth:`forward` call.
+                computation done just after the last recent :meth:`forward`
+                call, summed over the query axis. Shape must be
+                `(batch_size, n_query_groups, T)`, where `T <= cache_length` is
+                the current cache length.
+            query_length: Size of query axis
+
         """
+
         if len(args) >= 1:
             attn_weights = args[0]
         else:
             attn_weights = kwargs.get("attn_weights")
             if attn_weights is None:
                 raise ValueError("Need to pass 'attn_weights' argument")
+        if len(args) >= 2:
+            query_length = args[1]
+        else:
+            query_length = kwargs.get("query_length")
+            if query_length is None:
+                raise ValueError("Need to pass 'query_length' argument")
         if not isinstance(attn_weights, torch.Tensor):
             raise TypeError("attn_weights argument needs to be torch.Tensor")
+        if not isinstance(query_length, int) or query_length <= 0:
+            raise TypeError("query_length argument needs to be positive int")
         if attn_weights.device != self.device:
             raise ValueError(f"attn_weights.device = {attn_weights.device}, self.device = {self.device}. Must be the same")
-        if attn_weights.ndim != 4:
-            raise ValueError("attn_weights.ndim must be 4")
-        num = attn_weights.shape[2]
-        shape = (self.batch_size, self.n_query_groups, num, self.current_length)
+        shape = (self.batch_size, self.n_query_groups, self.current_length)
         if attn_weights.shape != shape:
             raise ValueError(f"Shape of attn_weights must be {shape}, but attn_weights.shape = {attn_weights.shape}")
         # Block gradients
-        if self._detach_scores:
+        if self._detach_attn_weights:
             attn_weights = attn_weights.detach()
 
         # Set `next_positions`
-        scores = self._compute_scores(attn_weights)
+        scores = self._compute_scores(attn_weights, query_length)
         if self.current_length < self.cache_length:
             self._set_next_positions_to_free_slots()
         else:
@@ -633,6 +643,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
     def _compute_scores(
         self,
         attn_weights: torch.Tensor,
+        query_length: int,
     ) -> Optional[torch.Tensor]:
         """
         Called by :meth:`update`. Updates scores, based on `attn_weights`.
@@ -644,9 +655,10 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         Args:
             attn_weights: Attention weights for the multi-head attention
                 computation done just after the last recent :meth:`forward`
-                call. Shape must be `(batch_size, n_query_groups, num, T)`,
-                where `T <= cache_length` is the current cache length, and `num`
-                is the number of tokens in the last recent :meth:`forward` call.
+                call, summed over the query axis. Shape must be
+                `(batch_size, n_query_groups, T)`, where `T <= cache_length` is
+                the current cache length.
+            query_length: Size of query axis
 
         Returns:
             scores, shape `(batch_size, n_query_groups, cache_length - grace_period)`,

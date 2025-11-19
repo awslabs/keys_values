@@ -106,19 +106,21 @@ def compute_scores(
     normalize_scores: bool = False,
 ) -> torch.Tensor:
     T, head_size = queries.shape[-2:]
-    attn_weights = compute_attn_weights(query=queries, k_and_v=k_and_v)
-    # Note that `attn_weights` is lower triangular
-    if not v_length:
-        scores = attn_weights[:, :, num_prefill:, :]
+    attn_weights = compute_attn_weights(
+        query=queries[:, :, num_prefill:, :].to(dtype=torch.float32),
+        k_and_v=DefaultKeysAndValues(
+            keys=k_and_v.keys().to(dtype=torch.float32),
+            values=k_and_v.values().to(dtype=torch.float32),
+        )
+    )
+    num_gen = T - num_prefill
+    if v_length:
+        v_norm = vector_norm(k_and_v.values(), dim=-1, dtype=torch.float32)
+        scores = attn_weights * v_norm
+        scores = (scores / scores.sum(dim=-1, keepdim=True)) * num_gen
     else:
-        v_norm = vector_norm(
-            k_and_v.values(), dim=-1, dtype=torch.float32,
-        ).unsqueeze(2).to(dtype=attn_weights.dtype)
-        scores = attn_weights[:, :, num_prefill:, :] * v_norm
-        scores = scores / scores.sum(dim=-1, keepdim=True)
-    scores = scores.sum(dim=2).to(dtype=torch.float32)
+        scores = attn_weights
     if normalize_scores:
-        num_gen = T - num_prefill
         denom = torch.arange(
             T, 0, -1, device=queries.device, dtype=scores.dtype
         ).minimum(num_gen)

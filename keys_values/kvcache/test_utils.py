@@ -95,14 +95,18 @@ def compute_attn_weights(
     **sdpa_kwargs,
 ) -> torch.Tensor:
     q_len, head_size = query.shape[-2:]
-    assert q_len == k_and_v.keys().shape[-2]
+    kv_len = k_and_v.keys().shape[-2]
+    assert q_len <= kv_len
     # Need causal mask
+    kwargs = dict(dtype=query.dtype, device=query.device)
     mask = build_mask_cache(
         max_seq_length=q_len,
         sliding_window_size=None,
-        device=query.device,
-        dtype=query.dtype,
+        **kwargs,
     )
+    if q_len < kv_len:
+        _pad_zeros = torch.zeros((1, 1), **kwargs).expand(q_len, kv_len - q_len)
+        mask = torch.cat((mask, _pad_zeros), dim=-1)
     _, attn_weights = eager_scaled_dot_product_attention(
         query=query,
         k_and_v=k_and_v,
