@@ -221,7 +221,8 @@ class MultiHeadSelfAttention:
             input_pos: Position in input sequence. Defaults to 0
             return_attn_weights: If this is `True` and `input_pos > 0`, the
                 attention weights (summed over query axis) are returned as
-                second argument
+                second argument. Here, `attn_weights.dtype=float32` independent
+                of `query.dtype`.
             token_positions: Required if `input_pos > 0`. Contains token
                 positions in KV cache. This is needed to select the correct
                 part of the mask matrix
@@ -358,7 +359,7 @@ class MultiHeadSelfAttention:
                 kv_len=k_and_v.keys().shape[2],
             )
         if sdpa_mode == SDPA_IMPL_QPADDED_PYTORCH:
-            y, filtered_kernels = qpadded_sdpa(
+            attn_outputs, filtered_kernels = qpadded_sdpa(
                 query=query,
                 key=k_and_v.keys(),
                 value=k_and_v.values(),
@@ -375,7 +376,7 @@ class MultiHeadSelfAttention:
             # We need `key` and `value` at the same time here. For the training
             # use case, this will be the case, since `k_and_v` is the default
             # in this case.
-            y, filtered_kernels = pytorch_scaled_dot_product_attention(
+            attn_outputs, filtered_kernels = pytorch_scaled_dot_product_attention(
                 query=query,
                 key=k_and_v.keys(),
                 value=k_and_v.values(),
@@ -391,7 +392,7 @@ class MultiHeadSelfAttention:
             use_blocking = sdpa_mode == SDPA_IMPL_EAGER_BLOCKS
             if not use_blocking:
                 assert mask is not None or query.shape[2] == 1
-            y, attn_weights = eager_scaled_dot_product_attention(
+            attn_outputs, attn_weights = eager_scaled_dot_product_attention(
                 query=query,
                 k_and_v=k_and_v,
                 scale_factor=scale_factor,
@@ -404,7 +405,7 @@ class MultiHeadSelfAttention:
                 attention_logit_softcapping=self.config.attention_logit_softcapping,
                 tmp_array_limit_gb=self.tmp_array_limit_gb_value(),
             )
-        return y.transpose(1, 2), attn_weights
+        return attn_outputs.transpose(1, 2), attn_weights
 
 
 def do_softcapping(x: torch.Tensor, thresh: Optional[float]) -> torch.Tensor:
@@ -426,22 +427,23 @@ def eager_scaled_dot_product_attention(
     mask: Optional[torch.Tensor] = None,
     attention_logit_softcapping: Optional[float] = None,
     tmp_array_limit_gb: Optional[float] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     if not use_blocking:
         dtype = query.dtype
-        key = k_and_v.keys().to(torch.float32)
-        query = query.to(torch.float32)
-        attn_weights = attention_compute_scores(query, key) * scale_factor
+        n_head = query.shape[1]
+        query32 = query.to(torch.float32)
+        key32 = k_and_v.keys().to(torch.float32)
+        attn_weights = attention_compute_scores(query32, key32) * scale_factor
         attn_weights = do_softcapping(attn_weights, attention_logit_softcapping)
         if mask is not None:
             attn_weights = attn_weights + mask.to(torch.float32)
         attn_weights = F.softmax(attn_weights, dim=-1)
-        value = k_and_v.values().to(torch.float32)
-        result = attention_compute_weighted_values(attn_weights, value).to(dtype)
+        del query32, key32
+        value32 = k_and_v.values().to(torch.float32)
+        result = attention_compute_weighted_values(attn_weights, value32).to(dtype)
         if return_attn_weights:
-            n_head = query.shape[1]
-            batch_size, n_query_groups, kv_len, _ = value.shape
-            attn_weights = attn_weights.sum(dim=2).to(dtype)
+            batch_size, n_query_groups, kv_len, _ = value32.shape
+            attn_weights = attn_weights.sum(dim=2)
             if n_head != n_query_groups:
                 attn_weights = attn_weights.view(
                     batch_size, n_query_groups, -1, kv_len,
@@ -496,7 +498,7 @@ def scaled_dot_product_attention_in_blocks(
         end = min(start + tmp_len, q_len)
         sz = end - start
         _input_pos = input_pos + start
-        # Subfunctions assume these arrays are flat:
+        # Functions assume these arrays are flat:
         _tmp_array = slice_as_flat(tmp_array, sz)
         # Attention weights -> `attn_weights_part`
         # Note: This creates a new matrix `attn_weights_part`, but this is
@@ -538,8 +540,6 @@ def scaled_dot_product_attention_in_blocks(
 
     # Combine
     output = torch.cat(output_parts, dim=2)
-    if return_attn_weights:
-        attn_weights = attn_weights.to(dtype=dtype)
-    else:
+    if not return_attn_weights:
         attn_weights = None
     return output, attn_weights

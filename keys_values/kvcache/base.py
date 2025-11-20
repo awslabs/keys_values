@@ -475,9 +475,10 @@ class DefaultKVCache(KVCache):
             If `True`, :meth:`update` requires argument `attn_weights`, which
             passes current attention weights, summed over the query axis, as
             `(batch_size, n_query_groups, T)` tensor, where
-            `T <= cache_length` is the current cache length. The query axis
-            size is the number of tokens in the last recent :meth:`forward`
-            call.
+            `T <= cache_length` is the current cache length. Independent of
+            `dtype` of other tensors, this tensor has `dtype=float32`.
+            The query axis size is the number of tokens in the last recent
+            :meth:`forward` call.
 
         """
         return False

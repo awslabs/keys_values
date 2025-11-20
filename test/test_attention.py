@@ -144,7 +144,7 @@ def test_scaled_dot_product_attention(n_head, n_query_groups, device):
         )
         attn_weights_cmp = attn_weights_cmp.view(
             batch_size, n_query_groups, -1, len_key,
-        ).to(torch.float32).mean(dim=2).to(dtype)
+        ).mean(dim=2)
         msg = (
             f"bs={batch_size}, hs={head_size}, nh_q={n_head}, nh_k={n_query_groups}, len_q={len_query}, len_k={len_key}"
         )

@@ -121,11 +121,11 @@ class H2OKVCache(AttnWeightsKVCache):
     ) -> Optional[torch.Tensor]:
         # Map weights to instantaneous scores, accumulate them. Sum over
         # dimension 2 (`num` tokens)
+        if attn_weights.dtype != torch.float32:
+            raise ValueError(f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}")
         self.scores[
             :self.batch_size, :, :self.current_length
-        ] += self._instantaneous_score(
-            attn_weights, query_length,
-        ).to(dtype=torch.float32)
+        ] += self._instantaneous_score(attn_weights, query_length)
         scores = None
         if self.current_length == self.cache_length:
             # Exclude the grace region, so that these tokens are not evicted
@@ -207,6 +207,7 @@ class VLengthInstantScoreMixin:
     """
     Same as H2O in :class:`H2OKVCache`, but the instantaneous score is
     modified to take the length of V vectors into account.
+
     """
     def get_v_norm(self) -> torch.Tensor:
         """
@@ -248,7 +249,7 @@ class VLengthInstantScoreMixin:
         But we do not obtain the full attention weights.
 
         """
-        scores = self.get_v_norm().to(dtype=attn_weights.dtype) * attn_weights
+        scores = self.get_v_norm() * attn_weights
         return (scores / scores.sum(dim=-1, keepdim=True)) * query_length
 
     def _initial_scores_in_forward(
@@ -454,8 +455,10 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
         attn_weights: torch.Tensor,
         query_length: int,
     ) -> Optional[torch.Tensor]:
+        if attn_weights.dtype != torch.float32:
+            raise ValueError(f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}")
         # Sum over the batch dimension 0
-        aggregated_weights = attn_weights.sum(0, keepdim=True).to(dtype=torch.float32)
+        aggregated_weights = attn_weights.sum(0, keepdim=True)
         self.scores[:self.batch_size, :, :self.current_length] += aggregated_weights
         if self.current_length == self.cache_length:
             return self.scores[:self.batch_size]

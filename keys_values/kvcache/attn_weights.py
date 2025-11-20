@@ -15,7 +15,6 @@ from typing import Optional, Tuple, Dict, List, Any
 from dataclasses import dataclass
 
 import torch
-from torchvision.transforms.v2 import query_size
 
 from litgpt.config import Config
 
@@ -603,7 +602,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                 computation done just after the last recent :meth:`forward`
                 call, summed over the query axis. Shape must be
                 `(batch_size, n_query_groups, T)`, where `T <= cache_length` is
-                the current cache length.
+                the current cache length. Also, `dtype=float32`.
             query_length: Size of query axis
 
         """
@@ -632,6 +631,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         # Block gradients
         if self._detach_attn_weights:
             attn_weights = attn_weights.detach()
+        attn_weights = attn_weights.to(dtype=torch.float32)
 
         # Set `next_positions`
         scores = self._compute_scores(attn_weights, query_length)
@@ -657,7 +657,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                 computation done just after the last recent :meth:`forward`
                 call, summed over the query axis. Shape must be
                 `(batch_size, n_query_groups, T)`, where `T <= cache_length` is
-                the current cache length.
+                the current cache length. Also, `dtype=float32`.
             query_length: Size of query axis
 
         Returns:
