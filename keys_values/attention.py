@@ -247,6 +247,7 @@ class MultiHeadSelfAttention:
             is_causal=is_causal,
             q_len=query.shape[2],
             kv_len=k_and_v.keys().shape[2],
+            sliding_window_size=sliding_window_size,
         )
         if sdpa_mode in (SDPA_IMPL_PYTORCH, SDPA_IMPL_EAGER_NO_BLOCKS):
             sdpa_is_eager = sdpa_mode == SDPA_IMPL_EAGER_NO_BLOCKS
@@ -358,6 +359,7 @@ class MultiHeadSelfAttention:
                 is_causal=input_pos == 0,
                 q_len=query.shape[2],
                 kv_len=k_and_v.keys().shape[2],
+                sliding_window_size=sliding_window_size,
             )
         if sdpa_mode == SDPA_IMPL_QPADDED_PYTORCH:
             attn_outputs, filtered_kernels = qpadded_sdpa(

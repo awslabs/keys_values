@@ -96,6 +96,7 @@ class TestAttnWeightsKVCacheMixin:
         self,
         path_mask: str,
         num_steps: int,
+        tol_kwargs: Optional[Dict[str, Any]] = None,
     ):
         self._path_mask = path_mask
         self._num_steps = num_steps
@@ -104,6 +105,9 @@ class TestAttnWeightsKVCacheMixin:
         self._current_record = None
         self._debug_attn_weights = None
         self._debug_instant_scores = None
+        if tol_kwargs is None:
+            tol_kwargs = dict()
+        self._tol_kwargs = tol_kwargs
 
     def _get_self(self) -> AttnWeightsKVCache:
         raise NotImplementedError
@@ -187,24 +191,32 @@ class TestAttnWeightsKVCacheMixin:
             outputs_here["instant_scores"] = self._debug_instant_scores
             if self._debug_mode == "store":
                 self._current_record.update(**outputs_here)
+                print(f"DEBUG: Store record {self._next_ind}")
                 debug_path = self._path_mask.format(self._next_ind)
                 ForwardInputOutput(**self._current_record).store(debug_path)
             else:
+                # Need to sum attn_weights from old code!
+                old_attn_weights = self._current_record["attn_weights"]
+                self._current_record["attn_weights"] = old_attn_weights.to(
+                    dtype=torch.float32
+                ).sum(axis=2)
                 # Compare loaded outputs with `outputs_here`
+                print(f"DEBUG: Compare against record {self._next_ind}")
                 names = (
-                    "attn_outputs",
                     "attn_weights",
-                    "instant_scores",
                     "cache_token_pos_after",
                     "cache_keys_after",
                     "cache_values_after",
+                    "attn_outputs",
                 )
                 if self._has_instant_scores():
                     names = names + ("instant_scores",)
                 for name in names:
+                    print(f"Comparing {name}")
                     torch.testing.assert_close(
                         outputs_here[name],
                         self._current_record[name],
+                        **self._tol_kwargs,
                     ), name
 
             self._debug_attn_weights = None
