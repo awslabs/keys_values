@@ -302,6 +302,7 @@ class MultiHeadSelfAttention:
         is_causal: bool,
         q_len: int,
         kv_len: int,
+        sliding_window_size: Optional[int],
     ) -> int:
         """
         Decides on what SDPA implementation can be used, depending on
@@ -321,7 +322,7 @@ class MultiHeadSelfAttention:
             return SDPA_IMPL_EAGER_NO_BLOCKS
         must_eager = return_attn_weights or self.use_eager_sdpa_always
         if must_eager or not is_causal:
-            if must_eager or self._use_eager_kernel(kv_len, q_len):
+            if must_eager or sliding_window_size is not None or self._use_eager_kernel(kv_len, q_len):
                 return SDPA_IMPL_EAGER_BLOCKS
             else:
                 return SDPA_IMPL_QPADDED_PYTORCH

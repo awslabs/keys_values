@@ -24,9 +24,7 @@ from keys_values.kvcache.base import (
     DefaultKVCacheReplayLog,
     KVCacheReplayLog,
 )
-from keys_values.kvcache.basics import (
-    KVCacheWithBuffers,
-)
+from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.kvcache.buffers import (
     DefaultKVCacheBuffers,
     KVCacheBuffers,

@@ -201,7 +201,7 @@ class KVCache(torch.nn.Module):
                 `num <= max_tokens_forward` if `input_pos > 0`, and
                 `num <= max_prefill_length` if `input_pos == 0`. Must be
                 position encoded.
-            key: New keys, `(atch_size, n_query_groups, num, head_size)`.
+            key: New keys, `(batch_size, n_query_groups, num, head_size)`.
                 Must be position encoded.
             value: New values, `(batch_size, n_query_groups, num, head_size)`
             token_idx: Token indices of input sequence, `(batch_size, num)`.
