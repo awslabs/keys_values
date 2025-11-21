@@ -56,6 +56,7 @@ class H2OKVCache(AttnWeightsKVCache):
         block_idx: int,
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
+        detach_attn_weights: bool = False,
         normalize_scores: bool = False,
         **base_kwargs,
     ):
@@ -65,6 +66,7 @@ class H2OKVCache(AttnWeightsKVCache):
             block_idx=block_idx,
             grace_period=grace_period,
             replay_log_blocksize=replay_log_blocksize,
+            detach_attn_weights=detach_attn_weights,
             **base_kwargs,
         )
         self.normalize_scores = normalize_scores
@@ -287,6 +289,7 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         block_idx: int,
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
+        detach_attn_weights: bool = False,
         normalize_scores: bool = False,
         **base_kwargs,
     ):
@@ -296,6 +299,7 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
             block_idx,
             grace_period,
             replay_log_blocksize,
+            detach_attn_weights,
             normalize_scores,
             **base_kwargs,
         )

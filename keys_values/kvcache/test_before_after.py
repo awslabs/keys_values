@@ -243,6 +243,7 @@ class TestH2OKVCache(H2OKVCache, TestAttnWeightsKVCacheMixin):
         block_idx: int,
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
+        detach_attn_weights: bool = False,
         normalize_scores: bool = False,
         **base_kwargs,
     ):
@@ -252,6 +253,7 @@ class TestH2OKVCache(H2OKVCache, TestAttnWeightsKVCacheMixin):
             block_idx=block_idx,
             grace_period=grace_period,
             replay_log_blocksize=replay_log_blocksize,
+            detach_attn_weights=detach_attn_weights,
             normalize_scores=normalize_scores,
             **base_kwargs,
         )
