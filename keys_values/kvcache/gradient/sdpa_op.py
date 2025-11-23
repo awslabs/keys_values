@@ -431,7 +431,6 @@ def scatter_on_buffers(
     key_buffer: torch.Tensor,
     value_buffer: torch.Tensor,
     index: torch.Tensor,
-    token_positions: torch.Tensor,
     positions: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     # Check dimensions
@@ -443,7 +442,6 @@ def scatter_on_buffers(
     assert key_buffer.shape == value_buffer.shape
     assert q_len <= kv_len
     assert index.shape == key.shape[:-1]
-    assert token_positions.shape == key_buffer.shape[:-1]
     do_grace_period = positions is not None
     if do_grace_period:
         if positions.ndim == 1:
@@ -542,13 +540,13 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
         # Check dimensions and update KV cache buffers
         if input_pos <= 0:
             raise ValueError("Operator supports input_pos > 0 only")
+        assert token_positions.shape == key_buffer.shape[:-1]
         key_buffer_new, value_buffer_new = scatter_on_buffers(
             key,
             value,
             key_buffer,
             value_buffer,
             index,
-            token_positions,
             positions,
         )
         # Compute SDPA

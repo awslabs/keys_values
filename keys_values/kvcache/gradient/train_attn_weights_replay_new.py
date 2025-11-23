@@ -20,6 +20,8 @@ from litgpt.config import Config
 from keys_values.attention import (
     KeysAndValues,
     DefaultKeysAndValues,
+    SDPA_IMPL_QPADDED_PYTORCH,
+    SDPA_IMPL_EAGER_BLOCKS,
 )
 from keys_values.kvcache.attn_weights import (
     update_token_positions,
@@ -42,14 +44,13 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
     """
     Variant of :class:`TrainingAttnWeightsReplayCache`. Here, we do not use
     the special operators of `sdpa_op`, but employ
-    :class:`MultiHeadSelfAttention` as part of the `autograd` graph. This makes
-    sense if PyTorch `F.scaled_dot_product_attention` is used there.
+    :class:`MultiHeadSelfAttention` as part of the `autograd` graph, with
+    `sdpa_mode = SDPA_IMPL_QPADDED_PYTORCH`.
 
     As in :class:`TrainingAttnWeightsReplayCache`, the main difficulty here is
     to support the autograd saved tensors hook mechanism by annotating the
     tensors properly.
 
-    HIER!!!
     """
     def __init__(
         self,
@@ -72,6 +73,13 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             raise ValueError(f"layer_idx {layer_idx}, must be nonnegative")
         if num_chunks <= 0:
             raise ValueError(f"num_chunks {num_chunks}, must be positive")
+        if config.attention_logit_softcapping is not None:
+            raise ValueError(
+                "This replay cache does not support "
+                "config.attention_logit_softcapping being used, since this "
+                "forbids the use of fast SDPA kernels. Choose a model without "
+                "this."
+            )
         super().__init__(
             config=config,
             max_batch_size=batch_size,
@@ -80,6 +88,8 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             dtype=None,
             **base_kwargs,
         )
+        if self.mha.use_eager_sdpa_always:
+            raise ValueError("This replay cache does not support mha.use_eager_sdpa_always = True")
         self.replay_log = replay_log
         self._device = device
         self._batch_size = batch_size
@@ -104,6 +114,21 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         self._debug_tensors = debug_tensors
         # If this is set, we log all annotations being created
         self.debug_print_annotations = debug_print_annotations
+        sliding_window_size = self.mha._get_sliding_window_size(layer_idx)
+        if sliding_window_size is not None:
+            print(
+                "WARNING: config.sliding_window_size is used. This means that "
+                "naive SDPA kernels have to be used, for which computations "
+                "can be slow. Consider switching to a model which does not use "
+                "config.sliding_window_size."
+            )
+            sdpa_mode = SDPA_IMPL_EAGER_BLOCKS
+        else:
+            sdpa_mode = SDPA_IMPL_QPADDED_PYTORCH
+        self._sdpa_kwargs = dict(
+            sdpa_mode=sdpa_mode,
+            sliding_window_size=sliding_window_size,
+        )
 
     @property
     def batch_size(self) -> Optional[int]:
@@ -268,7 +293,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 self.kv_buffers.keys(),
                 self.kv_buffers.values(),
                 index,
-                self.token_positions(),
                 positions,
             )
             # Post-processing w.r.t. annotations
@@ -330,12 +354,18 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             # Update buffers
             self.kv_buffers = DefaultKeysAndValues(key_buffer_new, value_buffer_new)
             self.current_length += num
-        # SDPA computation
-        # HIER! Attention: Things have been updated here already!
 
-        # Update buffers
+        # SDPA computation
+        attn_outputs, _ = self.mha.scaled_dot_product_attention(
+            query=query,
+            k_and_v=self.kv_buffers,
+            input_pos=input_pos,
+            token_positions=self.token_positions(),
+            return_attn_weights=False,
+            **self._sdpa_kwargs,
+        )
         q_len = query.shape[2]
-        return attn_output.transpose(1, 2).reshape(self.batch_size, q_len, -1)
+        return attn_outputs.reshape(self.batch_size, q_len, -1)
 
     def _append_annotation(self, annotation: NodeAnnotation):
         self._node_annotations.nodes.append(annotation)
