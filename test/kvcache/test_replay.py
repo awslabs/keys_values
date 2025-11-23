@@ -22,7 +22,7 @@ from litgpt.config import Config
 
 from keys_values.kvcache.attn_weights import AttnWeightsKVCache
 from keys_values.kvcache.base import KVCacheParams
-from keys_values.kvcache.factory import KVCacheFactory, split_name
+from keys_values.kvcache.factory import split_name
 from keys_values.kvcache.gradient.inference_replay import (
     inference_replay_cache_factory,
     get_replay_logs,

@@ -425,6 +425,57 @@ def finalize_gradients_key_or_value(
     return grad_new
 
 
+def scatter_on_buffers(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_buffer: torch.Tensor,
+    value_buffer: torch.Tensor,
+    index: torch.Tensor,
+    token_positions: torch.Tensor,
+    positions: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    # Check dimensions
+    assert key.ndim == 4
+    batch_size, n_query_groups, q_len, head_size = key.shape
+    assert key.shape == value.shape
+    kv_len = key_buffer.shape[2]
+    assert key_buffer.shape == (batch_size, n_query_groups, kv_len, head_size)
+    assert key_buffer.shape == value_buffer.shape
+    assert q_len <= kv_len
+    assert index.shape == key.shape[:-1]
+    assert token_positions.shape == key_buffer.shape[:-1]
+    do_grace_period = positions is not None
+    if do_grace_period:
+        if positions.ndim == 1:
+            positions = positions[None, None, :].expand(
+                batch_size, n_query_groups, -1,
+            )
+        else:
+            assert positions.shape[:-1] == (batch_size, n_query_groups)
+        assert 0 < positions.shape[-1] <= q_len
+    # Update KV cache buffers
+    if not do_grace_period:
+        index_e = expand_index(index, head_size)
+        key_buffer_new = key_buffer.scatter(-2, index_e, key)
+        value_buffer_new = value_buffer.scatter(-2, index_e, value)
+    else:
+        ext_index = expand_index(
+            torch.cat((index, positions), dim=-1), head_size,
+        )
+        positions_e = expand_index(positions, head_size)
+        key_buffer_new = key_buffer.scatter(
+            -2,
+            ext_index,
+            torch.cat((key_buffer.gather(-2, positions_e), key), dim=-2),
+        )
+        value_buffer_new = value_buffer.scatter(
+            -2,
+            ext_index,
+            torch.cat((value_buffer.gather(-2, positions_e), value), dim=-2),
+        )
+    return key_buffer_new, value_buffer_new
+
+
 class KVCacheScatterUpdateAndSDPAFunction(Function):
     """
     This `autograd` operator combines the "scatter" update of KV cache buffers
@@ -488,50 +539,18 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
             output and the new KV cache buffers after the update.
 
         """
-        # Check dimensions
-        assert query.ndim == 4 and key.ndim == 4
-        assert key.shape == value.shape
-        batch_size, n_head, q_len, head_size = query.shape
-        n_query_groups = key.shape[1]
-        assert key.shape == (batch_size, n_query_groups, *query.shape[2:])
-        kv_len = key_buffer.shape[2]
-        assert key_buffer.shape == value_buffer.shape
-        assert key_buffer.shape == (batch_size, n_query_groups, kv_len, head_size)
-        assert q_len <= kv_len
-        assert n_query_groups <= n_head and n_head % n_query_groups == 0
+        # Check dimensions and update KV cache buffers
         if input_pos <= 0:
             raise ValueError("Operator supports input_pos > 0 only")
-        assert index.shape == key.shape[:-1]
-        assert token_positions.shape == key_buffer.shape[:-1]
-        do_grace_period = positions is not None
-        if do_grace_period:
-            if positions.ndim == 1:
-                positions = positions[None, None, :].expand(
-                    batch_size, n_query_groups, -1,
-                )
-            else:
-                assert positions.shape[:-1] == (batch_size, n_query_groups)
-            assert 0 < positions.shape[-1] <= q_len
-        # Update KV cache buffers
-        if not do_grace_period:
-            index_e = expand_index(index, head_size)
-            key_buffer_new = key_buffer.scatter(-2, index_e, key)
-            value_buffer_new = value_buffer.scatter(-2, index_e, value)
-        else:
-            ext_index = expand_index(
-                torch.cat((index, positions), dim=-1), head_size,
-            )
-            positions_e = expand_index(positions, head_size)
-            key_buffer_new = key_buffer.scatter(
-                -2,
-                ext_index,
-                torch.cat((key_buffer.gather(-2, positions_e), key), dim=-2),
-            )
-            value_buffer_new = value_buffer.scatter(
-                -2,
-                ext_index,
-                torch.cat((value_buffer.gather(-2, positions_e), value), dim=-2),
-            )
+        key_buffer_new, value_buffer_new = scatter_on_buffers(
+            key,
+            value,
+            key_buffer,
+            value_buffer,
+            index,
+            token_positions,
+            positions,
+        )
         # Compute SDPA
         attn_output = sdpa_forward(
             query=query,
@@ -733,6 +752,38 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
         return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 10)
 
 
+def cat_on_buffers(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_buffer: Optional[torch.Tensor],
+    value_buffer: Optional[torch.Tensor],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    # Check dimensions
+    assert key.ndim == 4
+    assert key.shape == value.shape
+    batch_size, n_query_groups, q_len, head_size = key.shape
+    buffers_none = key_buffer is None
+    if not buffers_none:
+        kv_len = key_buffer.shape[2]
+        assert key_buffer.shape == value_buffer.shape
+        assert key_buffer.shape == (batch_size, n_query_groups, kv_len, head_size)
+        # Update KV cache buffers
+        key_buffer_new = torch.cat((key_buffer, key), dim=-2)
+        value_buffer_new = torch.cat((value_buffer, value), dim=-2)
+    else:
+        assert value_buffer is None
+        kv_len = 0
+        # Avoids the following error:
+        # RuntimeError: A input that has been returned as-is as output is being saved for backward. This is not supported if you override setup_context. You should return and save a view of the input instead, e.g. with x.view_as(x) or setup ctx inside the forward function itself
+        key_buffer_new = key
+        value_buffer_new = value
+    # Compute SDPA
+    token_positions = torch.arange(
+        0, kv_len + q_len, device=key.device, dtype=torch.int,
+    ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
+    return key_buffer_new, value_buffer_new, token_positions, kv_len
+
+
 class KVCacheCatUpdateAndSDPAFunction(Function):
     """
     This `autograd` operator combines the "cat" update of KV cache buffers
@@ -779,32 +830,11 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             `key_buffer_new`, `value_buffer_new`.
 
         """
-        # Check dimensions
-        assert query.ndim == 4 and key.ndim == 4
-        assert key.shape == value.shape
-        batch_size, n_head, q_len, head_size = query.shape
-        n_query_groups = key.shape[1]
-        assert key.shape == (batch_size, n_query_groups, *query.shape[2:])
-        assert n_query_groups <= n_head and n_head % n_query_groups == 0
-        buffers_none = key_buffer is None
-        if not buffers_none:
-            kv_len = key_buffer.shape[2]
-            assert key_buffer.shape == value_buffer.shape
-            assert key_buffer.shape == (batch_size, n_query_groups, kv_len, head_size)
-            # Update KV cache buffers
-            key_buffer_new = torch.cat((key_buffer, key), dim=-2)
-            value_buffer_new = torch.cat((value_buffer, value), dim=-2)
-        else:
-            assert value_buffer is None
-            kv_len = 0
-            # Avoids the following error:
-            # RuntimeError: A input that has been returned as-is as output is being saved for backward. This is not supported if you override setup_context. You should return and save a view of the input instead, e.g. with x.view_as(x) or setup ctx inside the forward function itself
-            key_buffer_new = key
-            value_buffer_new = value
+        # Check dimensions, compose new buffers
+        key_buffer_new, value_buffer_new, token_positions, kv_len = cat_on_buffers(
+            key, value, key_buffer, value_buffer,
+        )
         # Compute SDPA
-        token_positions = torch.arange(
-            0, kv_len + q_len, device=query.device, dtype=torch.int,
-        ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
         attn_output = sdpa_forward(
             query=query,
             key=key_buffer_new,
@@ -816,9 +846,6 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             sdpa_kernels=sdpa_kernels,
             tmp_array_limit_gb=tmp_array_limit_gb,
         )
-        if buffers_none:
-            key_buffer_new = None
-            value_buffer_new = None
         return attn_output, key_buffer_new, value_buffer_new
 
     @staticmethod
