@@ -48,11 +48,11 @@ from keys_values.kvcache.test_utils import (
 )
 from keys_values.model import GPT, CausalSelfAttention
 from keys_values.use_eager_kernel import transform_mha_kwargs
+from keys_values.utils import repeat_interleave
 
 
 @pytest.mark.parametrize(
-    ("n_head", "n_query_groups", "device"),
-    product_with_devices(
+    *product_with_devices(
         [
             (2, 1),
             (4, 1),
@@ -61,10 +61,11 @@ from keys_values.use_eager_kernel import transform_mha_kwargs
             (24, 8),
             (9, 3),
         ],
+        "n_head, n_query_groups",
     ),
 )
 @torch.inference_mode()
-def test_scaled_dot_product_attention(n_head, n_query_groups, device):
+def test_scaled_dot_product_attention(device, n_head, n_query_groups):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -127,9 +128,8 @@ def test_scaled_dot_product_attention(n_head, n_query_groups, device):
             sliding_window_size=sliding_window_size,
             mask=mask,
         )
-        q_per_kv = n_head // n_query_groups
-        key_bc = key.repeat_interleave(q_per_kv, dim=1)
-        value_bc = value.repeat_interleave(q_per_kv, dim=1)
+        key_bc = repeat_interleave(key, n_head)
+        value_bc = repeat_interleave(value, n_head)
         k_and_v_bc = DefaultKeysAndValues(key_bc, value_bc)
         result_cmp, attn_weights_cmp = eager_scaled_dot_product_attention(
             query,
@@ -153,8 +153,7 @@ def test_scaled_dot_product_attention(n_head, n_query_groups, device):
 
 
 @pytest.mark.parametrize(
-    ("sliding_window_size", "batch_size", "n_query_groups", "device"),
-    product_with_devices(
+    *product_with_devices(
         [
             (None, 1, 1),
             (None, 4, 16),
@@ -162,22 +161,22 @@ def test_scaled_dot_product_attention(n_head, n_query_groups, device):
             (4, 2, 32),
             (128, 1, 1),
             (128, 4, 16),
-        ]
+        ],
+        "sliding_window_size, batch_size, n_query_groups",
     ),
 )
 @torch.inference_mode()
 def test_build_mask_slice(
+    device: torch.device,
     sliding_window_size: Optional[int],
     batch_size: int,
     n_query_groups: int,
-    device: torch.device,
 ):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
     num_repeats = 30
     dtype = torch.bfloat16
-    device = torch.device("cpu")
 
     for _ in range(num_repeats):
         seq_len = random.randint(16, 256)
@@ -213,20 +212,19 @@ def test_build_mask_slice(
 
 
 @pytest.mark.parametrize(
-    "dtype, device",
+    "device, dtype",
     product(
-        [torch.float32, torch.float16, torch.bfloat16],
         available_backends(),
+        [torch.float32, torch.float16, torch.bfloat16],
     ),
 )
-def test_mask_sliding_window(dtype, device):
+def test_mask_sliding_window(device, dtype):
     """
     Compares `mask` used in MHA in training mode in old code (using
     `mask_cache`) and new code, using a setup from
     :func:`test_against_original_gemma_2` above.
 
     """
-    device = torch.device("cpu")
     T = 20
     model_name = "gemma-2-27b"
     config = Config.from_name(
@@ -466,14 +464,14 @@ def rope_cache_OLD(
 
 
 @pytest.mark.parametrize(
-    "model_name, dtype, device",
+    "device, model_name, dtype",
     product(
+        available_backends(),
         ["gemma-2-27b", "gemma-3-27b-it"],
         [torch.float32, torch.float16, torch.bfloat16],
-        available_backends(),
     ),
 )
-def test_multi_head_attention_for_gemma(model_name, dtype, device):
+def test_multi_head_attention_for_gemma(device, model_name, dtype):
     """
     Compares multi-head attention in old and current code, using a
     setup from :func:`test_against_original_gemma_2` above.
@@ -579,17 +577,17 @@ def _get_token_positions(
 
 
 @pytest.mark.parametrize(
-    "seq_len, sliding_window_size, device",
-    product_with_devices(
+    *product_with_devices(
         [
             (128, None),
             (21, None),
             (128, 16),
             (21, 12),
         ],
+        "seq_len, sliding_window_size",
     ),
 )
-def test_build_mask(seq_len, sliding_window_size, device):
+def test_build_mask(device, seq_len, sliding_window_size):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -638,8 +636,7 @@ def test_build_mask(seq_len, sliding_window_size, device):
 
 
 @pytest.mark.parametrize(
-    ("n_head", "n_query_groups", "q_len", "kv_len", "dtype", "sliding_window_size", "device"),
-    product_with_devices(
+    *product_with_devices(
         [
             (4, 2, 128, 512, torch.float16, None),
             (4, 4, 8, 256, torch.bfloat16, None),
@@ -651,9 +648,10 @@ def test_build_mask(seq_len, sliding_window_size, device):
             (24, 8, 2, 512, torch.bfloat16, 64),
             (9, 3, 128, 512, torch.float16, 96),
         ],
+        "n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size",
     ),
 )
-def test_attention_in_blocks(n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size, device):
+def test_attention_in_blocks(device, n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)

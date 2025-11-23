@@ -23,14 +23,7 @@ from torch.backends.cuda import (
 from torch.nn import functional as F
 from torch.nn.attention import SDPAParams, SDPBackend, sdpa_kernel
 
-
-# Currently, `F.scaled_dot_product_attention` does not properly support the
-# case `enabla_gqa=True` (i.e., keys and values have less heads than
-# queries). In this case, it is best to extend keys and values, which requires
-# extra memory, but allows for efficient kernels to be used.
-# Once PyTorch supports `enabla_gqa=True` properly at least with some fused
-# kernels (such as flash attention), this flag can be switched to `False`.
-FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA = True
+from keys_values.utils import repeat_interleave
 
 
 def filter_sdpa_kernels(
@@ -468,23 +461,22 @@ def pytorch_scaled_dot_product_attention(
         mask: Mask tensor, optional
 
     Returns:
-          `(y, filtered_sdpa_kernels)`, where `y` is the SDPA output, and
-          `filtered_sdpa_kernels` is the filtered list of SDPA kernels
-          if `do_filter_kernels=True`, and `None` otherwise.
+        `(attn_outputs, filtered_sdpa_kernels)`, where `attn_outputs` is
+        the SDPA output, and `filtered_sdpa_kernels` is the filtered list of
+        SDPA kernels if `do_filter_kernels=True`, and `None` otherwise.
 
     """
     is_causal = mask is None
     n_head = query.shape[1]
     n_query_groups = key.shape[1]
     enable_gqa = n_query_groups < n_head
-    if enable_gqa and FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA:
+    if enable_gqa:
         # Some efficient kernels have not implemented
         # `enabla_gqa=True`. It is better to extend keys, values in
         # this case.
-        q_per_kv = n_head // n_query_groups
-        key = key.repeat_interleave(q_per_kv, dim=1)
-        value = value.repeat_interleave(q_per_kv, dim=1)
-        enable_gqa = False
+        key = repeat_interleave(key, n_head)
+        value = repeat_interleave(value, n_head)
+        enable_gqa = key.shape[1] == n_query_groups
     kwargs = dict(
         query=query,
         key=key,
@@ -502,7 +494,7 @@ def pytorch_scaled_dot_product_attention(
             sdpa_kernels = filter_sdpa_kernels(sdpa_kernels=sdpa_kernels, **kwargs)
     if sdpa_kernels:
         with sdpa_kernel(sdpa_kernels):
-            y = F.scaled_dot_product_attention(**kwargs)
+            attn_outputs = F.scaled_dot_product_attention(**kwargs)
     else:
-        y = F.scaled_dot_product_attention(**kwargs)
-    return y, sdpa_kernels if do_filter_kernels else None
+        attn_outputs = F.scaled_dot_product_attention(**kwargs)
+    return attn_outputs, sdpa_kernels if do_filter_kernels else None

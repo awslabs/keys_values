@@ -24,6 +24,7 @@ from keys_values.attention import DefaultKeysAndValues
 from keys_values.kvcache.base import KVCacheReplayLog
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.train_attn_weights_replay import TrainingAttnWeightsReplayCache
+from keys_values.kvcache.gradient.train_attn_weights_replay_new import TrainingAttnWeightsReplayCacheNew
 from keys_values.kvcache.stack_layers import CellBlocks
 
 
@@ -98,6 +99,7 @@ class CellComputation(nn.Module):
         autograd_hooks: Optional[CellComputationAutogradHooks],
         replay_logs: List[KVCacheReplayLog],
         batch_size: int,
+        use_new_cache: bool = False,
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
         **cache_kwargs,
     ):
@@ -110,6 +112,9 @@ class CellComputation(nn.Module):
                 optional, cell computations can be done without the hooks
             replay_logs: KV cache replay logs for layers treated here
             batch_size: Batch size
+            use_new_cache: If `True`, we use :class:`TrainingAttnWeightsReplayCacheNew`
+                instead of :class:`TrainingAttnWeightsReplayCache`. This is yet
+                experimental
 
         """
         super().__init__()
@@ -144,6 +149,7 @@ class CellComputation(nn.Module):
                 idx.shape[-1] for idx in replay_logs[0].token_chunks
             )
         )
+        self._use_new_cache = use_new_cache
         self._debug_tensors = debug_tensors  # DEBUG
 
     @staticmethod
@@ -183,19 +189,23 @@ class CellComputation(nn.Module):
         self,
         first_chunk_idx: int,
         num_chunks: int,
-        debug_print_annotations: bool,
     ) -> List[TrainingAttnWeightsReplayCache]:
-        start_token_pos = self._token_pos_per_chunk[first_chunk_idx]
         first_layer_idx = self.model_part.first_layer_idx
+        more_kwargs = dict(
+            start_token_pos=self._token_pos_per_chunk[first_chunk_idx],
+            num_chunks=num_chunks,
+            debug_tensors=self._debug_tensors,
+        )
+        if self._use_new_cache:
+            cache_class = TrainingAttnWeightsReplayCacheNew
+        else:
+            cache_class = TrainingAttnWeightsReplayCache
         return [
-            TrainingAttnWeightsReplayCache(
+            cache_class(
                 **kwargs,
                 replay_log=replay_log,
-                start_token_pos=start_token_pos,
                 layer_idx=first_layer_idx + rel_block_idx,
-                num_chunks=num_chunks,
-                debug_tensors=self._debug_tensors,
-                debug_print_annotations=debug_print_annotations,
+                **more_kwargs,
             )
             for rel_block_idx, (replay_log, kwargs) in enumerate(
                 zip(self.replay_logs, self._train_cache_kwargs)
@@ -214,7 +224,6 @@ class CellComputation(nn.Module):
         v_buffers: Optional[List[torch.Tensor]],
         first_chunk_idx: int,
         num_chunks: int,
-        debug_print_annotations: bool = False,
     ) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
         """
         The cell receives input from the bottom (`inputs`) and from the
@@ -274,7 +283,7 @@ class CellComputation(nn.Module):
         # Hook training replay caches into self attention blocks, and assign
         # buffers.
         train_replay_caches = self._create_train_replay_caches(
-            first_chunk_idx, num_chunks, debug_print_annotations,
+            first_chunk_idx, num_chunks,
         )
         kv_caches_copy = []
         cache_lengths = []
@@ -295,35 +304,47 @@ class CellComputation(nn.Module):
                 replay_cache.initialize_buffers(buffers)
             cache_lengths.append(attn.kv_cache.cache_length)
             attn.kv_cache = replay_cache
-        # Initialize autograd hooks
-        if self.autograd_hooks is not None:
-            self.autograd_hooks.initialize_cell(
-                eff_num_layers=num_layers,
-                num_chunks=num_chunks,
-                first_layer_idx=self.model_part.first_layer_idx,
-                first_chunk_idx=first_chunk_idx,
-                cache_lengths=list(cache_lengths),
-                replay_logs=self.replay_logs,
-            )
 
-        # Outer loop over chunks
-        output_parts = cell_computation(
-            token_idxs=token_idxs,
-            model_part=self.model_part,
-            get_inputs_slice=get_inputs_slice,
-            input_pos=self.get_input_pos(first_chunk_idx),
-        )
-        # Reset `model` and compose results
-        for (_, block), old_cache in zip(
-            self.model_part.blocks(), kv_caches_copy,
-        ):
-            block.attn.kv_cache = old_cache
-        outputs = torch.cat(output_parts, dim=1)
-        k_buffers = []
-        v_buffers = []
-        for kv_cache in train_replay_caches:
-            buffers = kv_cache.kv_buffers
-            k_buffers.append(buffers.keys())
-            v_buffers.append(buffers.values())
-            kv_cache.deallocate_buffers()
+        try:
+            # Initialize autograd hooks
+            if self.autograd_hooks is not None:
+                self.autograd_hooks.initialize_cell(
+                    eff_num_layers=num_layers,
+                    num_chunks=num_chunks,
+                    first_layer_idx=self.model_part.first_layer_idx,
+                    first_chunk_idx=first_chunk_idx,
+                    cache_lengths=list(cache_lengths),
+                    replay_logs=self.replay_logs,
+                )
+
+            # Outer loop over chunks
+            output_parts = cell_computation(
+                token_idxs=token_idxs,
+                model_part=self.model_part,
+                get_inputs_slice=get_inputs_slice,
+                input_pos=self.get_input_pos(first_chunk_idx),
+            )
+            # DEBUG:
+            if self.autograd_hooks is not None:
+                largest_shape = self.autograd_hooks.largest_shape()
+                if largest_shape is not None:
+                    print(f"Largest node in autograd hook: shape={largest_shape.shape}, numel={largest_shape.numel} [{largest_shape.size_in_mb()} MB], count={largest_shape.count}")
+            # END DEBUG
+            # Assemble return arguments
+            outputs = torch.cat(output_parts, dim=1)
+            k_buffers = []
+            v_buffers = []
+            for kv_cache in train_replay_caches:
+                buffers = kv_cache.kv_buffers
+                k_buffers.append(buffers.keys())
+                v_buffers.append(buffers.values())
+        finally:
+            # Reassign original caches
+            for (_, block), old_cache in zip(
+                self.model_part.blocks(), kv_caches_copy,
+            ):
+                block.attn.kv_cache = old_cache
+            for kv_cache in train_replay_caches:
+                kv_cache.deallocate_buffers()
+
         return outputs, k_buffers, v_buffers

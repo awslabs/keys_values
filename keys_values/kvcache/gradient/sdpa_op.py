@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 from typing import Optional, List, Union, Tuple
 
 import torch
@@ -18,20 +19,25 @@ from torch.autograd import Function
 from torch.nn import functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from litgpt.config import Config
+
+from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import (
     scaled_dot_product_attention_in_blocks,
     DefaultKeysAndValues,
+    MultiHeadSelfAttention,
 )
 from keys_values.attention_utils import (
     filter_sdpa_kernels,
     create_temp_array,
     sdpa_attention_weights,
     slice_as_flat,
-    FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA,
 )
-from keys_values.kvcache.utils import expand_index
+from keys_values.use_eager_kernel import transform_mha_kwargs
+from keys_values.utils import expand_index, repeat_interleave
 
 
+# TODO: Remove once SDPAFunction._forward_new is established!
 def sdpa_forward(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -50,14 +56,13 @@ def sdpa_forward(
     if is_causal and sliding_window_size is None:
         # Use `F.scaled_dot_product_attention`, which is optimized for the
         # causal case
-        if enable_gqa and FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA:
+        if enable_gqa:
             # Some efficient fused kernels have not implemented
             # `enabla_gqa=True`. It is better to extend keys, values in
             # this case.
-            q_per_kv = n_head // n_query_groups
-            key = key.repeat_interleave(q_per_kv, dim=1)
-            value = value.repeat_interleave(q_per_kv, dim=1)
-            enable_gqa = False
+            key = repeat_interleave(key, n_head)
+            value = repeat_interleave(value, n_head)
+            enable_gqa = key.shape[1] == n_query_groups
         # Run the right version of `F.scaled_dot_product_attention`
         kwargs = dict(
             query=query,
@@ -324,13 +329,36 @@ class SDPAFunction(Function):
         _, n_head, q_len, _ = query.shape
         assert q_len <= kv_len
         assert n_query_groups <= n_head and n_head % n_query_groups == 0
-        is_causal = input_pos == 0
-        if is_causal:
+        if input_pos == 0:
             assert q_len == kv_len
             assert token_positions is None
         else:
             assert token_positions is not None
             assert token_positions.shape == key.shape[:-1]
+        return SDPAFunction._forward_new(
+            query=query,
+            key=key,
+            value=value,
+            token_positions=token_positions,
+            input_pos=input_pos,
+            scale_factor=scale_factor,
+            sliding_window_size=sliding_window_size,
+            sdpa_kernels=sdpa_kernels,
+            tmp_array_limit_gb=tmp_array_limit_gb,
+        )
+
+    @staticmethod
+    def _forward_old(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_positions: Optional[torch.Tensor],
+        input_pos: int,
+        scale_factor: float,
+        sliding_window_size: Optional[int] = None,
+        sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
+        tmp_array_limit_gb: Optional[float] = None,
+    ) -> torch.Tensor:
         return sdpa_forward(
             query=query,
             key=key,
@@ -342,6 +370,58 @@ class SDPAFunction(Function):
             sdpa_kernels=sdpa_kernels,
             tmp_array_limit_gb=tmp_array_limit_gb,
         )
+
+    @staticmethod
+    def _forward_new(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_positions: Optional[torch.Tensor],
+        input_pos: int,
+        scale_factor: float,
+        sliding_window_size: Optional[int] = None,
+        sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
+        tmp_array_limit_gb: Optional[float] = None,
+    ) -> torch.Tensor:
+        head_size = query.shape[-1]
+        temp = 1.0 / math.sqrt(head_size)
+        if abs(temp - scale_factor) < 1e-7:
+            attention_scores_scalar = None
+        else:
+            temp = 1.0 / scale_factor
+            attention_scores_scalar = int(temp * temp)
+        config = Config(
+            n_head=query.shape[1],
+            n_query_groups=key.shape[1],
+            head_size=head_size,
+            sliding_window_size=sliding_window_size,
+            attention_logit_softcapping=None,
+            attention_scores_scalar=attention_scores_scalar,
+        )
+        if tmp_array_limit_gb is not None:
+            tmp_array_limit_forward = TemporaryArrayLimit(
+                init_val=tmp_array_limit_gb,
+                name="attention_forward_temp_size_gb",
+            )
+        else:
+            tmp_array_limit_forward = None
+        mha_kwargs = dict(
+            sdpa_kernels=sdpa_kernels,
+            tmp_array_limit_gb=tmp_array_limit_forward,
+        )
+        mha = MultiHeadSelfAttention(
+            config, **transform_mha_kwargs(mha_kwargs, config),
+        )
+        return mha.scaled_dot_product_attention(
+            query=query,
+            k_and_v=DefaultKeysAndValues(key, value),
+            input_pos=input_pos,
+            token_positions=token_positions,
+            sdpa_mode=None,
+            sliding_window_size=sliding_window_size,
+            return_attn_weights=False,
+            transpose_result=False,
+        )[0]
 
     @staticmethod
     def setup_context(ctx, inputs, output):
@@ -425,6 +505,55 @@ def finalize_gradients_key_or_value(
     return grad_new
 
 
+def scatter_on_buffers(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_buffer: torch.Tensor,
+    value_buffer: torch.Tensor,
+    index: torch.Tensor,
+    positions: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    # Check dimensions
+    assert key.ndim == 4
+    batch_size, n_query_groups, q_len, head_size = key.shape
+    assert key.shape == value.shape
+    kv_len = key_buffer.shape[2]
+    assert key_buffer.shape == (batch_size, n_query_groups, kv_len, head_size)
+    assert key_buffer.shape == value_buffer.shape
+    assert q_len <= kv_len
+    assert index.shape == key.shape[:-1]
+    do_grace_period = positions is not None
+    if do_grace_period:
+        if positions.ndim == 1:
+            positions = positions[None, None, :].expand(
+                batch_size, n_query_groups, -1,
+            )
+        else:
+            assert positions.shape[:-1] == (batch_size, n_query_groups)
+        assert 0 < positions.shape[-1] <= q_len
+    # Update KV cache buffers
+    if not do_grace_period:
+        index_e = expand_index(index, head_size)
+        key_buffer_new = key_buffer.scatter(-2, index_e, key)
+        value_buffer_new = value_buffer.scatter(-2, index_e, value)
+    else:
+        ext_index = expand_index(
+            torch.cat((index, positions), dim=-1), head_size,
+        )
+        positions_e = expand_index(positions, head_size)
+        key_buffer_new = key_buffer.scatter(
+            -2,
+            ext_index,
+            torch.cat((key_buffer.gather(-2, positions_e), key), dim=-2),
+        )
+        value_buffer_new = value_buffer.scatter(
+            -2,
+            ext_index,
+            torch.cat((value_buffer.gather(-2, positions_e), value), dim=-2),
+        )
+    return key_buffer_new, value_buffer_new
+
+
 class KVCacheScatterUpdateAndSDPAFunction(Function):
     """
     This `autograd` operator combines the "scatter" update of KV cache buffers
@@ -488,52 +617,20 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
             output and the new KV cache buffers after the update.
 
         """
-        # Check dimensions
-        assert query.ndim == 4 and key.ndim == 4
-        assert key.shape == value.shape
-        batch_size, n_head, q_len, head_size = query.shape
-        n_query_groups = key.shape[1]
-        assert key.shape == (batch_size, n_query_groups, *query.shape[2:])
-        kv_len = key_buffer.shape[2]
-        assert key_buffer.shape == value_buffer.shape
-        assert key_buffer.shape == (batch_size, n_query_groups, kv_len, head_size)
-        assert q_len <= kv_len
-        assert n_query_groups <= n_head and n_head % n_query_groups == 0
+        # Check dimensions and update KV cache buffers
         if input_pos <= 0:
             raise ValueError("Operator supports input_pos > 0 only")
-        assert index.shape == key.shape[:-1]
         assert token_positions.shape == key_buffer.shape[:-1]
-        do_grace_period = positions is not None
-        if do_grace_period:
-            if positions.ndim == 1:
-                positions = positions[None, None, :].expand(
-                    batch_size, n_query_groups, -1,
-                )
-            else:
-                assert positions.shape[:-1] == (batch_size, n_query_groups)
-            assert 0 < positions.shape[-1] <= q_len
-        # Update KV cache buffers
-        if not do_grace_period:
-            index_e = expand_index(index, head_size)
-            key_buffer_new = key_buffer.scatter(-2, index_e, key)
-            value_buffer_new = value_buffer.scatter(-2, index_e, value)
-        else:
-            ext_index = expand_index(
-                torch.cat((index, positions), dim=-1), head_size,
-            )
-            positions_e = expand_index(positions, head_size)
-            key_buffer_new = key_buffer.scatter(
-                -2,
-                ext_index,
-                torch.cat((key_buffer.gather(-2, positions_e), key), dim=-2),
-            )
-            value_buffer_new = value_buffer.scatter(
-                -2,
-                ext_index,
-                torch.cat((value_buffer.gather(-2, positions_e), value), dim=-2),
-            )
+        key_buffer_new, value_buffer_new = scatter_on_buffers(
+            key,
+            value,
+            key_buffer,
+            value_buffer,
+            index,
+            positions,
+        )
         # Compute SDPA
-        attn_output = sdpa_forward(
+        attn_output = SDPAFunction.forward(
             query=query,
             key=key_buffer_new,
             value=value_buffer_new,
@@ -624,11 +721,11 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
         ) = ctx.saved_tensors
         index = ctx.extra_args["index"]
         token_positions = ctx.extra_args["token_positions"]
-        positions = ctx.extra_args["positions"]
         input_pos = ctx.extra_args["input_pos"]
         scale_factor = ctx.extra_args["scale_factor"]
         sliding_window_size = ctx.extra_args["sliding_window_size"]
         tmp_array_limit_gb = ctx.extra_args["tmp_array_limit_gb"]
+        positions = ctx.extra_args["positions"]
         do_grace_period = positions is not None
         grad_query = grad_key = grad_value = None
         grad_key_buffer = grad_value_buffer = None
@@ -648,8 +745,14 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
             # RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation: [torch.FloatTensor [5, 4, 512, 64]], which is output 0 of CatBackward0, is at version 2; expected version 0 instead
             index_e = expand_index(index, head_size)
             if not do_grace_period:
-                key_buffer_new = key_buffer.scatter(-2, index_e, key)
-                value_buffer_new = value_buffer.scatter(-2, index_e, key)
+                key_buffer_new, value_buffer_new = scatter_on_buffers(
+                    key,
+                    value,
+                    key_buffer,
+                    value_buffer,
+                    index,
+                    positions,
+                )
                 positions_e = None
                 index_prime = None
                 positions_prime = None
@@ -733,6 +836,38 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
         return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 10)
 
 
+def cat_on_buffers(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_buffer: Optional[torch.Tensor],
+    value_buffer: Optional[torch.Tensor],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    # Check dimensions
+    assert key.ndim == 4
+    assert key.shape == value.shape
+    batch_size, n_query_groups, q_len, head_size = key.shape
+    buffers_none = key_buffer is None
+    if not buffers_none:
+        kv_len = key_buffer.shape[2]
+        assert key_buffer.shape == value_buffer.shape
+        assert key_buffer.shape == (batch_size, n_query_groups, kv_len, head_size)
+        # Update KV cache buffers
+        key_buffer_new = torch.cat((key_buffer, key), dim=-2)
+        value_buffer_new = torch.cat((value_buffer, value), dim=-2)
+    else:
+        assert value_buffer is None
+        kv_len = 0
+        # Avoids the following error:
+        # RuntimeError: A input that has been returned as-is as output is being saved for backward. This is not supported if you override setup_context. You should return and save a view of the input instead, e.g. with x.view_as(x) or setup ctx inside the forward function itself
+        key_buffer_new = key
+        value_buffer_new = value
+    # Compute SDPA
+    token_positions = torch.arange(
+        0, kv_len + q_len, device=key.device, dtype=torch.int,
+    ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
+    return key_buffer_new, value_buffer_new, token_positions, kv_len
+
+
 class KVCacheCatUpdateAndSDPAFunction(Function):
     """
     This `autograd` operator combines the "cat" update of KV cache buffers
@@ -740,14 +875,17 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
     stored in the `autograd` graph, not the intermediates. It corresponds to
     what :meth:`KVCache.forward` is doing when the KV cache is not yet full.
 
+    This operator cannot be used for the prefill call, because `key_buffer`,
+    `value_buffer` must be given.
+
     """
     @staticmethod
     def forward(
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        key_buffer: Optional[torch.Tensor],
-        value_buffer: Optional[torch.Tensor],
+        key_buffer: torch.Tensor,
+        value_buffer: torch.Tensor,
         scale_factor: float,
         sliding_window_size: Optional[int] = None,
         sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
@@ -779,33 +917,14 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             `key_buffer_new`, `value_buffer_new`.
 
         """
-        # Check dimensions
-        assert query.ndim == 4 and key.ndim == 4
-        assert key.shape == value.shape
-        batch_size, n_head, q_len, head_size = query.shape
-        n_query_groups = key.shape[1]
-        assert key.shape == (batch_size, n_query_groups, *query.shape[2:])
-        assert n_query_groups <= n_head and n_head % n_query_groups == 0
-        buffers_none = key_buffer is None
-        if not buffers_none:
-            kv_len = key_buffer.shape[2]
-            assert key_buffer.shape == value_buffer.shape
-            assert key_buffer.shape == (batch_size, n_query_groups, kv_len, head_size)
-            # Update KV cache buffers
-            key_buffer_new = torch.cat((key_buffer, key), dim=-2)
-            value_buffer_new = torch.cat((value_buffer, value), dim=-2)
-        else:
-            assert value_buffer is None
-            kv_len = 0
-            # Avoids the following error:
-            # RuntimeError: A input that has been returned as-is as output is being saved for backward. This is not supported if you override setup_context. You should return and save a view of the input instead, e.g. with x.view_as(x) or setup ctx inside the forward function itself
-            key_buffer_new = key
-            value_buffer_new = value
+        if key_buffer is None or value_buffer is None:
+            raise ValueError("key_buffer, value_buffer must be given. Do not use this operator for the prefill call")
+        # Check dimensions, compose new buffers
+        key_buffer_new, value_buffer_new, token_positions, kv_len = cat_on_buffers(
+            key, value, key_buffer, value_buffer,
+        )
         # Compute SDPA
-        token_positions = torch.arange(
-            0, kv_len + q_len, device=query.device, dtype=torch.int,
-        ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
-        attn_output = sdpa_forward(
+        attn_output = SDPAFunction.forward(
             query=query,
             key=key_buffer_new,
             value=value_buffer_new,
@@ -816,9 +935,6 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             sdpa_kernels=sdpa_kernels,
             tmp_array_limit_gb=tmp_array_limit_gb,
         )
-        if buffers_none:
-            key_buffer_new = None
-            value_buffer_new = None
         return attn_output, key_buffer_new, value_buffer_new
 
     @staticmethod
@@ -869,34 +985,23 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
         scale_factor = ctx.extra_args["scale_factor"]
         sliding_window_size = ctx.extra_args["sliding_window_size"]
         tmp_array_limit_gb = ctx.extra_args["tmp_array_limit_gb"]
-        buffers_none = key_buffer is None
         grad_query = grad_key = grad_value = None
         grad_key_buffer = grad_value_buffer = None
         # Prepare inputs
-        batch_size, n_query_groups, q_len, _ = key.shape
-        kv_len = 0 if buffers_none else key_buffer.shape[2]
+        batch_size, n_query_groups, _, _ = key_buffer.shape
         need_query = ctx.needs_input_grad[0]
         need_key = ctx.needs_input_grad[1]
         need_value = ctx.needs_input_grad[2]
         need_key_buffer = ctx.needs_input_grad[3]
-        assert not (need_key_buffer and buffers_none)
         need_value_buffer = ctx.needs_input_grad[4]
-        assert not (need_value_buffer and buffers_none)
         need_one_of_key = need_key or need_key_buffer
         need_one_of_value = need_value or need_value_buffer
         if need_query or need_one_of_key or need_one_of_value:
-            # Compute `key_buffer_new`, `value_buffer_new`
-            if not buffers_none:
-                key_buffer_new = torch.cat((key_buffer, key), dim=-2)
-                value_buffer_new = torch.cat((value_buffer, value), dim=-2)
-            else:
-                key_buffer_new = key
-                value_buffer_new = value
+            key_buffer_new, value_buffer_new, token_positions, kv_len = cat_on_buffers(
+                key, value, key_buffer, value_buffer,
+            )
             # Backward of SDPA
-            token_positions = torch.arange(
-                0, kv_len + q_len, device=query.device, dtype=torch.int,
-            ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
-            grad_query, grad_key_buffer_new, grad_value_buffer_new = sdpa_backward(
+            grad_query, grad_key_buffer_new_indir, grad_value_buffer_new_indir = sdpa_backward(
                 grad_attn_output=grad_attn_output,
                 query=query,
                 key=key_buffer_new,
@@ -911,12 +1016,24 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
                 tmp_array_limit_gb=tmp_array_limit_gb,
             )
             if need_key_buffer:
-                grad_key_buffer = grad_key_buffer_new[:, :, :kv_len, :]
+                grad_key_buffer = (
+                    grad_key_buffer_new[:, :, :kv_len, :] +
+                    grad_key_buffer_new_indir[:, :, :kv_len, :]
+                )
             if need_key:
-                grad_key = grad_key_buffer_new[:, :, kv_len:, :]
+                grad_key = (
+                    grad_key_buffer_new[:, :, kv_len:, :] +
+                    grad_key_buffer_new_indir[:, :, kv_len:, :]
+                )
             if need_value_buffer:
-                grad_value_buffer = grad_value_buffer_new[:, :, :kv_len, :]
+                grad_value_buffer = (
+                    grad_value_buffer_new[:, :, :kv_len, :] +
+                    grad_value_buffer_new_indir[:, :, :kv_len, :]
+                )
             if need_value:
-                grad_value = grad_value_buffer_new[:, :, kv_len:, :]
+                grad_value = (
+                    grad_value_buffer_new[:, :, kv_len:, :] +
+                    grad_value_buffer_new_indir[:, :, kv_len:, :]
+                )
 
         return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 4)

@@ -150,6 +150,8 @@ def setup(
         verbose=VerbosityLevels.SOME.value,
         attention_forward_temp_size_gb=4,
         attention_backward_temp_size_gb=2,
+        use_new_cache=False,
+        max_match_trials_pack_arg=8,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
@@ -531,7 +533,16 @@ def wrap_gpt_model(
             init_val=limit_gb,
             name="attention_backward_temp_size_gb",
         )
-        train_cache_kwargs = {"sdpa_kernels": cache_kwargs["sdpa_kernels"]}
+        train_cache_kwargs = {
+            "sdpa_kernels": cache_kwargs["sdpa_kernels"],
+            "use_new_cache": kv_cache.use_new_cache,
+        }
+        if kv_cache.max_match_trials_pack_arg is not None:
+            autograd_hooks_kwargs = dict(
+                max_match_trials_pack_arg=kv_cache.max_match_trials_pack_arg,
+            )
+        else:
+            autograd_hooks_kwargs = None
         model = LongContextGradientModel(
             **common_kwargs,
             layers_per_cell=kv_cache.layers_per_cell,
@@ -539,6 +550,7 @@ def wrap_gpt_model(
             cache_kwargs=cache_kwargs,
             train_cache_kwargs=train_cache_kwargs,
             backward_tmp_array_limit_gb=backward_tmp_array_limit_gb,
+            autograd_hooks_kwargs=autograd_hooks_kwargs,
         )
     else:
         model = LongContextInferenceModel(**common_kwargs)
@@ -672,6 +684,7 @@ def fit(
                 model, DEBUG_NUM_SELECTED_PARAMS, num_trainable_params,
             )
             debug_orig_params = debug_clone_selected_params(model, debug_names)
+        time_grad_t0 = time.perf_counter()
         with fabric.no_backward_sync(model, enabled=is_accumulating):
             loss = model(
                 input_ids=batch[INPUT_IDS_NAME],
@@ -682,7 +695,9 @@ def fit(
             fabric.backward(loss)
 
         running_loss.update(loss.detach())
-        print_with_rank_and_timestamp("Finished gradient computation.", fabric.global_rank)
+        time_grad_in_secs = time.perf_counter() - time_grad_t0
+        print_with_rank_and_timestamp(f"Finished gradient computation [{time_grad_in_secs:.2} s]", fabric.global_rank)
+        flush_io_streams()
 
         if record_gpu_memory_snapshots is not None:
             # Stop recording and store snapshot. For kind 0, this is the single
@@ -752,7 +767,7 @@ def fit(
                 f"Epoch {metrics['epoch']} | iter {metrics['iter']} step {metrics['step']} |"
                 f" loss train: {metrics['loss']:.3f},"
                 f" val: {val_loss} |"
-                f" iter time: {metrics['iter_time'] * 1000:.2f} ms"
+                f" iter time: {metrics['iter_time'] * 1000:.2f} s"
                 f"{' (step)' if not is_accumulating else ''}"
             )
             fabric.log_dict(metrics, step=state["iter_num"])

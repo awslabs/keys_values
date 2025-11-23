@@ -37,7 +37,6 @@ from keys_values.kvcache.gradient.autograd_hooks import (
     AutogradHooks,
     CellComputationAutogradHooks,
     AnnotationUsageLog,
-    do_ignore_annotation,
 )
 from keys_values.kvcache.gradient.cell import (
     CellComputation,
@@ -572,50 +571,16 @@ class GradientAccumulator:
             v_buffers=v_buffers,
             first_chunk_idx=first_chunk_idx,
             num_chunks=num_chunks,
-            debug_print_annotations=False if autograd_hooks is None else autograd_hooks.debug_print_annotations,
         )
         scalar_output = (cell_outputs * head_gradients_top).sum()
 
-        # If autograd hooks are used, we need to create "ignore-headgrad"
-        # annotations for the head gradients, because they are stored in the
-        # autograd graph
         if head_gradients_k is not None:
             for idx, (o_k, g_k) in enumerate(zip(output_k_buffers, head_gradients_k)):
-                if autograd_hooks is not None:
-                    GradientAccumulator._ignore_head_gradients(
-                        autograd_hooks=autograd_hooks,
-                        head_gradients=g_k,
-                        layer_idx=first_layer_idx + idx,
-                        first_chunk_idx=first_chunk_idx,
-                    )
                 scalar_output += (o_k * g_k).sum()
         if head_gradients_v is not None:
             for idx, (o_v, g_v) in enumerate(zip(output_v_buffers, head_gradients_v)):
-                if autograd_hooks is not None:
-                    GradientAccumulator._ignore_head_gradients(
-                        autograd_hooks=autograd_hooks,
-                        head_gradients=g_v,
-                        layer_idx=first_layer_idx + idx,
-                        first_chunk_idx=first_chunk_idx,
-                    )
                 scalar_output += (o_v * g_v).sum()
         return scalar_output
-
-    @staticmethod
-    def _ignore_head_gradients(
-        autograd_hooks: CellComputationAutogradHooks,
-        head_gradients: torch.Tensor,
-        layer_idx: int,
-        first_chunk_idx: int,
-    ):
-        do_ignore_annotation(
-            x=head_gradients,
-            node_annotations=autograd_hooks.node_annotations,
-            kind="ignore-headgrad",
-            layer_idx=layer_idx,
-            chunk_idx=first_chunk_idx,
-            debug_print=autograd_hooks.debug_print_annotations,
-        )
 
     def _check_run_args(
         self,

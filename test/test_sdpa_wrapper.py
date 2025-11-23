@@ -36,8 +36,7 @@ from keys_values.sdpa_wrapper import scaled_dot_product_attention as wrapper_sdp
 
 
 @pytest.mark.parametrize(
-    ("n_head", "n_query_groups", "device"),
-    product_with_devices(
+    *product_with_devices(
         [
             (2, 1),
             (4, 1),
@@ -46,10 +45,11 @@ from keys_values.sdpa_wrapper import scaled_dot_product_attention as wrapper_sdp
             (24, 8),
             (9, 3),
         ],
+        "n_head, n_query_groups",
     ),
 )
 @torch.inference_mode()
-def test_sdpa_wrapper(n_head, n_query_groups, device):
+def test_sdpa_wrapper(device, n_head, n_query_groups):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -149,17 +149,17 @@ def test_sdpa_wrapper(n_head, n_query_groups, device):
 
 
 @pytest.mark.parametrize(
-    "dtype, tol_kwargs, device",
-    product_with_devices(
+    *product_with_devices(
         [
             (torch.float32, dict()),
             (torch.bfloat16, dict(atol=0.0005, rtol=0.03)),
             (torch.float16, dict(atol=0.0005, rtol=0.03)),
         ],
+        "dtype, tol_kwargs",
     ),
 )
 @torch.inference_mode()
-def test_wrapper_with_lastrec_cache(dtype, tol_kwargs, device):
+def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)

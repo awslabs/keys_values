@@ -55,6 +55,8 @@ class KVCacheArgs:
     allocate_buffers: bool = False
     attention_forward_temp_size_gb: Optional[float] = None
     attention_backward_temp_size_gb: Optional[float] = None
+    use_new_cache: bool = False
+    max_match_trials_pack_arg: Optional[int] = None
 
     def __post_init__(self):
         supported_names = KVCacheFactory.supported_names()
@@ -550,6 +552,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self.chunks_per_cell = None
         self.batch_size = None
         self._tmp_array_limit_gb = tmp_array_limit_gb
+        self._record_gpu_memory_snapshots = None
+        self._record_gpu_memory_kind = None
 
     def _check_args(
         self,
@@ -614,6 +618,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self.chunk_sizes = None
         self.chunks_per_cell = None
         self.batch_size = None
+        self._record_gpu_memory_snapshots = None
+        self._record_gpu_memory_kind = None
 
     def _init_members_from_tokens(
         self, input_ids: torch.Tensor, targets: torch.Tensor,
@@ -726,7 +732,14 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 input_ids, targets, scale_factor,
             )
         else:
+            if self._record_gpu_memory_snapshots is not None and self._record_gpu_memory_kind == 1:
+                self._record_gpu_memory_snapshots.set_path(
+                    self._record_gpu_memory_snapshots.path.parent / "snapshot_forward.pickle"
+                )
+                self._record_gpu_memory_snapshots.start_recording()
+                print(f"Start profiling GPU memory: {self._record_gpu_memory_snapshots.path}")
             result = None
+            retry_count = 0
             while result is None:
                 try:
                     result = self._forward_internal_no_check(
@@ -737,6 +750,12 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     result = None
                     deallocate_kv_cache_buffers_of_model(self.gpt_model)
                     torch.cuda.empty_cache()
+                    retry_count += 1
+                    if self._record_gpu_memory_kind == 1 and retry_count == 2:
+                        self._record_gpu_memory_snapshots.store_current_snapshot()
+                        self._record_gpu_memory_snapshots.stop_recording()
+                        print(f"Stop profiling GPU memory: {self._record_gpu_memory_snapshots.path}")
+
             return result
 
     def _forward_internal_no_check(
@@ -812,6 +831,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         )
                         input_pos += ch_size
                     assert input_pos == end  # Sanity check
+                    del embeddings
                     embeddings = torch.cat(new_embed_parts, dim=1)
                 # Layer input checkpointing
                 self._checkpoint_layer_input(

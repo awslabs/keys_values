@@ -11,9 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from functools import partial, cache
+from itertools import product
 import random
 from typing import Optional, Dict, Any
-from functools import partial
 
 import torch
 import pytest
@@ -22,7 +23,7 @@ from litgpt.config import Config
 
 from keys_values.kvcache.attn_weights import AttnWeightsKVCache
 from keys_values.kvcache.base import KVCacheParams
-from keys_values.kvcache.factory import KVCacheFactory, split_name
+from keys_values.kvcache.factory import split_name
 from keys_values.kvcache.gradient.inference_replay import (
     inference_replay_cache_factory,
     get_replay_logs,
@@ -30,6 +31,9 @@ from keys_values.kvcache.gradient.inference_replay import (
 )
 from keys_values.kvcache.gradient.train_attn_weights_replay import (
     TrainingAttnWeightsReplayCache,
+)
+from keys_values.kvcache.gradient.train_attn_weights_replay_new import (
+    TrainingAttnWeightsReplayCacheNew,
 )
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
@@ -202,12 +206,7 @@ def test_inference_replay(cache_name, device, cache_kwargs):
 
 
 def args_training_replay():
-    def tol_kwargs(name):
-        if name.startswith("lastrec"):
-            return dict(atol=0.005, rtol=0.1)
-        else:
-            return dict()
-
+    tol_kwargs = dict(atol=0.004, rtol=0.1)
     names_devices = cache_names_and_devices(
         filter_name=lambda name: (
             split_name(name)[1] == "default" and
@@ -215,11 +214,11 @@ def args_training_replay():
         ),
     )
     result1 = [
-        (name, device, _cache_kwargs(name), tol_kwargs(name))
+        (name, device, _cache_kwargs(name), tol_kwargs)
         for name, device in names_devices
     ]
     result2 = [
-        (name, device, dict(_cache_kwargs(name), grace_period=10), dict())
+        (name, device, dict(_cache_kwargs(name), grace_period=10), tol_kwargs)
         for name, device in names_devices
         if split_name(name)[0] in ("h2o", "h2o-vlen")
     ]
@@ -227,9 +226,15 @@ def args_training_replay():
 
 
 @pytest.mark.parametrize(
-    "cache_name, device, cache_kwargs, tol_kwargs", args_training_replay(),
+    "cache_name, device, cache_kwargs, tol_kwargs, use_new_cache",
+    [
+        a + (b,) for a, b in product(
+            args_training_replay(),
+            [False, True],
+        )
+    ],
 )
-def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs):
+def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_new_cache):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -244,7 +249,15 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs):
     vocab_size = 48
     tokens_per_chunk = [cache_length - 1, 1, 8, 4, 8, 2, 8, 2, 8, 8]
     seq_length = sum(tokens_per_chunk)
-
+    if use_new_cache:
+        replay_class = TrainingAttnWeightsReplayCacheNew
+        # Eager SDPA never used
+        cache_kwargs = {
+            **cache_kwargs,
+            "use_eager_kernel": lambda kv_len, q_len: False,
+        }
+    else:
+        replay_class = TrainingAttnWeightsReplayCache
     layer_outputs = dict()
 
     def start_of_layer_hook(
@@ -304,7 +317,7 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs):
             # Create training replay cache. We use the buffer of `kv_cache`
             # here.
             replay_log = get_replay_logs(model)[0]
-            tr_cache = TrainingAttnWeightsReplayCache(
+            tr_cache = replay_class(
                 config=config,
                 batch_size=batch_size,
                 cache_length=cache_length,

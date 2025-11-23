@@ -29,13 +29,13 @@ from keys_values.kvcache.test_utils import (
 
 
 @pytest.mark.parametrize(
-    "name, device",
+    "device, name",
     product(
-        ["lastrec-default", "lastrec-torch-quantized8"],
         available_backends(),
+        ["lastrec-default", "lastrec-torch-quantized8"],
     )
 )
-def test_last_recent(name, device):
+def test_last_recent(device, name):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -75,16 +75,16 @@ def test_last_recent(name, device):
 
 
 @pytest.mark.parametrize(
-    "dtype, tol_kwargs, device",
-    product_with_devices(
+    *product_with_devices(
         [
             (torch.bfloat16, dict(atol=0.0005, rtol=0.03)),
             (torch.float16, dict(atol=0.00015, rtol=0.01)),
             (torch.float32, dict()),
         ],
+        "dtype, tol_kwargs",
     ),
 )
-def test_incremental_versus_singlepass(dtype, tol_kwargs, device):
+def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)

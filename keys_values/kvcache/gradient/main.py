@@ -180,6 +180,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         cache_kwargs: Optional[Dict[str, Any]] = None,
         train_cache_kwargs: Optional[Dict[str, Any]] = None,
         backward_tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        autograd_hooks_kwargs: Optional[Dict[str, Any]] = None,
         debug_dont_use_autograd_hooks: bool = False,
         use_arrays_cleanup: bool = True,
     ):
@@ -250,6 +251,9 @@ class LongContextGradientModel(LongContextInferenceModel):
             del train_cache_kwargs["tmp_array_limit_gb"]
             print("Use `backward_tmp_array_limit_gb` instead of `train_cache_kwargs['tmp_array_limit_gb']`")
         self._train_cache_kwargs = train_cache_kwargs
+        if autograd_hooks_kwargs is None:
+            autograd_hooks_kwargs = dict()
+        self._autograd_hooks_kwargs = autograd_hooks_kwargs
         # Device memory limit for backward computations:
         self._backward_tmp_array_limit_gb = backward_tmp_array_limit_gb
         self._debug_dont_use_autograd_hooks = debug_dont_use_autograd_hooks
@@ -302,9 +306,10 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._init_members_from_tokens(input_ids, targets)
         if not isinstance(self.gpt_model.mha, MultiHeadSelfAttention):
             raise ValueError(f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention")
-        self._record_gpu_memory_snapshots = kwargs.get("record_gpu_memory_snapshots")
-        if self._record_gpu_memory_snapshots is not None:
-            self._record_gpu_memory_kind = kwargs.get("record_gpu_memory_kind", 0)
+        if self._record_gpu_memory_snapshots is None:
+            self._record_gpu_memory_snapshots = kwargs.get("record_gpu_memory_snapshots")
+            if self._record_gpu_memory_snapshots is not None:
+                self._record_gpu_memory_kind = kwargs.get("record_gpu_memory_kind", 0)
         if self.training:
             loss_value = self._inference_forward_pass(
                 input_ids, targets, scale_factor,
@@ -522,6 +527,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 config=self.config,
                 batch_size=self.batch_size,
                 arrays_cleanup=arrays_cleanup,
+                **self._autograd_hooks_kwargs,
             )
         elif self._use_arrays_cleanup:
             self.autograd_hooks = CleanupArraysAutogradHooks(arrays_cleanup)
@@ -634,6 +640,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 self._record_gpu_memory_snapshots.path.parent / "snapshot_backward0.pickle"
             )
             self._record_gpu_memory_snapshots.start_recording()
+            print(f"Started recording: {self._record_gpu_memory_snapshots.path}")
 
         # Call :meth:`_backward_accumulate_gradients_nocheck`. May be done
         # several times with reduced memory limits
@@ -655,18 +662,27 @@ class LongContextGradientModel(LongContextInferenceModel):
                         if debug_count <= 2:
                             self._record_gpu_memory_snapshots.store_current_snapshot()
                             self._record_gpu_memory_snapshots.stop_recording()
+                            print("Stopped recording")
                             if debug_count < 2:
                                 self._record_gpu_memory_snapshots.set_path(
                                     self._record_gpu_memory_snapshots.path.parent / f"snapshot_backward{debug_count + 1}.pickle"
                                 )
                                 self._record_gpu_memory_snapshots.start_recording()
+                                print(f"Started recording: {self._record_gpu_memory_snapshots.path}")
                         debug_count += 1
 
         self._status = "init"  # Reset
         # Summary of annotation usage logs
         if not self._debug_dont_use_autograd_hooks and self.verbose is not VerbosityLevels.NONE:
             num_unmatched_args = [
-                (idx, len(log.unmatched_pack_args))
+                (
+                    idx,
+                    len(log.unmatched_pack_args),
+                    log.num_matched_annotations,
+                    log.num_comparisons,
+                    log.num_4d_indexes,
+                    log.num_unmatched_scatter_cat,
+                )
                 for idx, log in self._annotation_usage_logs.items()
             ]
             total_num_unmatched = sum(x[1] for x in num_unmatched_args)
@@ -676,8 +692,9 @@ class LongContextGradientModel(LongContextInferenceModel):
                 lines = [
                             "\nThere were unmatched pack arguments in some cells. Use --kv_cache.verbose all for full information."
                         ] + [
-                            f"{num} unmatched in (first_layer_idx = {fli}, first_chunk_idx = {fci})"
-                            for (fli, fci), num in num_unmatched_args if num > 0
+                            f"{num} unmatched in ({fli},{fci}): {n_ma} matches, {n_cmp} comparisons, {n_unm} scatter/cat, {n_4d} 4D indexes"
+                            for (fli, fci), num, n_ma, n_cmp, n_4d, n_unm
+                            in num_unmatched_args if num > 0
                         ] + [""]
                 print("\n".join(lines))
 

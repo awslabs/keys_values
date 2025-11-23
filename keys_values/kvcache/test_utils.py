@@ -70,23 +70,51 @@ def tensor_is_simple(x: torch.Tensor) -> bool:
 
 def random_tensor(
     params: KVCacheParams,
-    num: int,
+    num: Optional[int] = None,
     is_query: bool = False,
     batch_size: Optional[int] = None,
 ) -> torch.Tensor:
     if batch_size is None:
         batch_size = params.max_batch_size
+    if num is None:
+        num = params.cache_length
     dim1 = params.n_head if is_query else params.n_query_groups
     shape = (batch_size, dim1, num, params.head_size)
     return torch.randn(*shape, device=params.device, dtype=params.dtype)
 
 
 def random_keys_values(
-    params: KVCacheParams, num: int,
+    params: KVCacheParams, num: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     keys = random_tensor(params, num)
     values= random_tensor(params, num)
     return keys, values
+
+
+def random_index(
+    params: KVCacheParams,
+    start: int,
+    end: int,
+    num: Optional[int] = None,
+    batch_size: Optional[int] = None,
+):
+    if batch_size is None:
+        batch_size = params.max_batch_size
+    if num is None:
+        num = params.cache_length
+    diff = end - start
+    if diff < num:
+        raise ValueError(f"end - start = {diff}, must be >= num = {num}")
+    index_kwargs = dict(dtype=torch.int64, device=params.device)
+    result = torch.empty(
+        (batch_size, params.n_query_groups, num), **index_kwargs,
+    )
+    for b in range(batch_size):
+        for h in range(params.n_query_groups):
+            result[b, h, :] = (
+                torch.randperm(diff, **index_kwargs) + start
+            )[:num]
+    return result
 
 
 def compute_attn_weights(
@@ -281,11 +309,14 @@ def cache_names_and_devices(
     return result
 
 
-def product_with_devices(list_tuples: List[tuple]) -> List[tuple]:
-    return [
-        a + (b,) for a, b in product(
-            list_tuples,
+def product_with_devices(
+    list_tuples: List[tuple],
+    arg_names: str,
+) -> Tuple[str, List[tuple]]:
+    return "device, " + arg_names, [
+        (a,) + b for a, b in product(
             available_backends(),
+            list_tuples,
         )
     ]
 

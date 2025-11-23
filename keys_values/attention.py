@@ -346,6 +346,7 @@ class MultiHeadSelfAttention:
         sliding_window_size: Optional[int],
         mask: Optional[torch.Tensor] = None,
         return_attn_weights: bool = False,
+        transpose_result: bool = True,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         scale_factor = self._get_scale_factor()
         # We cannot call PyTorch scaled_dot_product_attention if:
@@ -408,7 +409,9 @@ class MultiHeadSelfAttention:
                 attention_logit_softcapping=self.config.attention_logit_softcapping,
                 tmp_array_limit_gb=self.tmp_array_limit_gb_value(),
             )
-        return attn_outputs.transpose(1, 2), attn_weights
+        if transpose_result:
+            attn_outputs = attn_outputs.transpose(1, 2)
+        return attn_outputs, attn_weights
 
 
 def do_softcapping(x: torch.Tensor, thresh: Optional[float]) -> torch.Tensor:

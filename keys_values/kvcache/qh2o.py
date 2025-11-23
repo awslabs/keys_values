@@ -62,8 +62,9 @@ class QuantizedH2OKVCache(H2OKVCache):
         block_idx: int,
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
+        detach_attn_weights: bool = False,
         normalize_scores: bool = False,
-        combination_constant: float =DEFAULT_COMBINATION_CONSTANT,
+        combination_constant: float = DEFAULT_COMBINATION_CONSTANT,
         scratch_blocksize: int = DEFAULT_SCRATCH_BLOCKSIZE,
         **base_kwargs,
     ):
@@ -88,6 +89,7 @@ class QuantizedH2OKVCache(H2OKVCache):
             block_idx,
             grace_period,
             replay_log_blocksize,
+            detach_attn_weights,
             normalize_scores,
             **base_kwargs,
         )

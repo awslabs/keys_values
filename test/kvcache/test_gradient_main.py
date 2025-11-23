@@ -34,8 +34,9 @@ from keys_values.model import GPT
 
 def args_complete_gradient_computation():
     return [
-        a + b + (c,)
-        for a, b, c in product(
+        a + b + (c, d)
+        for d, a, b, c in product(
+            available_backends(),
             [
                 ("lastrec", dict()),
                 ("h2o", {"replay_log_blocksize": 64}),
@@ -45,17 +46,17 @@ def args_complete_gradient_computation():
                 ([128, 128],),
                 ([96, 128],),
             ],
-            available_backends(),
+            [False, True],
         )
     ]
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths, device",
+    "cache_name, cache_kwargs, cache_lengths, use_new_cache, device",
     args_complete_gradient_computation(),
 )
 def test_complete_gradient_computation(
-    cache_name, cache_kwargs, cache_lengths, device,
+    cache_name, cache_kwargs, cache_lengths, use_new_cache, device,
 ):
     seed = 31415927
     random.seed(seed)
@@ -139,6 +140,8 @@ def test_complete_gradient_computation(
             layers_per_cell=layers_per_cell,
             chunk_size=chunk_size,
             qname=qname,
+            train_cache_kwargs=dict(use_new_cache=use_new_cache),
+            autograd_hooks_kwargs=dict(max_match_trials_pack_arg=4),
             debug_single_cell_per_row=debug_flag,
             debug_dont_use_autograd_hooks=debug_flag,
         )
@@ -181,3 +184,8 @@ def test_complete_gradient_computation(
             raise IndexError(f"name = {name} is in gradients[0], but not in gradients[1]")
         print(f"Comparing gradient for {name}")
         torch.testing.assert_close(value, value_comp, **kwargs)
+
+
+if __name__ == "__main__":
+    args = args_complete_gradient_computation()[1]
+    test_complete_gradient_computation(*args)

@@ -151,7 +151,7 @@ class TorchBasicQuantizer(Quantizer):
             device = self.device
         # Note: If buffers are allocated with batch size >= `batch_size`, they
         # are not re-allocated
-        if not self.buffers_are_allocated or batch_size > self.shape[0] or device != self.device:
+        if (not self.buffers_are_allocated) or batch_size > self.shape[0] or device != self.device:
             self.shape = (batch_size,) + self.shape[1:]
             self._init_blocksize_quant_shape()
             shape = self._quant_shape

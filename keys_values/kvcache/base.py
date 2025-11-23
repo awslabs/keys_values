@@ -139,7 +139,7 @@ class KVCache(torch.nn.Module):
         raise NotImplementedError
 
     @property
-    def dtype(self) -> torch.dtype:
+    def dtype(self) -> Optional[torch.dtype]:
         return self._dtype
 
     @property
@@ -403,7 +403,7 @@ class DefaultKVCache(KVCache):
 
         # Multi-head self-attention main computation
         return_attn_weights = (not for_prefill) and self.update_requires_attn_weights()
-        y, attn_weights = self.mha(
+        attn_outputs, attn_weights = self.mha(
             query=query,
             k_and_v=k_and_v,
             block_idx=self.block_idx,
@@ -415,7 +415,7 @@ class DefaultKVCache(KVCache):
             # Pass attention weights to KV cache
             self._update(attn_weights=attn_weights, query_length=num)
 
-        return y
+        return attn_outputs
 
     def _forward(
         self,

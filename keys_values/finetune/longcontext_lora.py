@@ -12,13 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import csv
 import dataclasses
 import os
 import time
 import warnings
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any
+from typing import Dict, Literal, Optional, Union, Any, Tuple
 
 import lightning as L
 import torch
@@ -153,6 +154,8 @@ def setup(
         verbose=VerbosityLevels.SOME.value,
         attention_forward_temp_size_gb=4,
         attention_backward_temp_size_gb=2,
+        use_new_cache=False,
+        max_match_trials_pack_arg=8,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
@@ -161,6 +164,7 @@ def setup(
     record_gpu_memory_period: int = 0,
     debug_check_updates: bool = False,
     generate_with_eval: bool = False,
+    profile_grad_times: int = 0,
 ) -> None:
     """Finetune a model using the LoRA method.
 
@@ -347,6 +351,7 @@ def setup(
         record_gpu_memory_period=record_gpu_memory_period,
         debug_check_updates=debug_check_updates,
         generate_with_eval=generate_with_eval,
+        profile_grad_times=profile_grad_times,
     )
 
 
@@ -370,6 +375,7 @@ def main(
     record_gpu_memory_period: int,
     debug_check_updates: bool,
     generate_with_eval: bool,
+    profile_grad_times: int,
 ) -> None:
     validate_args(train, eval)
 
@@ -482,6 +488,17 @@ def main(
     if file_path.exists():
         load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
+    if profile_grad_times > 0:
+        thresh = kv_cache.max_match_trials_pack_arg
+        name = "new" if kv_cache.use_new_cache else "old"
+        profile_grad_params = (
+            Path(out_dir) / f"profile_grad_times_{name}_{thresh}.csv",
+            kv_cache.use_new_cache,
+            thresh,
+            profile_grad_times,
+        )
+    else:
+        profile_grad_params = None
     train_time = time.perf_counter()
     token_counts = fit(
         fabric=fabric,
@@ -502,6 +519,7 @@ def main(
         debug_check_updates=debug_check_updates,
         num_trainable_params=num_trainable_params,
         generate_with_eval=generate_with_eval,
+        profile_grad_params=profile_grad_params,
     )
     training_time = time.perf_counter() - train_time
     output = create_finetuning_performance_report(training_time, token_counts, fabric.device.type)
@@ -568,6 +586,7 @@ def fit(
     debug_check_updates: bool,
     num_trainable_params: int,
     generate_with_eval: bool,
+    profile_grad_params: Optional[Tuple[Path, bool, int, int]],
 ) -> Dict[str, Any]:
     model = state["model"]
     optimizer = state["optimizer"]
@@ -627,6 +646,7 @@ def fit(
     )
     total_t0 = time.perf_counter()
 
+    profile_grad_times = []
     while state["step_count"] < max_steps:
         state["iter_num"] += 1
         iter_t0 = time.perf_counter()
@@ -666,6 +686,7 @@ def fit(
                 model, DEBUG_NUM_SELECTED_PARAMS, num_trainable_params,
             )
             debug_orig_params = debug_clone_selected_params(model, debug_names)
+        time_grad_t0 = time.perf_counter()
         with fabric.no_backward_sync(model, enabled=is_accumulating):
             loss = model(
                 input_ids=batch[INPUT_IDS_NAME],
@@ -677,8 +698,21 @@ def fit(
             fabric.backward(loss)
 
         running_loss.update(loss.detach())
-        print_with_rank_and_timestamp("Finished gradient computation.", fabric.global_rank)
+        time_grad_in_secs = time.perf_counter() - time_grad_t0
+        print_with_rank_and_timestamp(f"Finished gradient computation [{time_grad_in_secs:.2} secs]", fabric.global_rank)
         flush_io_streams()
+        profile_grad_times.append(time_grad_in_secs)
+        if profile_grad_params is not None:
+            profile_path, use_new_cache, thresh, num_steps = profile_grad_params
+            with profile_path.open("w") as fp:
+                writer = csv.writer(fp, delimiter=",")
+                writer.writerow(["use_new_cache", "max_match_trials_pack_arg", "time_secs"])
+                prefix = [use_new_cache, thresh]
+                for time_secs in profile_grad_times:
+                    writer.writerow(prefix + [time_secs])
+            if len(profile_grad_times) >= num_steps:
+                print(f"Done {num_steps} updates. Stopping.")
+                exit(0)
 
         if record_gpu_memory_snapshots is not None and record_gpu_memory_kind != 2:
             # Stop recording and store snapshot. For kind 0, this is the single
@@ -756,7 +790,7 @@ def fit(
                 f"Epoch {metrics['epoch']} | iter {metrics['iter']} step {metrics['step']} |"
                 f" loss train: {metrics['loss']:.3f},"
                 f" val: {val_loss} |"
-                f" iter time: {metrics['iter_time'] * 1000:.2f} ms"
+                f" iter time: {metrics['iter_time']:.2f} s"
                 f"{' (step)' if not is_accumulating else ''}"
             )
             fabric.log_dict(metrics, step=state["iter_num"])

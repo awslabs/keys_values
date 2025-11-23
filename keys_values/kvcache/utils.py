@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from enum import unique, Enum
-import gc
 from typing import Iterable, Optional, Iterator, Union, List, Tuple, Dict
 
 import torch
@@ -38,11 +37,6 @@ def wrap_tqdm_if_verbose(
         return tqdm(iterator, total=total)
     else:
         return tqdm(iterator)
-
-
-def expand_index(index: torch.Tensor, head_size: int) -> torch.Tensor:
-    assert index.ndim == 3
-    return index.unsqueeze(-1).expand(-1, -1, -1, head_size)
 
 
 _PRECISION_TO_DTYPE = {
@@ -202,4 +196,4 @@ def storage_id(x: torch.Tensor) -> int:
         ID based on the underlying storage
 
     """
-    return x.storage().data_ptr()
+    return x.untyped_storage().data_ptr()
