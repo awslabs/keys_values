@@ -404,9 +404,8 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             # Update buffers
             self.kv_buffers = DefaultKeysAndValues(key_buffer_new, value_buffer_new)
             self.current_length += num
-        # Update buffers
-        q_len = query.shape[2]
-        return attn_output.transpose(1, 2).reshape(self.batch_size, q_len, -1)
+
+        return attn_output.transpose(1, 2).reshape(self.batch_size, num, -1)
 
     def _append_annotation(self, annotation: NodeAnnotation):
         self._node_annotations.nodes.append(annotation)

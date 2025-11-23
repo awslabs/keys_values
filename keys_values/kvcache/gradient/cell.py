@@ -24,6 +24,7 @@ from keys_values.attention import DefaultKeysAndValues
 from keys_values.kvcache.base import KVCacheReplayLog
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.train_attn_weights_replay import TrainingAttnWeightsReplayCache
+from keys_values.kvcache.gradient.train_attn_weights_replay_new import TrainingAttnWeightsReplayCacheNew
 from keys_values.kvcache.stack_layers import CellBlocks
 
 
@@ -98,6 +99,7 @@ class CellComputation(nn.Module):
         autograd_hooks: Optional[CellComputationAutogradHooks],
         replay_logs: List[KVCacheReplayLog],
         batch_size: int,
+        use_new_cache: bool = False,
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
         **cache_kwargs,
     ):
@@ -144,6 +146,7 @@ class CellComputation(nn.Module):
                 idx.shape[-1] for idx in replay_logs[0].token_chunks
             )
         )
+        self._use_new_cache = use_new_cache
         self._debug_tensors = debug_tensors  # DEBUG
 
     @staticmethod
@@ -185,17 +188,23 @@ class CellComputation(nn.Module):
         num_chunks: int,
         debug_print_annotations: bool,
     ) -> List[TrainingAttnWeightsReplayCache]:
-        start_token_pos = self._token_pos_per_chunk[first_chunk_idx]
         first_layer_idx = self.model_part.first_layer_idx
+        more_kwargs = dict(
+            start_token_pos=self._token_pos_per_chunk[first_chunk_idx],
+            num_chunks=num_chunks,
+            debug_tensors=self._debug_tensors,
+            debug_print_annotations=debug_print_annotations,
+        )
+        if self._use_new_cache:
+            cache_class = TrainingAttnWeightsReplayCacheNew
+        else:
+            cache_class = TrainingAttnWeightsReplayCache
         return [
-            TrainingAttnWeightsReplayCache(
+            cache_class(
                 **kwargs,
                 replay_log=replay_log,
-                start_token_pos=start_token_pos,
                 layer_idx=first_layer_idx + rel_block_idx,
-                num_chunks=num_chunks,
-                debug_tensors=self._debug_tensors,
-                debug_print_annotations=debug_print_annotations,
+                **more_kwargs,
             )
             for rel_block_idx, (replay_log, kwargs) in enumerate(
                 zip(self.replay_logs, self._train_cache_kwargs)

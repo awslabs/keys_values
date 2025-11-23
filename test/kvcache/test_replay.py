@@ -11,9 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from functools import partial
+from itertools import product
 import random
 from typing import Optional, Dict, Any
-from functools import partial
 
 import torch
 import pytest
@@ -30,6 +31,9 @@ from keys_values.kvcache.gradient.inference_replay import (
 )
 from keys_values.kvcache.gradient.train_attn_weights_replay import (
     TrainingAttnWeightsReplayCache,
+)
+from keys_values.kvcache.gradient.train_attn_weights_replay_new import (
+    TrainingAttnWeightsReplayCacheNew,
 )
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
@@ -227,9 +231,15 @@ def args_training_replay():
 
 
 @pytest.mark.parametrize(
-    "cache_name, device, cache_kwargs, tol_kwargs", args_training_replay(),
+    "cache_name, device, cache_kwargs, tol_kwargs, replay_class",
+    [
+        a + (b,) for a, b in product(
+            args_training_replay(),
+            [TrainingAttnWeightsReplayCache, TrainingAttnWeightsReplayCacheNew],
+        )
+    ],
 )
-def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs):
+def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, replay_class):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -304,7 +314,7 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs):
             # Create training replay cache. We use the buffer of `kv_cache`
             # here.
             replay_log = get_replay_logs(model)[0]
-            tr_cache = TrainingAttnWeightsReplayCache(
+            tr_cache = replay_class(
                 config=config,
                 batch_size=batch_size,
                 cache_length=cache_length,

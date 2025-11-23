@@ -77,8 +77,8 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             raise ValueError(
                 "This replay cache does not support "
                 "config.attention_logit_softcapping being used, since this "
-                "forbids the use of fast SDPA kernels. Choose a model without "
-                "this."
+                "forbids the use of fast SDPA kernels. Please choose a "
+                "different model."
             )
         super().__init__(
             config=config,
@@ -118,7 +118,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         if sliding_window_size is not None:
             print(
                 "WARNING: config.sliding_window_size is used. This means that "
-                "naive SDPA kernels have to be used, for which computations "
+                "a naive SDPA kernel has to be used, for which computations "
                 "can be slow. Consider switching to a model which does not use "
                 "config.sliding_window_size."
             )
@@ -308,8 +308,9 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 index=index_e,
                 debug_msg="scatter-after",
             )
-            # Update buffers
-            self.kv_buffers = DefaultKeysAndValues(key_buffer_new, value_buffer_new)
+            self.kv_buffers = DefaultKeysAndValues(
+                key_buffer_new, value_buffer_new,
+            )
             if update_result is not None and update_result.num1 == 0:
                 # Increment in round-robin fashion (only if num <= grace_period)
                 prefix = update_result.prefix
@@ -351,8 +352,9 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 index=index,
                 debug_msg=debug_msg,
             )
-            # Update buffers
-            self.kv_buffers = DefaultKeysAndValues(key_buffer_new, value_buffer_new)
+            self.kv_buffers = DefaultKeysAndValues(
+                key_buffer_new, value_buffer_new,
+            )
             self.current_length += num
 
         # SDPA computation
@@ -364,8 +366,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             return_attn_weights=False,
             **self._sdpa_kwargs,
         )
-        q_len = query.shape[2]
-        return attn_outputs.reshape(self.batch_size, q_len, -1)
+        return attn_outputs.reshape(self.batch_size, num, -1)
 
     def _append_annotation(self, annotation: NodeAnnotation):
         self._node_annotations.nodes.append(annotation)
