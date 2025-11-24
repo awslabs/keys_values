@@ -458,6 +458,11 @@ def test_gradient_new_and_old_spda(
     shape = (batch_size, seq_len, config.n_embd)
     for x in layer_inputs.values():
         assert x.shape == shape
+    model_part = DefaultCellBlocks(
+        model=gpt_model,
+        first_layer_idx=0,
+        num_layers=config.n_layer,
+    )
 
     # Use `TrainingAttnWeightsReplayCache` (old SDPA)
     # Setup gradient accumulator
@@ -488,11 +493,6 @@ def test_gradient_new_and_old_spda(
     )
     below_gradients_old = torch.zeros_like(head_gradients)
     print(f"\nGradient accumulation with old TrainingAttnWeightsReplayCache: {chunks_per_cell}")
-    model_part = DefaultCellBlocks(
-        model=gpt_model,
-        first_layer_idx=0,
-        num_layers=config.n_layer,
-    )
     accumulator_old.run(
         model_part=model_part,
         get_inputs_slice=make_get_inputs_slice(inputs),
@@ -522,7 +522,7 @@ def test_gradient_new_and_old_spda(
         autograd_hooks=autograd_hooks_new,
         qname=qname,
         verbose=VerbosityLevels.SOME,
-        train_cache_kwargs=dict(use_new_cache=False),
+        train_cache_kwargs=dict(use_new_cache=True),
     )
     accumulator_new._batch_size = batch_size
     accumulator_new._initialize_internal(
@@ -544,7 +544,6 @@ def test_gradient_new_and_old_spda(
     print(f"Number of gradients: {len(param_gradients_new)}")
     below_gradients_new = below_gradients_new.to(torch.device("cpu"))
 
-
     logs = accumulator_new.annotation_usage_logs()
     print("\nAnnotation usage logs (per cell):")
     for first_chunk_idx, annotation_usage in sorted(
@@ -558,7 +557,7 @@ def test_gradient_new_and_old_spda(
     for name, value in param_gradients_old.items():
         value_comp = param_gradients_new.get(name)
         if value_comp is None:
-            raise IndexError(f"name = {name} is in param_gradients, but not in param_gradients_comp")
+            raise IndexError(f"name = {name} is in param_gradients_old, but not in param_gradients_new")
         print(f"Comparing gradient for {name}")
         torch.testing.assert_close(value, value_comp)
     print("Comparing below_gradients:")
