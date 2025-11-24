@@ -541,7 +541,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             # scatter case
             index = self.replay_log.extract_index(
                 self._next_token_pos, num, **index_kwargs
-            )
+            ).detach()
             # Note: We want `update_result.positions` to be a tensor, not a
             # tuple, so `positions_is_tensor=True`
             update_result = update_token_positions(

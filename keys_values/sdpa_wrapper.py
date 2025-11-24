@@ -101,7 +101,7 @@ def scaled_dot_product_attention(
         if token_positions.shape != key.shape[:-1]:
             raise ValueError(f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible")
         sort_index = _extend_index(
-            torch.argsort(token_positions, dim=-1), head_size,
+            torch.argsort(token_positions, dim=-1).detach(), head_size,
         )
         key = key.gather(2, sort_index)
         value = value.gather(2, sort_index)

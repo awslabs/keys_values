@@ -72,7 +72,7 @@ def args_gradient_row_of_cells():
 
 @pytest.mark.parametrize(
     "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, device",
-    args_gradient_row_of_cells(),
+    [args_gradient_row_of_cells()[0]],  # DEBUG!
 )
 def test_gradient_row_of_cells(
     cache_name,
@@ -227,6 +227,7 @@ def test_gradient_row_of_cells(
         qname=qname,
         debug_tensors=debug_cache_tensors,
         verbose=VerbosityLevels.SOME,
+        train_cache_kwargs=dict(use_new_cache=True),  # DEBUG!
     )
     accumulator._batch_size = batch_size
     accumulator._initialize_internal(

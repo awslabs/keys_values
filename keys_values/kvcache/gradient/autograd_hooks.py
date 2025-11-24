@@ -21,7 +21,7 @@ from litgpt.config import Config
 
 from keys_values.kvcache.base import KVCacheReplayLog
 from keys_values.kvcache.gradient.cleanup import ArraysForCleanup
-from keys_values.kvcache.utils import shape_to_tuple
+from keys_values.kvcache.utils import shape_to_tuple, expand_index
 
 
 _ANNOTATION_KIND_VALUES = {
@@ -175,6 +175,15 @@ class UnmatchedPackHookArgument:
 class PackArgumentAsAnnotation:
     annot: NodeAnnotation
     target_dtype: Optional[torch.dtype]
+
+
+@dataclass(frozen=True)
+class PackArgumentAsIndex:
+    index_3d: torch.Tensor
+    final_dim: int
+
+
+PackedArgumentType = Union[PackArgumentAsAnnotation, PackArgumentAsIndex, torch.Tensor]
 
 
 @dataclass(frozen=True)
@@ -393,7 +402,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._pack_arguments = None
         # Contains entry for every match of pack argument to annotation. This is
         # worked off in :meth:`unpack_hook`
-        self._annotation_for_id = None
+        self._packed_arg_for_id = None
         # ID assigned to next pack hook argument
         self._next_id = None
         self._num_matched_annotations = None
@@ -445,9 +454,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._node_annotations.clear()
         self._initialize_shapes(cache_lengths, first_chunk_idx)
         self._pack_arguments: List[PackHookArgument] = []
-        self._annotation_for_id: Dict[
-            int, Union[PackArgumentAsAnnotation, torch.Tensor]
-        ] = dict()
+        self._packed_arg_for_id: Dict[int, PackedArgumentType] = dict()
         self._next_id = 0
         self._num_matched_annotations = 0
         self._unmatched_pack_args = []
@@ -468,8 +475,8 @@ class CellComputationAutogradHooks(AutogradHooks):
         self.first_chunk_idx = None
         self._shapes_to_match = None
         self._pack_arguments = None
-        if self._annotation_for_id is not None:
-            self._annotation_for_id.clear()
+        if self._packed_arg_for_id is not None:
+            self._packed_arg_for_id.clear()
         self._next_id = None
         self._num_matched_annotations = None
         self._unmatched_pack_args = None
@@ -571,9 +578,18 @@ class CellComputationAutogradHooks(AutogradHooks):
         # Pack argument if shape is matched
         new_id = self._pack_argument(x)
         if new_id is not None:
-            # Try to match annotations: We need to remove entries from
-            # `_pack_arguments` as soon as possible
-            self._match_annotations()
+            # Try to pack as broadcast-extended index
+            packed_index = self._pack_4d_index(x)
+            if packed_index is not None:
+                # Broadcast-extended index is packed without annotation
+                self._packed_arg_for_id[new_id] = packed_index
+                if self.debug_print_annotations:
+                    print(f"Pack broadcast-extended index: {x.shape}")
+                del self._pack_arguments[-1]
+            else:
+                # Try to match annotations: We need to remove entries from
+                # `_pack_arguments` as soon as possible
+                self._match_annotations()
             return new_id
         else:
             if self._arrays_cleanup is not None:
@@ -588,7 +604,7 @@ class CellComputationAutogradHooks(AutogradHooks):
             self._match_annotations(flush_pack_args=True)
         mark_cleanup = False
         if isinstance(x, int):
-            value = self._annotation_for_id.pop(x)
+            value = self._packed_arg_for_id.pop(x)
             if isinstance(value, PackArgumentAsAnnotation):
                 # Reconstruct buffer from annotation for successor
                 target_dtype = value.target_dtype
@@ -610,6 +626,8 @@ class CellComputationAutogradHooks(AutogradHooks):
                     x = x.to(dtype=target_dtype)
                 if self._debug_test_args:
                     self._debug_log_args.append((x, value))
+            elif isinstance(value, PackArgumentAsIndex):
+                 x = expand_index(value.index_3d, value.final_dim)
             else:
                 # Unmatched pack argument
                 assert isinstance(value, torch.Tensor)  # Sanity check
@@ -692,9 +710,9 @@ class CellComputationAutogradHooks(AutogradHooks):
         if annot_keys:
             rem_pack_args = []  # Collect unmatched pack args
             for pack_arg in self._pack_arguments:
+                parg_matched_to = None
                 parg_shape = pack_arg.shape
                 parg_dtype = pack_arg.x.dtype
-                parg_matched_to = None
                 for i, annot_key in enumerate(annot_keys):
                     if annot_key.shape == parg_shape:
                         # Shapes matches
@@ -730,7 +748,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                                         annot=annotation,
                                         target_dtype=parg_dtype if try_with_cast else None,
                                     )
-                                    self._annotation_for_id[
+                                    self._packed_arg_for_id[
                                         pack_arg.id
                                     ] = value
                                     if self.debug_print_annotations:
@@ -739,7 +757,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                                     # Pack hook arg matched against "ignore"
                                     # annotation is treated like an unmatched
                                     # pack arg, but is not counted against them
-                                    self._annotation_for_id[
+                                    self._packed_arg_for_id[
                                         pack_arg.id
                                     ] = pack_arg.x
                                     if self.debug_print_annotations:
@@ -761,7 +779,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         if flush_pack_args:
             # Flush all remaining pack arguments (these will not be packed)
             for pack_arg in self._pack_arguments:
-                self._annotation_for_id[pack_arg.id] = pack_arg.x
+                self._packed_arg_for_id[pack_arg.id] = pack_arg.x
                 self._unmatched_pack_args.append(
                     UnmatchedPackHookArgument(
                         id=pack_arg.id,
@@ -815,6 +833,30 @@ class CellComputationAutogradHooks(AutogradHooks):
         else:
             part_of_x = x[:, :, -1:, :]
         return part_of_x
+
+    @staticmethod
+    def _pack_4d_index(x: torch.Tensor) -> Optional[PackArgumentAsIndex]:
+        """
+        Helper for :meth:`_match_annotations`. `x` must be 4D of integer
+        type. The assumption is that the final dimension is
+        broadcast-extended. We run a (randomized) test for this (full test is
+        too expensive). If positive, we return a packed version, otherwise
+        `None`.
+
+        """
+        if x.ndim != 4 or x.dtype not in (torch.int64, torch.int32, torch.int):
+            return None
+        final_dim = x.shape[-1]
+        rem_size = x.numel() // final_dim
+        check_ind = torch.randperm(rem_size)[:5].to(device=x.device)
+        arg1 = x.view(-1, final_dim)[check_ind, :]
+        arg2 = arg1[:, 0].unsqueeze(-1).expand(-1, final_dim)
+        if arg1.equal(arg2):
+            return PackArgumentAsIndex(
+                index_3d=x[..., 0].clone(), final_dim=final_dim,
+            )
+        else:
+            return None
 
     def _transform_annotated_tensor(
         self,
