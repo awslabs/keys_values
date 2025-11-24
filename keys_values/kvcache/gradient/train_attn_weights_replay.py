@@ -35,7 +35,8 @@ from keys_values.kvcache.gradient.sdpa_op import (
     KVCacheCatUpdateAndSDPAFunction,
     KVCacheScatterUpdateAndSDPAFunction,
 )
-from keys_values.kvcache.utils import expand_index, shape_to_tuple
+from keys_values.kvcache.utils import shape_to_tuple
+from keys_values.utils import expand_index
 
 
 class TrainingAttnWeightsReplayCache(DefaultKVCache):

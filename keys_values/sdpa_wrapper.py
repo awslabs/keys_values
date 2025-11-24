@@ -11,16 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional, Union, Tuple
+from typing import List, Optional, Union, Tuple, Callable
 
 import torch
 from torch.nn.attention import SDPBackend
 
 from keys_values.attention_utils import pytorch_scaled_dot_product_attention
-
-
-def _extend_index(index: torch.Tensor, head_size: int) -> torch.Tensor:
-    return index.unsqueeze(-1).expand(-1, -1, -1, head_size)
+from keys_values.utils import expand_index
 
 
 def scaled_dot_product_attention(
@@ -100,7 +97,7 @@ def scaled_dot_product_attention(
         # (see `sdpa_wrapper_old` module).
         if token_positions.shape != key.shape[:-1]:
             raise ValueError(f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible")
-        sort_index = _extend_index(
+        sort_index = expand_index(
             torch.argsort(token_positions, dim=-1).detach(), head_size,
         )
         key = key.gather(2, sort_index)

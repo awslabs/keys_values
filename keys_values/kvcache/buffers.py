@@ -21,10 +21,10 @@ from litgpt.config import Config
 from keys_values.attention import KeysAndValues, DefaultKeysAndValues
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.utils import (
-    expand_index,
     bitsize_of,
     bits_for_torch_dtype,
 )
+from keys_values.utils import expand_index
 
 
 @dataclass(frozen=True)

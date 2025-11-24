@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import random
-import math
-from typing import Optional
-from itertools import product
 from dataclasses import replace
+from itertools import product
+import math
+import random
+from typing import Optional
 
 import torch
 import pytest
@@ -72,7 +72,7 @@ def args_gradient_row_of_cells():
 
 @pytest.mark.parametrize(
     "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, device",
-    [args_gradient_row_of_cells()[0]],  # DEBUG!
+    args_gradient_row_of_cells(),
 )
 def test_gradient_row_of_cells(
     cache_name,
@@ -206,6 +206,7 @@ def test_gradient_row_of_cells(
             batch_size=batch_size,
             debug_test_args=debug_test_args,
         )
+        #autograd_hooks.debug_print_annotations = True
     elif use_monitoring_autograd_hooks:
         autograd_hooks = MonitorCellComputationAutogradHooks(
             config=config,
@@ -227,7 +228,6 @@ def test_gradient_row_of_cells(
         qname=qname,
         debug_tensors=debug_cache_tensors,
         verbose=VerbosityLevels.SOME,
-        train_cache_kwargs=dict(use_new_cache=True),  # DEBUG!
     )
     accumulator._batch_size = batch_size
     accumulator._initialize_internal(
@@ -319,16 +319,12 @@ def test_gradient_row_of_cells(
     if use_autograd_hooks:
         logs = accumulator_comp.annotation_usage_logs() if hooks_for_comp else accumulator.annotation_usage_logs()
         print("\nAnnotation usage logs (per cell):")
-        all_args_matched = []
         for first_chunk_idx, annotation_usage in sorted(
             list(logs.items()), reverse=True,
         ):
             print(f"\nCell(first_chunk_idx {first_chunk_idx}):")
             print(annotation_usage.report())
-            all_args_matched.append(
-                len(annotation_usage.unmatched_pack_args) == 0
-            )
-        assert all(all_args_matched)
+            assert len(annotation_usage.unmatched_pack_args) == 0
 
     print("\nComparing gradients")
     for name, value in param_gradients.items():
@@ -350,3 +346,220 @@ def test_gradient_row_of_cells(
             key=lambda x: x[1], reverse=True,
         ):
             print(f"{shape} [{numel}]: {count}")
+
+
+@pytest.mark.parametrize(
+    "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, device",
+    args_gradient_row_of_cells(),
+)
+def test_gradient_new_and_old_spda(
+    cache_name,
+    cache_kwargs,
+    cache_lengths,
+    tokens_per_chunk,
+    chunks_per_cell,
+    device,
+):
+    seed = 31415927
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    print(f"cache_name={cache_name}, cache_kwargs={cache_kwargs}")
+    print(f"cache_length={cache_lengths}\ntokens_per_chunk={tokens_per_chunk}\nchunks_per_cell={chunks_per_cell}")
+    dtype = torch.float32
+    torch.set_default_dtype(dtype)  # Set default dtype
+
+    qname = "torch-quantized8"
+    batch_size = 5
+    n_layer = len(cache_lengths)
+    n_head = 8
+    n_query_groups = 4
+    head_size = 64
+    vocab_size = 48
+    num_chunks = len(tokens_per_chunk)
+    block_size = sum(tokens_per_chunk) + 16
+    assert sum(chunks_per_cell) == num_chunks
+
+    layer_inputs = dict()
+
+    def start_of_layer_hook(x: torch.Tensor, l_ix: int, input_pos: Optional[int]):
+        if l_ix in (0, n_layer):
+            assert input_pos is not None
+            current = layer_inputs.get(l_ix)
+            if current is None:
+                assert input_pos == 0
+                layer_inputs[l_ix] = x
+            else:
+                assert input_pos == current.shape[1]
+                layer_inputs[l_ix] = torch.cat([current, x], dim=1)
+
+    # Create model and data
+    config = Config(
+        n_layer=n_layer,
+        n_head=n_head,
+        n_query_groups=n_query_groups,
+        n_embd=n_head * head_size,
+        block_size=block_size,
+        vocab_size=vocab_size,
+        rotary_percentage=1,
+    )
+    params = KVCacheParams.from_config(
+        config=config,
+        max_batch_size=batch_size,
+        cache_length=cache_lengths[0],
+        device=device,
+        dtype=dtype,
+    )
+    gpt_model = GPT(config).to(device=device)
+    gpt_model.set_start_of_layer_hook(start_of_layer_hook)
+    token_idxs = torch.randint(
+        low=0,
+        high=config.vocab_size,
+        size=(batch_size, config.block_size),
+        device=device,
+    )
+    kv_caches = []
+    for block_idx, cache_length in enumerate(cache_lengths):
+        kv_cache = create_kv_cache(
+            name=cache_name + "-" + qname,
+            params=replace(params, cache_length=cache_length),
+            block_idx=block_idx,
+            **cache_kwargs,
+        )
+        kv_cache.switch_replay_logging(True)
+        kv_caches.append(kv_cache)
+    gpt_model.assign_kv_caches(kv_caches)
+
+    # Forward pass in inference mode. This is assembling the replay log and
+    # also populates `layer_inputs`
+    print("\nForward inference pass, recording replay logs and layer inputs")
+    with torch.no_grad():
+        input_pos = 0
+        y_parts = []
+        for num in tokens_per_chunk:
+            y_parts.append(
+                gpt_model(
+                    token_idxs[:, input_pos:(input_pos + num)],
+                    input_pos=input_pos,
+                )
+            )
+            input_pos += num
+        y = torch.cat(y_parts, dim=1)
+
+    gpt_model.set_start_of_layer_hook(None)   # Do not record layer inputs from now on
+    replay_logs = get_replay_logs(gpt_model)
+    assert len(replay_logs) == n_layer
+    # Checks on replay logs
+    seq_len = sum(tokens_per_chunk)
+    for replay_log in replay_logs:
+        assert len(replay_log) == seq_len
+        assert len(replay_log.token_chunks) == num_chunks
+    # Check on layer inputs
+    assert set(layer_inputs.keys()) == {0, n_layer}
+    shape = (batch_size, seq_len, config.n_embd)
+    for x in layer_inputs.values():
+        assert x.shape == shape
+
+    # Use `TrainingAttnWeightsReplayCache` (old SDPA)
+    # Setup gradient accumulator
+    autograd_hooks_old = CellComputationAutogradHooks(
+        config=config,
+        batch_size=batch_size,
+    )
+    accumulator_old = GradientAccumulator(
+        config=config,
+        autograd_hooks=autograd_hooks_old,
+        qname=qname,
+        verbose=VerbosityLevels.SOME,
+        train_cache_kwargs=dict(use_new_cache=False),
+    )
+    accumulator_old._batch_size = batch_size
+    accumulator_old._initialize_internal(
+        replay_logs, chunks_per_cell, weights_dtype=params.dtype,
+    )
+    # Replace KV cache checkpoint objects by such which do not quantize
+    # the checkpoints. This allows for simple gradient testing
+    exchange_kv_cache_checkpoints(accumulator_old)
+    # Run gradient accumulation
+    gpt_model.zero_grad()  # Reset gradients to 0
+    inputs = layer_inputs[0]
+    # We could compute real head gradients from the outputs
+    head_gradients = torch.randn(
+        *inputs.shape, device=inputs.device, dtype=inputs.dtype
+    )
+    below_gradients_old = torch.zeros_like(head_gradients)
+    print(f"\nGradient accumulation with old TrainingAttnWeightsReplayCache: {chunks_per_cell}")
+    model_part = DefaultCellBlocks(
+        model=gpt_model,
+        first_layer_idx=0,
+        num_layers=config.n_layer,
+    )
+    accumulator_old.run(
+        model_part=model_part,
+        get_inputs_slice=make_get_inputs_slice(inputs),
+        get_head_gradients_slice=make_get_inputs_slice(head_gradients),
+        write_head_gradients_slice=make_write_outputs_slice(below_gradients_old),
+    )
+    param_gradients_old = copy_gradients(gpt_model, device=torch.device("cpu"))
+    print(f"Number of gradients: {len(param_gradients_old)}")
+    below_gradients_old = below_gradients_old.to(torch.device("cpu"))
+
+    logs = accumulator_old.annotation_usage_logs()
+    print("\nAnnotation usage logs (per cell):")
+    for first_chunk_idx, annotation_usage in sorted(
+        list(logs.items()), reverse=True,
+    ):
+        print(f"\nCell(first_chunk_idx {first_chunk_idx}):")
+        print(annotation_usage.report())
+        assert len(annotation_usage.unmatched_pack_args) == 0
+
+    # Use `TrainingAttnWeightsReplayCacheNew` (new SDPA)
+    autograd_hooks_new = CellComputationAutogradHooks(
+        config=config,
+        batch_size=batch_size,
+    )
+    accumulator_new = GradientAccumulator(
+        config=config,
+        autograd_hooks=autograd_hooks_new,
+        qname=qname,
+        verbose=VerbosityLevels.SOME,
+        train_cache_kwargs=dict(use_new_cache=False),
+    )
+    accumulator_new._batch_size = batch_size
+    accumulator_new._initialize_internal(
+        replay_logs, chunks_per_cell, weights_dtype=params.dtype,
+    )
+    # Replace KV cache checkpoint objects by such which do not quantize
+    # the checkpoints. This allows for simple gradient testing
+    exchange_kv_cache_checkpoints(accumulator_new)
+    gpt_model.zero_grad()
+    below_gradients_new = torch.zeros_like(head_gradients)
+    print(f"\nGradient accumulation with old TrainingAttnWeightsReplayCache: {chunks_per_cell}")
+    accumulator_new.run(
+        model_part=model_part,
+        get_inputs_slice=make_get_inputs_slice(inputs),
+        get_head_gradients_slice=make_get_inputs_slice(head_gradients),
+        write_head_gradients_slice=make_write_outputs_slice(below_gradients_new),
+    )
+    param_gradients_new = copy_gradients(gpt_model, device=torch.device("cpu"))
+    print(f"Number of gradients: {len(param_gradients_new)}")
+    below_gradients_new = below_gradients_new.to(torch.device("cpu"))
+
+
+    logs = accumulator_new.annotation_usage_logs()
+    print("\nAnnotation usage logs (per cell):")
+    for first_chunk_idx, annotation_usage in sorted(
+        list(logs.items()), reverse=True,
+    ):
+        print(f"\nCell(first_chunk_idx {first_chunk_idx}):")
+        print(annotation_usage.report())
+        assert len(annotation_usage.unmatched_pack_args) <= 4
+
+    print("\nComparing gradients")
+    for name, value in param_gradients_old.items():
+        value_comp = param_gradients_new.get(name)
+        if value_comp is None:
+            raise IndexError(f"name = {name} is in param_gradients, but not in param_gradients_comp")
+        print(f"Comparing gradient for {name}")
+        torch.testing.assert_close(value, value_comp)
+    print("Comparing below_gradients:")
+    torch.testing.assert_close(below_gradients_old, below_gradients_new)

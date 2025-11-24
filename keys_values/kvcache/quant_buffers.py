@@ -25,11 +25,11 @@ from keys_values.kvcache.buffers import (
 )
 from keys_values.kvcache.quantize.quantization import Quantizer
 from keys_values.kvcache.utils import (
-    expand_index,
     smallest_covering_ranges,
     bitsize_of,
     bits_for_torch_dtype,
 )
+from keys_values.utils import expand_index
 
 
 class QuantizedKVCacheBuffers(KVCacheBuffers):

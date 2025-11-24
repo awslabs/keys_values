@@ -17,6 +17,8 @@ from pathlib import Path
 import time
 from typing import List, Dict, Any
 
+import torch
+
 
 def _append_results_to_csv(
     results: List[Dict[str, Any]],
@@ -53,3 +55,8 @@ def append_results_to_csv(
         if _append_results_to_csv(results, result_path):
             break
         time.sleep(sleep_time)
+
+
+def expand_index(index: torch.Tensor, head_size: int) -> torch.Tensor:
+    assert index.ndim == 3
+    return index.unsqueeze(-1).expand(-1, -1, -1, head_size)

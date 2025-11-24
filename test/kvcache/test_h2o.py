@@ -30,7 +30,7 @@ from keys_values.kvcache.test_utils import (
     random_args_cache_forward,
     range_from_args,
 )
-from keys_values.kvcache.utils import expand_index
+from keys_values.utils import expand_index
 
 
 @pytest.mark.parametrize(

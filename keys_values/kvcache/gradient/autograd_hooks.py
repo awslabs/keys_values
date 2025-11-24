@@ -21,8 +21,8 @@ from litgpt.config import Config
 
 from keys_values.kvcache.base import KVCacheReplayLog
 from keys_values.kvcache.gradient.cleanup import ArraysForCleanup
-from keys_values.kvcache.utils import shape_to_tuple, expand_index
-
+from keys_values.kvcache.utils import shape_to_tuple, storage_id
+from keys_values.utils import expand_index
 
 _ANNOTATION_KIND_VALUES = {
     "cat-key",
@@ -358,6 +358,22 @@ class CellComputationAutogradHooks(AutogradHooks):
         `a = gather(x_new, index[:num2])`
         `x = scatter(x_new, cat(index, positions), cat(delta_rev, a))`
 
+    Dealing with the same tensor passed to :meth:`pack_hook` multiple times:
+
+    This happens indeed. We use `_pack_hook_arg_to_id`, `_id_counts`, and
+    `_id_to_unpacked` to deal with this:
+
+    * In :meth:`pack_hook`, we map `storage_id(x)` to ID for args which are
+      not duplicates. We also identify duplicates this way. For each `x`
+      appearing as pack hook argument at least twice, we store a counter
+      in `_id_counts` (values there are >= 2). For duplicates, the same ID
+      is returned.
+    * In :meth:`unpack_hook`, we maintain decoded (and returned) tensors in
+      `_id_to_unpacked` for every ID which has `_id_count` entry. This way, if
+      the same ID is passed to :meth:`unpack_hook` again, we just return the
+      tensor from `_id_to_unpacked`. By reducing the `_id_count` counter, we
+      know when the tensor in `_id_to_unpacked` can be removed again.
+
     Logging:
 
     If `log_all_shapes` is set, we count the shapes of all nodes, as passed to
@@ -403,6 +419,19 @@ class CellComputationAutogradHooks(AutogradHooks):
         # Contains entry for every match of pack argument to annotation. This is
         # worked off in :meth:`unpack_hook`
         self._packed_arg_for_id = None
+        # The following 3 members are used to deal with objects which appear
+        # as :meth:`pack_hook` arguments multiple times (while also matching
+        # a shape we track).
+        # Maps `storage_id(x)` for every :meth:`pack_hook` argument to ID:
+        self._pack_hook_arg_to_id = None
+        # Counts how often an ID is used to represent a pack hook argument
+        # (only for IDs used >1 times):
+        self._id_counts = None
+        # Maintained along calls to :meth:`unpack_hook`. Whenever an ID is in
+        # `_id_counts`, its unpacked tensor is stored here, to be returned when
+        # the ID comes up again. Every time, `_id_counts` is reduced, and the
+        # tensor is deleted once the count drops to zero.
+        self._id_to_unpacked = None
         # ID assigned to next pack hook argument
         self._next_id = None
         self._num_matched_annotations = None
@@ -455,6 +484,9 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._initialize_shapes(cache_lengths, first_chunk_idx)
         self._pack_arguments: List[PackHookArgument] = []
         self._packed_arg_for_id: Dict[int, PackedArgumentType] = dict()
+        self._pack_hook_arg_to_id: Dict[int, int] = dict()
+        self._id_counts: Dict[int, int] = dict()
+        self._id_to_unpacked: Dict[int, torch.Tensor] = dict()
         self._next_id = 0
         self._num_matched_annotations = 0
         self._unmatched_pack_args = []
@@ -575,6 +607,14 @@ class CellComputationAutogradHooks(AutogradHooks):
                 extra += f"-str{x.stride()}"
             x_key += (extra,)
             self._shapes_counter[x_key] += 1
+        # Did we see this already?
+        prev_id = self._pack_hook_arg_to_id.get(storage_id(x))
+        if prev_id is not None:
+            if prev_id in self._id_counts:
+                self._id_counts[prev_id] += 1
+            else:
+                self._id_counts[prev_id] = 2
+            return prev_id
         # Pack argument if shape is matched
         new_id = self._pack_argument(x)
         if new_id is not None:
@@ -587,6 +627,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                     print(f"Pack broadcast-extended index: {x.shape}")
                 del self._pack_arguments[-1]
             else:
+                self._pack_hook_arg_to_id[storage_id(x)] = new_id
                 # Try to match annotations: We need to remove entries from
                 # `_pack_arguments` as soon as possible
                 self._match_annotations()
@@ -604,35 +645,52 @@ class CellComputationAutogradHooks(AutogradHooks):
             self._match_annotations(flush_pack_args=True)
         mark_cleanup = False
         if isinstance(x, int):
-            value = self._packed_arg_for_id.pop(x)
-            if isinstance(value, PackArgumentAsAnnotation):
-                # Reconstruct buffer from annotation for successor
-                target_dtype = value.target_dtype
-                value = value.annot
-                kind = value.kind
-                buffer = self._node_annotations.get_final(value.layer_idx, kind)
-                length = value.shape[2]
-                cache_length = self._get_cache_length(value.layer_idx)
-                if value.is_scatter:
-                    self._unpack_scatter(buffer, value)  # Overwrites `buffer`
-                    assert length == cache_length  # Sanity check
-                # Buffer stays the same for "cat", but a smaller slice is
-                # returned
-                x = self._transform_annotated_tensor(
-                    buffer=buffer[:, :, :length, :],
-                    kind=kind,
-                )
-                if target_dtype is not None and x.dtype != target_dtype:
-                    x = x.to(dtype=target_dtype)
-                if self._debug_test_args:
-                    self._debug_log_args.append((x, value))
-            elif isinstance(value, PackArgumentAsIndex):
-                 x = expand_index(value.index_3d, value.final_dim)
+            idd = x
+            # Maybe we decoded (unpacked) this one before?
+            if idd in self._id_to_unpacked:
+                if self._id_counts[idd] <= 0:
+                    raise ValueError(f"Count _id_count for idd={idd} is zero, but still appears for unpacking!")
+                # Just return the decoded object again
+                x = self._id_to_unpacked[idd]
+                self._id_counts[idd] -= 1
             else:
-                # Unmatched pack argument
-                assert isinstance(value, torch.Tensor)  # Sanity check
-                x = value
-                mark_cleanup = True
+                value = self._packed_arg_for_id.pop(idd)
+                check_for_id = False
+                if isinstance(value, PackArgumentAsAnnotation):
+                    # Reconstruct buffer from annotation for successor
+                    target_dtype = value.target_dtype
+                    value = value.annot
+                    kind = value.kind
+                    buffer = self._node_annotations.get_final(value.layer_idx, kind)
+                    length = value.shape[2]
+                    cache_length = self._get_cache_length(value.layer_idx)
+                    if value.is_scatter:
+                        self._unpack_scatter(buffer, value)  # Overwrites `buffer`
+                        assert length == cache_length  # Sanity check
+                    # Buffer stays the same for "cat", but a smaller slice is
+                    # returned
+                    x = self._transform_annotated_tensor(
+                        buffer=buffer[:, :, :length, :],
+                        kind=kind,
+                    )
+                    if target_dtype is not None and x.dtype != target_dtype:
+                        x = x.to(dtype=target_dtype)
+                    check_for_id = True
+                    if self._debug_test_args:
+                        self._debug_log_args.append((x, value))
+                elif isinstance(value, PackArgumentAsIndex):
+                     x = expand_index(value.index_3d, value.final_dim)
+                else:
+                    # Unmatched pack argument
+                    assert isinstance(value, torch.Tensor)  # Sanity check
+                    x = value
+                    mark_cleanup = True
+                if check_for_id and idd in self._id_counts:
+                    # Tensor `x` we decode here, turns out later again
+                    x = x.clone()
+                    self._id_to_unpacked[idd] = x
+                    assert self._id_counts[idd] >= 2  # Sanity check
+                    self._id_counts[idd] -= 1
         else:
             mark_cleanup = True
         if self._arrays_cleanup is not None and mark_cleanup:
@@ -921,3 +979,37 @@ def do_ignore_annotation(
     )
     if debug_print:
         print(f"Create ({layer_idx},{chunk_idx}): {x_shape}, {kind}")
+
+
+# TODO: Remove!
+def debug_spda_callback(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    query: torch.Tensor,
+    full_y: torch.Tensor,
+    node_annotations: Annotations,
+):
+    do_ignore_annotation(
+        x=key,
+        node_annotations=node_annotations,
+        kind="ignore-key-perm",
+        layer_idx=0,
+    )
+    do_ignore_annotation(
+        x=value,
+        node_annotations=node_annotations,
+        kind="ignore-value-perm",
+        layer_idx=0,
+    )
+    do_ignore_annotation(
+        x=query,
+        node_annotations=node_annotations,
+        kind="ignore-query-padded",
+        layer_idx=0,
+    )
+    do_ignore_annotation(
+        x=full_y,
+        node_annotations=node_annotations,
+        kind="ignore-sdpa-full",
+        layer_idx=0,
+    )

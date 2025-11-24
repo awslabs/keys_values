@@ -29,7 +29,7 @@ from keys_values.attention_utils import (
     slice_as_flat,
     FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA,
 )
-from keys_values.kvcache.utils import expand_index
+from keys_values.utils import expand_index
 
 
 def sdpa_forward(
