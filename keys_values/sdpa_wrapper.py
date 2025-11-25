@@ -101,7 +101,7 @@ def scaled_dot_product_attention(
             torch.argsort(token_positions, dim=-1).detach(), head_size,
         )
         key = torch.gather(key, 2, sort_index)
-        value = torch.gather(key, 2, sort_index)
+        value = torch.gather(value, 2, sort_index)
 
     # At this point, the new entries in `key`, `value`, corresponding to the
     # `query` tokens, are on the right end. Causal masking works if `query`
