@@ -78,7 +78,7 @@ def scaled_dot_product_attention(
     batch_size, n_head, q_len, head_size = query.shape
     if key.shape[0] != batch_size or key.shape[-1] != head_size:
         raise ValueError(f"key.shape = {key.shape}, must be ({batch_size}, _, _, {head_size})")
-    _, n_query_groups, kv_len, _ = key.shape
+    kv_len = key.shape[2]
     if not (0 < q_len < kv_len):
         raise ValueError(f"Must have 0 < q_len = {q_len} < kv_len = {kv_len}. Don't use this for prefill")
     if sdpa_kernels is None:
