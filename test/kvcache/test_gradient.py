@@ -33,7 +33,6 @@ from keys_values.kvcache.test_utils import (
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.cell import GetInputSlice, WriteOutputsSlice
 from keys_values.kvcache.gradient.inference_replay import get_replay_logs
-from keys_values.kvcache.gradient.monitor_autograd_hooks import MonitorCellComputationAutogradHooks
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
 from keys_values.kvcache.utils import VerbosityLevels
 from keys_values.model import GPT
@@ -89,15 +88,10 @@ def test_gradient_row_of_cells(
     print(f"cache_length={cache_lengths}\ntokens_per_chunk={tokens_per_chunk}\nchunks_per_cell={chunks_per_cell}")
 
     use_autograd_hooks = True
-    hooks_for_comp = False
     do_gradient_testing = True
     # Additional comparison of all autograd hook pack arguments
     debug_test_args = True
     do_compare_cache_tensors = False
-    use_monitoring_autograd_hooks = False
-    assert not (
-        use_autograd_hooks and use_monitoring_autograd_hooks
-    ), "Can only set one of use_autograd_hooks or use_monitoring_autograd_hooks"
     assert use_autograd_hooks or (
         not debug_test_args
     ), "If debug_test_args is set, so must be use_autograd_hooks"
@@ -207,15 +201,6 @@ def test_gradient_row_of_cells(
             debug_test_args=debug_test_args,
         )
         #autograd_hooks.debug_print_annotations = True
-    elif use_monitoring_autograd_hooks:
-        autograd_hooks = MonitorCellComputationAutogradHooks(
-            config=config,
-            batch_size=batch_size,
-            cache_length=cache_lengths[0],
-            num_layers=config.n_layer,
-            device=params.device,
-            dtype=params.dtype,
-        )
     else:
         autograd_hooks = None
     if do_compare_cache_tensors:
@@ -224,7 +209,7 @@ def test_gradient_row_of_cells(
         debug_cache_tensors = None
     accumulator = GradientAccumulator(
         config=config,
-        autograd_hooks=None if hooks_for_comp else autograd_hooks,
+        autograd_hooks=autograd_hooks,
         qname=qname,
         debug_tensors=debug_cache_tensors,
         verbose=VerbosityLevels.SOME,
@@ -250,7 +235,7 @@ def test_gradient_row_of_cells(
     model_part = DefaultCellBlocks(
         model=gpt_model,
         first_layer_idx=0,
-        num_layers=config.n_layer,
+        num_layers=n_layer,
     )
     accumulator.run(
         model_part=model_part,
@@ -271,7 +256,7 @@ def test_gradient_row_of_cells(
         debug_cache_tensors_comp = None
     accumulator_comp = GradientAccumulator(
         config=config,
-        autograd_hooks=autograd_hooks if hooks_for_comp else None,
+        autograd_hooks=None,
         qname="torch-quantized8",  # will not be used
         debug_tensors=debug_cache_tensors_comp,
         verbose=VerbosityLevels.SOME,
@@ -317,7 +302,7 @@ def test_gradient_row_of_cells(
                     print(f"{name}: {ex}")
 
     if use_autograd_hooks:
-        logs = accumulator_comp.annotation_usage_logs() if hooks_for_comp else accumulator.annotation_usage_logs()
+        logs = accumulator.annotation_usage_logs()
         print("\nAnnotation usage logs (per cell):")
         for first_chunk_idx, annotation_usage in sorted(
             list(logs.items()), reverse=True,
@@ -461,7 +446,7 @@ def test_gradient_new_and_old_spda(
     model_part = DefaultCellBlocks(
         model=gpt_model,
         first_layer_idx=0,
-        num_layers=config.n_layer,
+        num_layers=n_layer,
     )
 
     # Use `TrainingAttnWeightsReplayCache` (old SDPA)

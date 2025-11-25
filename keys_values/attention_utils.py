@@ -468,9 +468,9 @@ def pytorch_scaled_dot_product_attention(
         mask: Mask tensor, optional
 
     Returns:
-          `(y, filtered_sdpa_kernels)`, where `y` is the SDPA output, and
-          `filtered_sdpa_kernels` is the filtered list of SDPA kernels
-          if `do_filter_kernels=True`, and `None` otherwise.
+        `(attn_outputs, filtered_sdpa_kernels)`, where `attn_outputs` is
+        the SDPA output, and `filtered_sdpa_kernels` is the filtered list of
+        SDPA kernels if `do_filter_kernels=True`, and `None` otherwise.
 
     """
     is_causal = mask is None
@@ -502,7 +502,7 @@ def pytorch_scaled_dot_product_attention(
             sdpa_kernels = filter_sdpa_kernels(sdpa_kernels=sdpa_kernels, **kwargs)
     if sdpa_kernels:
         with sdpa_kernel(sdpa_kernels):
-            y = F.scaled_dot_product_attention(**kwargs)
+            attn_outputs = F.scaled_dot_product_attention(**kwargs)
     else:
-        y = F.scaled_dot_product_attention(**kwargs)
-    return y, sdpa_kernels if do_filter_kernels else None
+        attn_outputs = F.scaled_dot_product_attention(**kwargs)
+    return attn_outputs, sdpa_kernels if do_filter_kernels else None
