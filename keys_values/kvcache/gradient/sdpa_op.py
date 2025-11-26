@@ -789,14 +789,17 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
     stored in the `autograd` graph, not the intermediates. It corresponds to
     what :meth:`KVCache.forward` is doing when the KV cache is not yet full.
 
+    This operator cannot be used for the prefill call, because `key_buffer`,
+    `value_buffer` must be given.
+
     """
     @staticmethod
     def forward(
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        key_buffer: Optional[torch.Tensor],
-        value_buffer: Optional[torch.Tensor],
+        key_buffer: torch.Tensor,
+        value_buffer: torch.Tensor,
         scale_factor: float,
         sliding_window_size: Optional[int] = None,
         sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
@@ -828,17 +831,12 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             `key_buffer_new`, `value_buffer_new`.
 
         """
+        if key_buffer is None or value_buffer is None:
+            raise ValueError("key_buffer, value_buffer must be given. Do not use this operator for the prefill call")
         # Check dimensions, compose new buffers
         key_buffer_new, value_buffer_new, token_positions, kv_len = cat_on_buffers(
             key, value, key_buffer, value_buffer,
         )
-        if key_buffer is None:
-            # In this case, the output `key_buffer_new` is the same object as
-            # the input `key`, which results in this error:
-            # RuntimeError: A input that has been returned as-is as output is being saved for backward. This is not supported if you override setup_context. You should return and save a view of the input instead, e.g. with x.view_as(x) or setup ctx inside the forward function itself.
-            key_buffer_new = key_buffer_new.view_as(key_buffer_new)
-            value_buffer_new = value_buffer_new.view_as(value_buffer_new)
-
         # Compute SDPA
         attn_output = sdpa_forward(
             query=query,
@@ -866,12 +864,6 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             _,
             tmp_array_limit_gb,
         ) = inputs
-        if key_buffer is None:
-            # In this case, the output `key_buffer_new` is the same object as
-            # the input `key`, which results in this error:
-            # RuntimeError: A input that has been returned as-is as output is being saved for backward. This is not supported if you override setup_context. You should return and save a view of the input instead, e.g. with x.view_as(x) or setup ctx inside the forward function itself.
-            key = key.view_as(key)
-            value = value.view_as(value)
         ctx.save_for_backward(
             query,
             key,

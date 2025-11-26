@@ -535,9 +535,22 @@ def test_gradient_new_and_old_spda(
         positions = None
         update_result = None
         token_positions = None
-        if is_cat:
-            # Cat case
-            assert entry.input_pos == 0 if is_prefill else key_buffer1.shape[2]
+        if is_prefill:
+            cache_keys_after1 = key1
+            cache_values_after1 = value1
+            attn_outputs1 = SDPAFunction.apply(
+                query1,
+                key1,
+                value1,
+                None,
+                entry.input_pos,
+                scale_factor,
+                None,
+                sdpa_kernels,
+                None,
+            )
+        elif is_cat:
+            assert entry.input_pos == key_buffer1.shape[2]
             attn_outputs1, cache_keys_after1, cache_values_after1 = KVCacheCatUpdateAndSDPAFunction.apply(
                 query1,
                 key1,
