@@ -11,8 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import dataclass, asdict
-from typing import Dict, Any, Optional, Tuple
+from dataclasses import dataclass, asdict, replace
+from typing import Dict, Any, Optional, Tuple, List
 
 import torch
 
@@ -21,6 +21,57 @@ from litgpt.config import Config
 from keys_values.kvcache.attn_weights import AttnWeightsKVCache
 from keys_values.kvcache.buffers import KVCacheBuffers
 from keys_values.kvcache.h2o import H2OKVCache
+
+
+@dataclass(frozen=True)
+class ForwardInput:
+    query: torch.Tensor
+    key: torch.Tensor
+    value: torch.Tensor
+    token_idx: torch.Tensor
+    input_pos: int
+    next_positions: Optional[torch.Tensor]
+    cache_keys: Optional[torch.Tensor]
+    cache_values: Optional[torch.Tensor]
+    cache_token_pos: Optional[torch.Tensor]
+    attn_outputs_shape: Tuple[int, ...]
+    cache_keys_after_shape: Tuple[int, ...]
+    cache_values_after_shape: Tuple[int, ...]
+
+    @staticmethod
+    def from_inputs(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+        input_pos: int,
+        cache: AttnWeightsKVCache,
+    ):
+        if input_pos > 0:
+            k_and_v = cache.kv_buffers.get_keys_values()
+            kwargs = dict(
+                cache_keys=k_and_v.keys(),
+                cache_values=k_and_v.values(),
+                cache_token_pos=cache.token_pos.clone(),
+            )
+        else:
+            kwargs = dict(
+                cache_keys=None,
+                cache_values=None,
+                cache_token_pos=None,
+            )
+        return ForwardInput(
+            query=query,
+            key=key,
+            value=value,
+            token_idx=token_idx,
+            input_pos=input_pos,
+            next_positions=cache._next_positions,
+            attn_outputs_shape=(1,),
+            cache_keys_after_shape=(1,),
+            cache_values_after_shape=(1,),
+            **kwargs,
+        )
 
 
 @dataclass(frozen=True)
@@ -82,7 +133,64 @@ class ForwardInputOutput:
         ), next_positions
 
 
-class TestAttnWeightsKVCacheMixin:
+class TestLogInputsKVCacheMixin:
+    """
+    Enables logging the inputs to :meth:`forward` calls with subclasses of
+    :class:`AttnWeightsKVCache`.
+
+    """
+    def start_logging(
+        self,
+        inputs: List[ForwardInput],
+    ):
+        self._inputs = inputs
+
+    def _get_self(self) -> AttnWeightsKVCache:
+        raise NotImplementedError
+
+    def _get_cache_content(self) -> Dict[str, torch.Tensor]:
+        cache = self._get_self()
+        k_and_v = cache.kv_buffers.get_keys_values()
+        return {
+            "cache_keys": k_and_v.keys(),
+            "cache_values": k_and_v.values(),
+            "cache_token_pos": cache.token_pos.clone(),
+        }
+
+    def call_before_forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+        input_pos: int,
+    ) -> Dict[str, Any]:
+        forward_kwargs = dict(
+            query=query,
+            key=key,
+            value=value,
+            token_idx=token_idx,
+            input_pos=input_pos,
+        )
+        if hasattr(self, "_inputs"):
+            self._entry = ForwardInput.from_inputs(
+                **forward_kwargs, cache=self._get_self(),
+            )
+        return forward_kwargs
+
+    def call_after_forward(self, attn_outputs: torch.Tensor):
+        if hasattr(self, "_inputs"):
+            k_and_v = self._get_self().kv_buffers.get_keys_values()  # just for shape
+            entry = replace(
+                self._entry,
+                attn_outputs_shape=tuple(attn_outputs.shape),
+                cache_keys_after_shape=tuple(k_and_v.keys().shape),
+                cache_values_after_shape=tuple(k_and_v.values().shape),
+            )
+            self._inputs.append(entry)
+
+
+class TestBeforeAfterKVCacheMixin:
     """
     Enables before/after tests with subclasses of :class:`AttnWeightsKVCache`.
     We can (1) take snapshots of :meth:`forward` calls for the old code, then
@@ -227,7 +335,7 @@ class TestAttnWeightsKVCacheMixin:
                 exit(0)
 
 
-class TestH2OKVCache(H2OKVCache, TestAttnWeightsKVCacheMixin):
+class TestH2OKVCache(H2OKVCache, TestBeforeAfterKVCacheMixin):
     """
     For before/after testing, use this instead of :class:`H2OKVCache`.
 

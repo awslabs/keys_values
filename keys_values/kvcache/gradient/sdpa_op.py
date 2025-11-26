@@ -832,6 +832,13 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
         key_buffer_new, value_buffer_new, token_positions, kv_len = cat_on_buffers(
             key, value, key_buffer, value_buffer,
         )
+        if key_buffer is None:
+            # In this case, the output `key_buffer_new` is the same object as
+            # the input `key`, which results in this error:
+            # RuntimeError: A input that has been returned as-is as output is being saved for backward. This is not supported if you override setup_context. You should return and save a view of the input instead, e.g. with x.view_as(x) or setup ctx inside the forward function itself.
+            key_buffer_new = key_buffer_new.view_as(key_buffer_new)
+            value_buffer_new = value_buffer_new.view_as(value_buffer_new)
+
         # Compute SDPA
         attn_output = sdpa_forward(
             query=query,
@@ -859,6 +866,12 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             _,
             tmp_array_limit_gb,
         ) = inputs
+        if key_buffer is None:
+            # In this case, the output `key_buffer_new` is the same object as
+            # the input `key`, which results in this error:
+            # RuntimeError: A input that has been returned as-is as output is being saved for backward. This is not supported if you override setup_context. You should return and save a view of the input instead, e.g. with x.view_as(x) or setup ctx inside the forward function itself.
+            key = key.view_as(key)
+            value = value.view_as(value)
         ctx.save_for_backward(
             query,
             key,

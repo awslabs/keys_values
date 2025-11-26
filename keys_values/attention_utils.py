@@ -482,8 +482,8 @@ def pytorch_scaled_dot_product_attention(
         # `enabla_gqa=True`. It is better to extend keys, values in
         # this case.
         q_per_kv = n_head // n_query_groups
-        key = key.repeat_interleave(q_per_kv, dim=1)
-        value = value.repeat_interleave(q_per_kv, dim=1)
+        key = torch.repeat_interleave(key, q_per_kv, dim=1)
+        value = torch.repeat_interleave(value, q_per_kv, dim=1)
         enable_gqa = False
     kwargs = dict(
         query=query,

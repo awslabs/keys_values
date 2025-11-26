@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional, Union, Tuple, Callable
+from typing import List, Optional, Union, Tuple
 
 import torch
 from torch.nn.attention import SDPBackend
@@ -56,7 +56,7 @@ def scaled_dot_product_attention(
         key: Keys, shape `(batch_size, n_query_groups, kv_len, head_size)`
         value: Values, shape `(batch_size, n_query_groups, kv_len, head_size)`
         scale_factor: Scale factor for attention
-        input_pos: Position in input sequence, must be `> 0`
+        input_pos: Position in input sequence
         token_positions: Contains token positions in KV cache, shape
             `(batch_size, n_query_groups, kv_len)`. See above. If not given,
             we must have `input_pos + q_len == kv_len`, and the new KV
@@ -69,8 +69,6 @@ def scaled_dot_product_attention(
         Attention outputs, shape `(batch_size, n_heads, q_len, head_size)`
 
     """
-    if input_pos <= 0:
-        raise ValueError("input_pos must be positive. Don't use this for prefill")
     if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
         raise ValueError("query, key, value must be 4D tensors")
     if key.shape != value.shape:
@@ -79,8 +77,8 @@ def scaled_dot_product_attention(
     if key.shape[0] != batch_size or key.shape[-1] != head_size:
         raise ValueError(f"key.shape = {key.shape}, must be ({batch_size}, _, _, {head_size})")
     kv_len = key.shape[2]
-    if not (0 < q_len < kv_len):
-        raise ValueError(f"Must have 0 < q_len = {q_len} < kv_len = {kv_len}. Don't use this for prefill")
+    if not (0 < q_len <= kv_len):
+        raise ValueError(f"Must have 0 < q_len = {q_len} <= kv_len = {kv_len}. Don't use this for prefill")
     if sdpa_kernels is None:
         sdpa_kernels = []
 
@@ -95,6 +93,8 @@ def scaled_dot_product_attention(
         # We implemented an alternative which exchanges smaller parts of
         # `key`, `value`, but this does not end up being faster
         # (see `sdpa_wrapper_old` module).
+        if input_pos == 0:
+            raise ValueError("For input_pos=0, token_positions must be None")
         if token_positions.shape != key.shape[:-1]:
             raise ValueError(f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible")
         sort_index = expand_index(
@@ -106,10 +106,11 @@ def scaled_dot_product_attention(
     # At this point, the new entries in `key`, `value`, corresponding to the
     # `query` tokens, are on the right end. Causal masking works if `query`
     # is zero-padded on the left
-    fill_left = torch.zeros(
-        (1, 1, 1, 1), dtype=query.dtype, device=query.device,
-    ).expand(batch_size, n_head, kv_len - q_len, head_size)
-    query = torch.cat((fill_left, query), dim=2)
+    if q_len < kv_len:
+        fill_left = torch.zeros(
+            (1, 1, 1, 1), dtype=query.dtype, device=query.device,
+        ).expand(batch_size, n_head, kv_len - q_len, head_size)
+        query = torch.cat((fill_left, query), dim=2)
     full_y, filtered_kernels = pytorch_scaled_dot_product_attention(
         query=query,
         key=key,
@@ -118,4 +119,8 @@ def scaled_dot_product_attention(
         sdpa_kernels=sdpa_kernels,
         do_filter_kernels=do_filter_kernels,
     )
-    return full_y[:, :, (-q_len):, :].clone(), filtered_kernels
+    if q_len < kv_len:
+        attn_output = full_y[:, :, (-q_len):, :].clone()
+    else:
+        attn_output = full_y
+    return attn_output, filtered_kernels

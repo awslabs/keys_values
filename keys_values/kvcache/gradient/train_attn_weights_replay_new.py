@@ -130,7 +130,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             sdpa_mode=sdpa_mode,
             sliding_window_size=sliding_window_size,
         )
-        print(f"Create TrainingAttnWeightsReplayCacheNew: layer_idx={layer_idx}, cache_length={cache_length}")  # DEBUG
 
     @property
     def batch_size(self) -> Optional[int]:
