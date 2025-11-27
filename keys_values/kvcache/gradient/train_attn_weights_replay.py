@@ -146,9 +146,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         )
         self.current_length = 0
         self._initialize_replay()
-        # We need to create "final" annotations only for the first cell in a
-        # row
-        self._first_cell_in_row = start_token_pos == 0
         self._debug_tensors = debug_tensors
         # If this is set, we log all annotations being created
         self.debug_print_annotations = debug_print_annotations
@@ -468,36 +465,37 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
     ):
         if self._node_annotations is not None and self._token_chunk_pos == self._end_token_chunk_pos:
             # We need to store the final node in order to start the
-            # reconstruction of all earlier ones. It is needed as annotation
-            # only for the first cell in a row
+            # reconstruction of all earlier ones
             x_det = x.detach()
             x_shape = x_det.shape
             self._node_annotations.set_final(
                 x=x_det, layer_idx=self.layer_idx, kind=kind,
             )
-            if self._first_cell_in_row:
-                is_keys = NodeAnnotation.kind_is_keys(kind)
-                fin_kind = "final-key" if is_keys else "final-value"
-                # Use delta at same index as above for identification. We know
-                # that these entries ARE overwritten
-                if NodeAnnotation.kind_is_cat(kind):
-                    # Pass final row
-                    x_len = x_det.shape[2]
-                    index = torch.arange(
-                        x_len - 1, x_len, dtype=index.dtype, device=index.device,
-                    ).view(1, 1, -1, 1).expand(*x_shape[:2], -1, x_shape[-1])
-                delta = x_det.gather(-2, index)
-                self._append_annotation(
-                    NodeAnnotation(
-                        kind=fin_kind,
-                        layer_idx=self.layer_idx,
-                        chunk_idx=self._token_chunk_pos - 1,  # `token_chunk_pos` has already been advanced
-                        shape=shape_to_tuple(x_det),
-                        index=index,
-                        delta=delta,
-                        debug_msg=debug_msg,
-                    )
+            # The final node is also needed as annotation. This is because the
+            # output of custom SDPA operators are stored in the computation
+            # graph, not the input (in some cases).
+            is_keys = NodeAnnotation.kind_is_keys(kind)
+            fin_kind = "final-key" if is_keys else "final-value"
+            # Use delta at same index as above for identification. We know
+            # that these entries ARE overwritten
+            if NodeAnnotation.kind_is_cat(kind):
+                # Pass final row
+                x_len = x_det.shape[2]
+                index = torch.arange(
+                    x_len - 1, x_len, dtype=index.dtype, device=index.device,
+                ).view(1, 1, -1, 1).expand(*x_shape[:2], -1, x_shape[-1])
+            delta = x_det.gather(-2, index)
+            self._append_annotation(
+                NodeAnnotation(
+                    kind=fin_kind,
+                    layer_idx=self.layer_idx,
+                    chunk_idx=self._token_chunk_pos - 1,  # `token_chunk_pos` has already been advanced
+                    shape=shape_to_tuple(x_det),
+                    index=index,
+                    delta=delta,
+                    debug_msg=debug_msg,
                 )
+            )
         # DEBUG:
         if self._debug_tensors is not None:
             name = f"c{self._token_chunk_pos - 1}-l{self.layer_idx}-{kind}"
