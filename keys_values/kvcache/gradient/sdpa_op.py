@@ -580,17 +580,30 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
             _,
             tmp_array_limit_gb,
         ) = inputs
-        if positions is not None and positions.ndim == 1:
-            positions = positions[None, None, :].expand(
-                *index.shape[:2], -1,
+        do_grace_period = positions is not None
+        if not do_grace_period:
+            (
+                _,
+                key_buffer_new,
+                value_buffer_new,
+            ) = output
+            ctx.save_for_backward(
+                query,
+                key_buffer_new,
+                value_buffer_new,
             )
-        ctx.save_for_backward(
-            query,
-            key,
-            value,
-            key_buffer,
-            value_buffer,
-        )
+        else:
+            if positions.ndim == 1:
+                positions = positions[None, None, :].expand(
+                    *index.shape[:2], -1,
+                )
+            ctx.save_for_backward(
+                query,
+                key,
+                value,
+                key_buffer,
+                value_buffer,
+            )
         ctx.extra_args = dict(
             index=index,
             token_positions=token_positions,
@@ -601,6 +614,10 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
             tmp_array_limit_gb=tmp_array_limit_gb,
         )
 
+    # TODO:
+    # In case do_grace_period == True, we do not pass key_buffer_new,
+    # value_buffer_new to context, but key_buffer, value_buffer. Would it
+    # be simpler/cheaper to pass the former?
     @staticmethod
     def backward(
         ctx,
@@ -632,21 +649,30 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
 
         """
         # Inputs from context
-        (
-            query,
-            key,
-            value,
-            key_buffer,
-            value_buffer,
-        ) = ctx.saved_tensors
+        positions = ctx.extra_args["positions"]
+        do_grace_period = positions is not None
+        if not do_grace_period:
+            (
+                query,
+                key_buffer_new,
+                value_buffer_new,
+            ) = ctx.saved_tensors
+            key = value = key_buffer = value_buffer = None
+        else:
+            (
+                query,
+                key,
+                value,
+                key_buffer,
+                value_buffer,
+            ) = ctx.saved_tensors
+            key_buffer_new = value_buffer_new = None
         index = ctx.extra_args["index"]
         token_positions = ctx.extra_args["token_positions"]
-        positions = ctx.extra_args["positions"]
         input_pos = ctx.extra_args["input_pos"]
         scale_factor = ctx.extra_args["scale_factor"]
         sliding_window_size = ctx.extra_args["sliding_window_size"]
         tmp_array_limit_gb = ctx.extra_args["tmp_array_limit_gb"]
-        do_grace_period = positions is not None
         grad_query = grad_key = grad_value = None
         grad_key_buffer = grad_value_buffer = None
         # Prepare inputs
@@ -659,18 +685,17 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
         need_one_of_key = need_key or need_key_buffer
         need_one_of_value = need_value or need_value_buffer
         if need_query or need_one_of_key or need_one_of_value:
-            # Compute `key_buffer_new`, `value_buffer_new`.
-            # Note: We tried to overwrite `key_buffer`, `value_buffer` with
-            # these and restore them later. But `autograd` does not allow that:
-            # RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation: [torch.FloatTensor [5, 4, 512, 64]], which is output 0 of CatBackward0, is at version 2; expected version 0 instead
             index_e = expand_index(index, head_size)
             if not do_grace_period:
-                key_buffer_new = key_buffer.scatter(-2, index_e, key)
-                value_buffer_new = value_buffer.scatter(-2, index_e, key)
+                # Obtained key_buffer_new`, `value_buffer_new` from context
                 positions_e = None
                 index_prime = None
                 positions_prime = None
             else:
+                # Compute `key_buffer_new`, `value_buffer_new`.
+                # Note: We tried to overwrite `key_buffer`, `value_buffer` with
+                # these and restore them later. But `autograd` does not allow that:
+                # RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation: [torch.FloatTensor [5, 4, 512, 64]], which is output 0 of CatBackward0, is at version 2; expected version 0 instead
                 num2 = positions.shape[-1]
                 positions_prime = expand_index(index[:, :, :num2], head_size)
                 index_prime = expand_index(
@@ -855,21 +880,24 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
     def setup_context(ctx, inputs, output):
         (
             query,
-            key,
-            value,
-            key_buffer,
-            value_buffer,
+            _,
+            _,
+            _,
+            _,
             scale_factor,
             sliding_window_size,
             _,
             tmp_array_limit_gb,
         ) = inputs
+        (
+            _,
+            key_buffer_new,
+            value_buffer_new,
+        ) = output
         ctx.save_for_backward(
             query,
-            key,
-            value,
-            key_buffer,
-            value_buffer,
+            key_buffer_new,
+            value_buffer_new,
         )
         ctx.extra_args = dict(
             scale_factor=scale_factor,
@@ -891,10 +919,8 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
         # Inputs from context
         (
             query,
-            key,
-            value,
-            key_buffer,
-            value_buffer,
+            key_buffer_new,
+            value_buffer_new,
         ) = ctx.saved_tensors
         scale_factor = ctx.extra_args["scale_factor"]
         sliding_window_size = ctx.extra_args["sliding_window_size"]
@@ -902,7 +928,8 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
         grad_query = grad_key = grad_value = None
         grad_key_buffer = grad_value_buffer = None
         # Prepare inputs
-        batch_size, n_query_groups, q_len, _ = key.shape
+        batch_size, n_query_groups, kv_new_len, _ = key_buffer_new.shape
+        q_len = query.shape[2]
         need_query = ctx.needs_input_grad[0]
         need_key = ctx.needs_input_grad[1]
         need_value = ctx.needs_input_grad[2]
@@ -911,10 +938,10 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
         need_one_of_key = need_key or need_key_buffer
         need_one_of_value = need_value or need_value_buffer
         if need_query or need_one_of_key or need_one_of_value:
-            # Compute `key_buffer_new`, `value_buffer_new`
-            key_buffer_new, value_buffer_new, token_positions, kv_len = cat_on_buffers(
-                key, value, key_buffer, value_buffer,
-            )
+            kv_len = kv_new_len - q_len
+            token_positions = torch.arange(
+                0, kv_new_len, device=query.device, dtype=torch.int,
+            ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
             # Backward of SDPA
             grad_query, grad_key_buffer_new, grad_value_buffer_new = sdpa_backward(
                 grad_attn_output=grad_attn_output,
