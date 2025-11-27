@@ -383,7 +383,7 @@ def args_gradient_new_and_old_spda():
 
 @pytest.mark.parametrize(
     "cache_name, cache_kwargs, cache_length, tokens_per_chunk, chunks_per_cell, device",
-    args_gradient_new_and_old_spda()[:1],
+    args_gradient_new_and_old_spda(),
 )
 def test_gradient_new_and_old_spda(
     cache_name,
@@ -562,20 +562,6 @@ def test_gradient_new_and_old_spda(
                 sdpa_kernels,
                 None,
             )
-            #cache_keys_after1, cache_values_after1, token_positions, _ = cat_on_buffers(
-            #    key1, value1, key_buffer1, value_buffer1,
-            #)
-            #attn_outputs1 = SDPAFunction.apply(
-            #    query1,
-            #    cache_keys_after1,
-            #    cache_values_after1,
-            #    token_positions,  # after update
-            #    entry.input_pos,
-            #    scale_factor,
-            #    None,
-            #    sdpa_kernels,
-            #    None,
-            #)
         else:
             # Scatter case
             index = replay_log.extract_index(

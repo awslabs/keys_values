@@ -943,7 +943,7 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
                 0, kv_new_len, device=query.device, dtype=torch.int,
             ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
             # Backward of SDPA
-            grad_query, grad_key_buffer_new, grad_value_buffer_new = sdpa_backward(
+            grad_query, grad_key_buffer_new_indir, grad_value_buffer_new_indir = sdpa_backward(
                 grad_attn_output=grad_attn_output,
                 query=query,
                 key=key_buffer_new,
@@ -958,12 +958,24 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
                 tmp_array_limit_gb=tmp_array_limit_gb,
             )
             if need_key_buffer:
-                grad_key_buffer = grad_key_buffer_new[:, :, :kv_len, :]
+                grad_key_buffer = (
+                    grad_key_buffer_new[:, :, :kv_len, :] +
+                    grad_key_buffer_new_indir[:, :, :kv_len, :]
+                )
             if need_key:
-                grad_key = grad_key_buffer_new[:, :, kv_len:, :]
+                grad_key = (
+                    grad_key_buffer_new[:, :, kv_len:, :] +
+                    grad_key_buffer_new_indir[:, :, kv_len:, :]
+                )
             if need_value_buffer:
-                grad_value_buffer = grad_value_buffer_new[:, :, :kv_len, :]
+                grad_value_buffer = (
+                    grad_value_buffer_new[:, :, :kv_len, :] +
+                    grad_value_buffer_new_indir[:, :, :kv_len, :]
+                )
             if need_value:
-                grad_value = grad_value_buffer_new[:, :, kv_len:, :]
+                grad_value = (
+                    grad_value_buffer_new[:, :, kv_len:, :] +
+                    grad_value_buffer_new_indir[:, :, kv_len:, :]
+                )
 
         return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 4)
