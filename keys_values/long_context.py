@@ -55,6 +55,7 @@ class KVCacheArgs:
     allocate_buffers: bool = False
     attention_forward_temp_size_gb: Optional[float] = None
     attention_backward_temp_size_gb: Optional[float] = None
+    use_new_cache: bool = False  # DEBUG
 
     def __post_init__(self):
         supported_names = KVCacheFactory.supported_names()

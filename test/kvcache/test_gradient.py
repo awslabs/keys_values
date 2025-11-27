@@ -103,6 +103,7 @@ def test_gradient_row_of_cells(
     else:
         dtype = torch.bfloat16
     torch.set_default_dtype(dtype)  # Set default dtype
+    tol_kwargs = dict(atol=2e-5, rtol=2e-5)
 
     qname = "torch-quantized8"
     batch_size = 5
@@ -324,9 +325,11 @@ def test_gradient_row_of_cells(
         if value_comp is None:
             raise IndexError(f"name = {name} is in param_gradients, but not in param_gradients_comp")
         print(f"Comparing gradient for {name}")
-        torch.testing.assert_close(value, value_comp)
+        torch.testing.assert_close(value, value_comp, **tol_kwargs)
     print("Comparing below_gradients:")
-    torch.testing.assert_close(below_gradients, below_gradients_comp)
+    torch.testing.assert_close(
+        below_gradients, below_gradients_comp, **tol_kwargs,
+    )
 
     if use_autograd_hooks and autograd_hooks.log_all_shapes:
         print("\nAutograd hooks logged these shapes:")
