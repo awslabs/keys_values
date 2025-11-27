@@ -266,7 +266,7 @@ def test_sdpa_backward(n_head, n_query_groups, q_len, kv_len, dtype, sliding_win
             )
 
 
-class TestH2OKVCache(H2OKVCache, TestLogInputsKVCacheMixin):
+class H2OLogInputsKVCache(H2OKVCache, TestLogInputsKVCacheMixin):
     def __init__(
         self,
         config: Config,
@@ -313,7 +313,7 @@ class TestH2OKVCache(H2OKVCache, TestLogInputsKVCacheMixin):
         return attn_outputs
 
 
-class TestQuantizedH2OKVCache(QuantizedH2OKVCache, TestLogInputsKVCacheMixin):
+class QuantizedH2OLogInputsKVCache(QuantizedH2OKVCache, TestLogInputsKVCacheMixin):
     def __init__(
         self,
         config: Config,
@@ -452,14 +452,14 @@ def test_gradient_new_and_old_spda(
         **cache_kwargs,
     )
     if cache_name == "h2o":
-        kv_cache = TestH2OKVCache(
+        kv_cache = H2OLogInputsKVCache(
             config=config,
             buffers=_kv_cache.kv_buffers,
             block_idx=0,
             **cache_kwargs,
         )
     else:
-        kv_cache = TestQuantizedH2OKVCache(
+        kv_cache = QuantizedH2OLogInputsKVCache(
             config=config,
             buffers=_kv_cache.kv_buffers,
             block_idx=0,
@@ -562,6 +562,20 @@ def test_gradient_new_and_old_spda(
                 sdpa_kernels,
                 None,
             )
+            #cache_keys_after1, cache_values_after1, token_positions, _ = cat_on_buffers(
+            #    key1, value1, key_buffer1, value_buffer1,
+            #)
+            #attn_outputs1 = SDPAFunction.apply(
+            #    query1,
+            #    cache_keys_after1,
+            #    cache_values_after1,
+            #    token_positions,  # after update
+            #    entry.input_pos,
+            #    scale_factor,
+            #    None,
+            #    sdpa_kernels,
+            #    None,
+            #)
         else:
             # Scatter case
             index = replay_log.extract_index(
@@ -623,6 +637,7 @@ def test_gradient_new_and_old_spda(
             cache_keys_after2, cache_values_after2, _, _ = cat_on_buffers(
                 key2, value2, key_buffer2, value_buffer2,
             )
+            token_positions = None
         else:
             # Scatter case
             cache_keys_after2, cache_values_after2 = scatter_on_buffers(

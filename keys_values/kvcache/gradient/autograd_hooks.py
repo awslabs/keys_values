@@ -53,6 +53,7 @@ class NodeAnnotation:
     positions: Optional[torch.Tensor] = None
     debug_full_arg: Optional[torch.Tensor] = None
     debug_msg: Optional[str] = None
+    has_been_matched: bool = False
 
     def __post_init__(self):
         assert self.layer_idx >= 0
@@ -357,6 +358,14 @@ class CellComputationAutogradHooks(AutogradHooks):
 
         `a = gather(x_new, index[:num2])`
         `x = scatter(x_new, cat(index, positions), cat(delta_rev, a))`
+
+    Duplicate pack arguments:
+
+    We support matching different pack arguments to the same annotation. To
+    this end, we do not remove an annotation once it is matched, but mark it
+    with `has_been_matched=True`. All annotations are cleared with the first
+    call of :meth:`unpack_hook`, and those which have not been matched are
+    logged.
 
     Logging:
 
@@ -703,11 +712,17 @@ class CellComputationAutogradHooks(AutogradHooks):
         forward code into `_node_annotations.nodes`. Here, we find all pairwise
         matches between these two sides.
 
+        When an annotation in `_node_annotations.nodes` is matched with a
+        pack argument, it is not removed from the list, but only marked as
+        `has_been_matched=True`. This allows to match several pack arguments
+        against the same annotation.
+
         If `flush_pack_args == True`, the remaining `_pack_arguments`
         are entered into `_annotation_for_id` as they are. These arguments
         will not be packed. Ideally, there should be no unmatched pack
-        arguments. Also, all remaining annotations are converted into a form
-        for logging and then cleared.
+        arguments. Also, all remaining annotations which have not been
+        matched are converted into a form for logging, and then all
+        annotations are cleared.
 
         """
         # Run pairwise matching: Outer over pack args, inner over annotations
@@ -773,14 +788,18 @@ class CellComputationAutogradHooks(AutogradHooks):
                                 parg_matched_to = i
                                 break
                 if parg_matched_to is not None:
-                    del annot_keys[parg_matched_to]
+                    # We do not delete the annotation, but mark it as matched.
+                    # This allows duplicate pack arguments to be matched to
+                    # the same annotation
+                    annotation = annot_keys[parg_matched_to].annotation
+                    if not annotation.has_been_matched:
+                        annotation = replace(
+                            annotation, has_been_matched=True,
+                        )
+                        self._node_annotations.nodes[parg_matched_to] = annotation
                 else:
                     rem_pack_args.append(pack_arg)
             self._pack_arguments = rem_pack_args
-        # Recreate `_node_annotations.nodes` with remaining annotations
-        self._node_annotations.nodes.clear()
-        for annot_key in annot_keys:
-            self._node_annotations.nodes.append(annot_key.annotation)
         if flush_pack_args:
             # Flush all remaining pack arguments (these will not be packed)
             for pack_arg in self._pack_arguments:
@@ -795,10 +814,12 @@ class CellComputationAutogradHooks(AutogradHooks):
                 if self._arrays_cleanup is not None:
                     self._arrays_cleanup.add(pack_arg.x)
             self._pack_arguments.clear()
-            # Convert all remaining annotations into a form for logging and
-            # clear them
+            # Convert all remaining annotations which have not been matched
+            # into a form for logging
             self._remaining_annotations = [
-                NodeAnnotationForLog(a) for a in self._node_annotations.nodes
+                NodeAnnotationForLog(annotation)
+                for annotation in self._node_annotations.nodes
+                if not annotation.has_been_matched
             ]
             self._node_annotations.nodes.clear()
 

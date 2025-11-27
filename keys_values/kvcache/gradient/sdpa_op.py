@@ -899,33 +899,23 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
         scale_factor = ctx.extra_args["scale_factor"]
         sliding_window_size = ctx.extra_args["sliding_window_size"]
         tmp_array_limit_gb = ctx.extra_args["tmp_array_limit_gb"]
-        buffers_none = key_buffer is None
         grad_query = grad_key = grad_value = None
         grad_key_buffer = grad_value_buffer = None
         # Prepare inputs
         batch_size, n_query_groups, q_len, _ = key.shape
-        kv_len = 0 if buffers_none else key_buffer.shape[2]
         need_query = ctx.needs_input_grad[0]
         need_key = ctx.needs_input_grad[1]
         need_value = ctx.needs_input_grad[2]
         need_key_buffer = ctx.needs_input_grad[3]
-        assert not (need_key_buffer and buffers_none)
         need_value_buffer = ctx.needs_input_grad[4]
-        assert not (need_value_buffer and buffers_none)
         need_one_of_key = need_key or need_key_buffer
         need_one_of_value = need_value or need_value_buffer
         if need_query or need_one_of_key or need_one_of_value:
             # Compute `key_buffer_new`, `value_buffer_new`
-            if not buffers_none:
-                key_buffer_new = torch.cat((key_buffer, key), dim=-2)
-                value_buffer_new = torch.cat((value_buffer, value), dim=-2)
-            else:
-                key_buffer_new = key
-                value_buffer_new = value
+            key_buffer_new, value_buffer_new, token_positions, kv_len = cat_on_buffers(
+                key, value, key_buffer, value_buffer,
+            )
             # Backward of SDPA
-            token_positions = torch.arange(
-                0, kv_len + q_len, device=query.device, dtype=torch.int,
-            ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
             grad_query, grad_key_buffer_new, grad_value_buffer_new = sdpa_backward(
                 grad_attn_output=grad_attn_output,
                 query=query,
