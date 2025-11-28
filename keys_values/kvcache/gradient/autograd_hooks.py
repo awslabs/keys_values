@@ -53,6 +53,7 @@ class NodeAnnotation:
     positions: Optional[torch.Tensor] = None
     debug_full_arg: Optional[torch.Tensor] = None
     debug_msg: Optional[str] = None
+    match_id: Optional[int] = None
 
     def __post_init__(self):
         assert self.layer_idx >= 0
@@ -358,6 +359,14 @@ class CellComputationAutogradHooks(AutogradHooks):
         `a = gather(x_new, index[:num2])`
         `x = scatter(x_new, cat(index, positions), cat(delta_rev, a))`
 
+    Annotations matched several times:
+
+    Several pack arguments can match to the same annotation. We do not remove
+    an annotation once matched, but just mark it (using `match_id`).
+    We also count IDs return more than once in `_id_counts`. In
+    :meth:`unpack_hook`, we store unpacked tensors in `_id_to_unpacked` so they
+    can be returned once more for a duplicate.
+
     Logging:
 
     If `log_all_shapes` is set, we count the shapes of all nodes, as passed to
@@ -403,6 +412,8 @@ class CellComputationAutogradHooks(AutogradHooks):
         # Contains entry for every match of pack argument to annotation. This is
         # worked off in :meth:`unpack_hook`
         self._packed_arg_for_id = None
+        self._id_counts = None
+        self._id_to_unpacked = None
         # ID assigned to next pack hook argument
         self._next_id = None
         self._num_matched_annotations = None
@@ -455,6 +466,8 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._initialize_shapes(cache_lengths, first_chunk_idx)
         self._pack_arguments: List[PackHookArgument] = []
         self._packed_arg_for_id: Dict[int, PackedArgumentType] = dict()
+        self._id_counts: Dict[int, int] = dict()
+        self._id_to_unpacked: Dict[int, torch.Tensor] = dict()
         self._next_id = 0
         self._num_matched_annotations = 0
         self._unmatched_pack_args = []
@@ -478,6 +491,8 @@ class CellComputationAutogradHooks(AutogradHooks):
         if self._packed_arg_for_id is not None:
             self._packed_arg_for_id.clear()
             self._packed_arg_for_id = None
+        self._id_counts = None
+        self._id_to_unpacked = None
         self._next_id = None
         self._num_matched_annotations = None
         self._unmatched_pack_args = None
@@ -593,7 +608,11 @@ class CellComputationAutogradHooks(AutogradHooks):
             else:
                 # Try to match annotations: We need to remove entries from
                 # `_pack_arguments` as soon as possible
-                self._match_annotations()
+                _id = self._match_annotations()
+                if _id is not None:
+                    # Happens if `x` is directly matched by an annotation which
+                    # already matched before and has an ID already
+                    new_id = _id
             return new_id
         else:
             if self._arrays_cleanup is not None:
@@ -609,35 +628,48 @@ class CellComputationAutogradHooks(AutogradHooks):
         mark_cleanup = False
         if isinstance(x, int):
             idd = x
-            value = self._packed_arg_for_id.pop(idd)
-            if isinstance(value, PackArgumentAsAnnotation):
-                # Reconstruct buffer from annotation for successor
-                target_dtype = value.target_dtype
-                value = value.annot
-                kind = value.kind
-                buffer = self._node_annotations.get_final(value.layer_idx, kind)
-                length = value.shape[2]
-                cache_length = self._get_cache_length(value.layer_idx)
-                if value.is_scatter:
-                    self._unpack_scatter(buffer, value)  # Overwrites `buffer`
-                    assert length == cache_length  # Sanity check
-                # Buffer stays the same for "cat", but a smaller slice is
-                # returned
-                x = self._transform_annotated_tensor(
-                    buffer=buffer[:, :, :length, :],
-                    kind=kind,
-                )
-                if target_dtype is not None and x.dtype != target_dtype:
-                    x = x.to(dtype=target_dtype)
-                if self._debug_test_args:
-                    self._debug_log_args.append((x, value))
-            elif isinstance(value, PackArgumentAsIndex):
-                 x = expand_index(value.index_3d, value.final_dim)
+            if idd in self._id_to_unpacked:
+                # Unpacked this one before: Just return it
+                x = self._id_to_unpacked[idd]
+                self._id_counts[idd] -= 1
+                #print(f"DEBUG: {idd} from _id_to_unpacked [new cnt={self._id_counts[idd]}]")  # DEBUG
+                if self._id_counts[idd] == 0:
+                    del self._id_to_unpacked[idd]
             else:
-                # Unmatched pack argument
-                assert isinstance(value, torch.Tensor)  # Sanity check
-                x = value
-                mark_cleanup = True
+                value = self._packed_arg_for_id.pop(idd)
+                if isinstance(value, PackArgumentAsAnnotation):
+                    # Reconstruct buffer from annotation for successor
+                    target_dtype = value.target_dtype
+                    value = value.annot
+                    kind = value.kind
+                    buffer = self._node_annotations.get_final(value.layer_idx, kind)
+                    length = value.shape[2]
+                    cache_length = self._get_cache_length(value.layer_idx)
+                    if value.is_scatter:
+                        self._unpack_scatter(buffer, value)  # Overwrites `buffer`
+                        assert length == cache_length  # Sanity check
+                    # Buffer stays the same for "cat", but a smaller slice is
+                    # returned
+                    x = self._transform_annotated_tensor(
+                        buffer=buffer[:, :, :length, :],
+                        kind=kind,
+                    )
+                    if target_dtype is not None and x.dtype != target_dtype:
+                        x = x.to(dtype=target_dtype)
+                    if self._debug_test_args:
+                        self._debug_log_args.append((x, value))
+                    if self._id_counts.get(idd, 0) >= 2:
+                        # This ID will come up at least once more
+                        self._id_to_unpacked[idd] = x
+                        self._id_counts[idd] -= 1
+                        #print(f"DEBUG: {idd} -> _id_to_unpacked [new cnt={self._id_counts[idd]}]")  # DEBUG
+                elif isinstance(value, PackArgumentAsIndex):
+                     x = expand_index(value.index_3d, value.final_dim)
+                else:
+                    # Unmatched pack argument
+                    assert isinstance(value, torch.Tensor)  # Sanity check
+                    x = value
+                    mark_cleanup = True
         else:
             mark_cleanup = True
         if self._arrays_cleanup is not None and mark_cleanup:
@@ -696,7 +728,9 @@ class CellComputationAutogradHooks(AutogradHooks):
 
     # TODO: Do we need to protect `self._node_annotations.nodes` against
     # multi-threaded access?
-    def _match_annotations(self, flush_pack_args: bool = False):
+    def _match_annotations(
+        self, flush_pack_args: bool = False,
+    ) -> Optional[int]:
         """
         In :meth:`pack_hook` calls, we add candidates for packing into
         `_pack_arguments`. On the other side, annotations are entered by the
@@ -709,16 +743,22 @@ class CellComputationAutogradHooks(AutogradHooks):
         arguments. Also, all remaining annotations are converted into a form
         for logging and then cleared.
 
+        If the final entry of `_pack_arguments` is matched by an annotation
+        with `annotation.match_id` set, this ID is returned. Otherwise, `None`
+        is returned.
+
         """
         # Run pairwise matching: Outer over pack args, inner over annotations
         annot_keys = self._matching_entries()
+        ret_id = None
         if annot_keys:
+            new_entry_pos = len(self._pack_arguments) - 1
             rem_pack_args = []  # Collect unmatched pack args
-            for pack_arg in self._pack_arguments:
+            for pa_pos, pack_arg in enumerate(self._pack_arguments):
                 parg_shape = pack_arg.shape
                 parg_dtype = pack_arg.x.dtype
                 parg_matched_to = None
-                for i, annot_key in enumerate(annot_keys):
+                for an_pos, annot_key in enumerate(annot_keys):
                     if annot_key.shape == parg_shape:
                         # Shapes matches
                         annot_dtype = annot_key.dtype
@@ -749,15 +789,29 @@ class CellComputationAutogradHooks(AutogradHooks):
                                 # unmatched pack args (which otherwise are a
                                 # sign that something could be wrong)
                                 if not annotation.is_ignore:
-                                    value = PackArgumentAsAnnotation(
-                                        annot=annotation,
-                                        target_dtype=parg_dtype if try_with_cast else None,
-                                    )
-                                    self._packed_arg_for_id[
-                                        pack_arg.id
-                                    ] = value
-                                    if self.debug_print_annotations:
-                                        print(f"Match  ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, {annotation.kind}")
+                                    if annotation.match_id is None:
+                                        value = PackArgumentAsAnnotation(
+                                            annot=annotation,
+                                            target_dtype=parg_dtype if try_with_cast else None,
+                                        )
+                                        self._packed_arg_for_id[
+                                            pack_arg.id
+                                        ] = value
+                                        if self.debug_print_annotations:
+                                            print(f"Match  ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, {annotation.kind}")
+                                    else:
+                                        # Annotation has been matched before, has ID already
+                                        if self.debug_print_annotations:
+                                            print(f"Match again ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, {annotation.kind}")
+                                        idd = annotation.match_id
+                                        if idd in self._id_counts:
+                                            self._id_counts[idd] += 1
+                                        else:
+                                            self._id_counts[idd] = 2
+                                        #print(f"DEBUG: {idd} matched again [new cnt={self._id_counts[idd]}]")  # DEBUG
+                                        if pa_pos == new_entry_pos:
+                                            #print(f"DEBUG: {idd} returned by pack_hook")  # DEBUG
+                                            ret_id = idd
                                 else:
                                     # Pack hook arg matched against "ignore"
                                     # annotation is treated like an unmatched
@@ -770,17 +824,21 @@ class CellComputationAutogradHooks(AutogradHooks):
                                     if self._arrays_cleanup is not None:
                                         self._arrays_cleanup.add(pack_arg.x)
                                 self._num_matched_annotations += 1
-                                parg_matched_to = i
+                                parg_matched_to = (an_pos, pack_arg.id)
                                 break
                 if parg_matched_to is not None:
-                    del annot_keys[parg_matched_to]
+                    # We do not delete the annotation, but mark it
+                    ind, idd = parg_matched_to
+                    annotation = annot_keys[ind].annotation
+                    if not annotation.is_ignore and annotation.match_id is None:
+                        annotation = replace(
+                            annotation,
+                            match_id=idd,
+                        )
+                        self._node_annotations.nodes[ind] = annotation
                 else:
                     rem_pack_args.append(pack_arg)
             self._pack_arguments = rem_pack_args
-        # Recreate `_node_annotations.nodes` with remaining annotations
-        self._node_annotations.nodes.clear()
-        for annot_key in annot_keys:
-            self._node_annotations.nodes.append(annot_key.annotation)
         if flush_pack_args:
             # Flush all remaining pack arguments (these will not be packed)
             for pack_arg in self._pack_arguments:
@@ -798,9 +856,12 @@ class CellComputationAutogradHooks(AutogradHooks):
             # Convert all remaining annotations into a form for logging and
             # clear them
             self._remaining_annotations = [
-                NodeAnnotationForLog(a) for a in self._node_annotations.nodes
+                NodeAnnotationForLog(annotation)
+                for annotation in self._node_annotations.nodes
+                if annotation.match_id is None
             ]
             self._node_annotations.nodes.clear()
+        return ret_id
 
     def _matching_entries(self) -> List[MatchingEntry]:
         return [
