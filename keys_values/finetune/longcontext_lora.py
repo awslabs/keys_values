@@ -679,8 +679,8 @@ def fit(
             fabric.backward(loss)
 
         running_loss.update(loss.detach())
-        time_grad_in_ms = (time.perf_counter() - time_grad_t0) * 1000
-        print_with_rank_and_timestamp(f"Finished gradient computation [{time_grad_in_ms:.2} ms]", fabric.global_rank)
+        time_grad_in_secs = (time.perf_counter() - time_grad_t0) * 1000000
+        print_with_rank_and_timestamp(f"Finished gradient computation [{time_grad_in_secs:.2} secs]", fabric.global_rank)
         flush_io_streams()
 
         if record_gpu_memory_snapshots is not None and record_gpu_memory_kind != 2:

@@ -302,9 +302,10 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._init_members_from_tokens(input_ids, targets)
         if not isinstance(self.gpt_model.mha, MultiHeadSelfAttention):
             raise ValueError(f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention")
-        self._record_gpu_memory_snapshots = kwargs.get("record_gpu_memory_snapshots")
-        if self._record_gpu_memory_snapshots is not None:
-            self._record_gpu_memory_kind = kwargs.get("record_gpu_memory_kind", 0)
+        if self._record_gpu_memory_snapshots is None:
+            self._record_gpu_memory_snapshots = kwargs.get("record_gpu_memory_snapshots")
+            if self._record_gpu_memory_snapshots is not None:
+                self._record_gpu_memory_kind = kwargs.get("record_gpu_memory_kind", 0)
         if self.training:
             loss_value = self._inference_forward_pass(
                 input_ids, targets, scale_factor,
@@ -522,6 +523,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 config=self.config,
                 batch_size=self.batch_size,
                 arrays_cleanup=arrays_cleanup,
+                track_largest_shape=True,  # DEBUG
             )
         elif self._use_arrays_cleanup:
             self.autograd_hooks = CleanupArraysAutogradHooks(arrays_cleanup)
@@ -634,6 +636,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 self._record_gpu_memory_snapshots.path.parent / "snapshot_backward0.pickle"
             )
             self._record_gpu_memory_snapshots.start_recording()
+            print(f"Started recording: {self._record_gpu_memory_snapshots.path}")
 
         # Call :meth:`_backward_accumulate_gradients_nocheck`. May be done
         # several times with reduced memory limits
@@ -655,11 +658,13 @@ class LongContextGradientModel(LongContextInferenceModel):
                         if debug_count <= 2:
                             self._record_gpu_memory_snapshots.store_current_snapshot()
                             self._record_gpu_memory_snapshots.stop_recording()
+                            print("Stopped recording")
                             if debug_count < 2:
                                 self._record_gpu_memory_snapshots.set_path(
                                     self._record_gpu_memory_snapshots.path.parent / f"snapshot_backward{debug_count + 1}.pickle"
                                 )
                                 self._record_gpu_memory_snapshots.start_recording()
+                                print(f"Started recording: {self._record_gpu_memory_snapshots.path}")
                         debug_count += 1
 
         self._status = "init"  # Reset

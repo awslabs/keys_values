@@ -21,7 +21,7 @@ from litgpt.config import Config
 
 from keys_values.kvcache.base import KVCacheReplayLog
 from keys_values.kvcache.gradient.cleanup import ArraysForCleanup
-from keys_values.kvcache.utils import shape_to_tuple
+from keys_values.kvcache.utils import shape_to_tuple, bytes_for_torch_dtype
 from keys_values.utils import expand_index
 
 _ANNOTATION_KIND_VALUES = {
@@ -236,6 +236,34 @@ class LargeNodesLogEntry:
     shape: Tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class LargeShapeEntry:
+    shape: Tuple[int, ...]
+    numel: int
+    dtype: torch.dtype
+    count: int = 1
+
+    def process(self, x: torch.Tensor) -> "LargeShapeEntry":
+        x_numel = x.numel()
+        if x_numel > self.numel or self.numel == 0:
+            return LargeShapeEntry(
+                shape=tuple(x.shape),
+                numel=x_numel,
+                dtype=x.dtype,
+                count=1,
+            )
+        else:
+            return LargeShapeEntry(
+                shape=self.shape,
+                numel=self.numel,
+                dtype=x.dtype,
+                count=self.count + 1,
+            )
+
+    def size_in_mb(self) -> float:
+        return self.numel * bytes_for_torch_dtype(self.dtype) / (2 ** 20)
+
+
 class AutogradHooks:
     def pack_hook(self, x: torch.Tensor) -> Union[torch.Tensor, int]:
         raise NotImplementedError
@@ -381,6 +409,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         log_all_shapes: bool = False,
         debug_test_args: bool = False,
         arrays_cleanup: Optional[ArraysForCleanup] = None,
+        track_largest_shape: bool = False,
     ):
         """
         Args:
@@ -425,6 +454,8 @@ class CellComputationAutogradHooks(AutogradHooks):
         self.grace_period = None
         # If this is set, we log all annotations being matched
         self.debug_print_annotations = False
+        self._track_largest_shape = track_largest_shape
+        self._largest_shape = None
 
     def initialize_cell(
         self,
@@ -476,6 +507,10 @@ class CellComputationAutogradHooks(AutogradHooks):
             self._shapes_counter = Counter()
         if self._debug_test_args:
             self._debug_log_args = []
+        if self._track_largest_shape:
+            self._largest_shape = LargeShapeEntry(
+                shape=(0,), numel=0,
+            )
 
     @property
     def arrays_cleanup(self) -> Optional[ArraysForCleanup]:
@@ -553,6 +588,9 @@ class CellComputationAutogradHooks(AutogradHooks):
         assert self.log_all_shapes
         return self._shapes_counter
 
+    def largest_shape(self) -> Optional[LargeShapeEntry]:
+        return self._largest_shape
+
     def annotation_usage_log(self) -> AnnotationUsageLog:
         """
         The log can be used to understand why annotation matching does not work
@@ -591,6 +629,9 @@ class CellComputationAutogradHooks(AutogradHooks):
                 extra += f"-str{x.stride()}"
             x_key += (extra,)
             self._shapes_counter[x_key] += 1
+        if self._track_largest_shape:
+            self._largest_shape = self._largest_shape.process(x)
+
         # Pack argument if shape is matched
         new_id = self._pack_argument(x)
         if new_id is not None:

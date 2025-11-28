@@ -427,7 +427,10 @@ class DequantizedKVCacheBuffers:
         changed since then, nothing is done here.
 
         """
-        if self._quantized_cache is not None and self._needs_write_back:
+        # It can happen that `self._quantized_cache.buffers_are_allocated` is
+        # False here, because buffers have been deallocated due to OOM error.
+        # In this case, we don't need to write back anything
+        if self._quantized_cache is not None and self._needs_write_back and self._quantized_cache.buffers_are_allocated:
             self._quantize()  # Quantize and write back
 
     def _check_quantized_cache(self):

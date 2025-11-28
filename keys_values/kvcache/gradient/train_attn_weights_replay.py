@@ -154,6 +154,10 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
     def batch_size(self) -> Optional[int]:
         return self._batch_size
 
+    @property
+    def device(self) -> torch.device:
+        return self._device
+
     def _initialize_replay(self):
         # Initialize `_token_chunk_pos`, `_next_token_pos`, and
         # `_next_grace_pos`.

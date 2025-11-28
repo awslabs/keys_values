@@ -322,6 +322,12 @@ class CellComputation(nn.Module):
             get_inputs_slice=get_inputs_slice,
             input_pos=self.get_input_pos(first_chunk_idx),
         )
+        # DEBUG:
+        if self.autograd_hooks is not None:
+            largest_shape = self.autograd_hooks.largest_shape()
+            if largest_shape is not None:
+                print(f"Largest node in autograd hook: shape={largest_shape.shape}, numel={largest_shape.numel} [{largest_shape.size_in_mb()} MB], count={largest_shape.count}")
+        # END DEBUG
         # Reset `model` and compose results
         for (_, block), old_cache in zip(
             self.model_part.blocks(), kv_caches_copy,
