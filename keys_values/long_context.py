@@ -13,7 +13,7 @@
 # limitations under the License.
 import random
 from itertools import accumulate
-from typing import Optional, Dict, Any, Mapping, List, Set, Tuple
+from typing import Optional, Any, Mapping, List, Set, Tuple
 from dataclasses import dataclass, replace
 
 import torch
@@ -24,8 +24,6 @@ from keys_values.head_model import HeadModel
 from keys_values.kvcache.base import KVCache, DefaultKVCache
 from keys_values.kvcache.basics import DenseKVCache
 from keys_values.kvcache.factory import (
-    KVCacheFactory,
-    split_name,
     deallocate_kv_cache_buffers_of_model,
 )
 from keys_values.gpu_memory import RecordGPUMemory
@@ -41,52 +39,6 @@ from keys_values.model import GPT
 HEAD_OR_INITIAL_TENSORS_MAX_BYTES = 2 ** 31
 
 CLOSEBY_THRESHOLD = 4
-
-
-# TODO:
-# Too many parameters are collected here. Should only contain parameters
-# related to KV caches, not related to gradient computation.
-@dataclass(frozen=True)
-class KVCacheArgs:
-    name: str  # TODO: Different per layer
-    cache_length: int  # TODO: Different per layer
-    layers_per_cell: int = 1
-    chunk_size: int = 16
-    cache_kwargs: Optional[Dict[str, Any]] = None
-    randomize_chunk_sizes: bool = False
-    chunks_per_cell_multiplier: float = 1.0
-    single_tokens_for_targets: bool = False,
-    verbose: str = VerbosityLevels.SOME.value
-    allocate_buffers: bool = False
-    attention_forward_temp_size_gb: Optional[float] = None
-    attention_backward_temp_size_gb: Optional[float] = None
-    use_new_cache: bool = False
-    max_match_trials_pack_arg: Optional[int] = None
-    layer_checkpoint_chunk_size: Optional[int] = None
-
-    def __post_init__(self):
-        supported_names = KVCacheFactory.supported_names()
-        assert self.name in supported_names, f"name = {self.name} not supported, must be in {supported_names}"
-        assert self.verbose in VerbosityLevels, f"verbose = {self.verbose} not supported, must be in {VerbosityLevels}"
-        assert self.cache_length >= 1
-        assert self.attention_forward_temp_size_gb is None or self.attention_forward_temp_size_gb > 0
-        assert self.attention_backward_temp_size_gb is None or self.attention_backward_temp_size_gb > 0
-        assert self.chunks_per_cell_multiplier >= 0.1, f"chunks_per_cell_multiplier = {self.chunks_per_cell_multiplier}, must be >= 0.1"
-
-    @property
-    def verbosity_level(self) -> VerbosityLevels:
-        return VerbosityLevels(self.verbose)
-
-    @property
-    def qname(self) -> str:
-        return split_name(self.name)[1]
-
-    def maximum_chunk_size(self) -> int:
-        if not self.randomize_chunk_sizes:
-            return self.chunk_size
-        else:
-            step = self.chunk_size // 2
-            return self.chunk_size + step
 
 
 def create_chunk_sizes(
@@ -504,7 +456,6 @@ class LongContextInferenceModel(GPTAndHeadModel):
         chunk_size: int = 16,
         randomize_chunk_sizes: bool = False,
         chunks_per_cell_multiplier: float = 1.0,
-        single_tokens_for_targets: bool = False,
         verbose: VerbosityLevels = VerbosityLevels.SOME,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
         debug_single_cell_per_row: bool = False,
@@ -535,10 +486,6 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 larger. The larger this multiplier, the fewer cells per row,
                 which speeds up computation, but also memory requirements of
                 gradient computation per cell scales linearly in this value.
-            single_tokens_for_targets: If `True`, the targets part of a
-                sequence is processed token per token (i.e., with chunk size
-                1). This is slower, but more realistic, mirroring how inference
-                looks like.
             verbose: Verbosity level, defaults to ``VerbosityLevels.SOME``.
                 For ``VerbosityLevels.ALL``, we print deep diagnostic
                 information
@@ -558,7 +505,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
         if chunks_per_cell_multiplier < 0.1:
             raise ValueError(f"chunks_per_cell_multiplier = {chunks_per_cell_multiplier}, must be >=0.1")
         self.chunks_per_cell_multiplier = chunks_per_cell_multiplier
-        self.single_tokens_for_targets = single_tokens_for_targets
+        # Becomes an option in subclass for gradient computation:
+        self.single_tokens_for_targets = False
         self.verbose = verbose
         self._debug_single_cell_per_row = debug_single_cell_per_row
         cache_params = self.gpt_model.get_kv_cache_params(0)

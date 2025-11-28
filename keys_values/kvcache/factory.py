@@ -32,10 +32,7 @@ from keys_values.kvcache.quant_buffers import (
     DequantizedKVCacheBuffers,
 )
 from keys_values.kvcache.quantize import (
-    Quantizer,
-    TorchAOQuantizer,
-    TorchBasicQuantizer,
-    BitsAndBytesQuantizer,
+    Quantizer, TorchBasicQuantizer, TorchAOQuantizer, BitsAndBytesQuantizer,
 )
 from keys_values.model import GPT
 
@@ -50,6 +47,7 @@ _SUPPORTED_CACHES = (
     ("h2o-orig", H2OOriginalKVCache, True),
 )
 
+
 SUPPORTED_QUANTIZERS = {
     "default": None,
     "torch-quantized8": TorchBasicQuantizer,
@@ -58,6 +56,7 @@ SUPPORTED_QUANTIZERS = {
     "bnb-quantized4": BitsAndBytesQuantizer,
     "bnb-quantized8": BitsAndBytesQuantizer,
 }
+
 
 SUPPORTED_CACHES = {
     f"{name}-{quant}": typ

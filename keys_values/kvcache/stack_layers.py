@@ -95,9 +95,9 @@ class CellBlocks:
                         f"Batch size {batch_size} is too large for KV cache layer {block_idx} (batch size {kv_cache.max_batch_size}). Use 'assign_kv_caches' or `set_kv_caches'"
                     )
             else:
-                if kv_cache.max_tokens_forward < chunk_len:
+                if kv_cache.max_forward_length < chunk_len:
                     raise ValueError(
-                        f"KV cache for layer {block_idx}: chunk_len = {chunk_len}, must be <= max_tokens_forward = {kv_cache.max_tokens_forward}"
+                        f"KV cache for layer {block_idx}: chunk_len = {chunk_len}, must be <= max_forward_length = {kv_cache.max_forward_length}"
                     )
 
     def assign_kv_caches(

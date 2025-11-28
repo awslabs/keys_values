@@ -61,7 +61,7 @@ class InferenceReplayCacheMixin:
         raise NotImplementedError
 
     @property
-    def cache_length(self) -> Optional[int]:
+    def cache_length(self) -> int:
         raise NotImplementedError
 
     @property
@@ -151,7 +151,7 @@ class InferenceAttnWeightsReplayCache(
         return super().current_length
 
     @property
-    def cache_length(self) -> Optional[int]:
+    def cache_length(self) -> int:
         return super().cache_length
 
     @property
@@ -233,7 +233,7 @@ class InferenceDenseReplayCache(
         return super().current_length
 
     @property
-    def cache_length(self) -> Optional[int]:
+    def cache_length(self) -> int:
         return super().cache_length
 
     @property
@@ -288,7 +288,7 @@ class InferenceLastRecentlyInsertedReplayCache(
         return super().current_length
 
     @property
-    def cache_length(self) -> Optional[int]:
+    def cache_length(self) -> int:
         return super().cache_length
 
     @property

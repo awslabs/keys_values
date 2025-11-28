@@ -56,33 +56,34 @@ from litgpt.utils import (
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME
-from keys_values.finetune.args import OptimizerArgs, LoRAARgs
+from keys_values.finetune.args import (
+    EvalArgs,
+    GradientArgs,
+    KVCacheArgs,
+    LoRAARgs,
+    OptimizerArgs,
+)
 from keys_values.finetune.batch_transform import (
     BatchTransformFactory, BatchTransform,
 )
 from keys_values.finetune.longcontext_full import (
     wrap_gpt_model,
-    print_message,
-    get_lr_scheduler,
-    get_dataloaders,
-    validate_args,
-    check_kv_cache,
     validate,
     validate_and_all_reduce,
-    print_with_rank_and_timestamp,
-    flush_io_streams,
-    debug_sum_gradient_norms,
-    debug_random_trainable_param_names,
-    debug_clone_selected_params,
-    debug_compare_selected_params,
-    DEBUG_NUM_SELECTED_PARAMS,
-    choose_logger,
-    EvalArgs,
 )
+from keys_values.utils import flush_io_streams
 from keys_values.finetune.utils import (
     LORA_WEIGHTS_FNAME,
     HEAD_MODEL_FNAME,
     LIT_MODEL_FNAME,
+    get_lr_scheduler,
+    get_dataloaders,
+    validate_args,
+    choose_logger,
+    adapt_requires_grad,
+    print_with_rank_and_timestamp,
+    print_message,
+    check_kv_cache,
 )
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
@@ -93,7 +94,7 @@ from keys_values.kvcache.utils import (
     log_memory_all_devices,
     fabric_precision_to_dtype,
 )
-from keys_values.long_context import KVCacheArgs, GPTAndHeadModel
+from keys_values.long_context import GPTAndHeadModel
 from keys_values.lora import GPT
 from keys_values.parser_config import save_hyperparameters
 from keys_values.pos_encoding import position_encoding_factory
@@ -144,31 +145,33 @@ def setup(
     access_token: Optional[str] = None,
     kv_cache: KVCacheArgs = KVCacheArgs(
         name="h2o-torch-quantized8",
-        cache_length=8192,
-        layers_per_cell=1,
-        chunk_size=256,
+        cache_length=16384,
+        chunk_size=1024,
         cache_kwargs={
             "replay_log_blocksize": 1024,
             "allocate_buffers": False,
             "max_num_ranges": 4,
         },
         randomize_chunk_sizes=False,
+        allocate_buffers=False,
+    ),
+    grad: GradientArgs = GradientArgs(
+        layers_per_cell=1,
         chunks_per_cell_multiplier=1.0,
         single_tokens_for_targets=False,
-        verbose=VerbosityLevels.SOME.value,
-        attention_forward_temp_size_gb=4,
-        attention_backward_temp_size_gb=2,
         use_new_cache=False,
         max_match_trials_pack_arg=8,
         layer_checkpoint_chunk_size=None,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
+    verbose: Optional[str] = None,
+    attention_forward_temp_size_gb: Optional[float] = None,
+    attention_backward_temp_size_gb: Optional[float] = None,
     yarn_rope: bool = True,
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
     record_gpu_memory_period: int = 0,
-    debug_check_updates: bool = False,
     generate_with_eval: bool = False,
     profile_grad_times: int = 0,
     profile_parts: Optional[str] = None,
@@ -189,16 +192,9 @@ def setup(
             Note: We modified the defaults from `train.lr_warmup_steps=100` to
             `train.lr_warmup_fraction=0.15`, so the linear warm-up is the first
             15% of all steps.
-        lora: Arguments for LoRA extension of model:
-            - r: The LoRA rank.
-            - alpha: The LoRA alpha.
-            - dropout: The LoRA dropout value.
-            - query: Whether to apply LoRA to the query weights in attention.
-            - key: Whether to apply LoRA to the key weights in attention.
-            - value: Whether to apply LoRA to the value weights in attention.
-            - projection: Whether to apply LoRA to the output projection in the attention block.
-            - mlp: Whether to apply LoRA to the weights of the MLP in the attention block.
-            - head: Whether to apply LoRA to output head in GPT.
+        lora: Arguments for LoRA extension of model, see
+            ``keys_values.finetune.args.LoRAArgs`` for details. Adjust the LoRA
+            rank with `lora.r`.
         eval: Evaluation-related arguments. See ``litgpt.args.EvalArgs`` for details.
             Note: We modify the default for `eval.initial_validation` (whether
             evaluation is run before training starts). It is set if
@@ -209,13 +205,25 @@ def setup(
         logger_name: The name of the logger to send metrics to.
         seed: The random seed to use for reproducibility.
         access_token: Optional API token to access models with restrictions.
-        kv_cache: Configuration for the KV caches. Defaults to H2O with PyTorch
-            8-bit quantization and cache length 8192. Should be increased if GPU
-            memory is sufficient. Also consider increasing layers per cell.
+        kv_cache: Configuration for the KV caches. See
+            ``keys_values.finetune.args.KVCacheArgs`` for details. Defaults to
+            H2O with PyTorch 8-bit quantization. Make sure to adjust
+            `kv_cache.cache_length`.
+        grad: Configuration for gradient computation, see
+            ``keys_values.finetune.args.GradientArgs`` for details. Adjust
+            `grad.layers_per_cell` and `grad.chunks_per_cell_multiplier` given
+            your GPU memory (defaults are smallest sensible values).
         head_model: Name of the head model to use, see
             :class:`HeadModelFactory`. Defaults to "next_token_prediction"
         head_model_kwargs: Extra keyword arguments to pass to the head model
             factory.
+        verbose: Verbosity level for logging outputs.
+        attention_forward_temp_size_gb: Size of GPU memory buffers (in GB) used
+            in naive SDPA. At present, naive SDPA is used with KV caches which
+            require attention weights (e.g., H2O).
+        attention_backward_temp_size_gb: Size of GPU memory buffers (in GB) used
+            in naive SDPA during backward computations. At present, naive SDPA
+            is used in backward if `grad.use_new_cache == False`.
         yarn_rope: Should YaRN be used to adjust RoPE (position encoding) to the
             sequence length for each batch? Defaults to `True`. If not, RoPE is
             determined by the model configuration, and is static (no dependence
@@ -230,7 +238,8 @@ def setup(
             - 1: Only record gradient computations (after initial forward). For
                 each update, we store one snapshot file per row of cells being
                 processed.
-            - 2: Special case (DEBUG)
+            - 2: Special case (first forward and backward pass)
+            - 3: Another special case
             Defaults to 0.
         record_gpu_memory_period: Only if `record_gpu_memory_snapshots` is used.
             Snapshot files are written once per update step. Files are overwritten
@@ -252,7 +261,7 @@ def setup(
         data.metadata_dir = str(out_dir / "data")
         print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
     out_dir = init_out_dir(out_dir)
-    data.metadata_dir = str(init_out_dir(data.metadata_dir))
+    data.metadata_dir = str(init_out_dir(Path(data.metadata_dir)))
     if head_model_kwargs is None:
         head_model_kwargs = dict()
     devices = parse_devices(devices)
@@ -267,6 +276,26 @@ def setup(
         print(str(optimizer))
     if profile_parts is not None and profile_parts not in ("forward", "backward"):
         raise ValueError("profile_parts: Must be 'forward' or 'backward'")
+    # Legacy arguments
+    if verbose is None:
+        if kv_cache.verbose is not None:
+            verbose = kv_cache.verbose
+            kv_cache.verbose = None
+        else:
+            verbose = VerbosityLevels.SOME.value
+    verbose = VerbosityLevels(verbose)
+    if attention_forward_temp_size_gb is None:
+        if kv_cache.attention_forward_temp_size_gb is not None:
+            attention_forward_temp_size_gb = kv_cache.attention_forward_temp_size_gb
+            kv_cache.attention_forward_temp_size_gb = None
+        else:
+            attention_forward_temp_size_gb = 4
+    if attention_backward_temp_size_gb is None:
+        if kv_cache.attention_backward_temp_size_gb is not None:
+            attention_backward_temp_size_gb = kv_cache.attention_backward_temp_size_gb
+            kv_cache.attention_backward_temp_size_gb = None
+        else:
+            attention_backward_temp_size_gb = 2
 
     check_kv_cache(kv_cache)
     check_valid_checkpoint_dir(checkpoint_dir)
@@ -361,14 +390,17 @@ def setup(
         eval=eval,
         optimizer=optimizer,
         kv_cache=kv_cache,
+        grad=grad,
         num_nodes=num_nodes,
         head_model_name=head_model,
         head_model_kwargs=head_model_kwargs,
+        verbose=verbose,
+        attention_forward_temp_size_gb=attention_forward_temp_size_gb,
+        attention_backward_temp_size_gb=attention_backward_temp_size_gb,
         yarn_rope=yarn_rope,
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
-        debug_check_updates=debug_check_updates,
         generate_with_eval=generate_with_eval,
         profile_grad_times=profile_grad_times,
         profile_parts=profile_parts,
@@ -387,14 +419,17 @@ def main(
     eval: EvalArgs,
     optimizer: OptimizerArgs,
     kv_cache: KVCacheArgs,
+    grad: GradientArgs,
     num_nodes: int,
     head_model_name: str,
     head_model_kwargs: Dict[str, Any],
+    verbose: VerbosityLevels,
+    attention_forward_temp_size_gb: float,
+    attention_backward_temp_size_gb: float,
     yarn_rope: bool,
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
-    debug_check_updates: bool,
     generate_with_eval: bool,
     profile_grad_times: int,
     profile_parts: Optional[str],
@@ -434,7 +469,7 @@ def main(
             SDPBackend.CUDNN_ATTENTION,
             SDPBackend.MATH,
         ]
-        limit_gb = kv_cache.attention_forward_temp_size_gb
+        limit_gb = attention_forward_temp_size_gb
         if limit_gb is None:
             limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
         print_message(f"Setting limit attention_forward_temp_size_gb to {limit_gb} GB", fabric)
@@ -471,6 +506,7 @@ def main(
             data=data,
             **head_model_kwargs,
         )
+        adapt_requires_grad(gpt_model, head_model)
         batch_size = train.micro_batch_size
         if eval.micro_batch_size is not None:
             batch_size = max(batch_size, eval.micro_batch_size)
@@ -478,6 +514,9 @@ def main(
             gpt_model=gpt_model,
             head_model=head_model,
             kv_cache=kv_cache,
+            grad=grad,
+            verbose=verbose,
+            attention_backward_temp_size_gb=attention_backward_temp_size_gb,
             max_batch_size=batch_size,
             dtype=fabric_precision_to_dtype(fabric._precision.precision),
             profile_grad_times=profile_grad_times > 0,
@@ -518,11 +557,11 @@ def main(
         load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
     if profile_grad_times > 0:
-        thresh = kv_cache.max_match_trials_pack_arg
-        name = "new" if kv_cache.use_new_cache else "old"
+        thresh = grad.max_match_trials_pack_arg
+        name = "new" if grad.use_new_cache else "old"
         profile_grad_params = {
             "path": Path(out_dir) / f"profile_grad_times_{name}_{thresh}.csv",
-            "use_new_cache": kv_cache.use_new_cache,
+            "use_new_cache": grad.use_new_cache,
             "max_match_trials_pack_arg": thresh,
             "profile_grad_times": profile_grad_times,
             "cache_name": kv_cache.name,
@@ -546,7 +585,6 @@ def main(
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
-        debug_check_updates=debug_check_updates,
         num_trainable_params=num_trainable_params,
         generate_with_eval=generate_with_eval,
         profile_grad_params=profile_grad_params,
@@ -614,7 +652,6 @@ def fit(
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
-    debug_check_updates: bool,
     num_trainable_params: int,
     generate_with_eval: bool,
     profile_grad_params: Optional[Dict[str, Any]],
@@ -713,11 +750,6 @@ def fit(
 
         is_accumulating = state["iter_num"] % train.gradient_accumulation_iters(devices, num_nodes) != 0
         print_with_rank_and_timestamp("Starting gradient computation.", fabric.global_rank)
-        if debug_check_updates:
-            debug_names = debug_random_trainable_param_names(
-                model, DEBUG_NUM_SELECTED_PARAMS, num_trainable_params,
-            )
-            debug_orig_params = debug_clone_selected_params(model, debug_names)
         with fabric.no_backward_sync(model, enabled=is_accumulating):
             loss = model(
                 input_ids=batch[INPUT_IDS_NAME],
@@ -759,28 +791,8 @@ def fit(
 
         if not is_accumulating:
             print_with_rank_and_timestamp("Waiting for optimizer to update.", fabric.global_rank)
-            if debug_check_updates:
-                norm = debug_sum_gradient_norms(model)
-                print_with_rank_and_timestamp(
-                    f"Gradient average norm before update: {norm}",
-                    fabric.global_rank,
-                    start_newline=False,
-                )
             optimizer.step()
             print_message("Optimizer update done.", fabric)
-            if debug_check_updates:
-                if fabric.global_rank == 0:
-                    norm = debug_sum_gradient_norms(model)
-                    print_with_rank_and_timestamp(
-                        f"Gradient average norm after update: {norm}",
-                        fabric.global_rank,
-                        start_newline=False,
-                    )
-                num_changed = debug_compare_selected_params(model, debug_orig_params)
-                msg = f"{num_changed} of {DEBUG_NUM_SELECTED_PARAMS} parameters changed"
-                print_with_rank_and_timestamp(
-                    msg, fabric.global_rank, start_newline=False,
-                )
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
             state["step_count"] += 1

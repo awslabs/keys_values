@@ -14,17 +14,13 @@
 # limitations under the License.
 import csv
 import dataclasses
-import random
-import sys
 
-from datetime import datetime
 import math
 import os
 import time
 from pathlib import Path
 from pprint import pprint
-from dataclasses import dataclass
-from typing import Dict, Literal, Optional, Tuple, Union, Any, List
+from typing import Dict, Literal, Optional, Union, Any
 
 import lightning as L
 import torch
@@ -33,7 +29,8 @@ from torch.utils.data import DataLoader
 from torchmetrics import RunningMean
 from torch.nn.attention import SDPBackend
 
-from litgpt.args import EvalArgs as _EvalArgs, TrainArgs
+from keys_values.utils import flush_io_streams
+from litgpt.args import TrainArgs
 from litgpt.data import DataModule
 from litgpt.generate.base import generate
 from litgpt.config import Config
@@ -44,7 +41,6 @@ from litgpt.utils import (
     auto_download_checkpoint,
     check_nvlink_connectivity,
     check_valid_checkpoint_dir,
-    choose_logger as _choose_logger,
     copy_config_files,
     create_finetuning_performance_report,
     find_resume_path,
@@ -60,11 +56,31 @@ from litgpt.utils import (
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME
-from keys_values.finetune.args import OptimizerArgs
-from keys_values.finetune.batch_transform import (
-    BatchTransformFactory, BatchTransform,
+from keys_values.finetune.args import (
+    EvalArgs,
+    GradientArgs,
+    KVCacheArgs,
+    OptimizerArgs,
 )
-from keys_values.finetune.utils import LIT_MODEL_FNAME, HEAD_MODEL_FNAME
+from keys_values.finetune.batch_transform import (
+    BatchTransformFactory,
+    BatchTransform,
+)
+from keys_values.finetune.utils import (
+    LIT_MODEL_FNAME,
+    HEAD_MODEL_FNAME,
+    print_but_limit_size,
+    get_lr_scheduler,
+    get_dataloaders,
+    validate_args,
+    save_model_checkpoint,
+    choose_logger,
+    adapt_requires_grad,
+    print_with_rank_and_timestamp,
+    print_message,
+    check_kv_cache,
+)
+from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import HeadModel, CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.factory import (
@@ -73,19 +89,17 @@ from keys_values.kvcache.factory import (
     cleanup_cache_kwargs,
     split_name,
 )
-from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.gradient.main import (
     LongContextGradientModel,
     NaiveGPTAndHeadModel,
 )
 from keys_values.kvcache.utils import (
     fabric_precision_to_dtype,
-    VerbosityLevels,
-    message_memory_all_devices,
     log_memory_all_devices,
+    message_memory_all_devices,
+    VerbosityLevels,
 )
 from keys_values.long_context import (
-    KVCacheArgs,
     GPTAndHeadModel,
     LongContextInferenceModel,
 )
@@ -95,17 +109,6 @@ from keys_values.pos_encoding import position_encoding_factory
 
 
 DEFAULT_OUT_DIR = "out/finetune/longcontext_full"
-
-DEBUG_NUM_SELECTED_PARAMS = 20
-
-
-@dataclass
-class EvalArgs(_EvalArgs):
-    """
-    If `micro_batch_size` is not given, `train.micro_batch_size` is used.
-
-    """
-    micro_batch_size: Optional[int] = None
 
 
 def setup(
@@ -139,31 +142,33 @@ def setup(
     access_token: Optional[str] = None,
     kv_cache: KVCacheArgs = KVCacheArgs(
         name="h2o-torch-quantized8",
-        cache_length=8192,
-        layers_per_cell=1,
-        chunk_size=256,
+        cache_length=16384,
+        chunk_size=1024,
         cache_kwargs={
             "replay_log_blocksize": 1024,
             "allocate_buffers": False,
             "max_num_ranges": 4,
         },
         randomize_chunk_sizes=False,
+        allocate_buffers=False,
+    ),
+    grad: GradientArgs = GradientArgs(
+        layers_per_cell=1,
         chunks_per_cell_multiplier=1.0,
         single_tokens_for_targets=False,
-        verbose=VerbosityLevels.SOME.value,
-        attention_forward_temp_size_gb=4,
-        attention_backward_temp_size_gb=2,
         use_new_cache=False,
         max_match_trials_pack_arg=8,
         layer_checkpoint_chunk_size=None,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
+    verbose: Optional[str] = None,
+    attention_forward_temp_size_gb: Optional[float] = None,
+    attention_backward_temp_size_gb: Optional[float] = None,
     yarn_rope: bool = True,
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
     record_gpu_memory_period: int = 0,
-    debug_check_updates: bool = False,
     profile_grad_times: int = 0,
     profile_parts: Optional[str] = None,
 ) -> None:
@@ -185,21 +190,33 @@ def setup(
             Note: We modified the defaults from `train.lr_warmup_steps=100` to
             `train.lr_warmup_fraction=0.15`, so the linear warm-up is the first
             15% of all steps.
-        eval: Evaluation-related arguments. See ``litgpt.args.EvalArgs`` for details.
+        eval: Evaluation-related arguments. See
+            ``keys_values.finetune.args.EvalArgs`` for details.
         optimizer: Selects optimizer and its parameters, see
             ``keys_values.finetune.args.OptimizerArgs`` for details. Defaults to
             "AdamW" with default parameters.
         logger_name: The name of the logger to send metrics to.
         seed: The random seed to use for reproducibility.
         access_token: Optional API token to access models with restrictions.
-        kv_cache: Configuration for the KV caches. Defaults to H2O with PyTorch
-            8-bit quantization and cache length 8192. Should be increased if GPU
-            memory is sufficient. Also consider increasing layers per cell.
-        kv_cache: Configuration for the KV caches
+        kv_cache: Configuration for the KV caches. See
+            ``keys_values.finetune.args.KVCacheArgs`` for details. Defaults to
+            H2O with PyTorch 8-bit quantization. Make sure to adjust
+            `kv_cache.cache_length`.
+        grad: Configuration for gradient computation, see
+            ``keys_values.finetune.args.GradientArgs`` for details. Adjust
+            `grad.layers_per_cell` and `grad.chunks_per_cell_multiplier` given
+            your GPU memory (defaults are smallest sensible values).
         head_model: Name of the head model to use, see
             :class:`HeadModelFactory`. Defaults to "next_token_prediction"
         head_model_kwargs: Extra keyword arguments to pass to the head model
             factory.
+        verbose: Verbosity level for logging outputs.
+        attention_forward_temp_size_gb: Size of GPU memory buffers (in GB) used
+            in naive SDPA. At present, naive SDPA is used with KV caches which
+            require attention weights (e.g., H2O).
+        attention_backward_temp_size_gb: Size of GPU memory buffers (in GB) used
+            in naive SDPA during backward computations. At present, naive SDPA
+            is used in backward if `grad.use_new_cache == False`.
         yarn_rope: Should YaRN be used to adjust RoPE (position encoding) to the
             sequence length for each batch? Defaults to `True`. If not, RoPE is
             determined by the model configuration, and is static (no dependence
@@ -235,7 +252,7 @@ def setup(
         data.metadata_dir = str(out_dir / "data")
         print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
     out_dir = init_out_dir(out_dir)
-    data.metadata_dir = str(init_out_dir(data.metadata_dir))
+    data.metadata_dir = str(init_out_dir(Path(data.metadata_dir)))
     if head_model_kwargs is None:
         head_model_kwargs = dict()
     devices = parse_devices(devices)
@@ -245,11 +262,31 @@ def setup(
         eval.initial_validation = devices > 1
     if optimizer is None:
         optimizer = OptimizerArgs(name="AdamW")
-        print("Choosing optimizer AdamW with default learning rate. We highly recommend to at least tune optimizer.learning_rate")
+        print("Choosing optimizer AdamW with default learning rate. We recommend to at least tune optimizer.learning_rate")
     else:
         print(str(optimizer))
     if profile_parts is not None and profile_parts not in ("forward", "backward"):
         raise ValueError("profile_parts: Must be 'forward' or 'backward'")
+    # Legacy arguments
+    if verbose is None:
+        if kv_cache.verbose is not None:
+            verbose = kv_cache.verbose
+            kv_cache.verbose = None
+        else:
+            verbose = VerbosityLevels.SOME.value
+    verbose = VerbosityLevels(verbose)
+    if attention_forward_temp_size_gb is None:
+        if kv_cache.attention_forward_temp_size_gb is not None:
+            attention_forward_temp_size_gb = kv_cache.attention_forward_temp_size_gb
+            kv_cache.attention_forward_temp_size_gb = None
+        else:
+            attention_forward_temp_size_gb = 4
+    if attention_backward_temp_size_gb is None:
+        if kv_cache.attention_backward_temp_size_gb is not None:
+            attention_backward_temp_size_gb = kv_cache.attention_backward_temp_size_gb
+            kv_cache.attention_backward_temp_size_gb = None
+        else:
+            attention_backward_temp_size_gb = 2
 
     check_kv_cache(kv_cache)
     check_valid_checkpoint_dir(checkpoint_dir)
@@ -317,14 +354,17 @@ def setup(
         eval=eval,
         optimizer=optimizer,
         kv_cache=kv_cache,
+        grad=grad,
         num_nodes=num_nodes,
         head_model_name=head_model,
         head_model_kwargs=head_model_kwargs,
+        verbose=verbose,
+        attention_forward_temp_size_gb=attention_forward_temp_size_gb,
+        attention_backward_temp_size_gb=attention_backward_temp_size_gb,
         yarn_rope=yarn_rope,
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
-        debug_check_updates=debug_check_updates,
         profile_grad_times=profile_grad_times,
         profile_parts=profile_parts,
     )
@@ -343,14 +383,17 @@ def main(
     eval: EvalArgs,
     optimizer: OptimizerArgs,
     kv_cache: KVCacheArgs,
+    grad: GradientArgs,
     num_nodes: int,
     head_model_name: str,
     head_model_kwargs: Dict[str, Any],
+    verbose: VerbosityLevels,
+    attention_forward_temp_size_gb: float,
+    attention_backward_temp_size_gb: float,
     yarn_rope: bool,
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
-    debug_check_updates: bool,
     profile_grad_times: int,
     profile_parts: Optional[str],
 ) -> None:
@@ -374,7 +417,7 @@ def main(
     )
     steps_per_epoch = len(train_dataloader) // train.gradient_accumulation_iters(devices, num_nodes)
     lr_max_steps = min(train.epochs * steps_per_epoch, (train.max_steps or float("inf")))
-
+    print(f"Number of optimizer steps per epoch: {lr_max_steps}")
     fabric.seed_everything(seed)  # same seed for every process to init model (FSDP)
 
     if fabric.global_rank == 0:
@@ -388,7 +431,7 @@ def main(
             SDPBackend.CUDNN_ATTENTION,
             SDPBackend.MATH,
         ]
-        limit_gb = kv_cache.attention_forward_temp_size_gb
+        limit_gb = attention_forward_temp_size_gb
         if limit_gb is None:
             limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
         print_message(
@@ -415,6 +458,7 @@ def main(
             data=data,
             **head_model_kwargs,
         )
+        adapt_requires_grad(gpt_model, head_model)
         batch_size = train.micro_batch_size
         if eval.micro_batch_size is not None:
             batch_size = max(batch_size, eval.micro_batch_size)
@@ -422,6 +466,9 @@ def main(
             gpt_model=gpt_model,
             head_model=head_model,
             kv_cache=kv_cache,
+            grad=grad,
+            verbose=verbose,
+            attention_backward_temp_size_gb=attention_backward_temp_size_gb,
             max_batch_size=batch_size,
             dtype=fabric_precision_to_dtype(fabric._precision.precision),
             profile_grad_times=profile_grad_times > 0,
@@ -464,11 +511,11 @@ def main(
             load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
     if profile_grad_times > 0:
-        thresh = kv_cache.max_match_trials_pack_arg
-        name = "new" if kv_cache.use_new_cache else "old"
+        thresh = grad.max_match_trials_pack_arg
+        name = "new" if grad.use_new_cache else "old"
         profile_grad_params = {
             "path": Path(out_dir) / f"profile_grad_times_{name}_{thresh}.csv",
-            "use_new_cache": kv_cache.use_new_cache,
+            "use_new_cache": grad.use_new_cache,
             "max_match_trials_pack_arg": thresh,
             "profile_grad_times": profile_grad_times,
             "cache_name": kv_cache.name,
@@ -493,8 +540,6 @@ def main(
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
-        debug_check_updates=debug_check_updates,
-        num_trainable_params=num_trainable_params,
         profile_grad_params=profile_grad_params,
     )
     training_time = time.perf_counter() - train_time
@@ -531,18 +576,14 @@ def main(
             save_prompt_style(data.prompt_style, save_dir)
 
 
-def print_message(msg: str, fabric: Optional[L.Fabric] = None):
-    if fabric is not None:
-        fabric.print(msg)
-    else:
-        print(msg)
-
-
 # TODO: Support caches of different lengths, maybe even different types
 def wrap_gpt_model(
     gpt_model: GPT,
     head_model: HeadModel,
     kv_cache: KVCacheArgs,
+    grad: GradientArgs,
+    verbose: VerbosityLevels,
+    attention_backward_temp_size_gb: float,
     max_batch_size: int,
     dtype: torch.dtype,
     model_for_training: bool = True,
@@ -583,14 +624,13 @@ def wrap_gpt_model(
         head_model=head_model,
         chunk_size=kv_cache.chunk_size,
         randomize_chunk_sizes=kv_cache.randomize_chunk_sizes,
-        chunks_per_cell_multiplier=kv_cache.chunks_per_cell_multiplier,
-        single_tokens_for_targets=kv_cache.single_tokens_for_targets,
-        verbose=kv_cache.verbosity_level,
+        chunks_per_cell_multiplier=grad.chunks_per_cell_multiplier,
+        verbose=verbose,
         tmp_array_limit_gb=tmp_array_limit_gb,
     )
     if model_for_training:
         # Temp array size limit can be different for backward and forward
-        limit_gb = kv_cache.attention_backward_temp_size_gb
+        limit_gb = attention_backward_temp_size_gb
         if limit_gb is None:
             limit_gb = kv_cache.attention_forward_temp_size_gb
             if limit_gb is None:
@@ -605,17 +645,17 @@ def wrap_gpt_model(
         )
         train_cache_kwargs = {
             "sdpa_kernels": cache_kwargs["sdpa_kernels"],
-            "use_new_cache": kv_cache.use_new_cache,
+            "use_new_cache": grad.use_new_cache,
         }
-        if kv_cache.max_match_trials_pack_arg is not None:
+        if grad.max_match_trials_pack_arg is not None:
             autograd_hooks_kwargs = dict(
-                max_match_trials_pack_arg=kv_cache.max_match_trials_pack_arg,
+                max_match_trials_pack_arg=grad.max_match_trials_pack_arg,
             )
         else:
             autograd_hooks_kwargs = None
         if cpu_offload_device is not None:
             common_kwargs["head_model"] = head_model.to(device=cpu_offload_device)
-        layer_checkpoint_chunk_size = kv_cache.layer_checkpoint_chunk_size
+        layer_checkpoint_chunk_size = grad.layer_checkpoint_chunk_size
         if layer_checkpoint_chunk_size is None:
             # Default value for chunk size if not given
             layer_checkpoint_chunk_size = kv_cache.cache_length
@@ -629,7 +669,8 @@ def wrap_gpt_model(
             )
         model = LongContextGradientModel(
             **common_kwargs,
-            layers_per_cell=kv_cache.layers_per_cell,
+            layers_per_cell=grad.layers_per_cell,
+            single_tokens_for_targets=grad.single_tokens_for_targets,
             qname=kv_cache.qname,
             cache_kwargs=cache_kwargs,
             train_cache_kwargs=train_cache_kwargs,
@@ -682,8 +723,6 @@ def fit(
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
-    debug_check_updates: bool,
-    num_trainable_params: int,
     profile_grad_params: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     model = state["model"]
@@ -775,11 +814,6 @@ def fit(
 
         is_accumulating = state["iter_num"] % train.gradient_accumulation_iters(devices, num_nodes) != 0
         print_with_rank_and_timestamp("Starting gradient computation.", fabric.global_rank)
-        if debug_check_updates:
-            debug_names = debug_random_trainable_param_names(
-                model, DEBUG_NUM_SELECTED_PARAMS, num_trainable_params,
-            )
-            debug_orig_params = debug_clone_selected_params(model, debug_names)
         with fabric.no_backward_sync(model, enabled=is_accumulating):
             loss = model(
                 input_ids=batch[INPUT_IDS_NAME],
@@ -821,28 +855,8 @@ def fit(
 
         if not is_accumulating:
             print_with_rank_and_timestamp("Waiting for optimizer to update.", fabric.global_rank)
-            if debug_check_updates:
-                norm = debug_sum_gradient_norms(model)
-                print_with_rank_and_timestamp(
-                    f"Gradient average norm before update: {norm}",
-                    fabric.global_rank,
-                    start_newline=False,
-                )
             optimizer.step()
             print_message("Optimizer update done.", fabric)
-            if debug_check_updates:
-                if fabric.global_rank == 0:
-                    norm = debug_sum_gradient_norms(model)
-                    print_with_rank_and_timestamp(
-                        f"Gradient average norm after update: {norm}",
-                        fabric.global_rank,
-                        start_newline=False,
-                    )
-                num_changed = debug_compare_selected_params(model, debug_orig_params)
-                msg = f"{num_changed} of {DEBUG_NUM_SELECTED_PARAMS} parameters changed"
-                print_with_rank_and_timestamp(
-                    msg, fabric.global_rank, start_newline=False,
-                )
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
             state["step_count"] += 1
@@ -933,14 +947,6 @@ def fit(
         key: fabric.all_reduce(token_counts[key], reduce_op="sum").item()
         for key in token_counts.keys()
     }
-
-
-def check_kv_cache(kv_cache: KVCacheArgs):
-    if kv_cache.name.startswith("dense"):
-        raise ValueError(
-            "kv_cache must be given for long-context inference, and "
-            "kv_cache.name must not be dense-*"
-        )
 
 
 def validate_and_all_reduce(
@@ -1053,241 +1059,3 @@ def generate_example(
             f"The model's supported context size (post-training) is {gpt_model.config.block_size}.",
             fabric,
         )
-
-
-MAX_PRINT_HEAD = 256
-
-MAX_PRINT_TAIL = 128
-
-
-def print_but_limit_size(
-    fabric: L.Fabric,
-    text: str,
-):
-    text_length = len(text)
-    if text_length <= MAX_PRINT_HEAD + MAX_PRINT_TAIL:
-        print_message("\n" + text, fabric)
-    else:
-        print_message(
-            "\n" + text[:MAX_PRINT_HEAD] + "\n\n[...]\n\n" + text[(-MAX_PRINT_TAIL):],
-            fabric,
-        )
-
-
-def get_lr_scheduler(
-    optimizer,
-    train_args: TrainArgs,
-    max_steps: int,
-):
-    if train_args.lr_warmup_fraction is None:
-        if train_args.lr_warmup_steps is None:
-            raise ValueError("Either train.lr_warmup_fraction or train_args.lr_warmup_steps must be given")
-        warmup_steps = min(train_args.lr_warmup_steps, max_steps)
-    else:
-        if not (0 <= train_args.lr_warmup_fraction <= 1):
-            raise ValueError(f"train_args.lr_warmup_fraction = {train_args.lr_warmup_fraction}, must be in [0, 1]")
-        if train_args.lr_warmup_steps is not None:
-            print(f"train.lr_warmup_fraction = {train_args.lr_warmup_fraction}, train_args.lr_warmup_steps = {train_args.lr_warmup_steps}. Using the former.")
-        warmup_steps = train_args.lr_warmup_fraction * max_steps
-    # Linear warmup followed by cosine annealing
-    scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=(max_steps - warmup_steps))
-    if warmup_steps <= 0:
-        return scheduler2
-    # Note: The first LR (for `step=0`) is being used. Must not be 0
-    scheduler1 = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: (step + 1) / warmup_steps)
-    if warmup_steps >= max_steps:
-        return scheduler1
-    else:
-        return torch.optim.lr_scheduler.SequentialLR(
-            optimizer, [scheduler1, scheduler2], milestones=[warmup_steps],
-        )
-
-
-def get_dataloaders(
-    data: DataModule,
-    tokenizer: Tokenizer,
-    head_model: str,
-    train: TrainArgs,
-    eval: EvalArgs,
-    fabric: Optional[L.Fabric] = None,
-) -> Tuple[DataLoader, DataLoader]:
-    data.connect(
-        tokenizer=tokenizer,
-        batch_size=train.micro_batch_size,
-        max_seq_length=train.max_seq_length,
-        head_model=head_model,
-        val_batch_size=eval.micro_batch_size,
-    )
-    if fabric is not None:
-        with fabric.rank_zero_first():
-            data.prepare_data()
-    data.setup()
-    train_dataloader = data.train_dataloader()
-    val_dataloader = data.val_dataloader()
-    if fabric is not None:
-        train_dataloader, val_dataloader = fabric.setup_dataloaders(
-            train_dataloader, val_dataloader,
-        )
-    return train_dataloader, val_dataloader
-
-
-def validate_args(train: TrainArgs, eval: EvalArgs) -> None:
-    issues = []
-    unsupported = [(train, ["max_tokens", "max_norm", "tie_embeddings"])]
-    for args, names in unsupported:
-        for name in names:
-            if getattr(args, name) is not None:
-                issues.append(f"{__file__} doesn't support the {name!r} argument. This is set in {args}")
-    required = [(train, ["epochs"]), (eval, ["max_new_tokens"])]
-    for args, names in required:
-        for name in names:
-            if getattr(args, name) is None:
-                issues.append(f"{__file__} requires the {name!r} argument. This is set in {args}")
-    if not train.epochs and not train.max_steps:
-        issues.append(f"{__file__} requires either epochs or max_steps to be set. This is set in {train}")
-    if issues:
-        raise ValueError("\n".join(issues))
-
-
-def save_model_checkpoint(
-    fabric: L.Fabric,
-    model: GPTAndHeadModel,
-    file_dir: Path,
-) -> None:
-    file_dir.mkdir(parents=True, exist_ok=True)
-    file_path = file_dir / LIT_MODEL_FNAME
-    print_message(
-        f"\nSaving model weights to {str(file_path)!r}",
-        fabric,
-    )
-    fabric.save(file_path, state={"model": model.gpt_model})
-    if model.head_model.state_dict():
-        file_path = file_dir / HEAD_MODEL_FNAME
-        print_message(
-            f"Saving head model weights to {str(file_path)!r}",
-            fabric,
-        )
-        fabric.save(file_path, state={"model": model.head_model})
-
-
-def choose_logger(
-    logger_name: Literal["csv", "tensorboard", "wandb", "mlflow"],
-    out_dir: Path,
-    name: str,
-    use_fabric: bool = True,
-    log_interval: int = 1,
-    log_args: Optional[Dict] = None,
-    resume: Optional[bool] = None,
-    **kwargs: Any,
-):
-    if use_fabric:
-        return _choose_logger(logger_name, out_dir, name, log_interval, **kwargs)
-    else:
-        if logger_name == "csv":
-            from lightning.pytorch.loggers.csv_logs import CSVLogger
-
-            return CSVLogger(
-                out_dir,
-                name=name,
-                flush_logs_every_n_steps=log_interval,
-                **kwargs,
-            )
-        if logger_name == "tensorboard":
-            from lightning.pytorch.loggers.tensorboard import TensorBoardLogger
-
-            return TensorBoardLogger(
-                out_dir, name=name, **kwargs,
-            )
-        if logger_name == "wandb":
-            from lightning.pytorch.loggers.wandb import WandbLogger
-
-            if log_args is None:
-                log_args = dict()
-            project = log_args.get("project", name)
-            run = log_args.get("run", os.environ.get("WANDB_RUN_NAME"))
-            group = log_args.get("group", os.environ.get("WANDB_RUN_GROUP"))
-            return WandbLogger(
-                project=project, name=run, group=group, resume=resume, **kwargs,
-            )
-        if logger_name == "mlflow":
-            from lightning.pytorch.loggers.mlflow import MLFlowLogger
-
-            if log_args is None:
-                log_args = dict()
-            experiment_name = log_args.get("experiment_name", name)
-            tracking_uri = log_args.get("tracking_uri")
-            return MLFlowLogger(
-                experiment_name=experiment_name,
-                tracking_uri=tracking_uri,
-                save_dir=str(out_dir),
-                **kwargs,
-            )
-        raise ValueError(f"`logger_name={logger_name}` is not a valid option. Choose from 'csv', 'tensorboard', 'wandb', 'mlflow'.")
-
-
-def print_with_rank_and_timestamp(
-    msg: str,
-    rank: int,
-    start_newline: bool = True,
-    flush_streams: bool = True,
-):
-    time_format = "%Y-%m-%d %H:%M:%S"
-    time_stamp = datetime.now().strftime(time_format)
-    prefix = ("\n" if start_newline else "") + f"[rank {rank} | {time_stamp}]: "
-    print(prefix + msg)
-    if flush_streams:
-        flush_io_streams()
-
-
-def flush_io_streams():
-    sys.stdout.flush()
-    sys.stderr.flush()
-
-
-def debug_sum_gradient_norms(model: torch.nn.Module) -> float:
-    sum = 0
-    num = 0
-    for param in model.parameters():
-        if param.requires_grad and param.grad is not None:
-            sum = param.grad.norm() + sum
-            num += 1
-    return sum.item() / num
-
-
-def debug_random_trainable_param_names(
-    model: torch.nn.Module,
-    num_to_select: int,
-    num_trainable_params: int,
-) -> List[str]:
-    positions = set(random.sample(range(num_trainable_params), num_to_select))
-    return [
-        name
-        for i, name in enumerate(
-            name
-            for name, param in model.named_parameters()
-            if param.requires_grad
-        )
-        if i in positions
-    ]
-
-
-def debug_clone_selected_params(
-    model: torch.nn.Module,
-    names: List[str],
-) -> Dict[str, torch.Tensor]:
-    state_dict = model.state_dict()
-    return {
-        name: state_dict[name].detach().clone()
-        for name in names
-    }
-
-
-def debug_compare_selected_params(
-    model: torch.nn.Module,
-    orig_params: Dict[str, torch.Tensor],
-) -> int:
-    state_dict = model.state_dict()
-    return sum(
-        not torch.allclose(state_dict[name], value)
-        for name, value in orig_params.items()
-    )

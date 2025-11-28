@@ -25,6 +25,7 @@ def parser_commands() -> List[str]:
         "finetune_long_full",
         "finetune_long_lora",
         "eval_long",
+        "finetune_offload_full",
         "finetune_offload_lora",
     ]
 

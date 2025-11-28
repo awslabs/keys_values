@@ -47,7 +47,8 @@ class H2OKVCache(AttnWeightsKVCache):
       attention weights, see :meth:`_instantaneous_score`.
 
     The original H2O method as published is provided in
-    :class:`H2OOriginalKVCache`.
+    :class:`H2OOriginalKVCache` (for comparison only; not recommended).
+
     """
     def __init__(
         self,
@@ -62,6 +63,12 @@ class H2OKVCache(AttnWeightsKVCache):
         normalize_scores: bool = False,
         **base_kwargs,
     ):
+        """
+        Additional args:
+            normalize_scores: If `True`, scores are normalized (see header
+                comment.
+
+        """
         super().__init__(
             config=config,
             buffers=buffers,
@@ -136,8 +143,26 @@ class H2OKVCache(AttnWeightsKVCache):
         attn_weights: torch.Tensor,
         query_length: int,
     ) -> Optional[torch.Tensor]:
-        # Map weights to instantaneous scores, accumulate them. Sum over
-        # dimension 2 (`num` tokens)
+        """
+        Computes scores from attention weights. H2O scores are cumulative
+        attention weights (possibly normalized). This can be modified in
+        subclasses, via :meth:`_instantaneous_score` and
+        :meth:`_modify_scores`.
+
+        Args:
+            attn_weights: Attention weights, summed over query axis, shape
+                `(batch_size, n_query_groups, current_length)`, dtype
+                `float32`.
+            query_length: Number of queries (i.e., `query.shape[2]`) in last
+                recent :meth:`forward` call.
+
+        Returns:
+            Current score values over slots except for grace period, shape
+            `(batch_size, n_query_groups, cache_length - grace_period)`.
+            Only if cache is full (i.e., `current_length == cache_length`),
+            otherwise `None` is returned.
+
+        """
         if attn_weights.dtype != torch.float32:
             raise ValueError(f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}")
         self.scores[
@@ -192,13 +217,13 @@ class H2OKVCache(AttnWeightsKVCache):
 
         Args:
             scores: Score values, shape
-            `(batch_size, n_query_groups, cache_length - grace_period)`
+                `(batch_size, n_query_groups, cache_length - grace_period)`
 
         Returns:
             Modified values, same shape
 
         """
-        return scores
+        return scores  # Default: no modification
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         sz_total, dct_sz = super().size_estimate()
@@ -272,7 +297,8 @@ class VLengthInstantScoreMixin:
         NOTE: If we obtained the attention weights NOT summed over the query
         axis, we could first normalize to sum to 1 over the cache length
         dimension, then sum over the query axis, which may be a better score.
-        But we do not obtain the full attention weights.
+        But we do not obtain the full attention weights (would be a huge
+        tensor).
 
         """
         scores = self.get_v_norm() * attn_weights
@@ -306,6 +332,24 @@ class VLengthInstantScoreMixin:
 
 
 class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
+    """
+    Variant of H2O. Instead of cumulative attention weights, we use
+    cumulative expected v vector sizes, where the expectation is over the
+    attention weights. The instantaneous score is:
+
+    ..math::
+        S(j) = n_Q * m_j |v_j| / Z,  Z = \sum_j m_j |v_j|,
+         m_j = \sum_i m_{i,j}
+
+    Namely, `m_j` is `attn_weights` summed over the query axis, `|v_j|` the
+    norm of the v vector, n_Q the length of the query axis (`query_length`
+    passed to :meth:`_instantaneous_score`).
+
+    Different to H2O, this score takes the length of v vectors into account as
+    well, which in the end determine the attention outputs alongside the
+    attention weights.
+
+    """
     def __init__(
         self,
         config: Config,
@@ -426,6 +470,15 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         return VLengthH2OKVCache(**self._base_kwargs_for_clone())
 
 
+REMOVE_ARG_NAMES = (
+    "grace_period",
+    "replay_log_blocksize",
+    "detach_attn_weights",
+    "keep_initial_fraction",
+    "max_chunk_size",
+)
+
+
 class H2OOriginalKVCache(AttnWeightsKVCache):
     """
     Implements the heavy hitter oracle (H2O) KV cache, see
@@ -445,6 +498,9 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
     shapes remain the same, for compatibility with the parent class. Also,
     the score buffer `scores` has a batch dimension, even if it is not used.
 
+    TODO: Could support gradient computations and some of the arguments, if
+    this is useful for a comparison.
+
     """
     def __init__(
         self,
@@ -453,6 +509,9 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
         block_idx: int,
         **base_kwargs,
     ):
+        for name in REMOVE_ARG_NAMES:
+            if name in base_kwargs:
+                raise ValueError(f"Parameter {name} not supported for this class. Use 'H2OKVCache' instead.")
         super().__init__(config, buffers, block_idx, **base_kwargs)
         # Note: `scores` has a batch dimension, even though it is not used.
         # This is because all score buffers in :class:`AttnWeightsKVCache` have
@@ -504,7 +563,7 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
     ) -> Optional[torch.Tensor]:
         if attn_weights.dtype != torch.float32:
             raise ValueError(f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}")
-        # Sum over the batch dimension 0
+        # Sum over the batch dimension
         aggregated_weights = attn_weights.sum(0, keepdim=True)
         self.scores[:self.batch_size, :, :self.current_length] += aggregated_weights
         if self.current_length == self.cache_length:
@@ -537,3 +596,10 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
 
     def clone(self) -> KVCache:
         return H2OOriginalKVCache(**self._base_kwargs_for_clone())
+
+    def _base_kwargs_for_clone(self) -> Dict[str, Any]:
+        return {
+            k: v
+            for k, v in super()._base_kwargs_for_clone().items()
+            if k not in REMOVE_ARG_NAMES
+        }

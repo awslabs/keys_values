@@ -282,17 +282,18 @@ DEFAULT_KEEP_INITIAL_FRACTION = 0.05
 
 class AttnWeightsKVCache(KVCacheWithBuffers):
     """
-    Base class for key-value caches which need attention weights to be passed
-    (via :meth:`update`) in every round. In general, these weights are used to
-    compute scores, based on which eviction decisions are taken. All of this
-    happens in :meth:`_compute_scores`, which subclasses need to implement.
+    Base class for key-value caches which need attention weights (summeed over
+    the query axis) to be passed (via :meth:`_update`) in every round. In
+    general, these weights are used to compute scores, based on which eviction
+    decisions are taken, once the cache is full. Score computations happen in
+    :meth:`_compute_scores`, which subclasses need to implement.
 
     Grace period:
 
     If `grace_period > 0` (must be `< cache_length`), tokens are kept in the
-    cache for at least this many rounds before being considered for eviction.
-    This prevents the most recent tokens to be evicted based on noisy score
-    values.
+    cache for at least this many rounds before being considered for eviction,
+    independent of their score values. This prevents the most recent tokens
+    to be evicted based on noisy score values (scores are often cumulative).
 
     Technically, the final `grace_period` slots are reserved for these grace
     tokens. This part is organized as a ring buffer, the next slot to be
@@ -316,13 +317,12 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
     Replay log:
 
     Replay logging is required for gradient computation (fine-tuning), but not
-    for inference. It needs to be activated by
-    :code:`switch_replay_logging(True)`, and can be deactivated by passing
-    `False`. If active, We maintain the slot positions for all tokens at
-    positions `>= cache_length`, as well as all `token_idx` values passed to
-    :meth:`prefill` and :meth:`forward`. These positions depend on batch and head
-    index. They are stored on the same device as the cache buffers, as list of
-    `uint32` tensors of shape `(batch_size, n_query_groups, replay_log_blocksize)`.
+    for inference. It is (de)activated by :meth:`switch_replay_logging`. If
+    active, we maintain the slot positions for all tokens at positions
+    `>= cache_length`, as well as all `token_idx` values passed to
+    :meth:`forward`. These positions depend on batch and head index. They are
+    stored on the same device as the cache buffers, as list of `uint32`
+    tensors of shape `(batch_size, n_query_groups, replay_log_blocksize)`.
     These slot positions allow for re-playing all insert decisions later on,
     which is required for gradient computations.
 
@@ -330,14 +330,23 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
 
     In general, the initial (prefill) call fills up the cache, while not
     returning attention weights. This means that for the second call, we cannot
-    use a score-based decision which slots to overwrite. Instead, for the first
-    :meth:`forward` after the cache is filled up, we use a heuristic rule.
-    Namely, we evict slots starting at position
+    use a score-based decision for which slots to overwrite. Instead, for the
+    first :meth:`forward` after the cache is filled up, we use a heuristic
+    rule. Namely, we evict slots starting at position
     `int(cache_length * keep_initial_fraction)`. This rule is used once only,
     afterwards we use H2O scores. If `keep_initial_fraction > 0`, the KV
     information for the initial tokens is not evicted in this step. For
     `keep_fraction == 0`, this one-time rule corresponds to what a
     :class:`LastRecentlyInsertedKVCache` would do.
+
+    Limiting the chunk size:
+
+    The length of tensors passed to :meth:`forward` (along the sequence axis)
+    is called chunk size. The first call (after :meth:`reset`) is prefilling
+    with chunks up to `max_prefill_length`. If `max_chunk_size` is used, chunks
+    other than prefill must not be longer than this. The limitation is used in
+    order to process score values by `torch.topk` instead of `torch.argsort` in
+    :meth:`_update`, which can be significantly faster.
 
     Debugging/testing with `debug_next_positions`:
 
@@ -362,10 +371,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         Use :meth:`from_config` in order to use default KV cache buffers, which
         are allocated here.
 
-        Args:
-            config: Model config
-            buffers: KV cache buffers to be used
-            block_idx: Index of block (or layer)
+        Additional args:
             grace_period: Grace period, see header comment. Defaults to 0
                 (no grace period)
             replay_log_blocksize: See header comment.
@@ -433,28 +439,18 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         Returns:
             Batched positions where key and value tensors in next :meth:`forward`
             call are written to, shape `(batch_size, n_query_groups, num)`,
-            where `num <= max_tokens_forward`, the remaining ones are not used.
+            where `num <= max_forward_length`, the remaining ones are not used.
         """
         return None if self._next_positions is None else self._next_positions[:, :, :num]
 
     @property
-    def max_prefill_length(self) -> int:
-        """
-        Note that :meth:`prefill` must not fill the cache, as we need to
-        compute scores in order to make a good eviction decision, and this can
-        be done only after the first :meth:`forward` call.
-
-        Returns:
-            Maximum length for arguments to :meth:prefill`.
-        """
-        return self.cache_length
-
-    @property
-    def max_tokens_forward(self) -> int:
+    def max_forward_length(self) -> int:
         diff = self.cache_length - self.current_length
         result = self.cache_length - self.grace_period
         if diff > 0:
             result = min(result, diff)
+        if self.max_chunk_size is not None:
+            result = min(result, self.max_chunk_size)
         return result
 
     def _forward_internal(
@@ -468,17 +464,15 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             not self._use_initial_rule and self.next_positions(num=1) is None
         ):
             raise IndexError("Cache needs to be initialized with 'prefill' before being used")
-        if self._max_chunk_size is not None and num > self._max_chunk_size:
-            raise ValueError(f"key.shape[2] = {num}, must be <= max_chunk_size = {self._max_chunk_size}")
         diff = self.cache_length - self.current_length
-        if not 1 <= num <= self.max_tokens_forward:
+        if not 1 <= num <= self.max_forward_length:
             if 0 < diff < num:
                 # Cache is almost full, with `diff < num` slots free. There is no
                 # good solution for this. We don't know which `num - diff` slots to
                 # evict, because we did not compute scores so far.
                 raise ValueError(f"key.shape[2] = {num}, must be <= {diff} as long as the cache is not full")
             else:
-                raise ValueError(f"key.shape[2] = {num}, must be in [1, {self.max_tokens_forward}]")
+                raise ValueError(f"key.shape[2] = {num}, must be in [1, {self.max_forward_length}]")
         if self._use_initial_rule:
             # Set `_next_positions` according to the initial rule
             num_keep = min(
@@ -649,7 +643,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
 
         Args:
             key: New keys, `(batch_size, n_query_groups, num, head_size)`,
-                where `1 <= num <= max_tokens_forward`
+                where `1 <= num <= max_forward_length`
             value: New values, `(batch_size, n_query_groups, num, head_size)`
 
         Returns:
@@ -734,17 +728,23 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         excludes the grace region at the end of the buffer, since these tokens
         must not be evicted.
 
+        Note that score values are updated even if the cache is not full.
+        They are just not returned in this case.
+
         Args:
             attn_weights: Attention weights for the multi-head attention
                 computation done just after the last recent :meth:`forward`
                 call, summed over the query axis. Shape must be
-                `(batch_size, n_query_groups, T)`, where `T <= cache_length` is
-                the current cache length. Also, `dtype=float32`.
+                `(batch_size, n_query_groups, current_length)`, where
+                `current_length <= cache_length` is the current cache length.
+                Also, `dtype=float32`.
             query_length: Size of query axis
 
         Returns:
             scores, shape `(batch_size, n_query_groups, cache_length - grace_period)`,
-            only if cache is full.
+            only if cache is full. Note that the grace slots at the end of the
+            cache are excluded.
+
         """
         raise NotImplementedError()
 

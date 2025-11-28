@@ -26,8 +26,8 @@ from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import MultiHeadSelfAttention
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.factory import (
-    SUPPORTED_QUANTIZERS,
     deallocate_kv_cache_buffers_of_model,
+    SUPPORTED_QUANTIZERS,
 )
 from keys_values.kvcache.gradient.accumulate import GradientAccumulator
 from keys_values.kvcache.gradient.autograd_hooks import (
@@ -324,12 +324,12 @@ class LongContextGradientModel(LongContextInferenceModel):
             chunk_size,
             randomize_chunk_sizes,
             chunks_per_cell_multiplier,
-            single_tokens_for_targets,
             verbose,
             tmp_array_limit_gb,
             debug_single_cell_per_row,
             debug_store_intermediates,
         )
+        self.single_tokens_for_targets = single_tokens_for_targets
         if qname is None:
             qname = "torch-quantized8"
         elif qname not in SUPPORTED_QUANTIZERS:
@@ -548,7 +548,6 @@ class LongContextGradientModel(LongContextInferenceModel):
             chunk_size=self.chunk_size,
             randomize_chunk_sizes=self.randomize_chunk_sizes,
             chunks_per_cell_multiplier=self.chunks_per_cell_multiplier,
-            single_tokens_for_targets=self.single_tokens_for_targets,
             verbose=self.verbose,
             tmp_array_limit_gb=self._tmp_array_limit_gb,
             debug_single_cell_per_row=self._debug_single_cell_per_row,

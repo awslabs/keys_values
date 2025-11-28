@@ -36,12 +36,16 @@ from keys_values.kvcache.utils import bitsize_of, bits_for_torch_dtype
 from keys_values.utils import index_to_3d
 
 
+NOT_NEEDED_ARGS = ("max_batch_size", "cache_length", "dtype")
+
+
 class KVCacheWithBuffers(DefaultKVCache):
     """
     Base class of all KV caches supported by KV cache buffers of type
     :class:`KVCacheBuffers`. We recommend that all KV caches separate out
     buffers, in order to keep selection orthogonal to content compression
-    (e.g., by quantization).
+    (e.g., by quantization). Also, buffers can be deallocated to free up
+    GPU memory, and reallocated later on.
 
     Checkpoint hook:
 
@@ -50,14 +54,14 @@ class KVCacheWithBuffers(DefaultKVCache):
     a call to :meth:`prefill` (the prefill call is 0, first forward is 1, ...)
     in `chunk_idx`. We then call
     `checkpoint_hook(self.kv_buffers, self.chunk_idx)` at the start of
-    :meth:`forward`. An important use case is activation checkpointing for
+    :meth:`forward`. An important use case is KV cache checkpointing for
     gradient computation.
 
     Buffers, dependence on batch size:
 
     Subclasses support buffer allocation on demand, as well as their
     deallocation, so that GPU memory is freed for other uses. Buffers are
-    allocated (if not already present) with a call of :meth:`prefill`,
+    allocated (if not already present) with a call of :meth:`_prefill`,
     and the effective batch size `batch_size` is used then. Also, if
     buffers exist, but differ in shape due to `batch_size`, they are
     reallocated. This allows us to support different batch sizes (e.g.
@@ -77,8 +81,13 @@ class KVCacheWithBuffers(DefaultKVCache):
             config: Model config
             buffers: KV cache buffers to be used
             block_idx: Index of model block (or layer)
+            base_kwargs: Further args passed to superclass constructor
 
         """
+        for name in NOT_NEEDED_ARGS:
+            if name in base_kwargs:
+                print(f"Removing {name} from base_kwargs (taken from buffers")
+                base_kwargs.pop(name)
         super().__init__(
             config=config,
             max_batch_size=buffers.max_batch_size,
@@ -87,7 +96,6 @@ class KVCacheWithBuffers(DefaultKVCache):
             dtype=buffers.dtype,
             **base_kwargs,
         )
-        self.config = config  # Needed for :meth:`clone`
         self.kv_buffers = buffers
         self._checkpoint_hook = None
         self._chunk_idx = None
@@ -279,7 +287,7 @@ class KVCacheWithBuffers(DefaultKVCache):
         if self.kv_buffers.buffers_are_allocated:
             raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
         result = super()._base_kwargs_for_clone()
-        for name in ("max_batch_size", "cache_length", "dtype"):
+        for name in NOT_NEEDED_ARGS:
             del result[name]
         result["buffers"] = self.kv_buffers
         return result
@@ -288,8 +296,8 @@ class KVCacheWithBuffers(DefaultKVCache):
 class DenseKVCache(KVCacheWithBuffers):
     """
     Key-value cache for dense attention. Key and value tensors for all
-    past tokens are maintained. The cache length is the maximum sequence
-    length. This cache requires a lot of memory, it can only be used for
+    past tokens are maintained. This cache can only process as many tokens
+    as its cache length. It requires a lot of memory, so can only be used for
     moderate cache lengths.
 
     Note: If the cache is full, :meth:`forward` raises an exception. The cache
@@ -316,6 +324,23 @@ class DenseKVCache(KVCacheWithBuffers):
         dtype: Optional[torch.dtype] = None,
         **base_kwargs,
     ) -> "DenseKVCache":
+        """
+        Creates cache with default buffers (no quantization).
+
+        Args:
+            config: Model config
+            max_batch_size: Inference batch size (maximum)
+            cache_length: Number of slots in cache. This is also the maximum
+                number of tokens which can be stored for this cache
+            block_idx: Index of model block (or layer). Multi-head attention
+                needs to know this.
+            device: Device for buffers. If not given, it is set with the
+                first :meth:`forward` call, based on the input arguments.
+            dtype: Data type for buffers. If not given, it is set with the
+                first :meth:`forward` call, based on the input arguments.
+            base_kwargs: Extra keyword arguments for cache and default buffer
+
+        """
         buffers_kwargs = KVCacheWithBuffers.extract_default_buffers_kwargs(base_kwargs)
         buffers = KVCacheWithBuffers.create_default_buffers(
             config=config,
@@ -328,12 +353,8 @@ class DenseKVCache(KVCacheWithBuffers):
         return DenseKVCache(config, buffers, block_idx, **base_kwargs)
 
     @property
-    def max_tokens_forward(self) -> int:
+    def max_forward_length(self) -> int:
         return self.cache_length - self.input_pos
-
-    @property
-    def max_prefill_length(self) -> int:
-        return self.cache_length
 
     def _forward_internal(
         self,
@@ -341,12 +362,12 @@ class DenseKVCache(KVCacheWithBuffers):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
-        num = key.shape[2]
         if self._replay_log is not None:
             if not isinstance(self._replay_log, DefaultKVCacheReplayLog):
                 raise IndexError("Cannot switch on replay logging in the middle of inference run. Call 'prefill'.")
             self._replay_log.append_token_chunk(token_idx)
         np = self.input_pos
+        num = key.shape[2]
         return self.kv_buffers.forward(
             positions=(np, np + num),
             key=key,
@@ -369,7 +390,6 @@ class DenseKVCache(KVCacheWithBuffers):
 
     def token_positions(self) -> torch.Tensor:
         device = torch.get_default_device() if self.device is None else self.device
-
         return index_to_3d(
             torch.arange(self.input_pos, device=device),
             self.batch_size,
@@ -408,21 +428,12 @@ class DenseKVCache(KVCacheWithBuffers):
         return copy.copy(self._replay_log)
 
     def clone(self) -> KVCache:
-        """
-        Cloning a cache only works if its buffers are deallocated. The copy is
-        shallow, so that this object and the returned clone share the same
-        buffers. Ensure to only use one or the other. The typical use case is
-        to clone caches along with a model, use the cloned model for computations
-        and remove it before returning to the original.
-
-        """
         return DenseKVCache(**self._base_kwargs_for_clone())
 
 
 class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
     """
-    Baseline key-value cache which stores the last recently inserted
-    `cache_length` key, value tensors.
+    Replay log for :class:`LastRecentlyInsertedKVCache`.
 
     """
     def __init__(
@@ -467,7 +478,9 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
 class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     """
     Baseline key-value cache which stores the last recently inserted
-    `cache_length` key, value tensors.
+    `cache_length` key and value tensors. When the cache is full,
+    those slots are overwritten whose content is in the cache for the
+    longest time.
 
     """
     def __init__(
@@ -477,18 +490,16 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         block_idx: int,
         **base_kwargs,
     ):
-        """
-        Args:
-            config: Model config
-            buffers: KV cache buffers to be used
-        """
         super().__init__(config, buffers, block_idx, **base_kwargs)
+        # Note: We could generate `token_pos` on the fly from `input_pos`
+        # and `next_position`, but it is simpler just to maintain it.
         device = self._default_device_for_new_params()
         self.register_buffer(
             "token_pos",
             torch.zeros(buffers.cache_length, device=device, dtype=torch.int),
             persistent=False,
         )
+        # Position of first slot to overwrite with next :meth:`forward`
         self.next_position = None
         self._replay_log = None
 
@@ -509,8 +520,11 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             config: Model config
             max_batch_size: Maximum batch size supported
             cache_length: Number of slots (i.e., tokens) in cache
-            device: Device for buffers
-            dtype: Data type for buffers
+            device: Device for buffers. If not given, it is set with the
+                first :meth:`forward` call, based on the input arguments.
+            dtype: Data type for buffers. If not given, it is set with the
+                first :meth:`forward` call, based on the input arguments.
+            base_kwargs: Extra keyword arguments for cache and default buffer
 
         """
         buffers_kwargs = KVCacheWithBuffers.extract_default_buffers_kwargs(base_kwargs)
@@ -531,11 +545,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         return super()._parameter_names() + ["token_pos"]
 
     @property
-    def max_prefill_length(self) -> int:
-        return self.cache_length
-
-    @property
-    def max_tokens_forward(self) -> int:
+    def max_forward_length(self) -> int:
         return self.cache_length
 
     def _forward_internal(

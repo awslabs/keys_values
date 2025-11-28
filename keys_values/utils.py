@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import csv
+import sys
+
 from filelock import FileLock, Timeout
 from pathlib import Path
 import time
@@ -112,3 +114,8 @@ def copy_parameters(
             param.data.copy_(src_param.data, non_blocking=True)
             if copy_requires_grad:
                 param.requires_grad_(src_param.requires_grad)
+
+
+def flush_io_streams():
+    sys.stdout.flush()
+    sys.stderr.flush()

@@ -20,18 +20,18 @@ from pathlib import Path
 from pprint import pprint
 import random
 import time
-from typing import Dict, Literal, Optional, Any
+from typing import Dict, Literal, Optional, Any, Tuple
 
 import torch
 from torch.utils.data import DataLoader
 from torch.nn.attention import SDPBackend
 from torchmetrics import RunningMean
+from lightning.fabric.utilities.load import _lazy_load as lazy_load
 
 from litgpt.args import TrainArgs
+from litgpt.config import Config
 from litgpt.data import DataModule
-from litgpt.lora import Config, mark_only_lora_as_trainable, lora_filter
 from litgpt.prompts import save_prompt_style
-from litgpt.scripts.merge_lora import merge_lora
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     CycleIterator,
@@ -52,7 +52,6 @@ from keys_values.finetune.args import (
     EvalArgs,
     GradientArgs,
     KVCacheArgs,
-    LoRAARgs,
     OptimizerArgs,
 )
 from keys_values.finetune.batch_transform import (
@@ -64,12 +63,7 @@ from keys_values.finetune.longcontext_full import (
     validate_and_all_reduce,
 )
 from keys_values.utils import flush_io_streams
-from keys_values.finetune.longcon_offload_full import (
-    load_checkpoint,
-    create_optimizer,
-)
 from keys_values.finetune.utils import (
-    LORA_WEIGHTS_FNAME,
     HEAD_MODEL_FNAME,
     LIT_MODEL_FNAME,
     get_lr_scheduler,
@@ -80,24 +74,24 @@ from keys_values.finetune.utils import (
     print_message,
     check_kv_cache,
 )
+from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.factory import deallocate_kv_cache_buffers_of_model
-from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.utils import (
-    VerbosityLevels,
-    message_memory_all_devices,
-    log_memory_all_devices,
     fabric_precision_to_dtype,
+    log_memory_all_devices,
+    message_memory_all_devices,
+    VerbosityLevels,
 )
 from keys_values.long_context import GPTAndHeadModel
-from keys_values.lora import GPT
+from keys_values.model import GPT
 from keys_values.optimize.model_factory import BlockComponentName
 from keys_values.parser_config import save_hyperparameters
 from keys_values.pos_encoding import position_encoding_factory
 
 
-DEFAULT_OUT_DIR = "out/finetune/longcontext_lora"
+DEFAULT_OUT_DIR = "out/finetune/longcontext_full"
 
 
 def setup(
@@ -115,17 +109,6 @@ def setup(
         lr_warmup_fraction=0.15,
         epochs=5,
         max_seq_length=None,
-    ),
-    lora: LoRAARgs = LoRAARgs(
-        r = 8,
-        alpha = 16,
-        dropout = 0.05,
-        query = True,
-        key = False,
-        value = True,
-        projection = False,
-        mlp = False,
-        head = False,
     ),
     eval: EvalArgs = EvalArgs(
         interval=100,
@@ -185,9 +168,6 @@ def setup(
             Note: We modified the defaults from `train.lr_warmup_steps=100` to
             `train.lr_warmup_fraction=0.15`, so the linear warm-up is the first
             15% of all steps.
-        lora: Arguments for LoRA extension of model, see
-            ``keys_values.finetune.args.LoRAArgs`` for details. Adjust the LoRA
-            rank with `lora.r`.
         eval: Evaluation-related arguments. See ``litgpt.args.EvalArgs`` for details.
             Note: We modify the default for `eval.initial_validation` (whether
             evaluation is run before training starts). It is set if
@@ -265,7 +245,7 @@ def setup(
         raise ValueError(f"device = {device}, must be in [0, {torch.cuda.device_count() - 1}]")
     if optimizer is None:
         optimizer = OptimizerArgs(name="AdamW")
-        print("Choosing optimizer AdamW with default learning rate. We highly recommend to at least tune optimizer.learning_rate")
+        print("Choosing optimizer AdamW with default learning rate. We recommend to at least tune optimizer.learning_rate")
     else:
         print(str(optimizer))
     if train.global_batch_size != train.micro_batch_size:
@@ -295,18 +275,7 @@ def setup(
 
     check_kv_cache(kv_cache)
     check_valid_checkpoint_dir(checkpoint_dir)
-    config = Config.from_file(
-        checkpoint_dir / "model_config.yaml",
-        lora_r=lora.r,
-        lora_alpha=lora.alpha,
-        lora_dropout=lora.dropout,
-        lora_query=lora.query,
-        lora_key=lora.key,
-        lora_value=lora.value,
-        lora_projection=lora.projection,
-        lora_mlp=lora.mlp,
-        lora_head=lora.head,
-    )
+    config = Config.from_file(checkpoint_dir / "model_config.yaml")
 
     precision = precision or get_default_supported_precision(training=True)
     # TODO: Currently not used!
@@ -456,11 +425,9 @@ def main(
         profile_parts=profile_parts,
         cpu_offload_device=device,
     )
-    mark_only_lora_as_trainable(model.gpt_model)
 
     num_trainable_params = num_parameters(model, requires_grad=True)
     print_message(f"\nNumber of trainable parameters: {num_trainable_params:,}")
-    print_message(f"Number of non-trainable parameters: {num_parameters(model, requires_grad=False):,}")
 
     # We use a optimizer on CPU for all parameters of `gpt_model`. If
     # `head_model` has parameters, we use another optimizer on GPU for them.
@@ -574,17 +541,12 @@ def main(
 
     # Save the final LoRA checkpoint at the end of training
     save_dir = out_dir / "final"
-    save_lora_checkpoint(model, save_dir)
+    save_model_checkpoint(model, save_dir)
     # Copy checkpoint files from original checkpoint dir
     copy_config_files(checkpoint_dir, save_dir)
     save_hyperparameters(setup, save_dir)
     if hasattr(data, "prompt_style"):
         save_prompt_style(data.prompt_style, save_dir)
-    merge_lora(
-        checkpoint_dir=save_dir,
-        lora_fname=LORA_WEIGHTS_FNAME,
-        pretrained_fname=LIT_MODEL_FNAME,
-    )
 
 
 def fit(
@@ -831,17 +793,17 @@ def fit(
                 log_metrics=False,
             )
             print_with_rank_and_timestamp("Finished validation evaluations.", 0)
-            flush_io_streams()
             val_loss = f"{metrics['val_loss']:.3f}"
             print_message(
                 f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}"
             )
+            flush_io_streams()
             deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
             del valid_model
 
         if train.save_interval is not None and not is_accumulating and state["step_count"] % train.save_interval == 0:
             interval_dir = out_dir / f"step-{state['step_count']:06d}"
-            save_lora_checkpoint(model, interval_dir)
+            save_model_checkpoint(model, interval_dir)
             copy_config_files(checkpoint_dir, interval_dir)
             save_hyperparameters(setup, interval_dir)
             if hasattr(data, "prompt_style"):
@@ -850,22 +812,43 @@ def fit(
     return token_counts
 
 
-def save_lora_checkpoint(
+def load_checkpoint(
+    model: torch.nn.Module,
+    checkpoint_path: Path,
+    strict: bool = True,
+) -> None:
+    state_dict = lazy_load(checkpoint_path)
+    state_dict = state_dict.get("model", state_dict)
+    model.load_state_dict(state_dict, strict=strict)
+
+
+def save_model_checkpoint(
     model: GPTAndHeadModel,
     file_dir: Path,
 ) -> None:
     from lightning.fabric.strategies import SingleDeviceStrategy
 
     file_dir.mkdir(parents=True, exist_ok=True)
-    file_path = file_dir / LORA_WEIGHTS_FNAME
-    print_message(f"\nSaving LoRA weights to {str(file_path)!r}")
+    file_path = file_dir / LIT_MODEL_FNAME
+    print_message(f"\nSaving model weights to {str(file_path)!r}")
     strategy = SingleDeviceStrategy()
-    strategy.save_checkpoint(
-        file_path,
-        state={"model": model.gpt_model},
-        filter={"model": lora_filter},
-    )
+    strategy.save_checkpoint(file_path, state={"model": model.gpt_model})
     if model.head_model.state_dict():
         file_path = file_dir / HEAD_MODEL_FNAME
         print_message(f"Saving head model weights to {str(file_path)!r}")
         strategy.save_checkpoint(file_path, state={"model": model.head_model})
+
+
+def create_optimizer(
+    optim_args: OptimizerArgs,
+    gpt_model: GPT,
+    gpt_param_prefixes: Tuple[str, ...],
+):
+    parameters = [
+        param
+        for name, param in gpt_model.named_parameters()
+        if name.startswith(gpt_param_prefixes)
+    ]
+    return instantiate_torch_optimizer(
+        optim_args.name, parameters, **optim_args.optimizer_kwargs(),
+    )

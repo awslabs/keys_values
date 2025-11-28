@@ -533,7 +533,7 @@ def test_quantized_buffers_write_back(dtype, name, device):
     for n_upd in range(5):
         q_len = min(
             random.randint(1, cache_length // 2),
-            caches_common[0].max_tokens_forward,
+            caches_common[0].max_forward_length,
         )
         print(f"Update {n_upd}: {q_len}")
         for c_comm, c_sep in zip(caches_common, caches_separate):

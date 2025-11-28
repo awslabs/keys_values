@@ -228,7 +228,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         return self._token_positions[:, :, :self.current_length].clone()
 
     @property
-    def max_tokens_forward(self) -> int:
+    def max_forward_length(self) -> int:
         diff = self.cache_length - self.current_length
         result = self.cache_length - self.grace_period
         if diff > 0:

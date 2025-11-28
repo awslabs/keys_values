@@ -49,25 +49,26 @@ class KVCacheBuffersParams:
     def from_config(
         config: Config,
         max_batch_size: Optional[int] = None,
+        head_size: Optional[int] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ) -> "KVCacheBuffersParams":
         return KVCacheBuffersParams(
             max_batch_size=max_batch_size,
             n_query_groups = config.n_query_groups,
-            head_size = config.head_size,
+            head_size = config.head_size if head_size is None else head_size,
             device=device,
             dtype=dtype,
         )
 
     @staticmethod
-    def from_params(params: KVCacheParams) -> "KVCacheBuffersParams":
+    def from_params(cache_params: KVCacheParams) -> "KVCacheBuffersParams":
         return KVCacheBuffersParams(
-            max_batch_size=params.max_batch_size,
-            n_query_groups=params.n_query_groups,
-            head_size=params.head_size,
+            max_batch_size=cache_params.max_batch_size,
+            n_query_groups=cache_params.n_query_groups,
+            head_size=cache_params.head_size,
             device=None,
-            dtype=params.dtype,
+            dtype=cache_params.dtype,
         )
 
 
@@ -132,12 +133,7 @@ class KVCacheBuffers(torch.nn.Module):
     `(batch_size, n_query_groups, cache_length, head_size)`. Instead of
     allocating them in the :class:`KVCache` class, we abstract them here. The
     reason is that some KV caches maintain compressed (e.g., quantized)
-    versions of these buffers.
-
-    The general structure for quantized buffers allocates memory for the
-    quantized buffers as members here, and several objects (for different model
-    layers) share a single object with normal arrays, which is used to mediate
-    between the user and quantized storage.
+    versions of these buffers, see :class:`QuantizedKVCacheBuffers`.
 
     Deallocating and allocating buffers:
 

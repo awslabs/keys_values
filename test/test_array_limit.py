@@ -21,9 +21,9 @@ from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.finetune.longcontext_full import cleanup_cache_kwargs
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.kvcache.factory import KVCacheFactory, split_name
+from keys_values.finetune.args import KVCacheArgs, GradientArgs
 from keys_values.kvcache.gradient.main import LongContextGradientModel
 from keys_values.kvcache.utils import VerbosityLevels
-from keys_values.long_context import KVCacheArgs
 from keys_values.model import GPT
 
 
@@ -45,7 +45,6 @@ def test_tmp_array_limit_object():
     kv_cache_args = KVCacheArgs(
         name="h2o-torch-quantized8",
         cache_length=2048,
-        layers_per_cell=1,
         chunk_size=256,
         cache_kwargs={
             "replay_log_blocksize": 1024,
@@ -54,9 +53,12 @@ def test_tmp_array_limit_object():
             "tmp_array_limit_gb": tmp_array_limit_forward_gb,
         },
         randomize_chunk_sizes=False,
-        single_tokens_for_targets=False,
-        verbose=VerbosityLevels.SOME.value,
     )
+    grad_args = GradientArgs(
+        layers_per_cell=1,
+        single_tokens_for_targets=False,
+    )
+    verbose = VerbosityLevels.SOME.value
     cache_kwargs = cleanup_cache_kwargs(
         split_name(kv_cache_args.name)[0], kv_cache_args.cache_kwargs,
     )
@@ -94,8 +96,8 @@ def test_tmp_array_limit_object():
         head_model=CrossEntropyOnLogits(config),
         chunk_size=kv_cache_args.chunk_size,
         randomize_chunk_sizes=kv_cache_args.randomize_chunk_sizes,
-        single_tokens_for_targets=kv_cache_args.single_tokens_for_targets,
-        verbose=kv_cache_args.verbosity_level,
+        single_tokens_for_targets=grad_args.single_tokens_for_targets,
+        verbose=verbose,
         tmp_array_limit_gb=tmp_array_limit_forward_gb,
     )
     tmp_array_limit_backward_gb = TemporaryArrayLimit(
@@ -105,7 +107,7 @@ def test_tmp_array_limit_object():
     cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_backward_gb
     model = LongContextGradientModel(
         **common_kwargs,
-        layers_per_cell=kv_cache_args.layers_per_cell,
+        layers_per_cell=grad_args.layers_per_cell,
         qname=kv_cache_args.qname,
         cache_kwargs=cache_kwargs,
         train_cache_kwargs=train_cache_kwargs,

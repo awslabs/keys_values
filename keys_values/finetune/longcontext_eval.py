@@ -50,21 +50,20 @@ from keys_values.data.evaluation import (
 from keys_values.finetune.batch_transform import BatchTransformFactory
 from keys_values.finetune.longcontext_full import (
     wrap_gpt_model,
-    check_kv_cache,
-    flush_io_streams,
 )
+from keys_values.utils import flush_io_streams
 from keys_values.finetune.utils import (
     LIT_MODEL_FNAME,
     HEAD_MODEL_FNAME,
     LORA_WEIGHTS_FNAME,
-    LORA_WEIGHTS_FNAME_OLD,
+    LORA_WEIGHTS_FNAME_OLD, check_kv_cache,
 )
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.utils import VerbosityLevels
 from keys_values.long_context import (
-    KVCacheArgs,
     LongContextInferenceModel,
 )
+from keys_values.finetune.args import KVCacheArgs
 from keys_values.lora import GPT as GPTLoRA
 from keys_values.model import GPT as GPTFull
 

@@ -367,17 +367,17 @@ class GPT(nn.Module):
         kv_cache = self.transformer.h[block_idx].attn.kv_cache
         return None if kv_cache is None else kv_cache.get_params()
 
-    def kv_cache_max_tokens_forward(self) -> Optional[int]:
+    def kv_cache_max_forward_length(self) -> Optional[int]:
         """
         Returns:
-            Smallest `max_tokens_forward` over all KV caches, or `None` if KV
+            Smallest `max_forward_length` over all KV caches, or `None` if KV
             caches are not assigned.
 
         """
         if not self.are_kv_caches_assigned():
             return None
         else:
-            return min(kvc.max_tokens_forward for kvc in self.get_kv_caches())
+            return min(kvc.max_forward_length for kvc in self.get_kv_caches())
 
     def kv_cache_max_prefill_length(self) -> Optional[int]:
         """

@@ -155,9 +155,9 @@ def generate_fn(
         # We may need the last time slice of `all_logits` below:
         all_logits = model(inputs)
         input_pos = end
-        # Note that `max_tokens_forward` can change during the course of
+        # Note that `max_forward_length` can change during the course of
         # prompt processing:
-        chunksize = min((prompt_chunksize, model.kv_cache_max_tokens_forward(), prompt_size - input_pos))
+        chunksize = min((prompt_chunksize, model.kv_cache_max_forward_length(), prompt_size - input_pos))
         end += chunksize
 
     # Generation loop: One token per iteration
@@ -283,9 +283,9 @@ def batched_generate_fn(
         # We may need the last time slice of `all_logits` below:
         all_logits = model(inputs)
         input_pos = end
-        # Note that `max_tokens_forward` can change during the course of
+        # Note that `max_forward_length` can change during the course of
         # prompt processing:
-        chunksize = min((prompt_chunksize, model.kv_cache_max_tokens_forward(), max_prompt_size - input_pos))
+        chunksize = min((prompt_chunksize, model.kv_cache_max_forward_length(), max_prompt_size - input_pos))
         end += chunksize
 
     stop_progresses = [[0] * len(stop_tokens) for _ in range(batch_size)]  # [batch_size, ~len(stop_tokens)]

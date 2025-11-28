@@ -1,0 +1,9 @@
+#!/bin/sh
+# runs black only on all python files committed in git
+echo "Running black."
+git ls-files | grep "\.py$" |  xargs black
+
+if [ $? -ne 0 ]; then
+ echo "Black should pass before commit!"
+ exit 1
+fi

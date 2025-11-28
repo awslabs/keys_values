@@ -43,7 +43,7 @@ class QuantizedH2OKVCache(H2OKVCache):
     * They average scores over the batch dimension and occupy slots
       independent of the batch dimension. We make eviction decisions
       for each batch entry independently, which is not more expensive. This is
-      the same improvement as we do for H20 (:class:`H2OKVCache` versus
+      the same improvement as we do for H2O (:class:`H2OKVCache` versus
       :class:`H2OOriginalKVCache`).
     * They sum scores over all rounds, which may favor earlier tokens.
       We allow this as well, but also support normalization of
@@ -72,15 +72,9 @@ class QuantizedH2OKVCache(H2OKVCache):
         **base_kwargs,
     ):
         """
-        Args:
-            config: Model config
-            buffers: KV cache buffers to be used. Must be
-                :class:`QuantizedKVCacheBuffers`
-            grace_period: Grace period, see header comment. Defaults to 0
-                (no grace period)
-            normalize_scores: Normalize scores Defaults to `False`
-            combination_constant: Constant fon convex combination of H2O and
-                qwuantization error scores. Defaults to 0.5.
+        Additional args:
+            combination_constant: Constant for convex combination of H2O and
+                quantization error scores. Defaults to 0.5.
             scratch_blocksize: Quantization errors are computed in blocks of
                 this length. The larger, the faster, but also more scratch
                 memory is required.
@@ -105,8 +99,8 @@ class QuantizedH2OKVCache(H2OKVCache):
         if scratch_blocksize < 1:
             raise ValueError("scratch_blocksize must be positive int")
         scratch_blocksize = min(scratch_blocksize, buffers.cache_length)
-        self.combination_constant = combination_constant
         self._scratch_blocksize = scratch_blocksize
+        self.combination_constant = combination_constant
         shape = (buffers.max_batch_size, self.n_query_groups, buffers.cache_length)
         device = self._default_device_for_new_params()
         self.register_buffer(
@@ -166,7 +160,7 @@ class QuantizedH2OKVCache(H2OKVCache):
         key: torch.Tensor,
         value: torch.Tensor,
     ):
-        H2OKVCache._initial_scores_in_prefill(self, key, value)
+        super()._initial_scores_in_prefill(key, value)
         init_length = key.shape[2]
         self._compute_quantization_errors(
             key,
@@ -212,13 +206,19 @@ class QuantizedH2OKVCache(H2OKVCache):
         return QuantizedH2OKVCache(**self._base_kwargs_for_clone())
 
     def _base_kwargs_for_clone(self) -> Dict[str, Any]:
-        base_kwargs = super()._base_kwargs_for_clone()
-        base_kwargs["combination_constant"] = self.combination_constant
-        base_kwargs["scratch_blocksize"] = self._scratch_blocksize
-        return base_kwargs
+        return dict(
+            super()._base_kwargs_for_clone(),
+            combination_constant=self.combination_constant,
+            scratch_blocksize=self._scratch_blocksize,
+        )
 
 
 class QuantizedVLengthH2OKVCache(QuantizedH2OKVCache, VLengthInstantScoreMixin):
+    """
+    Variant of :class:`QuantizedH2OKVCache`. Derived from there in the same
+    way as :class:`VLengthH2OKVCache` is derived from :class:`H2OKVCache`.
+
+    """
     def __init__(
         self,
         config: Config,

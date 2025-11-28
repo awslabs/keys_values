@@ -275,7 +275,7 @@ def build_mask_slice(
     return mask
 
 
-# Maximum umber of `float32` entries for `tmp_array` for GB
+# Maximum number of `float32` entries for `tmp_array` for GB
 ENTRIES_PER_GB = 2 ** 28
 
 # Maximum size of `tmp_array` in GB

@@ -24,6 +24,7 @@ from litgpt.__main__ import PARSER_DATA as PARSER_DATA_LITGPT
 from keys_values.finetune.longcontext_eval import setup as eval_long_fn
 from keys_values.finetune.longcontext_full import setup as finetune_long_full_fn
 from keys_values.finetune.longcontext_lora import setup as finetune_long_lora_fn
+from keys_values.finetune.longcon_offload_full import setup as finetune_offload_full_fn
 from keys_values.finetune.longcon_offload_lora import setup as finetune_offload_lora_fn
 from keys_values.parser_config import parser_commands
 
@@ -38,6 +39,7 @@ PARSER_DATA = {
     "finetune_long_full": finetune_long_full_fn,
     "finetune_long_lora": finetune_long_lora_fn,
     "eval_long": eval_long_fn,
+    "finetune_offload_full": finetune_offload_full_fn,
     "finetune_offload_lora": finetune_offload_lora_fn,
 }
 
