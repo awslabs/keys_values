@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Union, Tuple, Dict, Optional, Set
+from typing import List, Union, Tuple, Dict, Optional, Set, Any
 from dataclasses import dataclass, field, replace
 from collections import Counter
 
@@ -27,10 +27,13 @@ from keys_values.utils import expand_index
 _ANNOTATION_KIND_VALUES = {
     "cat-key",
     "cat-value",
+    "ext-key",  # TODO
+    "ext-value",  # TODO
     "final-key",
     "final-value",
     "ignore-headgrad",
     "ignore-query",
+    "padded-query",
     "scatter-key",
     "scatter-value",
 }
@@ -51,6 +54,7 @@ class NodeAnnotation:
     index: torch.Tensor
     delta: torch.Tensor
     positions: Optional[torch.Tensor] = None
+    extra_info: Optional[Any] = None
     debug_full_arg: Optional[torch.Tensor] = None
     debug_msg: Optional[str] = None
     match_id: Optional[int] = None
@@ -252,13 +256,15 @@ class LargeShapeEntry:
                 dtype=x.dtype,
                 count=1,
             )
-        else:
+        elif x.shape == self.shape:
             return LargeShapeEntry(
                 shape=self.shape,
                 numel=self.numel,
                 dtype=x.dtype,
                 count=self.count + 1,
             )
+        else:
+            return self
 
     def size_in_mb(self) -> float:
         return self.numel * bytes_for_torch_dtype(self.dtype) / (2 ** 20)
@@ -508,8 +514,9 @@ class CellComputationAutogradHooks(AutogradHooks):
         if self._debug_test_args:
             self._debug_log_args = []
         if self._track_largest_shape:
+            # Dummy: Replaced with first shape
             self._largest_shape = LargeShapeEntry(
-                shape=(0,), numel=0,
+                shape=(0,), numel=0, dtype=torch.float32, count=0,
             )
 
     @property
@@ -538,6 +545,13 @@ class CellComputationAutogradHooks(AutogradHooks):
         self.grace_period = None
         self._node_annotations.clear()
 
+    def _add_shape(self, shape: List[int]):
+        self._shapes_to_match.add(tuple(shape))
+        if self.n_head > self.n_query_groups:
+            shape[1] = self.n_head
+            self._shapes_to_match.add(tuple(shape))
+            shape[1] = self.n_query_groups
+
     def _initialize_shapes(
         self,
         cache_lengths: List[int],
@@ -548,8 +562,9 @@ class CellComputationAutogradHooks(AutogradHooks):
         argument must have to be mapped to a certain annotation. The shape
         is mapped to the `kind` value.
 
-        Several modifications have been done to go from annotated buffer to
-        pack hook argument, see :meth:`_transform_annotated_tensor`.
+        If `n_head > n_query_groups`, we also include shapes with
+        `n_head` in place of `n_query_groups`. This caters for annotations
+        of padded query, or extended key, value.
 
         """
         # Initialize `_shapes_to_match`
@@ -568,7 +583,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         ]
         for cache_length in cache_lengths:
             key_shape[2] = cache_length
-            self._shapes_to_match.add(tuple(key_shape))
+            self._add_shape(key_shape)
             # "cat" has smaller shapes
             if min_cat_length < cache_length:
                 cat_length = 0
@@ -578,7 +593,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                         break
                     if cat_length >= min_cat_length:
                         key_shape[2] = cat_length
-                        self._shapes_to_match.add(tuple(key_shape))
+                        self._add_shape(key_shape)
 
     @property
     def node_annotations(self) -> Annotations:
@@ -631,7 +646,6 @@ class CellComputationAutogradHooks(AutogradHooks):
             self._shapes_counter[x_key] += 1
         if self._track_largest_shape:
             self._largest_shape = self._largest_shape.process(x)
-
         # Pack argument if shape is matched
         new_id = self._pack_argument(x)
         if new_id is not None:
@@ -683,18 +697,18 @@ class CellComputationAutogradHooks(AutogradHooks):
                     target_dtype = value.target_dtype
                     value = value.annot
                     kind = value.kind
-                    buffer = self._node_annotations.get_final(value.layer_idx, kind)
                     length = value.shape[2]
-                    cache_length = self._get_cache_length(value.layer_idx)
-                    if value.is_scatter:
-                        self._unpack_scatter(buffer, value)  # Overwrites `buffer`
-                        assert length == cache_length  # Sanity check
-                    # Buffer stays the same for "cat", but a smaller slice is
-                    # returned
-                    x = self._transform_annotated_tensor(
-                        buffer=buffer[:, :, :length, :],
-                        kind=kind,
-                    )
+                    if kind == "padded-query":
+                        x = self._unpack_padded_query(value)
+                    else:
+                        buffer = self._node_annotations.get_final(value.layer_idx, kind)
+                        if value.is_scatter:
+                            self._unpack_scatter(buffer, value)  # Overwrites `buffer`
+                            cache_length = self._get_cache_length(value.layer_idx)
+                            assert length == cache_length  # Sanity check
+                        # Buffer stays the same for "cat", but a smaller slice is
+                        # returned
+                        x = buffer[:, :, :length, :]
                     if target_dtype is not None and x.dtype != target_dtype:
                         x = x.to(dtype=target_dtype)
                     if self._debug_test_args:
@@ -734,6 +748,23 @@ class CellComputationAutogradHooks(AutogradHooks):
             buffer.scatter_(2, positions, buff_cp)
         buffer.scatter_(2, value.index, value.delta)
 
+    def _unpack_padded_query(self, annotation: NodeAnnotation) -> torch.Tensor:
+        assert annotation.kind == "padded-query"  # Sanity check
+        shape = annotation.shape
+        delta = annotation.delta
+        q_len = delta.shape[2]
+        kv_len = shape[2]
+        print(f"_unpack_padded_query: q_len={q_len}, kv_len={kv_len}")  # DEBUG
+        return torch.cat(
+            (
+                torch.zeros(
+                    (1, 1, 1, 1), dtype=delta.dtype, device=delta.device,
+                ).expand(*shape[:2], kv_len - q_len, shape[3]),
+                delta,
+            ),
+            dim=2,
+        )
+
     def _map_type(self, x: torch.Tensor) -> str:
         x_dtype = x.dtype
         if x_dtype == torch.int64:
@@ -744,17 +775,6 @@ class CellComputationAutogradHooks(AutogradHooks):
             return "D"
         else:
             return "O"
-
-    def _transform_shape(
-        self, shape: Tuple[int, ...], kind: str,
-    ) -> Tuple[int, ...]:
-        """
-        Allows to cater for cases where pack arguments are transformed from
-        node annotations. At the moment, due to us using
-        :class:`SDPAFunction` for MHA, there is no transformation.
-
-        """
-        return shape  # No transformation
 
     def _pack_argument(self, x: torch.Tensor) -> Optional[int]:
         shape = shape_to_tuple(x)
@@ -824,17 +844,21 @@ class CellComputationAutogradHooks(AutogradHooks):
                                         annotation,
                                         debug_full_arg=pack_arg.x,
                                     )
-                                # If the annotation is "ignore", the pack
-                                # argument counts as matched, but is dropped,
-                                # as it cannot be packed. This is to avoid
-                                # unmatched pack args (which otherwise are a
-                                # sign that something could be wrong)
                                 if not annotation.is_ignore:
+                                    # Match not to be ignored
                                     if annotation.match_id is None:
+                                        # Annotation may be transformed before
+                                        # being stored in `_packed_arg_for_id`
                                         value = PackArgumentAsAnnotation(
-                                            annot=annotation,
+                                            annot=self._transform_annotation(
+                                                annotation, pack_arg.x,
+                                            ),
                                             target_dtype=parg_dtype if try_with_cast else None,
                                         )
+                                        # DEBUG
+                                        if annotation.kind == "padded-query":
+                                            print(f"Matched padded-query: ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, q_len={annotation.extra_info}")
+                                        # END DEBUG
                                         self._packed_arg_for_id[
                                             pack_arg.id
                                         ] = value
@@ -907,10 +931,7 @@ class CellComputationAutogradHooks(AutogradHooks):
     def _matching_entries(self) -> List[MatchingEntry]:
         return [
             MatchingEntry(
-                shape=self._transform_shape(
-                    annotation.shape,
-                    kind="cat" if annotation.is_cat else "scatter",
-                ),
+                shape=annotation.shape,
                 dtype=annotation.delta.dtype,
                 annotation=annotation,
             )
@@ -918,10 +939,14 @@ class CellComputationAutogradHooks(AutogradHooks):
         ]
 
     @staticmethod
+    def _delta_with_index(annotation: NodeAnnotation) -> bool:
+        return annotation.is_scatter or annotation.is_final or annotation.kind == "padded-query"
+
+    @staticmethod
     def _delta_for_annotation(
         annotation: NodeAnnotation,
     ) -> torch.Tensor:
-        if (annotation.is_scatter or annotation.is_final) and annotation.delta.shape[2] > MAX_DELTA_TRANS_LENGTH:
+        if CellComputationAutogradHooks._delta_with_index(annotation) and annotation.delta.shape[2] > MAX_DELTA_TRANS_LENGTH:
             return annotation.delta[:, :, :MAX_DELTA_TRANS_LENGTH, :]
         else:
             return annotation.delta
@@ -930,10 +955,7 @@ class CellComputationAutogradHooks(AutogradHooks):
     def _delta_for_pack_argument(
         x: torch.Tensor, annotation: NodeAnnotation,
     ) -> torch.Tensor:
-        # There is currently no transformation between annotation and pack hook
-        # argument, so the delta is extracted in the same way as for the
-        # annotation
-        if annotation.is_scatter or annotation.is_final:
+        if CellComputationAutogradHooks._delta_with_index(annotation):
             num = min(annotation.delta.shape[2], MAX_DELTA_TRANS_LENGTH)
             index = annotation.index[:, :, :num, :]
             part_of_x = x.gather(2, index)
@@ -942,9 +964,40 @@ class CellComputationAutogradHooks(AutogradHooks):
         return part_of_x
 
     @staticmethod
+    def _transform_annotation(
+        annotation: NodeAnnotation,
+        x: torch.Tensor,
+    ):
+        """
+        Helper for :meth:`_match_annotations`. For certain kinds of
+        annotations, they need to be transformed before inserted into
+        `_packed_arg_for_id`.
+
+        """
+        if annotation.kind == "padded-query":
+            # We store the full query (without padding) in `delta`. This is
+            # different from what is stored there for matching
+            q_len = int(annotation.extra_info)
+            assert 0 < q_len <= x.shape[2], f"q_len={q_len}, x.shape[2]={x.shape[2]}"
+            return NodeAnnotation(
+                kind="padded-query",
+                layer_idx=annotation.layer_idx,
+                chunk_idx=annotation.chunk_idx,
+                shape=annotation.shape,
+                index=annotation.index,  # not used
+                delta=x[:, :, (-q_len):, :],
+                extra_info=q_len,
+                debug_full_arg=annotation.debug_full_arg,
+                debug_msg=annotation.debug_msg,
+                match_id=annotation.match_id,
+            )
+        else:
+            return annotation
+
+    @staticmethod
     def _pack_4d_index(x: torch.Tensor) -> Optional[PackArgumentAsIndex]:
         """
-        Helper for :meth:`_match_annotations`. `x` must be 4D of integer
+        Helper for :meth:`pack_hook`. `x` must be 4D of integer
         type. The assumption is that the final dimension is
         broadcast-extended. We run a (randomized) test for this (full test is
         too expensive). If positive, we return a packed version, otherwise
@@ -964,19 +1017,6 @@ class CellComputationAutogradHooks(AutogradHooks):
             )
         else:
             return None
-
-    def _transform_annotated_tensor(
-        self,
-        buffer: torch.Tensor,
-        kind: str,
-    ) -> torch.Tensor:
-        """
-        Allows to cater for cases where pack arguments are transformed from
-        node annotations. At the moment, due to us using
-        :class:`SDPAFunction` for MHA, there is no transformation.
-
-        """
-        return buffer
 
 
 def debug_compute_ratio(a: torch.Tensor, b: torch.Tensor):
@@ -1028,37 +1068,3 @@ def do_ignore_annotation(
     )
     if debug_print:
         print(f"Create ({layer_idx},{chunk_idx}): {x_shape}, {kind}")
-
-
-# TODO: Remove!
-def debug_spda_callback(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    query: torch.Tensor,
-    full_y: torch.Tensor,
-    node_annotations: Annotations,
-):
-    do_ignore_annotation(
-        x=key,
-        node_annotations=node_annotations,
-        kind="ignore-key-perm",
-        layer_idx=0,
-    )
-    do_ignore_annotation(
-        x=value,
-        node_annotations=node_annotations,
-        kind="ignore-value-perm",
-        layer_idx=0,
-    )
-    do_ignore_annotation(
-        x=query,
-        node_annotations=node_annotations,
-        kind="ignore-query-padded",
-        layer_idx=0,
-    )
-    do_ignore_annotation(
-        x=full_y,
-        node_annotations=node_annotations,
-        kind="ignore-sdpa-full",
-        layer_idx=0,
-    )

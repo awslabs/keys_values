@@ -139,7 +139,7 @@ class KVCache(torch.nn.Module):
         raise NotImplementedError
 
     @property
-    def dtype(self) -> torch.dtype:
+    def dtype(self) -> Optional[torch.dtype]:
         return self._dtype
 
     @property

@@ -415,15 +415,15 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             print(f"Create ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, {annotation.kind}")
 
     def _ignore_query_annotation(self, query: torch.Tensor):
-        if self.n_head == self.n_query_groups:
-            # `query` should be ignored
-            do_ignore_annotation(
-                x=query,
-                node_annotations=self._node_annotations,
-                kind="ignore-query",
-                layer_idx=self.block_idx,
-                debug_print=self.debug_print_annotations,
-            )
+        # `query` should be ignored, even if `n_head > n_query_groups`, because
+        # shapes with `n_head` can also be annotations
+        do_ignore_annotation(
+            x=query,
+            node_annotations=self._node_annotations,
+            kind="ignore-query",
+            layer_idx=self.block_idx,
+            debug_print=self.debug_print_annotations,
+        )
 
     def _create_node_before_creator(
         self,

@@ -32,6 +32,7 @@ from keys_values.kvcache.gradient.autograd_hooks import (
     NodeAnnotation,
     Annotations,
     do_ignore_annotation,
+    MAX_DELTA_TRANS_LENGTH,
 )
 from keys_values.kvcache.gradient.sdpa_op import (
     scatter_on_buffers,
@@ -363,6 +364,8 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             self.current_length += num
 
         # SDPA computation
+        if self._node_annotations is not None:
+            self._padded_query_annotation(query)
         attn_outputs, _ = self.mha.scaled_dot_product_attention(
             query=query,
             k_and_v=self.kv_buffers,
@@ -373,21 +376,57 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         )
         return attn_outputs.reshape(self.batch_size, num, -1)
 
+    def _padded_query_annotation(self, query: torch.Tensor):
+        if self._sdpa_kwargs["sdpa_mode"] == SDPA_IMPL_QPADDED_PYTORCH:
+            # Create annotation for padded query
+            _, _, q_len, head_size = query.shape
+            kv_len = self.kv_buffers.keys().shape[2]
+            shape = tuple(query.shape[:2]) + (kv_len, head_size)
+            # Pick a delta which includes zeros and non-zeros
+            delta_len = min(MAX_DELTA_TRANS_LENGTH, kv_len - q_len)
+            num_nonzeros = min(delta_len - 2, q_len)
+            num_zeros = delta_len - num_nonzeros
+            delta = torch.cat(
+                (
+                    torch.zeros(
+                        (1, 1, 1, 1), dtype=query.dtype, device=query.device,
+                    ).expand(*shape[:2], num_zeros, head_size),
+                    query[:, :, :num_nonzeros, :],
+                ),
+                dim=2,
+            )
+            start = kv_len - q_len - num_zeros
+            end = start + delta_len
+            index = torch.arange(
+                start, end, dtype=torch.int64, device=query.device,
+            ).view(1, 1, -1, 1).expand(*shape[:2], -1, head_size)
+            self._append_annotation(
+                NodeAnnotation(
+                    kind="padded-query",
+                    layer_idx=self.layer_idx,
+                    chunk_idx=self._token_chunk_pos - 1,  # `token_chunk_pos` has already been advanced
+                    shape=shape,
+                    index=index,
+                    delta=delta,
+                    extra_info=q_len,
+                )
+            )
+
     def _append_annotation(self, annotation: NodeAnnotation):
         self._node_annotations.nodes.append(annotation)
         if self.debug_print_annotations:
             print(f"Create ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, {annotation.kind}")
 
     def _ignore_query_annotation(self, query: torch.Tensor):
-        if self.n_head == self.n_query_groups:
-            # `query` should be ignored
-            do_ignore_annotation(
-                x=query,
-                node_annotations=self._node_annotations,
-                kind="ignore-query",
-                layer_idx=self.block_idx,
-                debug_print=self.debug_print_annotations,
-            )
+        # `query` should be ignored, even if `n_head > n_query_groups`, because
+        # shapes with `n_head` can also be annotations
+        do_ignore_annotation(
+            x=query,
+            node_annotations=self._node_annotations,
+            kind="ignore-query",
+            layer_idx=self.block_idx,
+            debug_print=self.debug_print_annotations,
+        )
 
     def _create_node_before_creator(
         self,

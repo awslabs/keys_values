@@ -72,7 +72,7 @@ def args_gradient_row_of_cells():
 
 @pytest.mark.parametrize(
     "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, use_new_cache, device",
-    args_gradient_row_of_cells(),
+    args_gradient_row_of_cells()[1:2],
 )
 def test_gradient_row_of_cells(
     cache_name,

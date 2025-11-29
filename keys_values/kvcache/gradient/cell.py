@@ -304,41 +304,47 @@ class CellComputation(nn.Module):
                 replay_cache.initialize_buffers(buffers)
             cache_lengths.append(attn.kv_cache.cache_length)
             attn.kv_cache = replay_cache
-        # Initialize autograd hooks
-        if self.autograd_hooks is not None:
-            self.autograd_hooks.initialize_cell(
-                eff_num_layers=num_layers,
-                num_chunks=num_chunks,
-                first_layer_idx=self.model_part.first_layer_idx,
-                first_chunk_idx=first_chunk_idx,
-                cache_lengths=list(cache_lengths),
-                replay_logs=self.replay_logs,
-            )
 
-        # Outer loop over chunks
-        output_parts = cell_computation(
-            token_idxs=token_idxs,
-            model_part=self.model_part,
-            get_inputs_slice=get_inputs_slice,
-            input_pos=self.get_input_pos(first_chunk_idx),
-        )
-        # DEBUG:
-        if self.autograd_hooks is not None:
-            largest_shape = self.autograd_hooks.largest_shape()
-            if largest_shape is not None:
-                print(f"Largest node in autograd hook: shape={largest_shape.shape}, numel={largest_shape.numel} [{largest_shape.size_in_mb()} MB], count={largest_shape.count}")
-        # END DEBUG
-        # Reset `model` and compose results
-        for (_, block), old_cache in zip(
-            self.model_part.blocks(), kv_caches_copy,
-        ):
-            block.attn.kv_cache = old_cache
-        outputs = torch.cat(output_parts, dim=1)
-        k_buffers = []
-        v_buffers = []
-        for kv_cache in train_replay_caches:
-            buffers = kv_cache.kv_buffers
-            k_buffers.append(buffers.keys())
-            v_buffers.append(buffers.values())
-            kv_cache.deallocate_buffers()
+        try:
+            # Initialize autograd hooks
+            if self.autograd_hooks is not None:
+                self.autograd_hooks.initialize_cell(
+                    eff_num_layers=num_layers,
+                    num_chunks=num_chunks,
+                    first_layer_idx=self.model_part.first_layer_idx,
+                    first_chunk_idx=first_chunk_idx,
+                    cache_lengths=list(cache_lengths),
+                    replay_logs=self.replay_logs,
+                )
+
+            # Outer loop over chunks
+            output_parts = cell_computation(
+                token_idxs=token_idxs,
+                model_part=self.model_part,
+                get_inputs_slice=get_inputs_slice,
+                input_pos=self.get_input_pos(first_chunk_idx),
+            )
+            # DEBUG:
+            if self.autograd_hooks is not None:
+                largest_shape = self.autograd_hooks.largest_shape()
+                if largest_shape is not None:
+                    print(f"Largest node in autograd hook: shape={largest_shape.shape}, numel={largest_shape.numel} [{largest_shape.size_in_mb()} MB], count={largest_shape.count}")
+            # END DEBUG
+            # Assemble return arguments
+            outputs = torch.cat(output_parts, dim=1)
+            k_buffers = []
+            v_buffers = []
+            for kv_cache in train_replay_caches:
+                buffers = kv_cache.kv_buffers
+                k_buffers.append(buffers.keys())
+                v_buffers.append(buffers.values())
+        finally:
+            # Reassign original caches
+            for (_, block), old_cache in zip(
+                self.model_part.blocks(), kv_caches_copy,
+            ):
+                block.attn.kv_cache = old_cache
+            for kv_cache in train_replay_caches:
+                kv_cache.deallocate_buffers()
+
         return outputs, k_buffers, v_buffers

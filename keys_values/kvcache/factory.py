@@ -575,6 +575,8 @@ def create_quantized_kv_buffers_for_checkpoints(
     """
     _, first_block = next(iter(model_part.blocks()))
     cache_params = first_block.attn.kv_cache.get_params()
+    if cache_params.dtype is None:
+        raise ValueError("KV caches assigned to each block must have `dtype` assigned")
     if layer_activations:
         # Layer activations have a different shape than KV caches. And their
         # `cache_length` dimension is constant.
