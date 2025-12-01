@@ -48,6 +48,7 @@ from keys_values.kvcache.test_utils import (
 )
 from keys_values.model import GPT, CausalSelfAttention
 from keys_values.use_eager_kernel import transform_mha_kwargs
+from keys_values.utils import repeat_interleave
 
 
 @pytest.mark.parametrize(
@@ -127,9 +128,8 @@ def test_scaled_dot_product_attention(n_head, n_query_groups, device):
             sliding_window_size=sliding_window_size,
             mask=mask,
         )
-        q_per_kv = n_head // n_query_groups
-        key_bc = key.repeat_interleave(q_per_kv, dim=1)
-        value_bc = value.repeat_interleave(q_per_kv, dim=1)
+        key_bc = repeat_interleave(key, n_head)
+        value_bc = repeat_interleave(value, n_head)
         k_and_v_bc = DefaultKeysAndValues(key_bc, value_bc)
         result_cmp, attn_weights_cmp = eager_scaled_dot_product_attention(
             query,

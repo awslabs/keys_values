@@ -20,6 +20,15 @@ from typing import List, Dict, Any
 import torch
 
 
+# Currently, `F.scaled_dot_product_attention` does not properly support the
+# case `enabla_gqa=True` (i.e., keys and values have less heads than
+# queries). In this case, it is best to extend keys and values, which requires
+# extra memory, but allows for efficient kernels to be used.
+# Once PyTorch supports `enabla_gqa=True` properly at least with some fused
+# kernels (such as flash attention), this flag can be switched to `False`.
+FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA = True
+
+
 def _append_results_to_csv(
     results: List[Dict[str, Any]],
     result_path: Path,
@@ -60,3 +69,16 @@ def append_results_to_csv(
 def expand_index(index: torch.Tensor, head_size: int) -> torch.Tensor:
     assert index.ndim == 3
     return index.unsqueeze(-1).expand(-1, -1, -1, head_size)
+
+
+def need_repeat_interleave(n_head: int, n_query_groups: int) -> bool:
+    return n_query_groups < n_head and FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA
+
+
+def repeat_interleave(x: torch.Tensor, n_head: int) -> torch.Tensor:
+    n_query_groups = x.shape[1]
+    if need_repeat_interleave(n_head, n_query_groups):
+        q_per_kv = n_head // n_query_groups
+        assert n_head == n_query_groups * q_per_kv
+        x = torch.repeat_interleave(x, q_per_kv, dim=1)
+    return x

@@ -316,8 +316,8 @@ def test_gradient_row_of_cells(
             print(f"\nCell(first_chunk_idx {first_chunk_idx}):")
             print(annotation_usage.report())
             num_total_unmatched += len(annotation_usage.unmatched_pack_args)
-        if not use_new_cache:
-            assert num_total_unmatched == 0
+        #if not use_new_cache:
+        assert num_total_unmatched == 0
 
     print("\nComparing gradients")
     for name, value in param_gradients.items():

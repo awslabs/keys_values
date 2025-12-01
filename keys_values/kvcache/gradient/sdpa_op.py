@@ -27,9 +27,8 @@ from keys_values.attention_utils import (
     create_temp_array,
     sdpa_attention_weights,
     slice_as_flat,
-    FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA,
 )
-from keys_values.utils import expand_index
+from keys_values.utils import expand_index, repeat_interleave
 
 
 def sdpa_forward(
@@ -50,14 +49,13 @@ def sdpa_forward(
     if is_causal and sliding_window_size is None:
         # Use `F.scaled_dot_product_attention`, which is optimized for the
         # causal case
-        if enable_gqa and FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA:
+        if enable_gqa:
             # Some efficient fused kernels have not implemented
             # `enabla_gqa=True`. It is better to extend keys, values in
             # this case.
-            q_per_kv = n_head // n_query_groups
-            key = key.repeat_interleave(q_per_kv, dim=1)
-            value = value.repeat_interleave(q_per_kv, dim=1)
-            enable_gqa = False
+            key = repeat_interleave(key, n_head)
+            value = repeat_interleave(value, n_head)
+            enable_gqa = key.shape[1] == n_query_groups
         # Run the right version of `F.scaled_dot_product_attention`
         kwargs = dict(
             query=query,

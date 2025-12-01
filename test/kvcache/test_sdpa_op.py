@@ -27,7 +27,6 @@ from keys_values.attention_utils import (
     build_mask_slice,
     sample_token_positions,
     ENTRIES_PER_GB,
-    FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA,
 )
 from keys_values.kvcache.attn_weights import (
     update_token_positions,
@@ -55,6 +54,7 @@ from keys_values.kvcache.test_utils import (
 )
 from keys_values.model import GPT
 from keys_values.sdpa_wrapper import scaled_dot_product_attention
+from keys_values.utils import repeat_interleave
 
 
 @pytest.mark.parametrize(
@@ -82,7 +82,6 @@ def test_sdpa_op_gradients(n_head, n_query_groups, q_len, kv_len, dtype, sliding
     seq_len = 2 * kv_len
     is_causal = q_len == kv_len
     input_pos = seq_len - q_len if not is_causal else 0
-    q_per_kv = n_head // n_query_groups
     enable_gqa = n_query_groups < n_head
 
     print(f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}, device={device}")
@@ -127,19 +126,15 @@ def test_sdpa_op_gradients(n_head, n_query_groups, q_len, kv_len, dtype, sliding
                     sliding_window_size,
                 )
             else:
-                if enable_gqa and FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA:
+                if enable_gqa:
                     # Some efficient kernels have not reliably implemented
                     # `enabla_gqa=True`. It is better to extend keys, values in
                     # this case.
                     _dtype = torch.float32
-                    key2 = torch.repeat_interleave(
-                        key.to(_dtype), q_per_kv, dim=1,
-                    )
-                    value2 = torch.repeat_interleave(
-                        value.to(_dtype), q_per_kv, dim=1,
-                    )
+                    key2 = repeat_interleave(key.to(_dtype), n_head)
+                    value2 = repeat_interleave(value.to(_dtype), n_head)
                     query2 = query.to(_dtype)
-                    _enable_gqa = False
+                    _enable_gqa = key2.shape[1] == n_query_groups
                 else:
                     query2 = query
                     key2 = key

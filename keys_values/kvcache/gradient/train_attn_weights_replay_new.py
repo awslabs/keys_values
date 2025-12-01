@@ -39,7 +39,7 @@ from keys_values.kvcache.gradient.sdpa_op import (
     cat_on_buffers,
 )
 from keys_values.kvcache.utils import shape_to_tuple
-from keys_values.utils import expand_index
+from keys_values.utils import expand_index, need_repeat_interleave
 
 
 class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
@@ -435,13 +435,15 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         positions: Optional[torch.Tensor] = None,
         debug_msg: Optional[str] = None,
     ):
-        NodeAnnotation.kind_is_valid(kind)
-        is_keys = NodeAnnotation.kind_is_keys(kind)
         if self._node_annotations is not None:
+            NodeAnnotation.kind_is_valid(kind)
+            assert NodeAnnotation.kind_is_scatter(kind) or NodeAnnotation.kind_is_cat(kind)
+            is_keys = NodeAnnotation.kind_is_keys(kind)
             buffer = self.kv_buffers.keys().detach() if is_keys else self.kv_buffers.values().detach()
             buffer = buffer[:, :, :self.current_length, :]
             index = index.detach().to(buffer.device)
-            if NodeAnnotation.kind_is_scatter(kind):
+            is_scatter = NodeAnnotation.kind_is_scatter(kind)
+            if is_scatter:
                 assert index.ndim == 4  # Sanity check
                 # Need to pass delta which is overwritten
                 delta = buffer.gather(-2, index)
@@ -450,18 +452,37 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 delta = buffer[:, :, -1:, :]
             if positions is not None:
                 positions = positions.detach().to(buffer.device)
+            shape = shape_to_tuple(buffer)
             self._append_annotation(
                 NodeAnnotation(
                     kind=kind,
                     layer_idx=self.layer_idx,
                     chunk_idx=self._token_chunk_pos - 1,  # `token_chunk_pos` has already been advanced
-                    shape=shape_to_tuple(buffer),
+                    shape=shape,
                     index=index,
                     delta=delta,
                     positions=positions,
                     debug_msg=debug_msg,
                 )
             )
+            if need_repeat_interleave(self.n_head, self.n_query_groups):
+                # Add copy of annotation for extended tensor
+                prefix, suffix = kind.split("-")
+                ext_kind = prefix + "-ext-" + suffix
+                ext_debug_msg = None if debug_msg is None else "Extended: " + debug_msg
+                self._append_annotation(
+                    NodeAnnotation(
+                        kind=ext_kind,
+                        layer_idx=self.layer_idx,
+                        chunk_idx=self._token_chunk_pos - 1,
+                        shape=(shape[0], self.n_head) + shape[-2:],
+                        index=index,
+                        delta=delta,
+                        positions=positions,
+                        debug_msg=ext_debug_msg,
+                    )
+                )
+
 
     def _create_node_after_creator(
         self,
@@ -477,7 +498,10 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             x_det = x.detach()
             x_shape = x_det.shape
             self._node_annotations.set_final(
-                x=x_det, layer_idx=self.layer_idx, kind=kind,
+                x=x_det,
+                layer_idx=self.layer_idx,
+                chunk_idx=self._token_chunk_pos,
+                kind=kind,
             )
             if self._first_cell_in_row:
                 is_keys = NodeAnnotation.kind_is_keys(kind)
