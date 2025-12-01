@@ -408,7 +408,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                     shape=shape,
                     index=index,
                     delta=delta,
-                    extra_info=q_len,
+                    extra_info={"q_len": q_len},
                 )
             )
 
@@ -453,16 +453,19 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             if positions is not None:
                 positions = positions.detach().to(buffer.device)
             shape = shape_to_tuple(buffer)
+            annot_kwargs = dict(
+                layer_idx=self.layer_idx,
+                chunk_idx=self._token_chunk_pos - 1,  # `token_chunk_pos` has already been advanced
+                index=index,
+                delta=delta,
+                positions=positions,
+            )
             self._append_annotation(
                 NodeAnnotation(
                     kind=kind,
-                    layer_idx=self.layer_idx,
-                    chunk_idx=self._token_chunk_pos - 1,  # `token_chunk_pos` has already been advanced
                     shape=shape,
-                    index=index,
-                    delta=delta,
-                    positions=positions,
                     debug_msg=debug_msg,
+                    **annot_kwargs,
                 )
             )
             if need_repeat_interleave(self.n_head, self.n_query_groups):
@@ -470,16 +473,17 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 prefix, suffix = kind.split("-")
                 ext_kind = prefix + "-ext-" + suffix
                 ext_debug_msg = None if debug_msg is None else "Extended: " + debug_msg
+                if is_scatter:
+                    # In the scatter case, key and value are permuted by
+                    # `sort_index`, which needs to be passed as well
+                    sort_index = torch.argsort(self.token_positions().detach(), dim=-1)
+                    annot_kwargs["extra_info"] = {"sort_index": sort_index}
                 self._append_annotation(
                     NodeAnnotation(
                         kind=ext_kind,
-                        layer_idx=self.layer_idx,
-                        chunk_idx=self._token_chunk_pos - 1,
                         shape=(shape[0], self.n_head) + shape[-2:],
-                        index=index,
-                        delta=delta,
-                        positions=positions,
                         debug_msg=ext_debug_msg,
+                        **annot_kwargs,
                     )
                 )
 
@@ -610,8 +614,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             index = self.replay_log.extract_index(
                 self._next_token_pos, num, **index_kwargs
             ).detach()
-            # Note: We want `update_result.positions` to be a tensor, not a
-            # tuple, so `positions_is_tensor=True`
             update_result = update_token_positions(
                 token_positions=self._token_positions,
                 next_token_pos=self._next_token_pos,

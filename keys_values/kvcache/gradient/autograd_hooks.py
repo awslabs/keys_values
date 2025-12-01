@@ -56,7 +56,7 @@ class NodeAnnotation:
     index: torch.Tensor
     delta: torch.Tensor
     positions: Optional[torch.Tensor] = None
-    extra_info: Optional[Any] = None
+    extra_info: Optional[Dict[str, Any]] = None
     debug_full_arg: Optional[torch.Tensor] = None
     debug_msg: Optional[str] = None
     match_id: Optional[int] = None
@@ -94,7 +94,7 @@ class NodeAnnotation:
 
     @staticmethod
     def kind_is_scatter(kind: str) -> bool:
-        return kind.startswith("scatter") or kind.startswith("ext")
+        return kind.startswith("scatter")
 
     @property
     def is_cat(self) -> bool:
@@ -755,9 +755,16 @@ class CellComputationAutogradHooks(AutogradHooks):
                     cache_length = self._get_cache_length(layer_idx)
                     assert length == cache_length  # Sanity check
                 self._node_annotations.chunk_idx[layer_idx] = chunk_idx
-            # Buffer stays the same for "cat", but a smaller slice is
-            # returned
-            x = buffer[:, :, :length, :]
+            x = buffer
+            if annotation.is_scatter and annotation.is_ext:
+                # Extended keys, values may be permuted
+                sort_index = None if annotation.extra_info is None else annotation.extra_info.get("sort_index")
+                if sort_index is not None:
+                    x = torch.gather(buffer, 2, sort_index)
+            elif annotation.is_cat:
+                # Buffer stays the same for "cat", but a smaller slice is
+                # returned
+                x = buffer[:, :, :length, :]
             if annotation.is_ext:
                 x = repeat_interleave(x, self.n_head)
         return x
@@ -765,19 +772,19 @@ class CellComputationAutogradHooks(AutogradHooks):
     def _get_cache_length(self, layer_idx: int) -> int:
         return self.cache_lengths[layer_idx - self.first_layer_idx]
 
-    def _unpack_scatter(self, buffer: torch.Tensor, value: NodeAnnotation):
+    def _unpack_scatter(self, buffer: torch.Tensor, annotation: NodeAnnotation):
         if self.grace_period > 0:
             # If there is a grace period, the unpacking is slightly more complex,
             # see header comment of :class:`CellComputationAutogradHooks`
-            assert value.positions is not None  # Sanity check
-            num = value.delta.shape[2]
+            assert annotation.positions is not None  # Sanity check
+            num = annotation.delta.shape[2]
             num2 = min(num, self.grace_period)
-            buff_cp = buffer.gather(2, value.index[:, :, :num2, :])
-            positions = value.positions.view(1, 1, -1, 1).expand(
+            buff_cp = buffer.gather(2, annotation.index[:, :, :num2, :])
+            positions = annotation.positions.view(1, 1, -1, 1).expand(
                 self.batch_size, self.n_query_groups, -1, self.head_size,
             )
             buffer.scatter_(2, positions, buff_cp)
-        buffer.scatter_(2, value.index, value.delta)
+        buffer.scatter_(2, annotation.index, annotation.delta)
 
     def _unpack_padded_query(self, annotation: NodeAnnotation) -> torch.Tensor:
         assert annotation.kind == "padded-query"  # Sanity check
@@ -887,7 +894,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                                         )
                                         # DEBUG
                                         if annotation.kind == "padded-query":
-                                            print(f"Matched padded-query: ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, q_len={annotation.extra_info}")
+                                            print(f"Matched padded-query: ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, q_len={annotation.extra_info['q_len']}")
                                         elif annotation.is_ext:
                                             print(f"Matched {annotation.kind}: ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}")
                                         # END DEBUG
@@ -981,19 +988,43 @@ class CellComputationAutogradHooks(AutogradHooks):
         self, annotation: NodeAnnotation,
     ) -> torch.Tensor:
         delta = annotation.delta
-        if CellComputationAutogradHooks._delta_with_index(annotation):
-            num = min(annotation.delta.shape[2], MAX_DELTA_TRANS_LENGTH)
+        if self._delta_with_index(annotation):
+            num = min(delta.shape[2], MAX_DELTA_TRANS_LENGTH)
             delta = annotation.delta[:, :, :num, :]
         if annotation.is_ext:
             delta = repeat_interleave(delta, self.n_head)
         return delta
 
+    @staticmethod
+    def _transform_index(
+        index: torch.Tensor, sort_index: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, n_query_groups, num, head_size = index.shape
+        si_len = sort_index.shape[-1]
+        assert sort_index.shape == (batch_size, n_query_groups, si_len)
+        index = index[:, :, :, 0]
+        result = torch.empty_like(sort_index).scatter_(
+            2,
+            sort_index,
+            torch.arange(
+                si_len, dtype=index.dtype, device=index.device,
+            ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
+        ).gather(2, index)
+        return expand_index(result, head_size)
+
     def _delta_for_pack_argument(
         self, x: torch.Tensor, annotation: NodeAnnotation,
     ) -> torch.Tensor:
-        if CellComputationAutogradHooks._delta_with_index(annotation):
+        if self._delta_with_index(annotation):
             num = min(annotation.delta.shape[2], MAX_DELTA_TRANS_LENGTH)
             index = annotation.index[:, :, :num, :]
+            if annotation.is_ext and annotation.is_scatter:
+                # Extended keys, values may be permuted
+                sort_index = None if annotation.extra_info is None else annotation.extra_info.get("sort_index")
+                if sort_index is not None:
+                    index = self._transform_index(index, sort_index)
+                else:
+                    print(f"WARNING! {annotation.kind} ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape} -- No sort_index!")  # DEBUG
             if annotation.is_ext:
                 index = repeat_interleave(index, self.n_head)
             part_of_x = x.gather(2, index)
@@ -1015,8 +1046,8 @@ class CellComputationAutogradHooks(AutogradHooks):
         if annotation.kind == "padded-query":
             # We store the full query (without padding) in `delta`. This is
             # different from what is stored there for matching
-            q_len = int(annotation.extra_info)
-            assert 0 < q_len <= x.shape[2], f"q_len={q_len}, x.shape[2]={x.shape[2]}"
+            q_len = annotation.extra_info.get("q_len")
+            assert q_len is not None and 0 < q_len <= x.shape[2], f"q_len={q_len}, x.shape[2]={x.shape[2]}"
             return NodeAnnotation(
                 kind="padded-query",
                 layer_idx=annotation.layer_idx,
@@ -1024,7 +1055,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                 shape=annotation.shape,
                 index=annotation.index,  # not used
                 delta=x[:, :, (-q_len):, :],
-                extra_info=q_len,
+                extra_info=annotation.extra_info,
                 debug_full_arg=annotation.debug_full_arg,
                 debug_msg=annotation.debug_msg,
                 match_id=annotation.match_id,
