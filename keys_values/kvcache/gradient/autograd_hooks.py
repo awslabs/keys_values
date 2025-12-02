@@ -751,7 +751,8 @@ class CellComputationAutogradHooks(AutogradHooks):
                 raise ValueError(f"Annotation {kind} ({layer_idx}, {chunk_idx}): final chunk_idx = {final_idx}, must be in [{chunk_idx}, {chunk_idx + 1}]")
             if final_idx == chunk_idx + 1:
                 if annotation.is_scatter:
-                    self._unpack_scatter(buffer, annotation)  # Overwrites `buffer`
+                    # Overwrites `buffer`:
+                    self._unpack_scatter(buffer, annotation, self.grace_period)
                     cache_length = self._get_cache_length(layer_idx)
                     assert length == cache_length  # Sanity check
                 self._node_annotations.chunk_idx[layer_idx] = chunk_idx
@@ -760,7 +761,9 @@ class CellComputationAutogradHooks(AutogradHooks):
                 # Extended keys, values may be permuted
                 sort_index = None if annotation.extra_info is None else annotation.extra_info.get("sort_index")
                 if sort_index is not None:
-                    x = torch.gather(buffer, 2, sort_index)
+                    x = torch.gather(
+                        buffer, 2, expand_index(sort_index, self.head_size),
+                    )
             elif annotation.is_cat:
                 # Buffer stays the same for "cat", but a smaller slice is
                 # returned
@@ -772,21 +775,25 @@ class CellComputationAutogradHooks(AutogradHooks):
     def _get_cache_length(self, layer_idx: int) -> int:
         return self.cache_lengths[layer_idx - self.first_layer_idx]
 
-    def _unpack_scatter(self, buffer: torch.Tensor, annotation: NodeAnnotation):
-        if self.grace_period > 0:
+    @staticmethod
+    def _unpack_scatter(
+        buffer: torch.Tensor, annotation: NodeAnnotation, grace_period: int,
+    ):
+        if grace_period > 0:
             # If there is a grace period, the unpacking is slightly more complex,
             # see header comment of :class:`CellComputationAutogradHooks`
             assert annotation.positions is not None  # Sanity check
             num = annotation.delta.shape[2]
-            num2 = min(num, self.grace_period)
+            num2 = min(num, grace_period)
             buff_cp = buffer.gather(2, annotation.index[:, :, :num2, :])
             positions = annotation.positions.view(1, 1, -1, 1).expand(
-                self.batch_size, self.n_query_groups, -1, self.head_size,
+                *buffer.shape[:2], -1, buffer.shape[-1],
             )
             buffer.scatter_(2, positions, buff_cp)
         buffer.scatter_(2, annotation.index, annotation.delta)
 
-    def _unpack_padded_query(self, annotation: NodeAnnotation) -> torch.Tensor:
+    @staticmethod
+    def _unpack_padded_query(annotation: NodeAnnotation) -> torch.Tensor:
         assert annotation.kind == "padded-query"  # Sanity check
         shape = annotation.shape
         delta = annotation.delta
