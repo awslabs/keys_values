@@ -868,10 +868,13 @@ class CellComputationAutogradHooks(AutogradHooks):
                             parg_delta = self._delta_for_pack_argument(
                                 x=pack_arg.x,
                                 annotation=annotation,
+                                n_head=self.n_head,
                             )
                             if try_with_cast:
                                 parg_delta = parg_delta.to(dtype=annot_dtype)
-                            annot_delta = self._delta_for_annotation(annotation)
+                            annot_delta = self._delta_for_annotation(
+                                annotation, self.n_head,
+                            )
                             if torch.allclose(
                                 annot_delta, parg_delta, atol=1e-6, rtol=1e-4,
                             ):
@@ -984,15 +987,16 @@ class CellComputationAutogradHooks(AutogradHooks):
     def _delta_with_index(annotation: NodeAnnotation) -> bool:
         return annotation.is_scatter or annotation.is_final or annotation.kind == "padded-query"
 
+    @staticmethod
     def _delta_for_annotation(
-        self, annotation: NodeAnnotation,
+        annotation: NodeAnnotation, n_head: int,
     ) -> torch.Tensor:
         delta = annotation.delta
-        if self._delta_with_index(annotation):
+        if CellComputationAutogradHooks._delta_with_index(annotation):
             num = min(delta.shape[2], MAX_DELTA_TRANS_LENGTH)
             delta = annotation.delta[:, :, :num, :]
         if annotation.is_ext:
-            delta = repeat_interleave(delta, self.n_head)
+            delta = repeat_interleave(delta, n_head)
         return delta
 
     @staticmethod
@@ -1012,21 +1016,24 @@ class CellComputationAutogradHooks(AutogradHooks):
         ).gather(2, index)
         return expand_index(result, head_size)
 
+    @staticmethod
     def _delta_for_pack_argument(
-        self, x: torch.Tensor, annotation: NodeAnnotation,
+        x: torch.Tensor, annotation: NodeAnnotation, n_head: int,
     ) -> torch.Tensor:
-        if self._delta_with_index(annotation):
+        if CellComputationAutogradHooks._delta_with_index(annotation):
             num = min(annotation.delta.shape[2], MAX_DELTA_TRANS_LENGTH)
             index = annotation.index[:, :, :num, :]
             if annotation.is_ext and annotation.is_scatter:
                 # Extended keys, values may be permuted
                 sort_index = None if annotation.extra_info is None else annotation.extra_info.get("sort_index")
                 if sort_index is not None:
-                    index = self._transform_index(index, sort_index)
+                    index = CellComputationAutogradHooks._transform_index(
+                        index, sort_index,
+                    )
                 else:
                     print(f"WARNING! {annotation.kind} ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape} -- No sort_index!")  # DEBUG
             if annotation.is_ext:
-                index = repeat_interleave(index, self.n_head)
+                index = repeat_interleave(index, n_head)
             part_of_x = x.gather(2, index)
         else:
             part_of_x = x[:, :, -1:, :]

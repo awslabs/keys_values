@@ -39,6 +39,7 @@ from keys_values.kvcache.test_utils import (
     random_keys_values,
     cache_names_and_devices,
     random_args_cache_forward,
+    random_index,
 )
 from keys_values.model import GPT
 
@@ -147,14 +148,7 @@ def test_concatenation(dtype, blocks_over_heads, name, device):
         params, num=cache_length, vocab_size=vocab_size,
     )
     kv_cache._prefill(data["key"], data["value"], data["token_idx"])
-    positions = torch.zeros(
-        (params.max_batch_size, params.n_query_groups, 7),
-        dtype=torch.int64,
-        device=device,
-    )
-    for b in range(params.max_batch_size):
-        for g in range(params.n_query_groups):
-            positions[b, g, :] = torch.randperm(cache_length)[:7]
+    positions = random_index(params, 0, cache_length, num=7)
     keys_1, values_1 = kv_cache.kv_buffers.get_slots(positions)
     kv_cache.kv_buffers.set_slots(positions, keys_1, values_1)
     keys_2, values_2 = kv_cache.kv_buffers.get_slots(positions)
