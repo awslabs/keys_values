@@ -48,16 +48,16 @@ def test_extract_delta(dtype, device):
         chunk_size = random.randint(1, cache_length // 2)
         input_pos = cache_length + 16
         token_positions = random_index(params, 0, cache_length)
-        new_pos = random_index(params, 0, cache_length, num=chunk_size)
+        index = random_index(params, 0, cache_length, num=chunk_size)
         token_positions.scatter_(
             -1,
-            new_pos,
+            index,
             torch.arange(
                 input_pos, input_pos + chunk_size, **index_kwargs,
             ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
         )
-        index_e = expand_index(new_pos, head_size)
-        delta = keys.gather(2, index_e)
+        index = expand_index(index, head_size)
+        delta = keys.gather(2, index)
         assert delta.shape == (batch_size, n_query_groups, chunk_size, head_size)
         # Transform as in `sdpa_wrapper.scaled_dot_product_attention`
         sort_index = torch.argsort(token_positions, dim=-1)
@@ -70,7 +70,7 @@ def test_extract_delta(dtype, device):
             layer_idx=0,
             chunk_idx=2,
             shape=tuple(keys.shape),
-            index=index_e,
+            index=index,
             delta=delta,
             positions=None,
             extra_info={"sort_index": sort_index},
