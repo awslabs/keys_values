@@ -24,6 +24,7 @@ from keys_values.kvcache.gradient.cleanup import ArraysForCleanup
 from keys_values.kvcache.utils import shape_to_tuple, bytes_for_torch_dtype
 from keys_values.utils import expand_index, repeat_interleave
 
+
 _ANNOTATION_KIND_VALUES = {
     "cat-key",
     "cat-value",
@@ -31,6 +32,8 @@ _ANNOTATION_KIND_VALUES = {
     "cat-ext-value",
     "final-key",
     "final-value",
+    "final-ext-key",
+    "final-ext-value",
     "ignore-headgrad",
     "ignore-query",
     "padded-query",
@@ -750,14 +753,16 @@ class CellComputationAutogradHooks(AutogradHooks):
             if not (chunk_idx <= final_idx <= chunk_idx + 1):
                 raise ValueError(f"Annotation {kind} ({layer_idx}, {chunk_idx}): final chunk_idx = {final_idx}, must be in [{chunk_idx}, {chunk_idx + 1}]")
             if final_idx == chunk_idx + 1:
-                if annotation.is_scatter:
+                if annotation.is_final:
+                    raise ValueError(f"Annotation {kind} ({layer_idx}, {chunk_idx}): final chunk_idx = {final_idx}, must be equal to chunk_idx = {chunk_idx}")
+                elif annotation.is_scatter:
                     # Overwrites `buffer`:
                     self._unpack_scatter(buffer, annotation, self.grace_period)
                     cache_length = self._get_cache_length(layer_idx)
                     assert length == cache_length  # Sanity check
                 self._node_annotations.chunk_idx[layer_idx] = chunk_idx
             x = buffer
-            if annotation.is_scatter and annotation.is_ext:
+            if annotation.is_ext and (annotation.is_scatter or annotation.is_final):
                 # Extended keys, values may be permuted
                 sort_index = None if annotation.extra_info is None else annotation.extra_info.get("sort_index")
                 if sort_index is not None:

@@ -103,6 +103,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         self._node_annotations = node_annotations
         self._next_token_pos = start_token_pos  # Will be validated
         self._token_chunk_pos = None
+        self._start_token_chunk_pos = None
         self._end_token_chunk_pos = None
         shape = (batch_size, config.n_query_groups, cache_length)
         self._token_positions = torch.zeros(
@@ -110,9 +111,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         )
         self.current_length = 0
         self._initialize_replay()
-        # We need to create "final" annotations only for the first cell in a
-        # row
-        self._first_cell_in_row = start_token_pos == 0
         self._debug_tensors = debug_tensors
         # If this is set, we log all annotations being created
         self.debug_print_annotations = debug_print_annotations
@@ -141,9 +139,10 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         return self._device
 
     def _initialize_replay(self):
-        # Initialize `_token_chunk_pos`, `_next_token_pos`, and
+        # Initialize `_token_chunk_pos`, `_start_token_chunk_pos`,
+        # `_end_token_chunk_pos`, `_next_token_pos`, and
         # `_next_grace_pos`.
-        next_token_pos = self._next_token_pos
+        next_token_pos = self._next_token_pos  # target value to reach
         self._next_token_pos = 0
         self._token_chunk_pos = 0
         self.prefill_length = None
@@ -153,6 +152,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             if self._next_token_pos >= next_token_pos:
                 done = self._next_token_pos == next_token_pos
                 break
+            # This advances `_token_chunk_pos`
             self._process_token_chunk(chunk)
             num = chunk.shape[-1]
             if do_grace_period:
@@ -173,6 +173,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 self.prefill_length = num
         if not done:
             raise ValueError(f"start_token_pos = {next_token_pos} does not map to start of a token chunk")
+        self._start_token_chunk_pos = self._token_chunk_pos
         self._end_token_chunk_pos = self._token_chunk_pos + self.num_chunks
         if self._end_token_chunk_pos > len(self.replay_log.token_chunks):
             raise ValueError(f"token_chunk_pos = {self._token_chunk_pos}, num_chunks = {self.num_chunks}, sum must be <= {len(self.replay_log.token_chunks)}")
@@ -267,6 +268,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         num = key.shape[2]
         # Process token chunk. This also updates `_token_positions` and the
         # counters
+        token_positions_before = self.token_positions().detach().clone()
         index, update_result = self._process_token_chunk(token_idx)
         # Cache full: Single scatter. `update_result` is given iff there is
         # a grace period.
@@ -285,12 +287,14 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 index=index_e,
                 positions=positions,
                 debug_msg="scatter-before",
+                token_positions_before=token_positions_before,
             )
             self._create_node_before_creator(
                 kind="scatter-value",
                 index=index_e,
                 positions=positions,
                 debug_msg="scatter-before",
+                token_positions_before=token_positions_before,
             )
             # "scatter" update of KV cache buffers
             key_buffer_new, value_buffer_new = scatter_on_buffers(
@@ -428,65 +432,103 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             debug_print=self.debug_print_annotations,
         )
 
+    def _create_annotations(
+        self,
+        kind: str,
+        x: torch.Tensor,
+        index: torch.Tensor,
+        delta: torch.Tensor,
+        chunk_idx: int,
+        is_scatter: bool,
+        positions: Optional[torch.Tensor],
+        debug_msg: Optional[str],
+        token_positions_to_use: Optional[torch.Tensor],
+    ):
+        NodeAnnotation.kind_is_valid(kind)
+        if positions is not None:
+            positions = positions.detach().to(x.device)
+        shape = shape_to_tuple(x)
+        annot_kwargs = dict(
+            layer_idx=self.layer_idx,
+            chunk_idx=chunk_idx,
+            index=index,
+            delta=delta,
+            positions=positions,
+            # extra_info={"full": buffer},  # DEBUG!
+        )
+        self._append_annotation(
+            NodeAnnotation(
+                kind=kind,
+                shape=shape,
+                debug_msg=debug_msg,
+                **annot_kwargs,
+            )
+        )
+        if need_repeat_interleave(self.n_head, self.n_query_groups):
+            # Add copy of annotation for extended tensor
+            prefix, suffix = kind.split("-")
+            ext_kind = prefix + "-ext-" + suffix
+            ext_debug_msg = None if debug_msg is None else "Extended: " + debug_msg
+            if is_scatter:
+                # In the scatter case, key and value are permuted by
+                # `sort_index`, which needs to be passed as well.
+                # Attention: `sort_index` is based on `token_positions`
+                # *before* the node update!
+                sort_index = torch.argsort(token_positions_to_use, dim=-1)
+                annot_kwargs["extra_info"] = {"sort_index": sort_index}
+                # DEBUG
+                # annot_kwargs["extra_info"]["sort_index"] = sort_index  # DEBUG
+                # full = torch.gather(buffer, 2, expand_index(sort_index, self.head_size))
+                # full = repeat_interleave(full, self.n_head)
+                # annot_kwargs["extra_info"]["full"] = full
+                # print(f"Enter annotation: {ext_kind} ({annot_kwargs['layer_idx']}, {annot_kwargs['chunk_idx']})")
+                # END DEBUG
+            self._append_annotation(
+                NodeAnnotation(
+                    kind=ext_kind,
+                    shape=(shape[0], self.n_head) + shape[-2:],
+                    debug_msg=ext_debug_msg,
+                    **annot_kwargs,
+                )
+            )
+
     def _create_node_before_creator(
         self,
         kind: str,
         index: torch.Tensor,
         positions: Optional[torch.Tensor] = None,
         debug_msg: Optional[str] = None,
+        token_positions_before: Optional[torch.Tensor] = None,
     ):
-        if self._node_annotations is not None:
-            NodeAnnotation.kind_is_valid(kind)
-            assert NodeAnnotation.kind_is_scatter(kind) or NodeAnnotation.kind_is_cat(kind)
+        # Note: `_token_chunk_pos` has already been advanced
+        # In the first call to this method,
+        # `_token_chunk_pos == _start_token_chunk_pos + 1`. The node before
+        # needs no annotation. If this is not the first chunk, it will be
+        # annotated as "final" when processing the chunk before.
+        if self._node_annotations is not None and self._token_chunk_pos > self._start_token_chunk_pos + 1:
             is_keys = NodeAnnotation.kind_is_keys(kind)
-            buffer = self.kv_buffers.keys().detach() if is_keys else self.kv_buffers.values().detach()
-            buffer = buffer[:, :, :self.current_length, :]
-            index = index.detach().to(buffer.device)
+            x = self.kv_buffers.keys().detach() if is_keys else self.kv_buffers.values().detach()
+            x = x[:, :, :self.current_length, :]
+            index = index.detach().to(x.device)
             is_scatter = NodeAnnotation.kind_is_scatter(kind)
             if is_scatter:
                 assert index.ndim == 4  # Sanity check
                 # Need to pass delta which is overwritten
-                delta = buffer.gather(-2, index)
+                delta = x.gather(-2, index)
             else:
                 # Pass the final row, used for identification
-                delta = buffer[:, :, -1:, :]
-            if positions is not None:
-                positions = positions.detach().to(buffer.device)
-            shape = shape_to_tuple(buffer)
-            annot_kwargs = dict(
-                layer_idx=self.layer_idx,
-                chunk_idx=self._token_chunk_pos - 1,  # `token_chunk_pos` has already been advanced
+                delta = x[:, :, -1:, :]
+            self._create_annotations(
+                kind=kind,
+                x=x,
                 index=index,
                 delta=delta,
+                chunk_idx=self._token_chunk_pos - 1,
+                is_scatter=is_scatter,
                 positions=positions,
+                debug_msg=debug_msg,
+                token_positions_to_use=token_positions_before,
             )
-            self._append_annotation(
-                NodeAnnotation(
-                    kind=kind,
-                    shape=shape,
-                    debug_msg=debug_msg,
-                    **annot_kwargs,
-                )
-            )
-            if need_repeat_interleave(self.n_head, self.n_query_groups):
-                # Add copy of annotation for extended tensor
-                prefix, suffix = kind.split("-")
-                ext_kind = prefix + "-ext-" + suffix
-                ext_debug_msg = None if debug_msg is None else "Extended: " + debug_msg
-                if is_scatter:
-                    # In the scatter case, key and value are permuted by
-                    # `sort_index`, which needs to be passed as well
-                    sort_index = torch.argsort(self.token_positions().detach(), dim=-1)
-                    annot_kwargs["extra_info"] = {"sort_index": sort_index}
-                self._append_annotation(
-                    NodeAnnotation(
-                        kind=ext_kind,
-                        shape=(shape[0], self.n_head) + shape[-2:],
-                        debug_msg=ext_debug_msg,
-                        **annot_kwargs,
-                    )
-                )
-
 
     def _create_node_after_creator(
         self,
@@ -497,8 +539,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
     ):
         if self._node_annotations is not None and self._token_chunk_pos == self._end_token_chunk_pos:
             # We need to store the final node in order to start the
-            # reconstruction of all earlier ones. It is needed as annotation
-            # only for the first cell in a row
+            # reconstruction of all earlier ones.
             x_det = x.detach()
             x_shape = x_det.shape
             self._node_annotations.set_final(
@@ -507,29 +548,32 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 chunk_idx=self._token_chunk_pos,
                 kind=kind,
             )
-            if self._first_cell_in_row:
-                is_keys = NodeAnnotation.kind_is_keys(kind)
-                fin_kind = "final-key" if is_keys else "final-value"
-                # Use delta at same index as above for identification. We know
-                # that these entries ARE overwritten
-                if NodeAnnotation.kind_is_cat(kind):
-                    # Pass final row
-                    x_len = x_det.shape[2]
-                    index = torch.arange(
-                        x_len - 1, x_len, dtype=index.dtype, device=index.device,
-                    ).view(1, 1, -1, 1).expand(*x_shape[:2], -1, x_shape[-1])
-                delta = x_det.gather(-2, index)
-                self._append_annotation(
-                    NodeAnnotation(
-                        kind=fin_kind,
-                        layer_idx=self.layer_idx,
-                        chunk_idx=self._token_chunk_pos - 1,  # `token_chunk_pos` has already been advanced
-                        shape=shape_to_tuple(x_det),
-                        index=index,
-                        delta=delta,
-                        debug_msg=debug_msg,
-                    )
-                )
+            is_keys = NodeAnnotation.kind_is_keys(kind)
+            fin_kind = "final-key" if is_keys else "final-value"
+            # Use delta at same index as above for identification. We know
+            # that these entries ARE overwritten
+            is_scatter = NodeAnnotation.kind_is_scatter(kind)
+            if not is_scatter:
+                # Pass final row
+                x_len = x_det.shape[2]
+                index = torch.arange(
+                    x_len - 1, x_len, dtype=index.dtype, device=x.device,
+                ).view(1, 1, -1, 1).expand(*x_shape[:2], -1, x_shape[-1])
+            else:
+                index = index.detach().to(x.device)
+            delta = x_det.gather(-2, index)
+            self._create_annotations(
+                kind=fin_kind,
+                x=x_det,
+                index=index,
+                delta=delta,
+                chunk_idx=self._token_chunk_pos,
+                is_scatter=is_scatter,
+                positions=None,  # TODO: Is this correct?
+                debug_msg=debug_msg,
+                token_positions_to_use=self.token_positions().detach(),
+            )
+
         # DEBUG:
         if self._debug_tensors is not None:
             name = f"c{self._token_chunk_pos - 1}-l{self.layer_idx}-{kind}"
