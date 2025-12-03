@@ -450,7 +450,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self.head_size = config.head_size
         self.log_all_shapes = log_all_shapes
         self._debug_test_args = debug_test_args
-        self._debug_log_args = None
+        self._debug_log_args = []
         self._node_annotations = Annotations()
         self._arrays_cleanup = arrays_cleanup
         # To be initialized in `initialize_cell`
@@ -529,8 +529,6 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._remaining_annotations = None
         if self.log_all_shapes:
             self._shapes_counter = Counter()
-        if self._debug_test_args:
-            self._debug_log_args = []
         if self._track_largest_shape:
             # Dummy: Replaced with first shape
             self._largest_shape = LargeShapeEntry(
@@ -737,6 +735,22 @@ class CellComputationAutogradHooks(AutogradHooks):
             self._arrays_cleanup.remove(x)
         return x
 
+    @staticmethod
+    def _transform_if_extended(
+        x: torch.Tensor,
+        annotation: NodeAnnotation,
+        n_head: int,
+        head_size: int,
+    ) -> torch.Tensor:
+        if annotation.is_ext:
+            if annotation.is_scatter or annotation.is_final:
+                # Extended keys, values may be permuted
+                sort_index = None if annotation.extra_info is None else annotation.extra_info.get("sort_index")
+                if sort_index is not None:
+                    x = torch.gather(x, 2, expand_index(sort_index, head_size))
+            x = repeat_interleave(x, n_head)
+        return x
+
     def _unpack_from_annotation(
         self, annotation: NodeAnnotation,
     ) -> torch.Tensor:
@@ -761,20 +775,12 @@ class CellComputationAutogradHooks(AutogradHooks):
                     cache_length = self._get_cache_length(layer_idx)
                     assert length == cache_length  # Sanity check
                 self._node_annotations.chunk_idx[layer_idx] = chunk_idx
-            x = buffer
-            if annotation.is_ext and (annotation.is_scatter or annotation.is_final):
-                # Extended keys, values may be permuted
-                sort_index = None if annotation.extra_info is None else annotation.extra_info.get("sort_index")
-                if sort_index is not None:
-                    x = torch.gather(
-                        buffer, 2, expand_index(sort_index, self.head_size),
-                    )
-            elif annotation.is_cat:
-                # Buffer stays the same for "cat", but a smaller slice is
-                # returned
-                x = buffer[:, :, :length, :]
-            if annotation.is_ext:
-                x = repeat_interleave(x, self.n_head)
+            # Buffer stays the same for "cat", but a smaller slice is
+            # returned
+            x = buffer[:, :, :length, :]
+            x = self._transform_if_extended(
+                x, annotation, self.n_head, self.head_size,
+            )
         return x
 
     def _get_cache_length(self, layer_idx: int) -> int:
@@ -908,10 +914,15 @@ class CellComputationAutogradHooks(AutogradHooks):
                                             target_dtype=parg_dtype if try_with_cast else None,
                                         )
                                         # DEBUG
+                                        deb_msg = f"Matched {annotation.kind}: ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}"
                                         if annotation.kind == "padded-query":
-                                            print(f"Matched padded-query: ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, q_len={annotation.extra_info['q_len']}")
+                                            deb_msg += f", q_len={annotation.extra_info['q_len']}"
                                         elif annotation.is_ext:
-                                            print(f"Matched {annotation.kind}: ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}")
+                                            si_shape = annotation.extra_info
+                                            si_shape = None if si_shape is None else si_shape.get("sort_index")
+                                            si_shape = None if si_shape is None else si_shape.shape
+                                            deb_msg += f", sort_index={si_shape}"
+                                        print(deb_msg)
                                         # END DEBUG
                                         self._packed_arg_for_id[
                                             pack_arg.id
