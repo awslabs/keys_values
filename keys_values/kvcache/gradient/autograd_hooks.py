@@ -28,19 +28,13 @@ from keys_values.utils import expand_index, repeat_interleave
 _ANNOTATION_KIND_VALUES = {
     "cat-key",
     "cat-value",
-    "cat-ext-key",
-    "cat-ext-value",
-    "final-key",
-    "final-value",
-    "final-ext-key",
-    "final-ext-value",
+    "ext-key",
+    "ext-value",
     "ignore-headgrad",
     "ignore-query",
     "padded-query",
     "scatter-key",
     "scatter-value",
-    "scatter-ext-key",
-    "scatter-ext-value",
 }
 
 
@@ -50,6 +44,11 @@ class NodeAnnotation:
     Note: If the node-creating operation is `x_new = f(x, index, delta)`, the
     information recorded is for reconstructing `x` (not `x_new`). For example,
     `shape = x.shape`, and `delta`, `index` refer to a part of `x`.
+
+    The semantics of `index`, `delta` depend on `kind`. Only for "scatter-*",
+    it is used to reconstruct `x` from `x_new`. For all other kinds, `index`
+    and `delta` are used only to support matching (i.e., recognize whether a
+    pack argument is equal to `x_new`)
 
     """
     kind: str
@@ -108,14 +107,6 @@ class NodeAnnotation:
         return kind.startswith("cat")
 
     @property
-    def is_final(self) -> bool:
-        return self.kind_is_final(self.kind)
-
-    @staticmethod
-    def kind_is_final(kind: str) -> bool:
-        return kind.startswith("final")
-
-    @property
     def is_ignore(self) -> bool:
         return self.kind_is_ignore(self.kind)
 
@@ -129,7 +120,7 @@ class NodeAnnotation:
 
     @staticmethod
     def kind_is_ext(kind: str) -> bool:
-        return "-ext-" in kind
+        return kind.startswith("ext")
 
     @staticmethod
     def kind_is_valid(kind: str):
@@ -154,30 +145,39 @@ class Annotations:
     nodes: List[NodeAnnotation] = field(default_factory=list)
     final_keys: Dict[int, torch.Tensor] = field(default_factory=dict)
     final_values: Dict[int, torch.Tensor] = field(default_factory=dict)
-    chunk_idx: Dict[int, int] = field(default_factory=dict)
+    chunk_idx_keys: Dict[int, int] = field(default_factory=dict)
+    chunk_idx_values: Dict[int, int] = field(default_factory=dict)
 
     def clear(self):
         self.nodes.clear()
         self.final_keys.clear()
         self.final_values.clear()
-        self.chunk_idx.clear()
+        self.chunk_idx_keys.clear()
+        self.chunk_idx_values.clear()
+
+    def _get_dicts(
+        self, kind: str,
+    ) -> Tuple[Dict[int, torch.Tensor], Dict[int, int]]:
+        if NodeAnnotation.kind_is_keys(kind):
+            return self.final_keys, self.chunk_idx_keys
+        else:
+            return self.final_values, self.chunk_idx_values
 
     def set_final(
         self, x: torch.Tensor, layer_idx: int, chunk_idx: int, kind: str,
     ):
-        is_keys = NodeAnnotation.kind_is_keys(kind)
-        target_dct = self.final_keys if is_keys else self.final_values
-        curr_val = target_dct.get(layer_idx)
+        x_dct, chidx_dct = self._get_dicts(kind)
+        curr_val = x_dct.get(layer_idx)
         if curr_val is not None and curr_val.shape == x.shape:
-            target_dct[layer_idx][:] = x
+            if x_dct[layer_idx] is not x:
+                x_dct[layer_idx][:] = x
         else:
-            target_dct[layer_idx] = x.clone()
-        self.chunk_idx[layer_idx] = chunk_idx
+            x_dct[layer_idx] = x.clone()
+        chidx_dct[layer_idx] = chunk_idx
 
     def get_final(self, layer_idx: int, kind: str) -> Tuple[torch.Tensor, int]:
-        is_keys = NodeAnnotation.kind_is_keys(kind)
-        target_dct = self.final_keys if is_keys else self.final_values
-        return target_dct[layer_idx], self.chunk_idx[layer_idx]
+        x_dct, chidx_dct = self._get_dicts(kind)
+        return x_dct[layer_idx], chidx_dct[layer_idx]
 
 
 @dataclass(frozen=True)
@@ -355,8 +355,9 @@ class CellComputationAutogradHooks(AutogradHooks):
 
     An annotation for `x` is created when a node is created as
     `x_new = f(x, index, delta)`. It is indexed as `(l, s)`. For each `l`,
-    nodes form dependency chains: `(l, s) -> (l, s + 1)`. The annotation
-    contains information to reconstruct `x` from `x_new`.
+    nodes form dependency chains: `(l, s - 1) -> (l, s)`. The annotation
+    contains information to reconstruct `x` from `x_new`, or to map `x` to
+    the pack argument.
 
     One difficulty is that :meth:`pack_hook` is often called for `x` before its
     annotation is created (because `x` is used before its usage to create
@@ -385,13 +386,12 @@ class CellComputationAutogradHooks(AutogradHooks):
     there are nodes with one of these shapes which cannot be packed. If there
     are such nodes, we may want to understand when they arise.
 
-    For (1), we rely on :class:`SDPAFunction` being used for the MHA
-    computation. This stores only `query`, `key`, `value` in the graph, so we
-    only need to look for shapes of `key` (since `value` has the same shape).
+    For (1), we need to specialize certain annotations to how SDPA is being
+    computed (for example, the "ext-*" or "padded-query" kind).
     For (2), we know that such "outlier" nodes arise during the processing of
     the first chunk (prefill). Namely, there are `query` nodes in this step,
     one per layer, which have the same shape as the `value` nodes. We use
-    "ignore" annotations to filter these out.
+    "ignore-*" annotations to filter these out.
 
     Packing for scatter with grace period:
 
@@ -418,6 +418,14 @@ class CellComputationAutogradHooks(AutogradHooks):
     We also count IDs return more than once in `_id_counts`. In
     :meth:`unpack_hook`, we store unpacked tensors in `_id_to_unpacked` so they
     can be returned once more for a duplicate.
+
+    Packing broadcast-extended indexes:
+
+    A broadcast-extended index is a 4D tensor of integer dtype, obtained as
+    `expand_index(index, head_size)` from a 3D index. We use such indexes a lot
+    with scatter and gather. They are packed without needing annotations. Once
+    a pack argument is determined to be a broadcast-extended index, it is packed
+    with the 3D `index`.
 
     Logging:
 
@@ -668,8 +676,7 @@ class CellComputationAutogradHooks(AutogradHooks):
             # Try to pack as broadcast-extended index
             packed_index = self._pack_4d_index(x)
             if packed_index is not None:
-                # Broadcast-extended index is packed without annotation. `x` is
-                # not tracked in `_pack_hook_arg_to_id`.
+                # Broadcast-extended index is packed without annotation
                 self._packed_arg_for_id[new_id] = packed_index
                 if self.debug_print_annotations:
                     print(f"Pack broadcast-extended index: {x.shape}")
@@ -682,7 +689,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                 _id = self._match_annotations()
                 if _id is not None:
                     # Happens if `x` is directly matched by an annotation which
-                    # already matched before and has an ID already
+                    # matched before and has an ID already
                     new_id = _id
             return new_id
         else:
@@ -705,6 +712,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                 self._id_counts[idd] -= 1
                 #print(f"DEBUG: {idd} from _id_to_unpacked [new cnt={self._id_counts[idd]}]")  # DEBUG
                 if self._id_counts[idd] == 0:
+                    # Not needed anymore:
                     del self._id_to_unpacked[idd]
             else:
                 value = self._packed_arg_for_id.pop(idd)
@@ -735,28 +743,12 @@ class CellComputationAutogradHooks(AutogradHooks):
             self._arrays_cleanup.remove(x)
         return x
 
-    @staticmethod
-    def _transform_if_extended(
-        x: torch.Tensor,
-        annotation: NodeAnnotation,
-        n_head: int,
-        head_size: int,
-    ) -> torch.Tensor:
-        if annotation.is_ext:
-            if annotation.is_scatter or annotation.is_final:
-                # Extended keys, values may be permuted
-                sort_index = None if annotation.extra_info is None else annotation.extra_info.get("sort_index")
-                if sort_index is not None:
-                    x = torch.gather(x, 2, expand_index(sort_index, head_size))
-            x = repeat_interleave(x, n_head)
-        return x
-
     def _unpack_from_annotation(
         self, annotation: NodeAnnotation,
     ) -> torch.Tensor:
         kind = annotation.kind
         if kind == "padded-query":
-            x = self._unpack_padded_query(annotation)
+            buffer = self._unpack_padded_query(annotation)
         else:
             layer_idx = annotation.layer_idx
             chunk_idx = annotation.chunk_idx
@@ -764,27 +756,45 @@ class CellComputationAutogradHooks(AutogradHooks):
             buffer, final_idx = self._node_annotations.get_final(
                 layer_idx, kind,
             )
-            if not (chunk_idx <= final_idx <= chunk_idx + 1):
-                raise ValueError(f"Annotation {kind} ({layer_idx}, {chunk_idx}): final chunk_idx = {final_idx}, must be in [{chunk_idx}, {chunk_idx + 1}]")
-            if final_idx == chunk_idx + 1:
-                if annotation.is_final:
+            buffer = buffer[:, :, :length, :]
+            print(f"_unpack_from_annotation: {kind} ({layer_idx},{chunk_idx}): shape={annotation.shape}, buffer={buffer.shape}, final_idx={final_idx}")  # DEBUG
+            if annotation.is_ext:
+                if final_idx != chunk_idx:
                     raise ValueError(f"Annotation {kind} ({layer_idx}, {chunk_idx}): final chunk_idx = {final_idx}, must be equal to chunk_idx = {chunk_idx}")
-                elif annotation.is_scatter:
+                buffer = self._unpack_extended(
+                    buffer, annotation, self.n_head, self.head_size,
+                )
+            else:
+                if final_idx != chunk_idx + 1:
+                    raise ValueError(f"Annotation {kind} ({layer_idx}, {chunk_idx}): final chunk_idx = {final_idx}, must be equal to chunk_idx + 1 = {chunk_idx + 1}")
+                if annotation.is_scatter:
                     # Overwrites `buffer`:
                     self._unpack_scatter(buffer, annotation, self.grace_period)
                     cache_length = self._get_cache_length(layer_idx)
                     assert length == cache_length  # Sanity check
-                self._node_annotations.chunk_idx[layer_idx] = chunk_idx
-            # Buffer stays the same for "cat", but a smaller slice is
-            # returned
-            x = buffer[:, :, :length, :]
-            x = self._transform_if_extended(
-                x, annotation, self.n_head, self.head_size,
-            )
-        return x
+                self._node_annotations.set_final(
+                    buffer, layer_idx, chunk_idx, kind,
+                )
+        return buffer
 
     def _get_cache_length(self, layer_idx: int) -> int:
         return self.cache_lengths[layer_idx - self.first_layer_idx]
+
+    @staticmethod
+    def _unpack_extended(
+        buffer: torch.Tensor,
+        annotation: NodeAnnotation,
+        n_head: int,
+        head_size: int,
+    ) -> torch.Tensor:
+        # Extended keys, values may be permuted
+        sort_index = None if annotation.extra_info is None else annotation.extra_info.get("sort_index")
+        if sort_index is not None:
+            buffer = torch.gather(
+                buffer, 2, expand_index(sort_index, head_size),
+            )
+        buffer = repeat_interleave(buffer, n_head)
+        return buffer
 
     @staticmethod
     def _unpack_scatter(
@@ -1008,7 +1018,7 @@ class CellComputationAutogradHooks(AutogradHooks):
 
     @staticmethod
     def _delta_with_index(annotation: NodeAnnotation) -> bool:
-        return annotation.is_scatter or annotation.is_final or annotation.kind == "padded-query"
+        return annotation.is_scatter or annotation.is_ext or annotation.kind == "padded-query"
 
     @staticmethod
     def _delta_for_annotation(
@@ -1023,38 +1033,12 @@ class CellComputationAutogradHooks(AutogradHooks):
         return delta
 
     @staticmethod
-    def _transform_index(
-        index: torch.Tensor, sort_index: torch.Tensor,
-    ) -> torch.Tensor:
-        batch_size, n_query_groups, num, head_size = index.shape
-        si_len = sort_index.shape[-1]
-        assert sort_index.shape == (batch_size, n_query_groups, si_len)
-        index = index[:, :, :, 0]
-        result = torch.empty_like(sort_index).scatter_(
-            2,
-            sort_index,
-            torch.arange(
-                si_len, dtype=index.dtype, device=index.device,
-            ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
-        ).gather(2, index)
-        return expand_index(result, head_size)
-
-    @staticmethod
     def _delta_for_pack_argument(
         x: torch.Tensor, annotation: NodeAnnotation, n_head: int,
     ) -> torch.Tensor:
         if CellComputationAutogradHooks._delta_with_index(annotation):
             num = min(annotation.delta.shape[2], MAX_DELTA_TRANS_LENGTH)
             index = annotation.index[:, :, :num, :]
-            if annotation.is_ext and annotation.is_scatter:
-                # Extended keys, values may be permuted
-                sort_index = None if annotation.extra_info is None else annotation.extra_info.get("sort_index")
-                if sort_index is not None:
-                    index = CellComputationAutogradHooks._transform_index(
-                        index, sort_index,
-                    )
-                else:
-                    print(f"WARNING! {annotation.kind} ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape} -- No sort_index!")  # DEBUG
             if annotation.is_ext:
                 index = repeat_interleave(index, n_head)
             part_of_x = x.gather(2, index)

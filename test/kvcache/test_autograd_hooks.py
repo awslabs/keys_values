@@ -9,6 +9,7 @@ from keys_values.kvcache.gradient.autograd_hooks import (
     CellComputationAutogradHooks,
     NodeAnnotation,
 )
+from keys_values.kvcache.gradient.train_attn_weights_replay_new import TrainingAttnWeightsReplayCacheNew
 from keys_values.kvcache.test_utils import (
     random_tensor,
     available_backends,
@@ -48,16 +49,16 @@ def test_extract_delta(dtype, device):
         chunk_size = random.randint(1, cache_length // 2)
         input_pos = cache_length + 16
         token_positions = random_index(params, 0, cache_length)
-        index = random_index(params, 0, cache_length, num=chunk_size)
+        delta_index = random_index(params, 0, cache_length, num=chunk_size)
         token_positions.scatter_(
             -1,
-            index,
+            delta_index,
             torch.arange(
                 input_pos, input_pos + chunk_size, **index_kwargs,
             ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
         )
-        index = expand_index(index, head_size)
-        delta = keys.gather(2, index)
+        delta_index = expand_index(delta_index, head_size)
+        delta = keys.gather(2, delta_index)
         assert delta.shape == (batch_size, n_query_groups, chunk_size, head_size)
         # Transform as in `sdpa_wrapper.scaled_dot_product_attention`
         sort_index = torch.argsort(token_positions, dim=-1)
@@ -65,12 +66,15 @@ def test_extract_delta(dtype, device):
         keys = repeat_interleave(keys, n_head)
         assert keys.shape == (batch_size, n_head, cache_length, head_size)
         # Annotation as in `TrainingAttnWeightsReplayCacheNew._create_node_before_creator`
+        ext_index = TrainingAttnWeightsReplayCacheNew._transform_index(
+            delta_index, sort_index,
+        )
         annotation = NodeAnnotation(
-            kind="scatter-ext-key",
+            kind="ext-key",
             layer_idx=0,
             chunk_idx=2,
             shape=tuple(keys.shape),
-            index=index,
+            index=ext_index,
             delta=delta,
             positions=None,
             extra_info={"sort_index": sort_index},

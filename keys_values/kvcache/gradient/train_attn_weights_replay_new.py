@@ -287,14 +287,12 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 index=index_e,
                 positions=positions,
                 debug_msg="scatter-before",
-                token_positions_before=token_positions_before,
             )
             self._create_node_before_creator(
                 kind="scatter-value",
                 index=index_e,
                 positions=positions,
                 debug_msg="scatter-before",
-                token_positions_before=token_positions_before,
             )
             # "scatter" update of KV cache buffers
             key_buffer_new, value_buffer_new = scatter_on_buffers(
@@ -353,13 +351,13 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             self._create_node_after_creator(
                 x=key_buffer_new,
                 kind="cat-key",
-                index=index,
+                index=None,
                 debug_msg=debug_msg,
             )
             self._create_node_after_creator(
                 x=value_buffer_new,
                 kind="cat-value",
-                index=index,
+                index=None,
                 debug_msg=debug_msg,
             )
             self.kv_buffers = DefaultKeysAndValues(
@@ -432,83 +430,20 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             debug_print=self.debug_print_annotations,
         )
 
-    def _create_annotations(
-        self,
-        kind: str,
-        x: torch.Tensor,
-        index: torch.Tensor,
-        delta: torch.Tensor,
-        chunk_idx: int,
-        is_scatter: bool,
-        positions: Optional[torch.Tensor],
-        debug_msg: Optional[str],
-        token_positions_to_use: Optional[torch.Tensor],
-    ):
-        NodeAnnotation.kind_is_valid(kind)
-        if positions is not None:
-            positions = positions.detach().to(x.device)
-        shape = shape_to_tuple(x)
-        annot_kwargs = dict(
-            layer_idx=self.layer_idx,
-            chunk_idx=chunk_idx,
-            index=index,
-            delta=delta,
-            positions=positions,
-            # extra_info={"full": buffer},  # DEBUG!
-        )
-        self._append_annotation(
-            NodeAnnotation(
-                kind=kind,
-                shape=shape,
-                debug_msg=debug_msg,
-                **annot_kwargs,
-            )
-        )
-        if need_repeat_interleave(self.n_head, self.n_query_groups):
-            # Add copy of annotation for extended tensor
-            prefix, suffix = kind.split("-")
-            ext_kind = prefix + "-ext-" + suffix
-            ext_debug_msg = None if debug_msg is None else "Extended: " + debug_msg
-            if is_scatter:
-                # In the scatter case, key and value are permuted by
-                # `sort_index`, which needs to be passed as well.
-                # Attention: `sort_index` is based on `token_positions`
-                # *before* the node update!
-                sort_index = torch.argsort(token_positions_to_use, dim=-1)
-                annot_kwargs["extra_info"] = {"sort_index": sort_index}
-                # DEBUG
-                # annot_kwargs["extra_info"]["sort_index"] = sort_index  # DEBUG
-                # full = torch.gather(buffer, 2, expand_index(sort_index, self.head_size))
-                # full = repeat_interleave(full, self.n_head)
-                # annot_kwargs["extra_info"]["full"] = full
-                # print(f"Enter annotation: {ext_kind} ({annot_kwargs['layer_idx']}, {annot_kwargs['chunk_idx']})")
-                # END DEBUG
-            self._append_annotation(
-                NodeAnnotation(
-                    kind=ext_kind,
-                    shape=(shape[0], self.n_head) + shape[-2:],
-                    debug_msg=ext_debug_msg,
-                    **annot_kwargs,
-                )
-            )
-
     def _create_node_before_creator(
         self,
         kind: str,
         index: torch.Tensor,
         positions: Optional[torch.Tensor] = None,
         debug_msg: Optional[str] = None,
-        token_positions_before: Optional[torch.Tensor] = None,
     ):
-        # Note: `_token_chunk_pos` has already been advanced
-        # In the first call to this method,
-        # `_token_chunk_pos == _start_token_chunk_pos + 1`. The node before
-        # needs no annotation. If this is not the first chunk, it will be
-        # annotated as "final" when processing the chunk before.
-        if self._node_annotations is not None and self._token_chunk_pos > self._start_token_chunk_pos + 1:
+        chunk_idx = self._token_chunk_pos - 1  # counter has already been advanced
+        if self._node_annotations is not None and chunk_idx > self._start_token_chunk_pos:
+            # This annotation is for `x` before the node is created, so the
+            # chunk index is `chunk_idx - 1`.
             is_keys = NodeAnnotation.kind_is_keys(kind)
-            x = self.kv_buffers.keys().detach() if is_keys else self.kv_buffers.values().detach()
-            x = x[:, :, :self.current_length, :]
+            x = self.kv_buffers.keys() if is_keys else self.kv_buffers.values()
+            x = x.detach()[:, :, :self.current_length, :]
             index = index.detach().to(x.device)
             is_scatter = NodeAnnotation.kind_is_scatter(kind)
             if is_scatter:
@@ -518,68 +453,115 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             else:
                 # Pass the final row, used for identification
                 delta = x[:, :, -1:, :]
-            self._create_annotations(
-                kind=kind,
-                x=x,
-                index=index,
-                delta=delta,
-                chunk_idx=self._token_chunk_pos - 1,
-                is_scatter=is_scatter,
-                positions=positions,
-                debug_msg=debug_msg,
-                token_positions_to_use=token_positions_before,
+            if positions is not None:
+                positions = positions.detach().to(x.device)
+            self._append_annotation(
+                NodeAnnotation(
+                    kind=kind,
+                    layer_idx=self.layer_idx,
+                    chunk_idx=chunk_idx - 1,
+                    shape=shape_to_tuple(x),
+                    index=index,
+                    delta=delta,
+                    positions=positions,
+                    debug_msg=debug_msg,
+                )
             )
+
+    @staticmethod
+    def _transform_index(
+        index: torch.Tensor, sort_index: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, n_query_groups, num, head_size = index.shape
+        si_len = sort_index.shape[-1]
+        assert sort_index.shape == (batch_size, n_query_groups, si_len)
+        index = index[:, :, :, 0]
+        result = torch.empty_like(sort_index).scatter_(
+            2,
+            sort_index,
+            torch.arange(
+                si_len, dtype=index.dtype, device=index.device,
+            ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
+        ).gather(2, index)
+        return expand_index(result, head_size)
 
     def _create_node_after_creator(
         self,
         x: torch.Tensor,
         kind: str,
-        index: torch.Tensor,
+        index: Optional[torch.Tensor],
         debug_msg: Optional[str] = None,
     ):
-        if self._node_annotations is not None and self._token_chunk_pos == self._end_token_chunk_pos:
-            # We need to store the final node in order to start the
-            # reconstruction of all earlier ones.
-            x_det = x.detach()
-            x_shape = x_det.shape
-            self._node_annotations.set_final(
-                x=x_det,
-                layer_idx=self.layer_idx,
-                chunk_idx=self._token_chunk_pos,
-                kind=kind,
-            )
-            is_keys = NodeAnnotation.kind_is_keys(kind)
-            fin_kind = "final-key" if is_keys else "final-value"
-            # Use delta at same index as above for identification. We know
-            # that these entries ARE overwritten
+        chunk_idx = self._token_chunk_pos - 1  # counter has already been advanced
+        x = x.detach()
+        if self._node_annotations is not None:
+            if chunk_idx == self._end_token_chunk_pos - 1:
+                # We need to store the final node in order to start the
+                # reconstruction of all earlier ones.
+                self._node_annotations.set_final(
+                    x=x,
+                    layer_idx=self.layer_idx,
+                    chunk_idx=chunk_idx,
+                    kind=kind,
+                )
+            # Create "ext-*" annotation for node `x` after it was created, so
+            # the chunk index is `chunk_idx`
             is_scatter = NodeAnnotation.kind_is_scatter(kind)
-            if not is_scatter:
-                # Pass final row
-                x_len = x_det.shape[2]
-                index = torch.arange(
-                    x_len - 1, x_len, dtype=index.dtype, device=x.device,
-                ).view(1, 1, -1, 1).expand(*x_shape[:2], -1, x_shape[-1])
-            else:
-                index = index.detach().to(x.device)
-            delta = x_det.gather(-2, index)
-            self._create_annotations(
-                kind=fin_kind,
-                x=x_det,
-                index=index,
-                delta=delta,
-                chunk_idx=self._token_chunk_pos,
-                is_scatter=is_scatter,
-                positions=None,  # TODO: Is this correct?
-                debug_msg=debug_msg,
-                token_positions_to_use=self.token_positions().detach(),
-            )
+            need_ri = need_repeat_interleave(self.n_head, self.n_query_groups)
+            if need_ri or is_scatter:
+                is_keys = NodeAnnotation.kind_is_keys(kind)
+                ext_kind = "ext-key" if is_keys else "ext-value"
+                # Create index
+                extra_info = None
+                if not is_scatter:
+                    # Pass final row
+                    x_len = x.shape[2]
+                    ext_index = torch.arange(
+                        x_len - 1, x_len, dtype=torch.int64, device=x.device,
+                    ).view(1, 1, -1, 1).expand(*x.shape[:2], -1, x.shape[-1])
+                    delta_index = ext_index
+                else:
+                    assert index is not None
+                    # Used for reordering in padded-query SDPA
+                    sort_index = torch.argsort(
+                        self.token_positions().detach(), dim=-1,
+                    )
+                    extra_info = {"sort_index": sort_index}
+                    # `delta_index` is equal to initial slices of `index`.
+                    # `ext_index` must be such that if
+                    # `delta = gather(x, delta_index)` and
+                    # `x1 = gather(x, sort_index)`, then
+                    # `delta == gather(x1, ext_index)`. This means that
+                    # `ext_index` can be used to extract `delta` from the pack
+                    # argument, which is transformed by `sort_index`.
+                    ind_len = min(MAX_DELTA_TRANS_LENGTH, index.shape[2])
+                    delta_index = index[:, :, :ind_len, :]
+                    ext_index = self._transform_index(
+                        index=delta_index, sort_index=sort_index,
+                    )
+                delta = x.gather(2, delta_index)
+                shape = shape_to_tuple(x)
+                if need_ri:
+                    shape = shape[:2] + (self.n_head, shape[-1])
+                self._append_annotation(
+                    NodeAnnotation(
+                        kind=ext_kind,
+                        layer_idx=self.layer_idx,
+                        chunk_idx=chunk_idx,
+                        shape=shape,
+                        index=ext_index,
+                        delta=delta,
+                        extra_info=extra_info,
+                        debug_msg=debug_msg,
+                    )
+                )
 
         # DEBUG:
         if self._debug_tensors is not None:
             name = f"c{self._token_chunk_pos - 1}-l{self.layer_idx}-{kind}"
             if name in self._debug_tensors:
                 raise IndexError(f"Entry {name} already in debug_tensor!")
-            self._debug_tensors[name] = x.detach().clone()
+            self._debug_tensors[name] = x.clone()
 
     def _update(self, *args, **kwargs):
         pass
