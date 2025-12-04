@@ -455,18 +455,17 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 delta = x[:, :, -1:, :]
             if positions is not None:
                 positions = positions.detach().to(x.device)
-            self._append_annotation(
-                NodeAnnotation(
-                    kind=kind,
-                    layer_idx=self.layer_idx,
-                    chunk_idx=chunk_idx - 1,
-                    shape=shape_to_tuple(x),
-                    index=index,
-                    delta=delta,
-                    positions=positions,
-                    debug_msg=debug_msg,
-                )
+            annotation = NodeAnnotation(
+                kind=kind,
+                layer_idx=self.layer_idx,
+                chunk_idx=chunk_idx - 1,
+                shape=shape_to_tuple(x),
+                index=index,
+                delta=delta,
+                positions=positions,
+                debug_msg=debug_msg,
             )
+            self._append_annotation(annotation)
 
     @staticmethod
     def _transform_index(
@@ -512,14 +511,14 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 is_keys = NodeAnnotation.kind_is_keys(kind)
                 ext_kind = "ext-key" if is_keys else "ext-value"
                 # Create index
-                extra_info = None
                 if not is_scatter:
                     # Pass final row
                     x_len = x.shape[2]
-                    ext_index = torch.arange(
+                    delta_index = torch.arange(
                         x_len - 1, x_len, dtype=torch.int64, device=x.device,
                     ).view(1, 1, -1, 1).expand(*x.shape[:2], -1, x.shape[-1])
-                    delta_index = ext_index
+                    ext_index = delta_index
+                    extra_info = None
                 else:
                     assert index is not None
                     # Used for reordering in padded-query SDPA
@@ -542,7 +541,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 delta = x.gather(2, delta_index)
                 shape = shape_to_tuple(x)
                 if need_ri:
-                    shape = shape[:2] + (self.n_head, shape[-1])
+                    shape = (shape[0], self.n_head) + shape[2:]
                 self._append_annotation(
                     NodeAnnotation(
                         kind=ext_kind,

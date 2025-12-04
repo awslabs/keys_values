@@ -288,7 +288,7 @@ def test_gradient_row_of_cells(
     if debug_test_args:
         print("\nComparing pack arguments with their reconstructions:")
         for pack_arg, annotation in autograd_hooks.debug_log_args():
-            print(f"kind={annotation.kind}, layer_idx={annotation.layer_idx}, chunk_idx={annotation.chunk_idx}, shape={annotation.shape}")
+            print(str(annotation))
             torch.testing.assert_close(pack_arg, annotation.debug_full_arg)
 
     # Compare cache tensors

@@ -59,9 +59,9 @@ class NodeAnnotation:
     delta: torch.Tensor
     positions: Optional[torch.Tensor] = None
     extra_info: Optional[Dict[str, Any]] = None
+    match_id: Optional[int] = None
     debug_full_arg: Optional[torch.Tensor] = None
     debug_msg: Optional[str] = None
-    match_id: Optional[int] = None
 
     def __post_init__(self):
         assert self.layer_idx >= 0
@@ -73,6 +73,9 @@ class NodeAnnotation:
             assert self.is_scatter, "positions only with scatter"
             assert self.positions.ndim == 1, "positions must be a 1D tensor"
             assert self.positions.device == device, f"delta.device = {device}, positions.device = {self.positions.device}, must be the same"
+
+    def __str__(self) -> str:
+        return f"{self.kind} ({self.layer_idx},{self.chunk_idx}): {self.shape}"
 
     @property
     def is_keys(self) -> bool:
@@ -419,6 +422,18 @@ class CellComputationAutogradHooks(AutogradHooks):
     :meth:`unpack_hook`, we store unpacked tensors in `_id_to_unpacked` so they
     can be returned once more for a duplicate.
 
+    Dealing with different forward and backward traversal orderings:
+
+    :meth:`pack_hook` is called along the forward traversal,
+    :meth:`unpack_hook` along the backward traversal. It turns out the backward
+    traversal ordering is not exactly the reverse of the forward traversal
+    ordering. This is a problem: if "ext-key" (l_idx, c_idx) comes before
+    "scatter-key" (l_idx, c_idx) in the backward traversal, we have noy yet
+    reconstructed the input to "ext-key". We solve this by
+    `prior_annotation` for the "ext-key" annotation refering to the
+    "scatter-key" annotation, which can then be done earlier (and skipped
+    later).
+
     Packing broadcast-extended indexes:
 
     A broadcast-extended index is a 4D tensor of integer dtype, obtained as
@@ -710,7 +725,6 @@ class CellComputationAutogradHooks(AutogradHooks):
                 # Unpacked this one before: Just return it
                 x = self._id_to_unpacked[idd]
                 self._id_counts[idd] -= 1
-                #print(f"DEBUG: {idd} from _id_to_unpacked [new cnt={self._id_counts[idd]}]")  # DEBUG
                 if self._id_counts[idd] == 0:
                     # Not needed anymore:
                     del self._id_to_unpacked[idd]
@@ -724,12 +738,11 @@ class CellComputationAutogradHooks(AutogradHooks):
                     if target_dtype is not None and x.dtype != target_dtype:
                         x = x.to(dtype=target_dtype)
                     if self._debug_test_args:
-                        self._debug_log_args.append((x, annotation))
+                        self._debug_log_args.append((x.clone(), annotation))
                     if self._id_counts.get(idd, 0) >= 2:
                         # This ID will come up at least once more
                         self._id_to_unpacked[idd] = x
                         self._id_counts[idd] -= 1
-                        #print(f"DEBUG: {idd} -> _id_to_unpacked [new cnt={self._id_counts[idd]}]")  # DEBUG
                 elif isinstance(value, PackArgumentAsIndex):
                      x = expand_index(value.index_3d, value.final_dim)
                 else:
@@ -748,37 +761,83 @@ class CellComputationAutogradHooks(AutogradHooks):
     ) -> torch.Tensor:
         kind = annotation.kind
         if kind == "padded-query":
+            print(f"_unpack_from_annotation: {str(annotation)}")  # DEBUG
             buffer = self._unpack_padded_query(annotation)
         else:
             layer_idx = annotation.layer_idx
             chunk_idx = annotation.chunk_idx
-            length = annotation.shape[2]
             buffer, final_idx = self._node_annotations.get_final(
                 layer_idx, kind,
             )
-            buffer = buffer[:, :, :length, :]
-            print(f"_unpack_from_annotation: {kind} ({layer_idx},{chunk_idx}): shape={annotation.shape}, buffer={buffer.shape}, final_idx={final_idx}")  # DEBUG
+            print(f"_unpack_from_annotation: {str(annotation)}, buffer={buffer.shape}, final_idx={final_idx}")  # DEBUG
+            # This is complex, because it happens that "ext-*" appears before
+            # "scatter-*" or "cat-*" for the same node. In this case, we need
+            # to first execute this "prior annotation", since otherwise the
+            # input to "ext-*" does not exist.
+            annotations_todo = [annotation]
             if annotation.is_ext:
-                if final_idx != chunk_idx:
-                    raise ValueError(f"Annotation {kind} ({layer_idx}, {chunk_idx}): final chunk_idx = {final_idx}, must be equal to chunk_idx = {chunk_idx}")
-                buffer = self._unpack_extended(
-                    buffer, annotation, self.n_head, self.head_size,
-                )
+                if final_idx == chunk_idx + 1:
+                    # ext-* annotation comes too early, need to do another one first
+                    prior_annotation = self._find_prior_annotation(annotation)
+                    print(f"--> Doing {str(prior_annotation)} first")
+                    annotations_todo.insert(0, prior_annotation)
+                elif final_idx != chunk_idx:
+                    raise ValueError(f"Annotation {str(annotation)}: final chunk_idx = {final_idx}, must be in [{chunk_idx}, {chunk_idx + 1}]")
             else:
-                if final_idx != chunk_idx + 1:
-                    raise ValueError(f"Annotation {kind} ({layer_idx}, {chunk_idx}): final chunk_idx = {final_idx}, must be equal to chunk_idx + 1 = {chunk_idx + 1}")
-                if annotation.is_scatter:
-                    # Overwrites `buffer`:
-                    self._unpack_scatter(buffer, annotation, self.grace_period)
-                    cache_length = self._get_cache_length(layer_idx)
-                    assert length == cache_length  # Sanity check
-                self._node_annotations.set_final(
-                    buffer, layer_idx, chunk_idx, kind,
-                )
+                if final_idx == chunk_idx:
+                    # Has already been done to support ext-* annotation
+                    print("--> Skip (already done)")
+                    annotations_todo = []
+                elif final_idx != chunk_idx + 1:
+                    raise ValueError(f"Annotation {str(annotation)}: final chunk_idx = {final_idx}, must be in [{chunk_idx}, {chunk_idx + 1}]")
+            for annot in annotations_todo:
+                if annot.is_ext:
+                    buffer = self._unpack_extended(
+                        buffer, annot, self.n_head, self.head_size,
+                    )
+                else:
+                    length = annot.shape[2]
+                    if annot.is_scatter:
+                        # Overwrites `buffer`:
+                        self._unpack_scatter(buffer, annot, self.grace_period)
+                        cache_length = self._get_cache_length(layer_idx)
+                        assert length == cache_length  # Sanity check
+                    else:
+                        buffer = buffer[:, :, :length, :]
+                    self._node_annotations.set_final(
+                        buffer, layer_idx, chunk_idx, kind,
+                    )
+            # Sanity check
+            final_idx = self._node_annotations.get_final(layer_idx, kind)[1]
+            if final_idx != chunk_idx:
+                raise IndexError(f"kind={kind}, layer_idx={layer_idx}, chunk_idx={chunk_idx}, final_chunk_idx={final_idx}")
         return buffer
 
     def _get_cache_length(self, layer_idx: int) -> int:
         return self.cache_lengths[layer_idx - self.first_layer_idx]
+
+    def _find_prior_annotation(self, annotation: NodeAnnotation) -> NodeAnnotation:
+        assert annotation.is_ext
+        layer_idx = annotation.layer_idx
+        chunk_idx = annotation.chunk_idx
+        is_keys = annotation.is_keys
+        result = next(
+            (
+                e.annot
+                for e in self._packed_arg_for_id.values()
+                if (
+                    isinstance(e, PackArgumentAsAnnotation)
+                    and e.annot.is_keys == is_keys
+                    and e.annot.layer_idx == layer_idx
+                    and e.annot.chunk_idx == chunk_idx
+                    and (e.annot.is_scatter or e.annot.is_cat)
+                )
+            ),
+            None
+        )
+        if result is None:
+            raise IndexError(f"{str(annotation)}: Don't find prior annotation for this one!")
+        return result
 
     @staticmethod
     def _unpack_extended(
@@ -910,7 +969,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                                 if self._debug_test_args:
                                     annotation = replace(
                                         annotation,
-                                        debug_full_arg=pack_arg.x,
+                                        debug_full_arg=pack_arg.x.clone(),
                                     )
                                 if not annotation.is_ignore:
                                     # Match not to be ignored
@@ -924,7 +983,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                                             target_dtype=parg_dtype if try_with_cast else None,
                                         )
                                         # DEBUG
-                                        deb_msg = f"Matched {annotation.kind}: ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}"
+                                        deb_msg = f"Matched {str(annotation)}"
                                         if annotation.kind == "padded-query":
                                             deb_msg += f", q_len={annotation.extra_info['q_len']}"
                                         elif annotation.is_ext:
@@ -938,11 +997,11 @@ class CellComputationAutogradHooks(AutogradHooks):
                                             pack_arg.id
                                         ] = value
                                         if self.debug_print_annotations:
-                                            print(f"Match  ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, {annotation.kind}")
+                                            print(f"Match {str(annotation)}")
                                     else:
                                         # Annotation has been matched before, has ID already
                                         if self.debug_print_annotations:
-                                            print(f"Match again ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, {annotation.kind}")
+                                            print(f"Match again {str(annotation)}")
                                         idd = annotation.match_id
                                         if idd in self._id_counts:
                                             self._id_counts[idd] += 1
@@ -960,7 +1019,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                                         pack_arg.id
                                     ] = pack_arg.x
                                     if self.debug_print_annotations:
-                                        print(f"Ignore ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, {annotation.kind}")
+                                        print(f"Ignore {str(annotation)}")
                                     if self._arrays_cleanup is not None:
                                         self._arrays_cleanup.add(pack_arg.x)
                                 self._num_matched_annotations += 1
@@ -1150,4 +1209,4 @@ def do_ignore_annotation(
         )
     )
     if debug_print:
-        print(f"Create ({layer_idx},{chunk_idx}): {x_shape}, {kind}")
+        print(f"Create {kind} ({layer_idx},{chunk_idx}): {x_shape}")
