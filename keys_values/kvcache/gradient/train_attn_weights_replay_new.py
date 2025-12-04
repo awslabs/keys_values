@@ -229,28 +229,11 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         if query.shape[0] != self.batch_size:
             raise ValueError(f"query.shape[0] = {query.shape[0]}, batch_size = {self.batch_size}, must be equal")
         # For prefill, we use the default implementation based on :meth:`_prefill`.
-        # If `input_pos > 0`, we use our own special-purpose operators.
         if input_pos == 0:
             if self._node_annotations is not None:
                 self._ignore_query_annotation(query)
-            result = super().forward(query, key, value, token_idx, input_pos)
-            if self.current_length == self.cache_length:
-                # The prefill call fills the cache. In this case, we need to
-                # create an annotation here. Otherwise, there is a subsequent
-                # "cat" operation which does that.
-                index = torch.tensor([0], dtype=torch.int64, device=self._device)
-                debug_msg = f"input_pos == 0 (clen={self.current_length})"
-                self._create_node_before_creator(
-                    kind="cat-key",
-                    index=index,
-                    debug_msg=debug_msg,
-                )
-                self._create_node_before_creator(
-                    kind="cat-value",
-                    index=index,
-                    debug_msg=debug_msg,
-                )
-            return result
+            # TODO: Should we add "ignore" annotations for the other nodes?
+            return super().forward(query, key, value, token_idx, input_pos)
         else:
             return self._forward_if_not_prefill(
                 query, key, value, token_idx, input_pos,
@@ -438,7 +421,11 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         debug_msg: Optional[str] = None,
     ):
         chunk_idx = self._token_chunk_pos - 1  # counter has already been advanced
-        if self._node_annotations is not None and chunk_idx > self._start_token_chunk_pos:
+        # For the first cell, we do not create an annotation for `chunk_idx - 1`
+        # if `chunk_idx == 1`. This is because the first (prefill) SDPA call
+        # does not need to be supported by an "ext" annotation.
+        idx_thres = max(1, self._start_token_chunk_pos)
+        if self._node_annotations is not None and chunk_idx > idx_thres:
             # This annotation is for `x` before the node is created, so the
             # chunk index is `chunk_idx - 1`.
             is_keys = NodeAnnotation.kind_is_keys(kind)

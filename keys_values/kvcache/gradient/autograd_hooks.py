@@ -1053,6 +1053,21 @@ class CellComputationAutogradHooks(AutogradHooks):
         ]
 
     def _flush_remaining_pack_args(self):
+        """
+        Flush all remaining pack arguments as they are (not packed). We also
+        convert all annotations with `match_id is None` to a cheaper form for
+        logging and clear the annotations list.
+
+        Here, we make sure that unmatched annotations of kind "scatter" or
+        "cat" are appended to `_packed_arg_for_id` with new IDs. This ensures
+        that the "annotation chain" needed to reconstruct all keys and values
+        is complete in `_packed_arg_for_id`. Even if a "cat" or "scatter"
+        annotation is not matched to a pack argument, it may be required to
+        serve "ext" annotations. Namely, it could happen that `autograd` stores
+        an "ext" node in its graph, but not the associated "cat" / "scatter"
+        node.
+
+        """
         # Flush all remaining pack arguments (these will not be packed)
         for pack_arg in self._pack_arguments:
             self._packed_arg_for_id[pack_arg.id] = pack_arg.x
@@ -1067,12 +1082,19 @@ class CellComputationAutogradHooks(AutogradHooks):
                 self._arrays_cleanup.add(pack_arg.x)
         self._pack_arguments.clear()
         # Convert all remaining annotations into a form for logging and
-        # clear them
-        self._remaining_annotations = [
-            NodeAnnotationForLog(annotation)
-            for annotation in self._node_annotations.nodes
-            if annotation.match_id is None
-        ]
+        # clear them. Also, if "cat" or "scatter" annotations have not been
+        # matched, they are entered into `_packed_arg_for_id`.
+        self._remaining_annotations = []
+        for annotation in self._node_annotations.nodes:
+            if annotation.match_id is None:
+                self._remaining_annotations.append(NodeAnnotationForLog(annotation))
+                if annotation.is_scatter or annotation.is_cat:
+                    print(f"Unmatched {str(annotation)}: Add with ID={self._next_id}")  # DEBUG
+                    self._packed_arg_for_id[self._next_id] = PackArgumentAsAnnotation(
+                        annot=annotation,
+                        target_dtype=None,
+                    )
+                    self._next_id += 1
         self._node_annotations.nodes.clear()
 
     @staticmethod
