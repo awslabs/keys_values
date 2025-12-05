@@ -30,6 +30,7 @@ _ANNOTATION_KIND_VALUES = {
     "cat-value",
     "ext-key",
     "ext-value",
+    "ignore-ext-cat",
     "ignore-headgrad",
     "ignore-query",
     "padded-query",
@@ -55,8 +56,8 @@ class NodeAnnotation:
     layer_idx: int
     chunk_idx: int
     shape: Tuple[int, ...]
-    index: torch.Tensor
-    delta: torch.Tensor
+    index: Optional[torch.Tensor]
+    delta: Optional[torch.Tensor]
     positions: Optional[torch.Tensor] = None
     extra_info: Optional[Dict[str, Any]] = None
     match_id: Optional[int] = None
@@ -67,12 +68,18 @@ class NodeAnnotation:
         assert self.layer_idx >= 0
         assert self.chunk_idx >= 0
         self.kind_is_valid(self.kind)
-        device = self.delta.device
-        assert self.index.device == device, f"delta.device = {device}, index.device = {self.index.device}, must be the same"
+        if self.index is not None:
+            assert self.delta is not None
+            device = self.delta.device
+            assert self.index.device == device, f"delta.device = {device}, index.device = {self.index.device}, must be the same"
+        else:
+            assert self.delta is None
+            device = None
         if self.positions is not None:
             assert self.is_scatter, "positions only with scatter"
             assert self.positions.ndim == 1, "positions must be a 1D tensor"
-            assert self.positions.device == device, f"delta.device = {device}, positions.device = {self.positions.device}, must be the same"
+            if device is not None:
+                assert self.positions.device == device, f"delta.device = {device}, positions.device = {self.positions.device}, must be the same"
 
     def __str__(self) -> str:
         return f"{self.kind} ({self.layer_idx},{self.chunk_idx}): {self.shape}"
@@ -965,6 +972,13 @@ class CellComputationAutogradHooks(AutogradHooks):
                             if torch.allclose(
                                 annot_delta, parg_delta, atol=1e-6, rtol=1e-4,
                             ):
+                                # DEBUG:
+                                if annotation.debug_full_arg is not None:
+                                    print("Checking " + str(annotation))
+                                    torch.testing.assert_close(
+                                        pack_arg.x, annotation.debug_full_arg,
+                                    )
+                                # END DEBUG
                                 # Deltas match as well
                                 if self._debug_test_args:
                                     annotation = replace(
@@ -1000,6 +1014,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                                             print(f"Match {str(annotation)}")
                                     else:
                                         # Annotation has been matched before, has ID already
+                                        print(f"Matched again {str(annotation)}")  # DEBUG
                                         if self.debug_print_annotations:
                                             print(f"Match again {str(annotation)}")
                                         idd = annotation.match_id
@@ -1099,7 +1114,7 @@ class CellComputationAutogradHooks(AutogradHooks):
 
     @staticmethod
     def _delta_with_index(annotation: NodeAnnotation) -> bool:
-        return annotation.is_scatter or annotation.is_ext or annotation.kind == "padded-query"
+        return annotation.is_scatter or annotation.is_cat or annotation.is_ext or annotation.kind == "padded-query"
 
     @staticmethod
     def _delta_for_annotation(
@@ -1143,20 +1158,15 @@ class CellComputationAutogradHooks(AutogradHooks):
             # different from what is stored there for matching
             q_len = annotation.extra_info.get("q_len")
             assert q_len is not None and 0 < q_len <= x.shape[2], f"q_len={q_len}, x.shape[2]={x.shape[2]}"
-            return NodeAnnotation(
-                kind="padded-query",
-                layer_idx=annotation.layer_idx,
-                chunk_idx=annotation.chunk_idx,
-                shape=annotation.shape,
-                index=annotation.index,  # not used
-                delta=x[:, :, (-q_len):, :],
-                extra_info=annotation.extra_info,
-                debug_full_arg=annotation.debug_full_arg,
-                debug_msg=annotation.debug_msg,
-                match_id=annotation.match_id,
+            return replace(
+                annotation, delta=x[:, :, (-q_len):, :],
             )
-        else:
+        elif annotation.is_scatter:
             return annotation
+        else:
+            # Strip out `delta`, `index`. These are not needed beyond
+            # matching, and can be large
+            return replace(annotation, delta=None, index=None)
 
     @staticmethod
     def _pack_4d_index(x: torch.Tensor) -> Optional[PackArgumentAsIndex]:

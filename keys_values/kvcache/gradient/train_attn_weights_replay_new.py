@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from dataclasses import replace
 from typing import Optional, Tuple, Dict
 
 import torch
@@ -39,7 +40,7 @@ from keys_values.kvcache.gradient.sdpa_op import (
     cat_on_buffers,
 )
 from keys_values.kvcache.utils import shape_to_tuple
-from keys_values.utils import expand_index, need_repeat_interleave
+from keys_values.utils import expand_index, need_repeat_interleave, repeat_interleave
 
 
 class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
@@ -52,6 +53,11 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
     As in :class:`TrainingAttnWeightsReplayCache`, the main difficulty here is
     to support the autograd saved tensors hook mechanism by annotating the
     tensors properly.
+
+    Ignoring "ext" annotations following "cat":
+
+    We observe that "ext" annotations following "cat" are not matched by pack
+    args. We still enter "ignore-ext-cat" to cover for edge cases.
 
     """
     def __init__(
@@ -67,6 +73,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         node_annotations: Optional[Annotations] = None,
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
         debug_print_annotations: bool = False,
+        debug_full_args: bool = False,
         **base_kwargs,
     ):
         if not (0 <= start_token_pos < len(replay_log)):
@@ -114,6 +121,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         self._debug_tensors = debug_tensors
         # If this is set, we log all annotations being created
         self.debug_print_annotations = debug_print_annotations
+        self._debug_full_args = debug_full_args
         sliding_window_size = self.mha._get_sliding_window_size(layer_idx)
         if sliding_window_size is not None:
             print(
@@ -251,7 +259,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         num = key.shape[2]
         # Process token chunk. This also updates `_token_positions` and the
         # counters
-        token_positions_before = self.token_positions().detach().clone()
         index, update_result = self._process_token_chunk(token_idx)
         # Cache full: Single scatter. `update_result` is given iff there is
         # a grace period.
@@ -413,10 +420,25 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             debug_print=self.debug_print_annotations,
         )
 
+    def _random_index(
+        self, length: int, num: int, device: torch.device,
+    ) -> torch.Tensor:
+        index_kwargs = dict(dtype=torch.int64, device=device)
+        result = torch.empty(
+            (self.batch_size, self.n_query_groups, num), **index_kwargs,
+        )
+        num = min(num, length)
+        for b in range(self.batch_size):
+            for h in range(self.n_query_groups):
+                result[b, h, :] = torch.randperm(
+                    length, **index_kwargs,
+                )[:num]
+        return expand_index(result, self.head_size)
+
     def _create_node_before_creator(
         self,
         kind: str,
-        index: torch.Tensor,
+        index: Optional[torch.Tensor],
         positions: Optional[torch.Tensor] = None,
         debug_msg: Optional[str] = None,
     ):
@@ -431,15 +453,17 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             is_keys = NodeAnnotation.kind_is_keys(kind)
             x = self.kv_buffers.keys() if is_keys else self.kv_buffers.values()
             x = x.detach()[:, :, :self.current_length, :]
-            index = index.detach().to(x.device)
             is_scatter = NodeAnnotation.kind_is_scatter(kind)
             if is_scatter:
+                index = index.detach().to(x.device)
                 assert index.ndim == 4  # Sanity check
-                # Need to pass delta which is overwritten
-                delta = x.gather(-2, index)
             else:
-                # Pass the final row, used for identification
-                delta = x[:, :, -1:, :]
+                index = self._random_index(
+                    length=self.current_length,
+                    num=MAX_DELTA_TRANS_LENGTH,
+                    device=x.device,
+                )
+            delta = x.gather(2, index)
             if positions is not None:
                 positions = positions.detach().to(x.device)
             annotation = NodeAnnotation(
@@ -452,7 +476,13 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 positions=positions,
                 debug_msg=debug_msg,
             )
+            if self._debug_full_args:
+                annotation = replace(
+                    annotation,
+                    debug_full_arg=x.clone(),
+                )
             self._append_annotation(annotation)
+
 
     @staticmethod
     def _transform_index(
@@ -490,24 +520,18 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                     chunk_idx=chunk_idx,
                     kind=kind,
                 )
-            # Create "ext-*" annotation for node `x` after it was created, so
-            # the chunk index is `chunk_idx`
             is_scatter = NodeAnnotation.kind_is_scatter(kind)
             need_ri = need_repeat_interleave(self.n_head, self.n_query_groups)
             if need_ri or is_scatter:
-                is_keys = NodeAnnotation.kind_is_keys(kind)
-                ext_kind = "ext-key" if is_keys else "ext-value"
-                # Create index
-                if not is_scatter:
-                    # Pass final row
-                    x_len = x.shape[2]
-                    delta_index = torch.arange(
-                        x_len - 1, x_len, dtype=torch.int64, device=x.device,
-                    ).view(1, 1, -1, 1).expand(*x.shape[:2], -1, x.shape[-1])
-                    ext_index = delta_index
-                    extra_info = None
-                else:
+                if is_scatter:
                     assert index is not None
+                # Create "ext-*" annotation for node `x` after it was created, so
+                # the chunk index is `chunk_idx`
+                # Create index
+                extra_info = None
+                if is_scatter:
+                    is_keys = NodeAnnotation.kind_is_keys(kind)
+                    ext_kind = "ext-key" if is_keys else "ext-value"
                     # Used for reordering in padded-query SDPA
                     sort_index = torch.argsort(
                         self.token_positions().detach(), dim=-1,
@@ -521,26 +545,46 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                     # `ext_index` can be used to extract `delta` from the pack
                     # argument, which is transformed by `sort_index`.
                     ind_len = min(MAX_DELTA_TRANS_LENGTH, index.shape[2])
-                    delta_index = index[:, :, :ind_len, :]
+                    ext_index = index[:, :, :ind_len, :]
+                    delta = x.gather(2, ext_index)
                     ext_index = self._transform_index(
-                        index=delta_index, sort_index=sort_index,
+                        index=ext_index, sort_index=sort_index,
                     )
-                delta = x.gather(2, delta_index)
+                else:
+                    # Ignore annotation
+                    ext_kind = "ignore-ext-cat"
+                    ext_index = self._random_index(
+                        length=x.shape[2],
+                        num=MAX_DELTA_TRANS_LENGTH,
+                        device=x.device,
+                    )
+                    delta = repeat_interleave(
+                        x.gather(2, ext_index), self.n_head,
+                    )
+                    ext_index = repeat_interleave(ext_index, self.n_head)
                 shape = shape_to_tuple(x)
                 if need_ri:
                     shape = (shape[0], self.n_head) + shape[2:]
-                self._append_annotation(
-                    NodeAnnotation(
-                        kind=ext_kind,
-                        layer_idx=self.layer_idx,
-                        chunk_idx=chunk_idx,
-                        shape=shape,
-                        index=ext_index,
-                        delta=delta,
-                        extra_info=extra_info,
-                        debug_msg=debug_msg,
-                    )
+                annotation = NodeAnnotation(
+                    kind=ext_kind,
+                    layer_idx=self.layer_idx,
+                    chunk_idx=chunk_idx,
+                    shape=shape,
+                    index=ext_index,
+                    delta=delta,
+                    extra_info=extra_info,
+                    debug_msg=debug_msg,
                 )
+                if self._debug_full_args and is_scatter:
+                    sort_index = extra_info["sort_index"]
+                    x = x.gather(2, expand_index(sort_index, self.head_size))
+                    if need_ri:
+                        x = repeat_interleave(x, self.n_head)
+                    annotation = replace(
+                        annotation,
+                        debug_full_arg=x,
+                    )
+                self._append_annotation(annotation)
 
         # DEBUG:
         if self._debug_tensors is not None:
@@ -614,15 +658,11 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             raise ValueError(f"token_idx:\n{token_idx}\nreplay_log.token_chunks[{self._token_chunk_pos}]:\n{other}\nShould be the same!")
         self._token_chunk_pos += 1
         num = token_idx.shape[-1]
-        index_kwargs = {"dtype": torch.int64, "device": self._device}
-        if self.current_length < self.cache_length:
-            # cat case:
-            # We store `index = [current_length]`, which is redundant, since the
-            # information is also in `NodeAnnotation.shape`
-            index = torch.tensor([self.current_length], **index_kwargs)
-            update_result = None
-        else:
+        index = None
+        update_result = None
+        if self.current_length >= self.cache_length:
             # scatter case
+            index_kwargs = {"dtype": torch.int64, "device": self._device}
             index = self.replay_log.extract_index(
                 self._next_token_pos, num, **index_kwargs
             ).detach()
