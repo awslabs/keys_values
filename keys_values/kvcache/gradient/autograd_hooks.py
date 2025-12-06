@@ -30,7 +30,8 @@ _ANNOTATION_KIND_VALUES = {
     "cat-value",
     "ext-key",
     "ext-value",
-    "ignore-ext-cat",
+    "ignore-ext-key",
+    "ignore-ext-value",
     "ignore-headgrad",
     "ignore-query",
     "padded-query",
@@ -189,6 +190,30 @@ class Annotations:
         x_dct, chidx_dct = self._get_dicts(kind)
         return x_dct[layer_idx], chidx_dct[layer_idx]
 
+    def find(self, annotation: NodeAnnotation) -> Optional[int]:
+        return next(
+            (
+                pos
+                for pos, annot in enumerate(self.nodes)
+                if (
+                    annot.layer_idx == annotation.layer_idx and
+                    annot.chunk_idx == annotation.chunk_idx and
+                    annot.kind == annotation.kind
+                )
+            ),
+            None
+        )
+
+    def append_safe(self, annotation: NodeAnnotation):
+        pos = self.find(annotation)
+        if pos is not None:
+            raise IndexError(
+                "Annotation already in the list!\n"
+                f"nodes[{pos}]: {str(self.nodes[pos])}\n"
+                f"new: {str(annotation)}"
+            )
+        self.nodes.append(annotation)
+
 
 @dataclass(frozen=True)
 class PackHookArgument:
@@ -250,16 +275,6 @@ class AnnotationUsageLog:
 
 
 MAX_DELTA_TRANS_LENGTH = 32
-
-
-@dataclass(frozen=True)
-class MatchingEntry:
-    shape: Tuple[int, ...]
-    dtype: torch.dtype
-    annotation: NodeAnnotation
-
-    def kind(self) -> str:
-        return self.annotation.kind
 
 
 @dataclass(frozen=True)
@@ -941,20 +956,19 @@ class CellComputationAutogradHooks(AutogradHooks):
 
         """
         # Run pairwise matching: Outer over pack args, inner over annotations
-        annot_keys = self._matching_entries()
         ret_id = None
-        if annot_keys:
+        if self._node_annotations.nodes:
             new_entry_pos = len(self._pack_arguments) - 1
             rem_pack_args = []  # Collect unmatched pack args
             for pa_pos, pack_arg in enumerate(self._pack_arguments):
                 parg_shape = pack_arg.shape
                 parg_dtype = pack_arg.x.dtype
                 parg_matched_to = None
-                for an_pos, annot_key in enumerate(annot_keys):
-                    if annot_key.shape == parg_shape:
+                for an_pos, annotation in enumerate(self._node_annotations.nodes):
+                    if annotation.shape == parg_shape:
                         # Shapes matches
-                        annot_dtype = annot_key.dtype
-                        annotation = annot_key.annotation
+                        assert annotation.delta is not None  # sanity check
+                        annot_dtype = annotation.delta.dtype
                         same_dtype = parg_dtype == annot_dtype
                         try_with_cast = (not same_dtype) and parg_dtype == torch.float32
                         if same_dtype or try_with_cast:
@@ -1043,8 +1057,8 @@ class CellComputationAutogradHooks(AutogradHooks):
                 if parg_matched_to is not None:
                     # We do not delete the annotation, but mark it
                     ind, idd = parg_matched_to
-                    annotation = annot_keys[ind].annotation
-                    if not annotation.is_ignore and annotation.match_id is None:
+                    annotation = self._node_annotations.nodes[ind]
+                    if (not annotation.is_ignore) and annotation.match_id is None:
                         annotation = replace(
                             annotation,
                             match_id=idd,
@@ -1056,16 +1070,6 @@ class CellComputationAutogradHooks(AutogradHooks):
         if flush_pack_args:
             self._flush_remaining_pack_args()
         return ret_id
-
-    def _matching_entries(self) -> List[MatchingEntry]:
-        return [
-            MatchingEntry(
-                shape=annotation.shape,
-                dtype=annotation.delta.dtype,
-                annotation=annotation,
-            )
-            for annotation in self._node_annotations.nodes
-        ]
 
     def _flush_remaining_pack_args(self):
         """
@@ -1162,7 +1166,17 @@ class CellComputationAutogradHooks(AutogradHooks):
                 annotation, delta=x[:, :, (-q_len):, :],
             )
         elif annotation.is_scatter:
-            return annotation
+            index_len = None if annotation.extra_info is None else annotation.extra_info.get("index_len")
+            if index_len is not None:
+                # May have extended `index`, `delta` to lower probability of
+                # mis-matches. Strip extra content off here
+                return replace(
+                    annotation,
+                    delta=annotation.delta[:, :, :index_len, :],
+                    index=annotation.index[:, :, :index_len, :],
+                )
+            else:
+                return annotation
         else:
             # Strip out `delta`, `index`. These are not needed beyond
             # matching, and can be large

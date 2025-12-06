@@ -67,32 +67,35 @@ def args_gradient_row_of_cells():
             [False, True],
         )
     ]
+    # `limit_num_unmatched` depends on the scenario. These are the numbers of
+    # unmatched pack args per cell we still tolerate. Need more work to
+    # understand where these pack args come from.
     return [
         a + (b, c)
         for (a, b), c in product(
             zip(
                 setups,
                 [
-                    [8, 10, 10, 16],
+                    [8, 10, 10, 16], # FAILS [0]
                     [8, 10, 10, 16], # OK
-                    [8, 10, 10, 12, 16],
+                    [8, 10, 10, 12, 16], # FAILS [2]
                     [8, 10, 10, 12, 16], # OK
-                    [8, 10, 10, 16],
+                    [4, 4, 4, 10], # OK
                     [8, 10, 10, 16], # OK
-                    [8, 10, 10, 12, 16],
+                    [4, 4, 4, 4, 10], # OK
                     [8, 10, 10, 12, 16], # OK
-                    [8, 10, 10, 16],
+                    [4, 4, 4, 10], # OK
                     [8, 10, 10, 16], # OK
-                    [8, 10, 10, 12, 16],
+                    [4, 4, 4, 4, 10], # OK
                     [8, 10, 10, 12, 16], # OK
-                    [12, 14, 14, 16],
+                    [4, 4, 4, 10], # OK
                     [12, 14, 14, 16], # OK
-                    [12, 14, 14, 14, 16],
+                    [4, 4, 4, 4, 10], # OK
                     [12, 14, 14, 14, 16], # OK
-                    [12, 14, 14, 16],
-                    [12, 14, 14, 16],
-                    [12, 14, 14, 14, 16],
-                    [12, 14, 14, 14, 16],
+                    [4, 4, 4, 10], # FAILS [16]
+                    [12, 14, 14, 16], # OK
+                    [4, 4, 4, 4, 10], # FAILS [18]
+                    [12, 14, 14, 14, 16], # OK
                 ],
             ),
             available_backends(),

@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import replace
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Any
 
 import torch
+from litdata.processing.utilities import extract_rank_and_index_from_filename
+from torch.utils.data.datapipes.gen_pyi import iterDP_files_to_exclude
 
 from litgpt.config import Config
 
@@ -405,9 +407,9 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             )
 
     def _append_annotation(self, annotation: NodeAnnotation):
-        self._node_annotations.nodes.append(annotation)
+        self._node_annotations.append_safe(annotation)
         if self.debug_print_annotations:
-            print(f"Create ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, {annotation.kind}")
+            print(f"Create {str(annotation)}")
 
     def _ignore_query_annotation(self, query: torch.Tensor):
         # `query` should be ignored, even if `n_head > n_query_groups`, because
@@ -421,19 +423,51 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         )
 
     def _random_index(
-        self, length: int, num: int, device: torch.device,
+        self, num: int, device: torch.device,
     ) -> torch.Tensor:
         index_kwargs = dict(dtype=torch.int64, device=device)
         result = torch.empty(
             (self.batch_size, self.n_query_groups, num), **index_kwargs,
         )
-        num = min(num, length)
+        num = min(num, self.current_length)
         for b in range(self.batch_size):
             for h in range(self.n_query_groups):
                 result[b, h, :] = torch.randperm(
-                    length, **index_kwargs,
+                    self.current_length, **index_kwargs,
                 )[:num]
         return expand_index(result, self.head_size)
+
+    def _append_random_index(self, index: torch.Tensor) -> torch.Tensor:
+        index_len = index.shape[2]
+        if index_len < MAX_DELTA_TRANS_LENGTH:
+            index2 = self._random_index(
+                num=MAX_DELTA_TRANS_LENGTH - index_len,
+                device=index.device,
+            )
+            index = torch.cat((index, index2), dim=2)
+        return index
+
+    def _index_for_before(
+        self,
+        kind: str,
+        index: Optional[torch.Tensor],
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, Optional[Dict[str, Any]]]:
+        if NodeAnnotation.kind_is_scatter(kind):
+            assert index is not None
+            index = index.detach().to(device)
+            assert index.ndim == 4  # Sanity check
+            # If index is too small, we extend it by random entries. This
+            # is to lower the probability of false matches
+            extra_info = {"index_len": index.shape[2]}
+            index = self._append_random_index(index)
+        else:
+            index = self._random_index(
+                num=MAX_DELTA_TRANS_LENGTH,
+                device=device,
+            )
+            extra_info = None
+        return index, extra_info
 
     def _create_node_before_creator(
         self,
@@ -453,16 +487,11 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             is_keys = NodeAnnotation.kind_is_keys(kind)
             x = self.kv_buffers.keys() if is_keys else self.kv_buffers.values()
             x = x.detach()[:, :, :self.current_length, :]
-            is_scatter = NodeAnnotation.kind_is_scatter(kind)
-            if is_scatter:
-                index = index.detach().to(x.device)
-                assert index.ndim == 4  # Sanity check
-            else:
-                index = self._random_index(
-                    length=self.current_length,
-                    num=MAX_DELTA_TRANS_LENGTH,
-                    device=x.device,
-                )
+            index, extra_info = self._index_for_before(
+                kind=kind,
+                index=index,
+                device=x.device,
+            )
             delta = x.gather(2, index)
             if positions is not None:
                 positions = positions.detach().to(x.device)
@@ -474,6 +503,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 index=index,
                 delta=delta,
                 positions=positions,
+                extra_info=extra_info,
                 debug_msg=debug_msg,
             )
             if self._debug_full_args:
@@ -529,8 +559,8 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 # the chunk index is `chunk_idx`
                 # Create index
                 extra_info = None
+                is_keys = NodeAnnotation.kind_is_keys(kind)
                 if is_scatter:
-                    is_keys = NodeAnnotation.kind_is_keys(kind)
                     ext_kind = "ext-key" if is_keys else "ext-value"
                     # Used for reordering in padded-query SDPA
                     sort_index = torch.argsort(
@@ -544,17 +574,19 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                     # `delta == gather(x1, ext_index)`. This means that
                     # `ext_index` can be used to extract `delta` from the pack
                     # argument, which is transformed by `sort_index`.
-                    ind_len = min(MAX_DELTA_TRANS_LENGTH, index.shape[2])
-                    ext_index = index[:, :, :ind_len, :]
+                    index_len = index.shape[2]
+                    if index_len > MAX_DELTA_TRANS_LENGTH:
+                        ext_index = index[:, :, :index_len, :]
+                    else:
+                        ext_index = self._append_random_index(index)
                     delta = x.gather(2, ext_index)
                     ext_index = self._transform_index(
                         index=ext_index, sort_index=sort_index,
                     )
                 else:
                     # Ignore annotation
-                    ext_kind = "ignore-ext-cat"
+                    ext_kind = "ignore-ext-key" if is_keys else "ignore-ext-value"
                     ext_index = self._random_index(
-                        length=x.shape[2],
                         num=MAX_DELTA_TRANS_LENGTH,
                         device=x.device,
                     )
