@@ -15,8 +15,6 @@ from dataclasses import replace
 from typing import Optional, Tuple, Dict, Any
 
 import torch
-from litdata.processing.utilities import extract_rank_and_index_from_filename
-from torch.utils.data.datapipes.gen_pyi import iterDP_files_to_exclude
 
 from litgpt.config import Config
 
@@ -36,6 +34,7 @@ from keys_values.kvcache.gradient.autograd_hooks import (
     Annotations,
     do_ignore_annotation,
     MAX_DELTA_TRANS_LENGTH,
+    create_random_index,
 )
 from keys_values.kvcache.gradient.sdpa_op import (
     scatter_on_buffers,
@@ -59,7 +58,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
     Ignoring "ext" annotations following "cat":
 
     We observe that "ext" annotations following "cat" are not matched by pack
-    args. We still enter "ignore-ext-cat" to cover for edge cases.
+    args. We still enter "ignore-ext-*" to cover for edge cases.
 
     """
     def __init__(
@@ -323,12 +322,12 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             debug_msg = f"cat-before (clen={self.current_length})"
             self._create_node_before_creator(
                 kind="cat-key",
-                index=index,
+                index=None,
                 debug_msg=debug_msg,
             )
             self._create_node_before_creator(
                 kind="cat-value",
-                index=index,
+                index=None,
                 debug_msg=debug_msg,
             )
             # "cat" update of KV cache buffers
@@ -392,7 +391,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             start = kv_len - q_len - num_zeros
             end = start + delta_len
             index = torch.arange(
-                start, end, dtype=torch.int64, device=query.device,
+                start, end, dtype=torch.int32, device=query.device,
             ).view(1, 1, -1, 1).expand(*shape[:2], -1, head_size)
             self._append_annotation(
                 NodeAnnotation(
@@ -419,23 +418,18 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             node_annotations=self._node_annotations,
             kind="ignore-query",
             layer_idx=self.block_idx,
-            debug_print=self.debug_print_annotations,
         )
 
     def _random_index(
         self, num: int, device: torch.device,
     ) -> torch.Tensor:
-        index_kwargs = dict(dtype=torch.int64, device=device)
-        result = torch.empty(
-            (self.batch_size, self.n_query_groups, num), **index_kwargs,
+        shape = (self.batch_size, self.n_query_groups, num, self.head_size)
+        return create_random_index(
+            shape=shape,
+            length=self.current_length,
+            device=device,
+            dtype=torch.int32,
         )
-        num = min(num, self.current_length)
-        for b in range(self.batch_size):
-            for h in range(self.n_query_groups):
-                result[b, h, :] = torch.randperm(
-                    self.current_length, **index_kwargs,
-                )[:num]
-        return expand_index(result, self.head_size)
 
     def _append_random_index(self, index: torch.Tensor) -> torch.Tensor:
         index_len = index.shape[2]
@@ -458,7 +452,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             index = index.detach().to(device)
             assert index.ndim == 4  # Sanity check
             # If index is too small, we extend it by random entries. This
-            # is to lower the probability of false matches
+            # lowers the probability of false matches
             extra_info = {"index_len": index.shape[2]}
             index = self._append_random_index(index)
         else:
@@ -469,6 +463,18 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             extra_info = None
         return index, extra_info
 
+    def _delta_for_before(
+        self,
+        kind: str,
+        index: torch.Tensor,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        if NodeAnnotation.kind_is_scatter(kind):
+            num = min(index.shape[2], MAX_DELTA_TRANS_LENGTH)
+        else:
+            num = index.shape[2]
+        return x.gather(2, index[:, :, :num, :])
+
     def _create_node_before_creator(
         self,
         kind: str,
@@ -476,7 +482,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         positions: Optional[torch.Tensor] = None,
         debug_msg: Optional[str] = None,
     ):
-        chunk_idx = self._token_chunk_pos - 1  # counter has already been advanced
+        chunk_idx = self._token_chunk_pos - 1  # Counter has already been advanced
         # For the first cell, we do not create an annotation for `chunk_idx - 1`
         # if `chunk_idx == 1`. This is because the first (prefill) SDPA call
         # does not need to be supported by an "ext" annotation.
@@ -492,7 +498,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 index=index,
                 device=x.device,
             )
-            delta = x.gather(2, index)
+            delta = self._delta_for_before(kind, index, x)
             if positions is not None:
                 positions = positions.detach().to(x.device)
             annotation = NodeAnnotation(
@@ -512,7 +518,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                     debug_full_arg=x.clone(),
                 )
             self._append_annotation(annotation)
-
 
     @staticmethod
     def _transform_index(
@@ -576,7 +581,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                     # argument, which is transformed by `sort_index`.
                     index_len = index.shape[2]
                     if index_len > MAX_DELTA_TRANS_LENGTH:
-                        ext_index = index[:, :, :index_len, :]
+                        ext_index = index[:, :, :MAX_DELTA_TRANS_LENGTH, :]
                     else:
                         ext_index = self._append_random_index(index)
                     delta = x.gather(2, ext_index)
@@ -694,7 +699,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         update_result = None
         if self.current_length >= self.cache_length:
             # scatter case
-            index_kwargs = {"dtype": torch.int64, "device": self._device}
+            index_kwargs = {"dtype": torch.int32, "device": self._device}
             index = self.replay_log.extract_index(
                 self._next_token_pos, num, **index_kwargs
             ).detach()

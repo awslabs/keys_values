@@ -32,6 +32,7 @@ from keys_values.kvcache.gradient.autograd_hooks import (
     Annotations,
     do_ignore_annotation,
     MAX_DELTA_TRANS_LENGTH,
+    create_random_index,
 )
 from keys_values.kvcache.gradient.sdpa_op import (
     KVCacheCatUpdateAndSDPAFunction,
@@ -354,12 +355,12 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             debug_msg = f"cat-before (clen={self.current_length})"
             self._create_node_before_creator(
                 kind="cat-key",
-                index=index,
+                index=None,
                 debug_msg=debug_msg,
             )
             self._create_node_before_creator(
                 kind="cat-value",
-                index=index,
+                index=None,
                 debug_msg=debug_msg,
             )
             # "cat" update of KV cache buffers and MHA computation, via
@@ -394,9 +395,9 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         return attn_output.transpose(1, 2).reshape(self.batch_size, num, -1)
 
     def _append_annotation(self, annotation: NodeAnnotation):
-        self._node_annotations.nodes.append(annotation)
+        self._node_annotations.append_safe(annotation)
         if self.debug_print_annotations:
-            print(f"Create ({annotation.layer_idx},{annotation.chunk_idx}): {annotation.shape}, {annotation.kind}")
+            print(f"Create {str(annotation)}")
 
     def _ignore_query_annotation(self, query: torch.Tensor):
         # `query` should be ignored, even if `n_head > n_query_groups`, because
@@ -406,23 +407,18 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             node_annotations=self._node_annotations,
             kind="ignore-query",
             layer_idx=self.block_idx,
-            debug_print=self.debug_print_annotations,
         )
 
     def _random_index(
-        self, length: int, num: int, device: torch.device,
+        self, num: int, device: torch.device,
     ) -> torch.Tensor:
-        index_kwargs = dict(dtype=torch.int64, device=device)
-        result = torch.empty(
-            (self.batch_size, self.n_query_groups, num), **index_kwargs,
+        shape = (self.batch_size, self.n_query_groups, num, self.head_size)
+        return create_random_index(
+            shape=shape,
+            length=self.current_length,
+            device=device,
+            dtype=torch.int32,
         )
-        num = min(num, length)
-        for b in range(self.batch_size):
-            for h in range(self.n_query_groups):
-                result[b, h, :] = torch.randperm(
-                    length, **index_kwargs,
-                )[:num]
-        return expand_index(result, self.head_size)
 
     def _create_node_before_creator(
         self,
@@ -443,7 +439,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 assert index.ndim == 4  # Sanity check
             else:
                 index = self._random_index(
-                    length=self.current_length,
                     num=MAX_DELTA_TRANS_LENGTH,
                     device=x.device,
                 )

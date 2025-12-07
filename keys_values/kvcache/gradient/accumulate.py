@@ -614,7 +614,6 @@ class GradientAccumulator:
             kind="ignore-headgrad",
             layer_idx=layer_idx,
             chunk_idx=first_chunk_idx,
-            debug_print=autograd_hooks.debug_print_annotations,
         )
 
     def _check_run_args(
