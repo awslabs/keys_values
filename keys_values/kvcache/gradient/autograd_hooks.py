@@ -991,9 +991,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                         if same_dtype or try_with_cast:
                             # Either same dtype, or `parg` is `float32`
                             parg_delta = self._delta_for_pack_argument(
-                                x=pack_arg.x,
-                                annotation=annotation,
-                                n_head=self.n_head,
+                                x=pack_arg.x, annotation=annotation,
                             )
                             if try_with_cast:
                                 parg_delta = parg_delta.to(dtype=annot_dtype)
@@ -1133,7 +1131,7 @@ class CellComputationAutogradHooks(AutogradHooks):
 
     @staticmethod
     def _delta_for_pack_argument(
-        x: torch.Tensor, annotation: NodeAnnotation, n_head: int,
+        x: torch.Tensor, annotation: NodeAnnotation,
     ) -> torch.Tensor:
         index = annotation.index
         if annotation.is_scatter:

@@ -8,6 +8,8 @@ from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.gradient.autograd_hooks import (
     CellComputationAutogradHooks,
     NodeAnnotation,
+    MAX_DELTA_TRANS_LENGTH,
+    create_random_index,
 )
 from keys_values.kvcache.gradient.train_attn_weights_replay_new import TrainingAttnWeightsReplayCacheNew
 from keys_values.kvcache.test_utils import (
@@ -57,17 +59,32 @@ def test_extract_delta(dtype, device):
                 input_pos, input_pos + chunk_size, **index_kwargs,
             ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
         )
-        delta_index = expand_index(delta_index, head_size)
-        delta = keys.gather(2, delta_index)
-        assert delta.shape == (batch_size, n_query_groups, chunk_size, head_size)
+        delta_index = expand_index(delta_index, head_size).to(dtype=torch.int32)
         # Transform as in `sdpa_wrapper.scaled_dot_product_attention`
-        sort_index = torch.argsort(token_positions, dim=-1)
-        keys = keys.gather(2, expand_index(sort_index, head_size))
-        keys = repeat_interleave(keys, n_head)
-        assert keys.shape == (batch_size, n_head, cache_length, head_size)
-        # Annotation as in `TrainingAttnWeightsReplayCacheNew._create_node_before_creator`
-        ext_index = TrainingAttnWeightsReplayCacheNew._transform_index(
-            delta_index, sort_index,
+        sort_index = torch.argsort(token_positions, dim=-1).to(dtype=torch.int32)
+        keys_after = keys.gather(2, expand_index(sort_index, head_size))
+        keys_after = repeat_interleave(keys_after, n_head)
+        assert keys_after.shape == (batch_size, n_head, cache_length, head_size)
+        # Annotation as in `TrainingAttnWeightsReplayCacheNew._create_node_after_creator`
+        index_len = delta_index.shape[2]
+        if index_len >= MAX_DELTA_TRANS_LENGTH:
+            ext_index = delta_index[:, :, :MAX_DELTA_TRANS_LENGTH, :]
+        else:
+            shape = (batch_size, n_query_groups, MAX_DELTA_TRANS_LENGTH - index_len, head_size)
+            index2 = create_random_index(
+                shape=shape,
+                length=cache_length,
+                device=device,
+                dtype=torch.int32,
+            )
+            ext_index = torch.cat((delta_index, index2), dim=2)
+        delta = repeat_interleave(keys.gather(2, ext_index), n_head)
+        assert delta.shape == (batch_size, n_head, MAX_DELTA_TRANS_LENGTH, head_size)
+        ext_index = repeat_interleave(
+            TrainingAttnWeightsReplayCacheNew._transform_index(
+                index=ext_index, sort_index=sort_index,
+            ),
+            n_head,
         )
         annotation = NodeAnnotation(
             kind="ext-key",
@@ -79,13 +96,7 @@ def test_extract_delta(dtype, device):
             positions=None,
             extra_info={"sort_index": sort_index},
         )
-        annot_delta = CellComputationAutogradHooks._delta_for_annotation(
-            annotation=annotation,
-            n_head=n_head,
-        )
         parg_delta = CellComputationAutogradHooks._delta_for_pack_argument(
-            x=keys,
-            annotation=annotation,
-            n_head=n_head,
+            x=keys_after, annotation=annotation,
         )
-        torch.testing.assert_close(annot_delta, parg_delta)
+        torch.testing.assert_close(delta, parg_delta)
