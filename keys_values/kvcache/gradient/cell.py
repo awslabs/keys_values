@@ -186,14 +186,12 @@ class CellComputation(nn.Module):
         self,
         first_chunk_idx: int,
         num_chunks: int,
-        debug_print_annotations: bool,
     ) -> List[TrainingAttnWeightsReplayCache]:
         first_layer_idx = self.model_part.first_layer_idx
         more_kwargs = dict(
             start_token_pos=self._token_pos_per_chunk[first_chunk_idx],
             num_chunks=num_chunks,
             debug_tensors=self._debug_tensors,
-            debug_print_annotations=debug_print_annotations,
         )
         if self._use_new_cache:
             cache_class = TrainingAttnWeightsReplayCacheNew
@@ -223,7 +221,6 @@ class CellComputation(nn.Module):
         v_buffers: Optional[List[torch.Tensor]],
         first_chunk_idx: int,
         num_chunks: int,
-        debug_print_annotations: bool = False,
     ) -> Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]:
         """
         The cell receives input from the bottom (`inputs`) and from the
@@ -283,7 +280,7 @@ class CellComputation(nn.Module):
         # Hook training replay caches into self attention blocks, and assign
         # buffers.
         train_replay_caches = self._create_train_replay_caches(
-            first_chunk_idx, num_chunks, debug_print_annotations,
+            first_chunk_idx, num_chunks,
         )
         kv_caches_copy = []
         cache_lengths = []

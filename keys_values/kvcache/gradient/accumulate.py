@@ -572,7 +572,6 @@ class GradientAccumulator:
             v_buffers=v_buffers,
             first_chunk_idx=first_chunk_idx,
             num_chunks=num_chunks,
-            debug_print_annotations=False if autograd_hooks is None else autograd_hooks.debug_print_annotations,
         )
         scalar_output = (cell_outputs * head_gradients_top).sum()
 

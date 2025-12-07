@@ -76,26 +76,26 @@ def args_gradient_row_of_cells():
             zip(
                 setups,
                 [
-                    [8, 10, 10, 16], # FAILS [0]
-                    [8, 10, 10, 16], # OK
-                    [8, 10, 10, 12, 16], # FAILS [2]
-                    [8, 10, 10, 12, 16], # OK
-                    [4, 4, 4, 10], # OK
-                    [8, 10, 10, 16], # OK
-                    [4, 4, 4, 4, 10], # OK
-                    [8, 10, 10, 12, 16], # OK
-                    [4, 4, 4, 10], # OK
-                    [8, 10, 10, 16], # OK
-                    [4, 4, 4, 4, 10], # OK
-                    [8, 10, 10, 12, 16], # OK
-                    [4, 4, 4, 10], # OK
-                    [12, 14, 14, 16], # OK
-                    [4, 4, 4, 4, 10], # OK
-                    [12, 14, 14, 14, 16], # OK
-                    [4, 4, 4, 10], # FAILS [16]
-                    [12, 14, 14, 16], # OK
-                    [4, 4, 4, 4, 10], # FAILS [18]
-                    [12, 14, 14, 14, 16], # OK
+                    [4, 4, 4, 10],
+                    [8, 10, 10, 16],
+                    [4, 4, 4, 4, 10],
+                    [8, 10, 10, 12, 16],
+                    [4, 4, 4, 10],
+                    [8, 10, 10, 16],
+                    [4, 4, 4, 4, 10],
+                    [8, 10, 10, 12, 16],
+                    [4, 4, 4, 10],
+                    [8, 10, 10, 16],
+                    [4, 4, 4, 4, 10],
+                    [8, 10, 10, 12, 16],
+                    [4, 4, 4, 10],
+                    [12, 14, 14, 16],
+                    [4, 4, 4, 4, 10],
+                    [12, 14, 14, 14, 16],
+                    [4, 4, 4, 10],
+                    [12, 14, 14, 16],
+                    [4, 4, 4, 4, 10],
+                    [12, 14, 14, 14, 16],
                 ],
             ),
             available_backends(),
@@ -237,7 +237,7 @@ def test_gradient_row_of_cells(
             batch_size=batch_size,
             debug_test_args=debug_test_args,
         )
-        #autograd_hooks.debug_print_annotations = True
+        autograd_hooks.debug_print_annotations = True
     else:
         autograd_hooks = None
     if do_compare_cache_tensors:
@@ -253,6 +253,7 @@ def test_gradient_row_of_cells(
         train_cache_kwargs=dict(
             use_new_cache=use_new_cache,
             debug_full_args=True,
+            debug_print_annotations=True,
         )
     )
     accumulator._batch_size = batch_size
@@ -378,3 +379,8 @@ def test_gradient_row_of_cells(
             key=lambda x: x[1], reverse=True,
         ):
             print(f"{shape} [{numel}]: {count}")
+
+
+if __name__ == "__main__":
+    args = args_gradient_row_of_cells()[1]
+    test_gradient_row_of_cells(*args)

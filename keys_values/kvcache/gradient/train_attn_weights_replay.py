@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import replace
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Any
 
 import torch
 
@@ -420,6 +420,50 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             dtype=torch.int32,
         )
 
+    def _append_random_index(self, index: torch.Tensor) -> torch.Tensor:
+        index_len = index.shape[2]
+        if index_len < MAX_DELTA_TRANS_LENGTH:
+            index2 = self._random_index(
+                num=MAX_DELTA_TRANS_LENGTH - index_len,
+                device=index.device,
+            )
+            index = torch.cat((index, index2), dim=2)
+        return index
+
+    def _index_for_before(
+        self,
+        kind: str,
+        index: Optional[torch.Tensor],
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, Optional[Dict[str, Any]]]:
+        if NodeAnnotation.kind_is_scatter(kind):
+            assert index is not None
+            index = index.detach().to(device)
+            assert index.ndim == 4  # Sanity check
+            # If index is too small, we extend it by random entries. This
+            # lowers the probability of false matches
+            extra_info = {"index_len": index.shape[2]}
+            index = self._append_random_index(index)
+        else:
+            index = self._random_index(
+                num=MAX_DELTA_TRANS_LENGTH,
+                device=device,
+            )
+            extra_info = None
+        return index, extra_info
+
+    def _delta_for_before(
+        self,
+        kind: str,
+        index: torch.Tensor,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        if NodeAnnotation.kind_is_scatter(kind):
+            num = min(index.shape[2], MAX_DELTA_TRANS_LENGTH)
+        else:
+            num = index.shape[2]
+        return x.gather(2, index[:, :, :num, :])
+
     def _create_node_before_creator(
         self,
         kind: str,
@@ -433,16 +477,12 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             is_keys = NodeAnnotation.kind_is_keys(kind)
             x = self.kv_buffers.keys() if is_keys else self.kv_buffers.values()
             x = x.detach()[:, :, :self.current_length, :]
-            is_scatter = NodeAnnotation.kind_is_scatter(kind)
-            if is_scatter:
-                index = index.detach().to(x.device)
-                assert index.ndim == 4  # Sanity check
-            else:
-                index = self._random_index(
-                    num=MAX_DELTA_TRANS_LENGTH,
-                    device=x.device,
-                )
-            delta = x.gather(2, index)
+            index, extra_info = self._index_for_before(
+                kind=kind,
+                index=index,
+                device=x.device,
+            )
+            delta = self._delta_for_before(kind, index, x)
             if positions is not None:
                 positions = positions.detach().to(x.device)
             annotation = NodeAnnotation(
@@ -453,6 +493,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 index=index,
                 delta=delta,
                 positions=positions,
+                extra_info=extra_info,
                 debug_msg=debug_msg,
             )
             if self._debug_full_args:
@@ -556,7 +597,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         update_result = None
         if self.current_length >= self.cache_length:
             # scatter case
-            index_kwargs = {"dtype": torch.int64, "device": self._device}
+            index_kwargs = {"dtype": torch.int32, "device": self._device}
             index = self.replay_log.extract_index(
                 self._next_token_pos, num, **index_kwargs
             ).detach()

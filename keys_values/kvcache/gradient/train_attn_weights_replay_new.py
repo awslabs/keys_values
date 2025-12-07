@@ -526,6 +526,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         batch_size, n_query_groups, num, head_size = index.shape
         si_len = sort_index.shape[-1]
         assert sort_index.shape == (batch_size, n_query_groups, si_len)
+        sort_index = sort_index.to(dtype=index.dtype)
         index = index[:, :, :, 0]
         result = torch.empty_like(sort_index).scatter_(
             2,
@@ -570,7 +571,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                     # Used for reordering in padded-query SDPA
                     sort_index = torch.argsort(
                         self.token_positions().detach(), dim=-1,
-                    )
+                    ).to(dtype=torch.int32)
                     extra_info = {"sort_index": sort_index}
                     # `delta_index` is equal to initial slices of `index`.
                     # `ext_index` must be such that if

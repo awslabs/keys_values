@@ -34,8 +34,8 @@ from keys_values.model import GPT
 
 def args_complete_gradient_computation():
     return [
-        a + b + (c,)
-        for a, b, c in product(
+        a + b + (c, d)
+        for a, b, c, d in product(
             [
                 ("lastrec", dict()),
                 ("h2o", {"replay_log_blocksize": 64}),
@@ -45,17 +45,18 @@ def args_complete_gradient_computation():
                 ([128, 128],),
                 ([96, 128],),
             ],
+            [False, True],
             available_backends(),
         )
     ]
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths, device",
+    "cache_name, cache_kwargs, cache_lengths, use_new_cache, device",
     args_complete_gradient_computation(),
 )
 def test_complete_gradient_computation(
-    cache_name, cache_kwargs, cache_lengths, device,
+    cache_name, cache_kwargs, cache_lengths, use_new_cache, device,
 ):
     seed = 31415927
     random.seed(seed)
@@ -139,6 +140,7 @@ def test_complete_gradient_computation(
             layers_per_cell=layers_per_cell,
             chunk_size=chunk_size,
             qname=qname,
+            train_cache_kwargs=dict(use_new_cache=use_new_cache),
             debug_single_cell_per_row=debug_flag,
             debug_dont_use_autograd_hooks=debug_flag,
         )
