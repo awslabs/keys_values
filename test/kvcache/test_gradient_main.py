@@ -140,7 +140,10 @@ def test_complete_gradient_computation(
             layers_per_cell=layers_per_cell,
             chunk_size=chunk_size,
             qname=qname,
-            train_cache_kwargs=dict(use_new_cache=use_new_cache),
+            train_cache_kwargs=dict(
+                use_new_cache=use_new_cache,
+                debug_print_annotations=True,
+            ),
             debug_single_cell_per_row=debug_flag,
             debug_dont_use_autograd_hooks=debug_flag,
         )
@@ -183,3 +186,8 @@ def test_complete_gradient_computation(
             raise IndexError(f"name = {name} is in gradients[0], but not in gradients[1]")
         print(f"Comparing gradient for {name}")
         torch.testing.assert_close(value, value_comp, **kwargs)
+
+
+if __name__ == "__main__":
+    args = args_complete_gradient_computation()[0]
+    test_complete_gradient_computation(*args)

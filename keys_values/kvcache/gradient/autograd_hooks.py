@@ -274,6 +274,11 @@ class AnnotationUsageLog:
         return "\n".join(lines)
 
 
+# The typical shape for `annotation.delta` in phase (1), matching annotations
+# against pack arguments, is
+# `(batch_size, n_query_groups, MAX_DELTA_TRANS_LENGTH, head_size)`. Making
+# this smaller increases the probability of false matches, but speeds up the
+# matching.
 MAX_DELTA_TRANS_LENGTH = 32
 
 
@@ -992,9 +997,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                             )
                             if try_with_cast:
                                 parg_delta = parg_delta.to(dtype=annot_dtype)
-                            annot_delta = self._delta_for_annotation(
-                                annotation, self.n_head,
-                            )
+                            annot_delta = annotation.delta
                             if torch.allclose(
                                 annot_delta, parg_delta, atol=1e-6, rtol=1e-4,
                             ):
@@ -1129,19 +1132,6 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._node_annotations.nodes.clear()
 
     @staticmethod
-    def _delta_with_index(annotation: NodeAnnotation) -> bool:
-        return annotation.is_scatter or annotation.is_cat or annotation.is_ext or annotation.kind == "padded-query"
-
-    @staticmethod
-    def _delta_for_annotation(
-        annotation: NodeAnnotation, n_head: int,
-    ) -> torch.Tensor:
-        delta = annotation.delta
-        if annotation.is_ext:
-            delta = repeat_interleave(delta, n_head)
-        return delta
-
-    @staticmethod
     def _delta_for_pack_argument(
         x: torch.Tensor, annotation: NodeAnnotation, n_head: int,
     ) -> torch.Tensor:
@@ -1150,8 +1140,6 @@ class CellComputationAutogradHooks(AutogradHooks):
             # For "scatter", `index` may be larger than `delta`
             num = min(annotation.delta.shape[2], index.shape[2])
             index = index[:, :, :num, :]
-        if annotation.is_ext:
-            index = repeat_interleave(index, n_head)
         return x.gather(2, index)
 
     @staticmethod

@@ -586,8 +586,11 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                     else:
                         ext_index = self._append_random_index(index)
                     delta = x.gather(2, ext_index)
-                    ext_index = self._transform_index(
-                        index=ext_index, sort_index=sort_index,
+                    ext_index = repeat_interleave(
+                        self._transform_index(
+                            index=ext_index, sort_index=sort_index,
+                        ),
+                        self.n_head,
                     )
                 else:
                     # Ignore annotation
@@ -596,10 +599,9 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                         num=MAX_DELTA_TRANS_LENGTH,
                         device=x.device,
                     )
-                    delta = repeat_interleave(
-                        x.gather(2, ext_index), self.n_head,
-                    )
+                    delta = x.gather(2, ext_index)
                     ext_index = repeat_interleave(ext_index, self.n_head)
+                delta = repeat_interleave(delta, self.n_head)
                 shape = shape_to_tuple(x)
                 if need_ri:
                     shape = (shape[0], self.n_head) + shape[2:]
