@@ -140,10 +140,8 @@ def test_complete_gradient_computation(
             layers_per_cell=layers_per_cell,
             chunk_size=chunk_size,
             qname=qname,
-            train_cache_kwargs=dict(
-                use_new_cache=use_new_cache,
-                debug_print_annotations=True,
-            ),
+            train_cache_kwargs=dict(use_new_cache=use_new_cache),
+            autograd_hooks_kwargs=dict(max_match_trials_pack_arg=4),
             debug_single_cell_per_row=debug_flag,
             debug_dont_use_autograd_hooks=debug_flag,
         )
@@ -189,5 +187,5 @@ def test_complete_gradient_computation(
 
 
 if __name__ == "__main__":
-    args = args_complete_gradient_computation()[0]
+    args = args_complete_gradient_computation()[1]
     test_complete_gradient_computation(*args)

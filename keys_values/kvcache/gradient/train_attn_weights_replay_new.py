@@ -32,7 +32,6 @@ from keys_values.kvcache.base import DefaultKVCache, KVCacheReplayLog
 from keys_values.kvcache.gradient.autograd_hooks import (
     NodeAnnotation,
     Annotations,
-    do_ignore_annotation,
     MAX_DELTA_TRANS_LENGTH,
     create_random_index,
 )
@@ -54,11 +53,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
     As in :class:`TrainingAttnWeightsReplayCache`, the main difficulty here is
     to support the autograd saved tensors hook mechanism by annotating the
     tensors properly.
-
-    Ignoring "ext" annotations following "cat":
-
-    We observe that "ext" annotations following "cat" are not matched by pack
-    args. We still enter "ignore-ext-*" to cover for edge cases.
 
     """
     def __init__(
@@ -239,9 +233,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             raise ValueError(f"query.shape[0] = {query.shape[0]}, batch_size = {self.batch_size}, must be equal")
         # For prefill, we use the default implementation based on :meth:`_prefill`.
         if input_pos == 0:
-            if self._node_annotations is not None:
-                self._ignore_query_annotation(query)
-            # TODO: Should we add "ignore" annotations for the other nodes?
             return super().forward(query, key, value, token_idx, input_pos)
         else:
             return self._forward_if_not_prefill(
@@ -410,16 +401,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         if self.debug_print_annotations:
             print(f"Create {str(annotation)}")
 
-    def _ignore_query_annotation(self, query: torch.Tensor):
-        # `query` should be ignored, even if `n_head > n_query_groups`, because
-        # shapes with `n_head` can also be annotations
-        do_ignore_annotation(
-            x=query,
-            node_annotations=self._node_annotations,
-            kind="ignore-query",
-            layer_idx=self.block_idx,
-        )
-
     def _random_index(
         self, num: int, device: torch.device,
     ) -> torch.Tensor:
@@ -556,51 +537,38 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                     chunk_idx=chunk_idx,
                     kind=kind,
                 )
-            is_scatter = NodeAnnotation.kind_is_scatter(kind)
-            need_ri = need_repeat_interleave(self.n_head, self.n_query_groups)
-            if need_ri or is_scatter:
-                if is_scatter:
-                    assert index is not None
+            if NodeAnnotation.kind_is_scatter(kind):
+                assert index is not None
                 # Create "ext-*" annotation for node `x` after it was created, so
                 # the chunk index is `chunk_idx`
                 # Create index
-                extra_info = None
+                need_ri = need_repeat_interleave(self.n_head, self.n_query_groups)
                 is_keys = NodeAnnotation.kind_is_keys(kind)
-                if is_scatter:
-                    ext_kind = "ext-key" if is_keys else "ext-value"
-                    # Used for reordering in padded-query SDPA
-                    sort_index = torch.argsort(
-                        self.token_positions().detach(), dim=-1,
-                    ).to(dtype=torch.int32)
-                    extra_info = {"sort_index": sort_index}
-                    # `delta_index` is equal to initial slices of `index`.
-                    # `ext_index` must be such that if
-                    # `delta = gather(x, delta_index)` and
-                    # `x1 = gather(x, sort_index)`, then
-                    # `delta == gather(x1, ext_index)`. This means that
-                    # `ext_index` can be used to extract `delta` from the pack
-                    # argument, which is transformed by `sort_index`.
-                    index_len = index.shape[2]
-                    if index_len > MAX_DELTA_TRANS_LENGTH:
-                        ext_index = index[:, :, :MAX_DELTA_TRANS_LENGTH, :]
-                    else:
-                        ext_index = self._append_random_index(index)
-                    delta = x.gather(2, ext_index)
-                    ext_index = repeat_interleave(
-                        self._transform_index(
-                            index=ext_index, sort_index=sort_index,
-                        ),
-                        self.n_head,
-                    )
+                ext_kind = "ext-key" if is_keys else "ext-value"
+                # Used for reordering in padded-query SDPA
+                sort_index = torch.argsort(
+                    self.token_positions().detach(), dim=-1,
+                ).to(dtype=torch.int32)
+                extra_info = {"sort_index": sort_index}
+                # `delta_index` is equal to initial slices of `index`.
+                # `ext_index` must be such that if
+                # `delta = gather(x, delta_index)` and
+                # `x1 = gather(x, sort_index)`, then
+                # `delta == gather(x1, ext_index)`. This means that
+                # `ext_index` can be used to extract `delta` from the pack
+                # argument, which is transformed by `sort_index`.
+                index_len = index.shape[2]
+                if index_len > MAX_DELTA_TRANS_LENGTH:
+                    ext_index = index[:, :, :MAX_DELTA_TRANS_LENGTH, :]
                 else:
-                    # Ignore annotation
-                    ext_kind = "ignore-ext-key" if is_keys else "ignore-ext-value"
-                    ext_index = self._random_index(
-                        num=MAX_DELTA_TRANS_LENGTH,
-                        device=x.device,
-                    )
-                    delta = x.gather(2, ext_index)
-                    ext_index = repeat_interleave(ext_index, self.n_head)
+                    ext_index = self._append_random_index(index)
+                delta = x.gather(2, ext_index)
+                ext_index = repeat_interleave(
+                    self._transform_index(
+                        index=ext_index, sort_index=sort_index,
+                    ),
+                    self.n_head,
+                )
                 delta = repeat_interleave(delta, self.n_head)
                 shape = shape_to_tuple(x)
                 if need_ri:
@@ -615,7 +583,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                     extra_info=extra_info,
                     debug_msg=debug_msg,
                 )
-                if self._debug_full_args and is_scatter:
+                if self._debug_full_args:
                     sort_index = extra_info["sort_index"]
                     x = x.gather(2, expand_index(sort_index, self.head_size))
                     if need_ri:

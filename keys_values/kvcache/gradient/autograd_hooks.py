@@ -30,10 +30,6 @@ _ANNOTATION_KIND_VALUES = {
     "cat-value",
     "ext-key",
     "ext-value",
-    "ignore-ext-key",
-    "ignore-ext-value",
-    "ignore-headgrad",
-    "ignore-query",
     "padded-query",
     "scatter-key",
     "scatter-value",
@@ -116,14 +112,6 @@ class NodeAnnotation:
     @staticmethod
     def kind_is_cat(kind: str) -> bool:
         return kind.startswith("cat")
-
-    @property
-    def is_ignore(self) -> bool:
-        return self.kind_is_ignore(self.kind)
-
-    @staticmethod
-    def kind_is_ignore(kind: str) -> bool:
-        return kind.startswith("ignore")
 
     @property
     def is_ext(self) -> bool:
@@ -220,6 +208,10 @@ class PackHookArgument:
     id: int
     x: torch.Tensor
     shape: Tuple[int, ...]
+    count: int = 0
+
+    def increase_count(self) -> "PackHookArgument":
+        return PackHookArgument(self.id, self.x, self.shape, self.count + 1)
 
 
 @dataclass(frozen=True)
@@ -246,14 +238,41 @@ PackedArgumentType = Union[PackArgumentAsAnnotation, PackArgumentAsIndex, torch.
 
 @dataclass(frozen=True)
 class AnnotationUsageLog:
+    """
+    Statistics about autograd hooks mechanism, can be obtained by
+    :meth:`CellComputationAutogradHooks.annotation_usage_log`.
+
+    - `num_matched_annotations`: Ideally, all annotations are matched (and
+        therefore used to pack arguments).
+    - Number of unmatched pack args: A large number here means there are
+        many pack args of the targeted shapes, which we cannot annotate and
+        pack right now.
+    - `num_unmatched_scatter_cat`: If this is non-zero, the value of
+        `max_match_trials_pack_arg` may be too small. It means that some
+        necessary annotations are not matched, most likely because the
+        respective pack arguments are removed too early, or otherwise because
+        they are not used in the `autograd` graph.
+    - `num_comparisons`: If this is large, the value of
+        `max_match_trials_pack_arg` may be too large. Pack arguments which do
+        not match annotations, remain in the list for too long.
+    - `num_4d_indexes`: Number of 4D broadcast-extended indexes which were
+        matched.
+
+    """
     num_matched_annotations: int
+    num_comparisons: int
+    num_4d_indexes: int
+    num_unmatched_scatter_cat: int
     unmatched_pack_args: List[UnmatchedPackHookArgument] = field(default_factory=list)
     remaining_annotations: List[NodeAnnotationForLog] = field(default_factory=list)
 
     def report(self) -> str:
         lines: List[str] = [
-            f"Number of matched annotations: {self.num_matched_annotations}",
-            f"Number of unmatched pack args: {len(self.unmatched_pack_args)}",
+            f"Number of matched annotations:           {self.num_matched_annotations}",
+            f"Number of unmatched pack args:           {len(self.unmatched_pack_args)}",
+            f"Number of delta comparisons:             {self.num_comparisons}",
+            f"Number of 4D indexes packed:             {self.num_4d_indexes}",
+            f"Number of unmatched scatter annotations: {self.num_unmatched_scatter_cat}",
         ]
         if self.remaining_annotations:
             lines.append("Remaining unmatched annotations:")
@@ -426,10 +445,28 @@ class CellComputationAutogradHooks(AutogradHooks):
 
     For (1), we need to specialize certain annotations to how SDPA is being
     computed (for example, the "ext-*" or "padded-query" kind).
-    For (2), we know that such "outlier" nodes arise during the processing of
-    the first chunk (prefill). Namely, there are `query` nodes in this step,
-    one per layer, which have the same shape as the `value` nodes. We use
-    "ignore-*" annotations to filter these out.
+    For (2), we have a mechanism to remove pack arguments which cannot be
+    matched to annotations after `max_match_trials_pack_arg` calls of
+    :meth:`pack_hook`. This means we only create annotations for nodes which
+    we know how to pack.
+
+    Adjusting `max_match_trials_pack_arg`:
+
+    It is important to properly choose `max_match_trials_pack_arg`, at least
+    in situations where there are a substantial number of pack arguments of
+    target shapes which cannot be matched against annotations. Namely, once
+    a pack argument exists for `max_match_trials_pack_arg` calls of
+    :meth:`pack_hook`, it will be removed as unmatched (and not packed).
+
+    If `max_match_trials_pack_arg` is too large, pack arguments stick around
+    for longer, and there will be more overhead in failed matchings. If
+    `max_match_trials_pack_arg` is too small, pack arguments may be removed
+    before they can be matched against annotations, which reduces memory
+    savings.
+
+    You can adjust `max_match_trials_pack_arg` by monitoring the
+    `num_unmatched_scatter_cat` field in :meth:`annotation_usage_log`. As
+    long as this is 0, `max_match_trials_pack_arg` can be decreased.
 
     Packing for scatter with grace period:
 
@@ -465,7 +502,7 @@ class CellComputationAutogradHooks(AutogradHooks):
     ordering. This is a problem: if "ext-key" (l_idx, c_idx) comes before
     "scatter-key" (l_idx, c_idx) in the backward traversal, we have noy yet
     reconstructed the input to "ext-key". We solve this by
-    `prior_annotation` for the "ext-key" annotation refering to the
+    `prior_annotation` for the "ext-key" annotation referring to the
     "scatter-key" annotation, which can then be done earlier (and skipped
     later).
 
@@ -488,6 +525,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self,
         config: Config,
         batch_size: int,
+        max_match_trials_pack_arg: int = 6,
         log_all_shapes: bool = False,
         debug_test_args: bool = False,
         arrays_cleanup: Optional[ArraysForCleanup] = None,
@@ -497,6 +535,11 @@ class CellComputationAutogradHooks(AutogradHooks):
         Args:
             config: Model configuration
             batch_size: Batch size
+            max_match_trials_pack_arg: Arguments of :meth:`pack_hook` are matched
+                against annotations. A pack argument is removed (and not
+                packed) if it is not matched after this number of
+                :meth:`pack_hook` calls. This avoids running up costs trying to
+                match pack args over and over, which can be significant
             log_all_shapes: See header comment. Defaults to `False`
             debug_test_args: If `True`, pack args are stored with annotations.
                 This is only for testing!
@@ -506,6 +549,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self.n_query_groups = config.n_query_groups
         self.n_head = config.n_head
         self.head_size = config.head_size
+        self._max_comp_pack_arg = max_match_trials_pack_arg
         self.log_all_shapes = log_all_shapes
         self._debug_test_args = debug_test_args
         self._debug_log_args = []
@@ -528,6 +572,9 @@ class CellComputationAutogradHooks(AutogradHooks):
         # ID assigned to next pack hook argument
         self._next_id = None
         self._num_matched_annotations = None
+        self._num_comparisons = None
+        self._num_4d_indexes = None
+        self._num_unmatched_scatter_cat = None
         self._unmatched_pack_args = None
         self._remaining_annotations = None
         self._shapes_counter = None
@@ -583,6 +630,9 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._id_to_unpacked: Dict[int, torch.Tensor] = dict()
         self._next_id = 0
         self._num_matched_annotations = 0
+        self._num_comparisons = 0
+        self._num_4d_indexes = 0
+        self._num_unmatched_scatter_cat = 0
         self._unmatched_pack_args = []
         self._remaining_annotations = None
         if self.log_all_shapes:
@@ -611,6 +661,9 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._id_to_unpacked = None
         self._next_id = None
         self._num_matched_annotations = None
+        self._num_comparisons = None
+        self._num_4d_indexes = None
+        self._num_unmatched_scatter_cat = None
         self._unmatched_pack_args = None
         self._remaining_annotations = None
         self._shapes_counter = None
@@ -702,6 +755,9 @@ class CellComputationAutogradHooks(AutogradHooks):
             remaining_annotations = self._remaining_annotations
         return AnnotationUsageLog(
             num_matched_annotations=self._num_matched_annotations,
+            num_comparisons=self._num_comparisons,
+            num_4d_indexes=self._num_4d_indexes,
+            num_unmatched_scatter_cat=self._num_unmatched_scatter_cat,
             unmatched_pack_args=self._unmatched_pack_args.copy(),
             remaining_annotations=remaining_annotations,
         )
@@ -727,6 +783,7 @@ class CellComputationAutogradHooks(AutogradHooks):
             packed_index = self._pack_4d_index(x)
             if packed_index is not None:
                 # Broadcast-extended index is packed without annotation
+                self._num_4d_indexes += 1
                 self._packed_arg_for_id[new_id] = packed_index
                 if self.debug_print_annotations:
                     print(f"Pack broadcast-extended index: {x.shape}")
@@ -981,7 +1038,10 @@ class CellComputationAutogradHooks(AutogradHooks):
                 parg_shape = pack_arg.shape
                 parg_dtype = pack_arg.x.dtype
                 parg_matched_to = None
-                for an_pos, annotation in enumerate(self._node_annotations.nodes):
+                was_compared = False
+                for an_pos, annotation in reversed(
+                    list(enumerate(self._node_annotations.nodes))
+                ):
                     if annotation.shape == parg_shape:
                         # Shapes matches
                         assert annotation.delta is not None  # sanity check
@@ -990,12 +1050,14 @@ class CellComputationAutogradHooks(AutogradHooks):
                         try_with_cast = (not same_dtype) and parg_dtype == torch.float32
                         if same_dtype or try_with_cast:
                             # Either same dtype, or `parg` is `float32`
+                            was_compared = True
                             parg_delta = self._delta_for_pack_argument(
                                 x=pack_arg.x, annotation=annotation,
                             )
                             if try_with_cast:
                                 parg_delta = parg_delta.to(dtype=annot_dtype)
                             annot_delta = annotation.delta
+                            self._num_comparisons += 1
                             if torch.allclose(
                                 annot_delta, parg_delta, atol=1e-6, rtol=1e-4,
                             ):
@@ -1013,49 +1075,38 @@ class CellComputationAutogradHooks(AutogradHooks):
                                         debug_full_arg=pack_arg.x.clone(),
                                     )
                                 idd = pack_arg.id  # ID of pack argument
-                                if not annotation.is_ignore:
-                                    # Match not to be ignored
-                                    if annotation.match_id is None:
-                                        # Annotation is transformed before
-                                        # being stored in `_packed_arg_for_id`
-                                        value = PackArgumentAsAnnotation(
-                                            annot=self._transform_annotation(
-                                                annotation, pack_arg.x,
-                                            ),
-                                            target_dtype=parg_dtype if try_with_cast else None,
-                                        )
-                                        if self.debug_print_annotations:
-                                            deb_msg = f"Matched {str(annotation)}"
-                                            if annotation.kind == "padded-query":
-                                                deb_msg += f", q_len={annotation.extra_info['q_len']}"
-                                            elif annotation.is_ext:
-                                                si_shape = annotation.extra_info
-                                                si_shape = None if si_shape is None else si_shape.get("sort_index")
-                                                si_shape = None if si_shape is None else si_shape.shape
-                                                deb_msg += f", sort_index={si_shape}"
-                                            print(deb_msg)
-                                        self._packed_arg_for_id[idd] = value
-                                    else:
-                                        # Annotation has been matched before, has ID already
-                                        if self.debug_print_annotations:
-                                            print(f"Matched again {str(annotation)}")
-                                        idd = annotation.match_id
-                                        # `_id_counts` contains IDs of annotations matched >= 2x
-                                        if idd in self._id_counts:
-                                            self._id_counts[idd] += 1
-                                        else:
-                                            self._id_counts[idd] = 2
-                                        if pa_pos == new_entry_pos:
-                                            ret_id = idd
-                                else:
-                                    # Pack hook arg matched against "ignore"
-                                    # annotation is treated like an unmatched
-                                    # pack arg, but is not counted against them
-                                    self._packed_arg_for_id[idd] = pack_arg.x
+                                if annotation.match_id is None:
+                                    # Annotation is transformed before
+                                    # being stored in `_packed_arg_for_id`
+                                    value = PackArgumentAsAnnotation(
+                                        annot=self._transform_annotation(
+                                            annotation, pack_arg.x,
+                                        ),
+                                        target_dtype=parg_dtype if try_with_cast else None,
+                                    )
                                     if self.debug_print_annotations:
-                                        print(f"Ignore {str(annotation)}")
-                                    if self._arrays_cleanup is not None:
-                                        self._arrays_cleanup.add(pack_arg.x)
+                                        deb_msg = f"Matched {str(annotation)}"
+                                        if annotation.kind == "padded-query":
+                                            deb_msg += f", q_len={annotation.extra_info['q_len']}"
+                                        elif annotation.is_ext:
+                                            si_shape = annotation.extra_info
+                                            si_shape = None if si_shape is None else si_shape.get("sort_index")
+                                            si_shape = None if si_shape is None else si_shape.shape
+                                            deb_msg += f", sort_index={si_shape}"
+                                        print(deb_msg)
+                                    self._packed_arg_for_id[idd] = value
+                                else:
+                                    # Annotation has been matched before, has ID already
+                                    if self.debug_print_annotations:
+                                        print(f"Matched again {str(annotation)}")
+                                    idd = annotation.match_id
+                                    # `_id_counts` contains IDs of annotations matched >= 2x
+                                    if idd in self._id_counts:
+                                        self._id_counts[idd] += 1
+                                    else:
+                                        self._id_counts[idd] = 2
+                                    if pa_pos == new_entry_pos:
+                                        ret_id = idd
                                 # Count match and store info to mark annotation
                                 self._num_matched_annotations += 1
                                 parg_matched_to = (an_pos, idd)
@@ -1073,7 +1124,24 @@ class CellComputationAutogradHooks(AutogradHooks):
                         self._node_annotations.nodes[ind] = annotation
                 else:
                     # Pack argument was not matched
-                    rem_pack_args.append(pack_arg)
+                    if was_compared:
+                        pack_arg = pack_arg.increase_count()
+                    if pack_arg.count >= self._max_comp_pack_arg:
+                        idd = pack_arg.id
+                        if self.debug_print_annotations:
+                            print(f"Remove pack arg ID={idd} after {pack_arg.count} match trials")
+                        self._packed_arg_for_id[idd] = pack_arg.x
+                        self._unmatched_pack_args.append(
+                            UnmatchedPackHookArgument(
+                                id=idd,
+                                shape=shape_to_tuple(pack_arg.x),
+                                dtype=pack_arg.x.dtype,
+                            )
+                        )
+                        if self._arrays_cleanup is not None:
+                            self._arrays_cleanup.add(pack_arg.x)
+                    else:
+                        rem_pack_args.append(pack_arg)
             # Unmatched pack arguments:
             self._pack_arguments = rem_pack_args
         if flush_pack_args:
@@ -1120,6 +1188,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                 # We need all "cat", "scatter" annotations, also if they have
                 # not been matched
                 if annotation.is_scatter or annotation.is_cat:
+                    self._num_unmatched_scatter_cat += 1
                     if self.debug_print_annotations:
                         print(f"Unmatched {str(annotation)}: Add with ID={self._next_id}")
                     self._packed_arg_for_id[self._next_id] = PackArgumentAsAnnotation(
@@ -1261,31 +1330,3 @@ def create_random_index(
         for h in range(shape[1]):
             result[b, h, :] = torch.randperm(length, **index_kwargs)[:num]
     return expand_index(result, shape[-1])
-
-
-def do_ignore_annotation(
-    x: torch.Tensor,
-    node_annotations: Annotations,
-    kind: str,
-    layer_idx: int,
-    chunk_idx: int = 0,
-):
-    assert x.ndim == 4
-    ind_shape = tuple(x.shape[:2]) + (MAX_DELTA_TRANS_LENGTH, x.shape[-1])
-    index = create_random_index(
-        shape=ind_shape,
-        length=x.shape[2],
-        device=x.device,
-        dtype=torch.int32,
-    )
-    delta = x.gather(2, index)
-    node_annotations.nodes.append(
-        NodeAnnotation(
-            kind=kind,
-            layer_idx=layer_idx,
-            chunk_idx=chunk_idx,
-            shape=shape_to_tuple(x),
-            index=index,
-            delta=delta,
-        )
-    )

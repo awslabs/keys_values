@@ -30,7 +30,6 @@ from keys_values.kvcache.base import DefaultKVCache, KVCacheReplayLog
 from keys_values.kvcache.gradient.autograd_hooks import (
     NodeAnnotation,
     Annotations,
-    do_ignore_annotation,
     MAX_DELTA_TRANS_LENGTH,
     create_random_index,
 )
@@ -93,13 +92,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
     since no quantization or dequantization are done. Since
     :class:`InferenceAttnWeightsReplayCache` is easily obtained from
     :class:`AttnWeightsReplayCache`, this is the simpler option.
-
-    Annotations for tensors to be ignored:
-
-    We also append annotations for tensors which should be ignored
-    (i.e., not packed). Namely:
-    - If `config.n_head == config.n_query_groups` and `input_pos == 0`, the
-      query tensor has the same shape as key, value. It should be ignored.
 
     """
     def __init__(
@@ -257,8 +249,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         # For prefill, we use the default implementation based on :meth:`_prefill`.
         # If `input_pos > 0`, we use our own special-purpose operators.
         if input_pos == 0:
-            if self._node_annotations is not None:
-                self._ignore_query_annotation(query)
             return super().forward(query, key, value, token_idx, input_pos)
         else:
             return self._forward_if_not_prefill(
@@ -398,16 +388,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         self._node_annotations.append_safe(annotation)
         if self.debug_print_annotations:
             print(f"Create {str(annotation)}")
-
-    def _ignore_query_annotation(self, query: torch.Tensor):
-        # `query` should be ignored, even if `n_head > n_query_groups`, because
-        # shapes with `n_head` can also be annotations
-        do_ignore_annotation(
-            x=query,
-            node_annotations=self._node_annotations,
-            kind="ignore-query",
-            layer_idx=self.block_idx,
-        )
 
     def _random_index(
         self, num: int, device: torch.device,

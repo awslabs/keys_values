@@ -56,6 +56,7 @@ class KVCacheArgs:
     attention_forward_temp_size_gb: Optional[float] = None
     attention_backward_temp_size_gb: Optional[float] = None
     use_new_cache: bool = False  # DEBUG
+    autograd_hooks_kwargs: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         supported_names = KVCacheFactory.supported_names()
