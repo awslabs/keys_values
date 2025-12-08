@@ -12,13 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import csv
 import dataclasses
 import os
 import time
 import warnings
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any
+from typing import Dict, Literal, Optional, Union, Any, Tuple
 
 import lightning as L
 import torch
@@ -165,6 +166,7 @@ def setup(
     record_gpu_memory_period: int = 0,
     debug_check_updates: bool = False,
     generate_with_eval: bool = False,
+    profile_grad_times: int = 0,
 ) -> None:
     """Finetune a model using the LoRA method.
 
@@ -351,6 +353,7 @@ def setup(
         record_gpu_memory_period=record_gpu_memory_period,
         debug_check_updates=debug_check_updates,
         generate_with_eval=generate_with_eval,
+        profile_grad_times=profile_grad_times,
     )
 
 
@@ -374,6 +377,7 @@ def main(
     record_gpu_memory_period: int,
     debug_check_updates: bool,
     generate_with_eval: bool,
+    profile_grad_times: int,
 ) -> None:
     validate_args(train, eval)
 
@@ -486,6 +490,16 @@ def main(
     if file_path.exists():
         load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
+    if profile_grad_times > 0:
+        thresh = kv_cache.autograd_hooks_kwargs["max_match_trials_pack_arg"]
+        profile_grad_params = (
+            Path(out_dir) / f"profile_grad_times_{kv_cache.use_new_cache}_{thresh}.csv",
+            kv_cache.use_new_cache,
+            thresh,
+            profile_grad_times,
+        )
+    else:
+        profile_grad_params = None
     train_time = time.perf_counter()
     token_counts = fit(
         fabric=fabric,
@@ -506,6 +520,7 @@ def main(
         debug_check_updates=debug_check_updates,
         num_trainable_params=num_trainable_params,
         generate_with_eval=generate_with_eval,
+        profile_grad_params=profile_grad_params,
     )
     training_time = time.perf_counter() - train_time
     output = create_finetuning_performance_report(training_time, token_counts, fabric.device.type)
@@ -572,6 +587,7 @@ def fit(
     debug_check_updates: bool,
     num_trainable_params: int,
     generate_with_eval: bool,
+    profile_grad_params: Optional[Tuple[Path, bool, int]],
 ) -> Dict[str, Any]:
     model = state["model"]
     optimizer = state["optimizer"]
@@ -631,6 +647,7 @@ def fit(
     )
     total_t0 = time.perf_counter()
 
+    profile_grad_times = []
     while state["step_count"] < max_steps:
         state["iter_num"] += 1
         iter_t0 = time.perf_counter()
@@ -685,6 +702,18 @@ def fit(
         time_grad_in_secs = (time.perf_counter() - time_grad_t0) * 1000000
         print_with_rank_and_timestamp(f"Finished gradient computation [{time_grad_in_secs:.2} secs]", fabric.global_rank)
         flush_io_streams()
+        profile_grad_times.append(time_grad_in_secs)
+        if profile_grad_params is not None:
+            path, use_new_cache, thresh, num_steps = profile_grad_params
+            with path.open("w") as fp:
+                writer = csv.writer(fp, delimiter=",")
+                writer.writerow(["use_new_cache", "max_match_trials_pack_arg", "time_secs"])
+                prefix = [use_new_cache, thresh]
+                for time_secs in profile_grad_times:
+                    writer.writerow(prefix + [time_secs])
+            if len(profile_grad_times) >= num_steps:
+                print(f"Done {num_steps} updates. Stopping.")
+                exit(0)
 
         if record_gpu_memory_snapshots is not None and record_gpu_memory_kind != 2:
             # Stop recording and store snapshot. For kind 0, this is the single

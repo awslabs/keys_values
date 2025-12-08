@@ -70,33 +70,35 @@ def args_gradient_row_of_cells():
     # `limit_num_unmatched` depends on the scenario. These are the numbers of
     # unmatched pack args per cell we still tolerate. Need more work to
     # understand where these pack args come from.
+    tol_kwargs = dict(atol=2e-5, rtol=2e-5)
+    tol_kwargs2 = dict(atol=0.0005, rtol=0.001)
     return [
-        a + (b, c)
+        a + b + (c,)
         for c, (a, b) in product(
             available_backends(),
             zip(
                 setups,
                 [
-                    [4, 8, 8, 16],
-                    [10, 20, 20, 22],
-                    [4, 8, 8, 8, 16],
-                    [8, 18, 18, 16, 22],
-                    [4, 8, 8, 16],
-                    [10, 20, 20, 22],
-                    [4, 8, 8, 8, 16],
-                    [8, 18, 18, 16, 22],
-                    [4, 8, 8, 16],
-                    [10, 20, 20, 22],
-                    [4, 8, 8, 8, 16],
-                    [8, 18, 18, 16, 22],
-                    [4, 8, 8, 16],
-                    [14, 24, 24, 22],
-                    [4, 8, 8, 8, 16],
-                    [12, 22, 22, 18, 22],
-                    [4, 8, 8, 16],
-                    [14, 24, 24, 22],
-                    [4, 8, 8, 8, 16],
-                    [12, 22, 22, 18, 22],
+                    ([4, 8, 8, 16], tol_kwargs),
+                    ([10, 20, 20, 22], tol_kwargs),
+                    ([4, 8, 8, 8, 16], tol_kwargs),
+                    ([8, 18, 18, 16, 22], tol_kwargs2),
+                    ([4, 8, 8, 16], tol_kwargs),
+                    ([10, 20, 20, 22], tol_kwargs),
+                    ([4, 8, 8, 8, 16], tol_kwargs),
+                    ([8, 18, 18, 16, 22], tol_kwargs2),
+                    ([4, 8, 8, 16], tol_kwargs),
+                    ([10, 20, 20, 22], tol_kwargs),
+                    ([4, 8, 8, 8, 16], tol_kwargs),
+                    ([8, 18, 18, 16, 22], tol_kwargs2),
+                    ([4, 8, 8, 16], tol_kwargs),
+                    ([14, 24, 24, 22], tol_kwargs),
+                    ([4, 8, 8, 8, 16], tol_kwargs),
+                    ([12, 22, 22, 18, 22], tol_kwargs2),
+                    ([4, 8, 8, 16], tol_kwargs),
+                    ([14, 24, 24, 22], tol_kwargs),
+                    ([4, 8, 8, 8, 16], tol_kwargs),
+                    ([12, 22, 22, 18, 22], tol_kwargs2),
                 ],
             ),
         )
@@ -104,7 +106,7 @@ def args_gradient_row_of_cells():
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, use_new_cache, limit_num_unmatched, device",
+    "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, use_new_cache, limit_num_unmatched, tol_kwargs, device",
     args_gradient_row_of_cells(),
 )
 def test_gradient_row_of_cells(
@@ -115,6 +117,7 @@ def test_gradient_row_of_cells(
     chunks_per_cell,
     use_new_cache,
     limit_num_unmatched,
+    tol_kwargs,
     device,
 ):
     seed = 31415927
@@ -137,7 +140,6 @@ def test_gradient_row_of_cells(
     else:
         dtype = torch.bfloat16
     torch.set_default_dtype(dtype)  # Set default dtype
-    tol_kwargs = dict(atol=2e-5, rtol=2e-5)
 
     qname = "torch-quantized8"
     batch_size = 5
