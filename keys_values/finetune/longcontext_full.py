@@ -151,9 +151,7 @@ def setup(
         attention_forward_temp_size_gb=4,
         attention_backward_temp_size_gb=2,
         use_new_cache=False,
-        autograd_hooks_kwargs={
-            "max_match_trials_pack_arg": 8,
-        }
+        max_match_trials_pack_arg=8,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
@@ -539,6 +537,12 @@ def wrap_gpt_model(
             "sdpa_kernels": cache_kwargs["sdpa_kernels"],
             "use_new_cache": kv_cache.use_new_cache,
         }
+        if kv_cache.max_match_trials_pack_arg is not None:
+            autograd_hooks_kwargs = dict(
+                max_match_trials_pack_arg=kv_cache.max_match_trials_pack_arg,
+            )
+        else:
+            autograd_hooks_kwargs = None
         model = LongContextGradientModel(
             **common_kwargs,
             layers_per_cell=kv_cache.layers_per_cell,
@@ -546,7 +550,7 @@ def wrap_gpt_model(
             cache_kwargs=cache_kwargs,
             train_cache_kwargs=train_cache_kwargs,
             backward_tmp_array_limit_gb=backward_tmp_array_limit_gb,
-            autograd_hooks_kwargs=kv_cache.autograd_hooks_kwargs,
+            autograd_hooks_kwargs=autograd_hooks_kwargs,
         )
     else:
         model = LongContextInferenceModel(**common_kwargs)

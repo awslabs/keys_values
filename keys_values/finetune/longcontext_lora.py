@@ -155,9 +155,7 @@ def setup(
         attention_forward_temp_size_gb=4,
         attention_backward_temp_size_gb=2,
         use_new_cache=False,
-        autograd_hooks_kwargs={
-            "max_match_trials_pack_arg": 8,
-        }
+        max_match_trials_pack_arg=8,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
