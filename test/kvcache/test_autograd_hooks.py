@@ -21,10 +21,10 @@ from keys_values.utils import expand_index, repeat_interleave
 
 
 @pytest.mark.parametrize(
-    "dtype, device",
-    product([torch.float32, torch.bfloat16], available_backends()),
+    "device, dtype",
+    product(available_backends(), [torch.float32, torch.bfloat16]),
 )
-def test_extract_delta(dtype, device):
+def test_extract_delta(device, dtype):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)

@@ -72,7 +72,8 @@ def args_gradient_row_of_cells():
     # understand where these pack args come from.
     return [
         a + (b, c)
-        for (a, b), c in product(
+        for c, (a, b) in product(
+            available_backends(),
             zip(
                 setups,
                 [
@@ -98,7 +99,6 @@ def args_gradient_row_of_cells():
                     [12, 22, 22, 18, 22],
                 ],
             ),
-            available_backends(),
         )
     ]
 

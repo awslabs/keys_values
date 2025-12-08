@@ -58,8 +58,7 @@ from keys_values.utils import repeat_interleave
 
 
 @pytest.mark.parametrize(
-    ("n_head", "n_query_groups", "q_len", "kv_len", "dtype", "sliding_window_size", "device"),
-    product_with_devices(
+    *product_with_devices(
         [
             (4, 2, 128, 512, torch.float32, None),
             (4, 4, 1, 256, torch.float32, None),
@@ -72,9 +71,10 @@ from keys_values.utils import repeat_interleave
             (24, 8, 2, 512, torch.float16, 64),
             (9, 3, 128, 512, torch.bfloat16, 96),
         ],
+        "n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size",
     ),
 )
-def test_sdpa_op_gradients(n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size, device):
+def test_sdpa_op_gradients(device, n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -177,8 +177,7 @@ def test_sdpa_op_gradients(n_head, n_query_groups, q_len, kv_len, dtype, sliding
 
 
 @pytest.mark.parametrize(
-    ("n_head", "n_query_groups", "q_len", "kv_len", "dtype", "sliding_window_size", "device"),
-    product_with_devices(
+    *product_with_devices(
         [
             (4, 2, 128, 512, torch.float16, None),
             (4, 4, 8, 256, torch.bfloat16, None),
@@ -192,9 +191,10 @@ def test_sdpa_op_gradients(n_head, n_query_groups, q_len, kv_len, dtype, sliding
             (24, 8, 2, 512, torch.bfloat16, 64),
             (9, 3, 128, 512, torch.float16, 96),
         ],
+        "n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size",
     ),
 )
-def test_sdpa_backward(n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size, device):
+def test_sdpa_backward(device, n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -358,7 +358,8 @@ class QuantizedH2OLogInputsKVCache(QuantizedH2OKVCache, TestLogInputsKVCacheMixi
 def args_gradient_new_and_old_spda():
     return [
         a + b + (c,)
-        for a, b, c in product(
+        for c, a, b in product(
+            available_backends(),
             [
                 ("h2o", {"replay_log_blocksize": 64}),
                 ("qh2o", {"replay_log_blocksize": 64}),
@@ -371,7 +372,6 @@ def args_gradient_new_and_old_spda():
                 (512, [503, 1, 4, 4, 8, 4, 8, 2, 8, 2, 8, 8], [4, 3, 3, 2]),
                 (512, [384, 128, 8, 16, 4, 24, 4, 4, 16, 8], [2, 3, 2, 3]),
             ],
-            available_backends(),
         )
     ]
 

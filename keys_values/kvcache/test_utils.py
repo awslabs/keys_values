@@ -309,11 +309,14 @@ def cache_names_and_devices(
     return result
 
 
-def product_with_devices(list_tuples: List[tuple]) -> List[tuple]:
-    return [
-        a + (b,) for a, b in product(
-            list_tuples,
+def product_with_devices(
+    list_tuples: List[tuple],
+    arg_names: str,
+) -> Tuple[str, List[tuple]]:
+    return "device, " + arg_names, [
+        (a,) + b for a, b in product(
             available_backends(),
+            list_tuples,
         )
     ]
 

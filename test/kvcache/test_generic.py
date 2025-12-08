@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List
+from typing import List, Tuple
 from itertools import product
 import random
 import re
@@ -35,7 +35,7 @@ from keys_values.kvcache.test_utils import (
 )
 
 
-def args_store_retrieve() -> List[tuple]:
+def args_store_retrieve() -> Tuple[str, List[tuple]]:
     names = [
         (name, dict()) for name in KVCacheFactory.supported_names()
         if name.endswith("-default")
@@ -43,12 +43,11 @@ def args_store_retrieve() -> List[tuple]:
         ("h2o-default", dict(grace_period=3)),
         ("h2o-vlen-default", dict(grace_period=3)),
     ]
-    return product_with_devices(names)
+    return product_with_devices(names, "name, kwargs")
 
 
-@pytest.mark.parametrize(
-    "name, kwargs, device", args_store_retrieve())
-def test_store_retrieve(name, kwargs, device):
+@pytest.mark.parametrize(*args_store_retrieve())
+def test_store_retrieve(device, name, kwargs):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)

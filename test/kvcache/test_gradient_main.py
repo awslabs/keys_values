@@ -35,7 +35,8 @@ from keys_values.model import GPT
 def args_complete_gradient_computation():
     return [
         a + b + (c, d)
-        for a, b, c, d in product(
+        for d, a, b, c in product(
+            available_backends(),
             [
                 ("lastrec", dict()),
                 ("h2o", {"replay_log_blocksize": 64}),
@@ -46,7 +47,6 @@ def args_complete_gradient_computation():
                 ([96, 128],),
             ],
             [False, True],
-            available_backends(),
         )
     ]
 

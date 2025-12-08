@@ -34,13 +34,13 @@ from keys_values.utils import expand_index
 
 
 @pytest.mark.parametrize(
-    "name, device",
+    "device, name",
     product(
-        ["h2o-default", "h2o-vlen-default"],
         available_backends(),
+        ["h2o-default", "h2o-vlen-default"],
     )
 )
-def test_grace_period(name, device):
+def test_grace_period(device, name):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -127,14 +127,14 @@ def compute_scores(
 
 
 @pytest.mark.parametrize(
-    "name, dtype, device",
+    "device, name, dtype",
     product(
+        available_backends(),
         ["h2o-default", "h2o-vlen-default"],
         [torch.float32, torch.bfloat16, torch.float16],
-        available_backends(),
     ),
 )
-def test_h2o_scores(name, dtype, device):
+def test_h2o_scores(device, name, dtype):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -202,13 +202,13 @@ def test_h2o_scores(name, dtype, device):
 
 
 @pytest.mark.parametrize(
-    "dtype, device",
+    "device, dtype",
     product(
+        available_backends(),
         [torch.float32, torch.bfloat16, torch.float16],
-        available_backends()
     ),
 )
-def test_token_pos_and_pos_log(dtype, device):
+def test_token_pos_and_pos_log(device, dtype):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)

@@ -459,10 +459,11 @@ class CellComputationAutogradHooks(AutogradHooks):
     :meth:`pack_hook`, it will be removed as unmatched (and not packed).
 
     If `max_match_trials_pack_arg` is too large, pack arguments stick around
-    for longer, and there will be more overhead in failed matchings. If
-    `max_match_trials_pack_arg` is too small, pack arguments may be removed
+    for longer, and there will be more overhead in failed matchings. This can
+    be substantial.
+    If `max_match_trials_pack_arg` is too small, pack arguments may be removed
     before they can be matched against annotations, which reduces memory
-    savings.
+    savings, and may lead to OOM errors.
 
     You can adjust `max_match_trials_pack_arg` by monitoring the
     `num_unmatched_scatter_cat` field in :meth:`annotation_usage_log`. As
