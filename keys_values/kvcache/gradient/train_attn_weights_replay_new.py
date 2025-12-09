@@ -413,12 +413,9 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         )
 
     def _append_random_index(self, index: torch.Tensor) -> torch.Tensor:
-        index_len = index.shape[2]
-        if index_len < MAX_DELTA_TRANS_LENGTH:
-            index2 = self._random_index(
-                num=MAX_DELTA_TRANS_LENGTH - index_len,
-                device=index.device,
-            )
+        num = MAX_DELTA_TRANS_LENGTH - index.shape[2]
+        if num > 0:
+            index2 = self._random_index(num=num, device=index.device)
             index = torch.cat((index, index2), dim=2)
         return index
 
@@ -444,21 +441,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             extra_info = None
         return index, extra_info
 
-    def _delta_for_before(
-        self,
-        kind: str,
-        index: torch.Tensor,
-        x: torch.Tensor,
-        index_len: Optional[int] = None,
-    ) -> torch.Tensor:
-        if NodeAnnotation.kind_is_scatter(kind):
-            assert index_len is not None
-            assert index.shape[2] >= index_len
-            num = index_len
-        else:
-            num = index.shape[2]
-        return x.gather(2, index[:, :, :num, :])
-
     def _create_node_before_creator(
         self,
         kind: str,
@@ -482,11 +464,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 index=index,
                 device=x.device,
             )
-            if NodeAnnotation.kind_is_scatter(kind):
-                index_len = extra_info["index_len"]
-            else:
-                index_len = None
-            delta = self._delta_for_before(kind, index, x, index_len)
+            delta = x.gather(2, index)
             if positions is not None:
                 positions = positions.detach().to(x.device)
             annotation = NodeAnnotation(
@@ -564,11 +542,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 # `delta == gather(x1, ext_index)`. This means that
                 # `ext_index` can be used to extract `delta` from the pack
                 # argument, which is transformed by `sort_index`.
-                index_len = index.shape[2]
-                if index_len > MAX_DELTA_TRANS_LENGTH:
-                    ext_index = index[:, :, :MAX_DELTA_TRANS_LENGTH, :]
-                else:
-                    ext_index = self._append_random_index(index)
+                ext_index = self._append_random_index(index)[:, :, :MAX_DELTA_TRANS_LENGTH, :]
                 delta = x.gather(2, ext_index)
                 ext_index = repeat_interleave(
                     self._transform_index(

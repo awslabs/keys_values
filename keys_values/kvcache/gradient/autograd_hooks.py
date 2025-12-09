@@ -1234,7 +1234,7 @@ class CellComputationAutogradHooks(AutogradHooks):
     @staticmethod
     def _delta_for_annotation(annotation) -> torch.Tensor:
         delta = annotation.delta
-        if annotation.is_scatter and delta.shape[2] > MAX_DELTA_TRANS_LENGTH:
+        if annotation.is_scatter:
             delta = delta[:, :, :MAX_DELTA_TRANS_LENGTH, :]
         return delta
 
@@ -1244,8 +1244,7 @@ class CellComputationAutogradHooks(AutogradHooks):
     ) -> torch.Tensor:
         index = annotation.index
         if annotation.is_scatter:
-            num = min(annotation.delta.shape[2], MAX_DELTA_TRANS_LENGTH)
-            index = index[:, :, :num, :]
+            index = index[:, :, :MAX_DELTA_TRANS_LENGTH, :]
         return x.gather(2, index)
 
     @staticmethod
@@ -1282,8 +1281,8 @@ class CellComputationAutogradHooks(AutogradHooks):
             index_len = None if annotation.extra_info is None else annotation.extra_info.get("index_len")
             if index_len is not None:
                 index = annotation.index[:, :, :index_len, :]
-                assert annotation.delta.shape == index.shape, f"delta.shape={annotation.delta.shape}, index.shape={index.shape}"
-                return replace(annotation, index=index)
+                delta = annotation.delta[:, :, :index_len, :]
+                return replace(annotation, index=index, delta=delta)
             else:
                 return annotation
         else:

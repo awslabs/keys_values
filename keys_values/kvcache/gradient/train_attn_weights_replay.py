@@ -432,21 +432,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             extra_info = None
         return index, extra_info
 
-    def _delta_for_before(
-        self,
-        kind: str,
-        index: torch.Tensor,
-        x: torch.Tensor,
-        index_len: Optional[int] = None,
-    ) -> torch.Tensor:
-        if NodeAnnotation.kind_is_scatter(kind):
-            assert index_len is not None
-            assert index.shape[2] >= index_len
-            num = index_len
-        else:
-            num = index.shape[2]
-        return x.gather(2, index[:, :, :num, :])
-
     def _create_node_before_creator(
         self,
         kind: str,
@@ -465,11 +450,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 index=index,
                 device=x.device,
             )
-            if NodeAnnotation.kind_is_scatter(kind):
-                index_len = extra_info["index_len"]
-            else:
-                index_len = None
-            delta = self._delta_for_before(kind, index, x, index_len)
+            delta = x.gather(2, index)
             if positions is not None:
                 positions = positions.detach().to(x.device)
             annotation = NodeAnnotation(
