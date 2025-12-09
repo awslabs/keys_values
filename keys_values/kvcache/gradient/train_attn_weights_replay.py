@@ -418,8 +418,8 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
     ) -> Tuple[torch.Tensor, Optional[Dict[str, Any]]]:
         if NodeAnnotation.kind_is_scatter(kind):
             assert index is not None
-            index = index.detach().to(device)
             assert index.ndim == 4  # Sanity check
+            index = index.detach().to(device)
             # If index is too small, we extend it by random entries. This
             # lowers the probability of false matches
             extra_info = {"index_len": index.shape[2]}
@@ -437,9 +437,12 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         kind: str,
         index: torch.Tensor,
         x: torch.Tensor,
+        index_len: Optional[int] = None,
     ) -> torch.Tensor:
         if NodeAnnotation.kind_is_scatter(kind):
-            num = min(index.shape[2], MAX_DELTA_TRANS_LENGTH)
+            assert index_len is not None
+            assert index.shape[2] >= index_len
+            num = index_len
         else:
             num = index.shape[2]
         return x.gather(2, index[:, :, :num, :])
@@ -451,7 +454,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         positions: Optional[torch.Tensor] = None,
         debug_msg: Optional[str] = None,
     ):
-        chunk_idx = self._token_chunk_pos - 1  # counter has already been advanced
+        chunk_idx = self._token_chunk_pos - 1  # Counter has already been advanced
         idx_thres = max(1, self._start_token_chunk_pos)
         if self._node_annotations is not None and chunk_idx > idx_thres:
             is_keys = NodeAnnotation.kind_is_keys(kind)
@@ -462,7 +465,11 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 index=index,
                 device=x.device,
             )
-            delta = self._delta_for_before(kind, index, x)
+            if NodeAnnotation.kind_is_scatter(kind):
+                index_len = extra_info["index_len"]
+            else:
+                index_len = None
+            delta = self._delta_for_before(kind, index, x, index_len)
             if positions is not None:
                 positions = positions.detach().to(x.device)
             annotation = NodeAnnotation(
@@ -489,7 +496,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         x: torch.Tensor,
         kind: str,
     ):
-        chunk_idx = self._token_chunk_pos - 1  # counter has already been advanced
+        chunk_idx = self._token_chunk_pos - 1  # Counter has already been advanced
         x = x.detach()
         if self._node_annotations is not None and chunk_idx == self._end_token_chunk_pos - 1:
             # We need to store the final node in order to start the

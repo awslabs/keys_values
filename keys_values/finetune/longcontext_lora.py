@@ -489,9 +489,10 @@ def main(
         load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
     if profile_grad_times > 0:
-        thresh = kv_cache.autograd_hooks_kwargs["max_match_trials_pack_arg"]
+        thresh = kv_cache.max_match_trials_pack_arg
+        name = "new" if kv_cache.use_new_cache else "old"
         profile_grad_params = (
-            Path(out_dir) / f"profile_grad_times_{kv_cache.use_new_cache}_{thresh}.csv",
+            Path(out_dir) / f"profile_grad_times_{name}_{thresh}.csv",
             kv_cache.use_new_cache,
             thresh,
             profile_grad_times,
@@ -585,7 +586,7 @@ def fit(
     debug_check_updates: bool,
     num_trainable_params: int,
     generate_with_eval: bool,
-    profile_grad_params: Optional[Tuple[Path, bool, int]],
+    profile_grad_params: Optional[Tuple[Path, bool, int, int]],
 ) -> Dict[str, Any]:
     model = state["model"]
     optimizer = state["optimizer"]
@@ -702,8 +703,8 @@ def fit(
         flush_io_streams()
         profile_grad_times.append(time_grad_in_secs)
         if profile_grad_params is not None:
-            path, use_new_cache, thresh, num_steps = profile_grad_params
-            with path.open("w") as fp:
+            profile_path, use_new_cache, thresh, num_steps = profile_grad_params
+            with profile_path.open("w") as fp:
                 writer = csv.writer(fp, delimiter=",")
                 writer.writerow(["use_new_cache", "max_match_trials_pack_arg", "time_secs"])
                 prefix = [use_new_cache, thresh]
