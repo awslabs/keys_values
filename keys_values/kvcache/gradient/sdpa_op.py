@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 from typing import Optional, List, Union, Tuple
 
 import torch
@@ -18,9 +19,12 @@ from torch.autograd import Function
 from torch.nn import functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from litgpt.config import Config
+
 from keys_values.attention import (
     scaled_dot_product_attention_in_blocks,
     DefaultKeysAndValues,
+    MultiHeadSelfAttention,
 )
 from keys_values.attention_utils import (
     filter_sdpa_kernels,
@@ -28,9 +32,11 @@ from keys_values.attention_utils import (
     sdpa_attention_weights,
     slice_as_flat,
 )
+from keys_values.use_eager_kernel import transform_mha_kwargs
 from keys_values.utils import expand_index, repeat_interleave
 
 
+# TODO: Remove once SDPAFunction._forward_new is established!
 def sdpa_forward(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -322,13 +328,36 @@ class SDPAFunction(Function):
         _, n_head, q_len, _ = query.shape
         assert q_len <= kv_len
         assert n_query_groups <= n_head and n_head % n_query_groups == 0
-        is_causal = input_pos == 0
-        if is_causal:
+        if input_pos == 0:
             assert q_len == kv_len
             assert token_positions is None
         else:
             assert token_positions is not None
             assert token_positions.shape == key.shape[:-1]
+        return SDPAFunction._forward_new(
+            query=query,
+            key=key,
+            value=value,
+            token_positions=token_positions,
+            input_pos=input_pos,
+            scale_factor=scale_factor,
+            sliding_window_size=sliding_window_size,
+            sdpa_kernels=sdpa_kernels,
+            tmp_array_limit_gb=tmp_array_limit_gb,
+        )
+
+    @staticmethod
+    def _forward_old(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_positions: Optional[torch.Tensor],
+        input_pos: int,
+        scale_factor: float,
+        sliding_window_size: Optional[int] = None,
+        sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
+        tmp_array_limit_gb: Optional[float] = None,
+    ) -> torch.Tensor:
         return sdpa_forward(
             query=query,
             key=key,
@@ -340,6 +369,51 @@ class SDPAFunction(Function):
             sdpa_kernels=sdpa_kernels,
             tmp_array_limit_gb=tmp_array_limit_gb,
         )
+
+    @staticmethod
+    def _forward_new(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_positions: Optional[torch.Tensor],
+        input_pos: int,
+        scale_factor: float,
+        sliding_window_size: Optional[int] = None,
+        sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
+        tmp_array_limit_gb: Optional[float] = None,
+    ) -> torch.Tensor:
+        head_size = query.shape[-1]
+        temp = 1.0 / math.sqrt(head_size)
+        if abs(temp - scale_factor) < 1e-7:
+            attention_scores_scalar = None
+        else:
+            temp = 1.0 / scale_factor
+            attention_scores_scalar = int(temp * temp)
+        config = Config(
+            n_head=query.shape[1],
+            n_query_groups=key.shape[1],
+            head_size=head_size,
+            sliding_window_size=sliding_window_size,
+            attention_logit_softcapping=None,
+            attention_scores_scalar=attention_scores_scalar,
+        )
+        mha_kwargs = dict(
+            sdpa_kernels=sdpa_kernels,
+            tmp_array_limit_gb=tmp_array_limit_gb,
+        )
+        mha = MultiHeadSelfAttention(
+            config, **transform_mha_kwargs(mha_kwargs, config),
+        )
+        return mha.scaled_dot_product_attention(
+            query=query,
+            k_and_v=DefaultKeysAndValues(key, value),
+            input_pos=input_pos,
+            token_positions=token_positions,
+            sdpa_mode=None,
+            sliding_window_size=sliding_window_size,
+            return_attn_weights=False,
+            transpose_result=False,
+        )[0]
 
     @staticmethod
     def setup_context(ctx, inputs, output):
@@ -548,7 +622,7 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
             positions,
         )
         # Compute SDPA
-        attn_output = sdpa_forward(
+        attn_output = SDPAFunction.forward(
             query=query,
             key=key_buffer_new,
             value=value_buffer_new,
@@ -842,7 +916,7 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             key, value, key_buffer, value_buffer,
         )
         # Compute SDPA
-        attn_output = sdpa_forward(
+        attn_output = SDPAFunction.forward(
             query=query,
             key=key_buffer_new,
             value=value_buffer_new,
