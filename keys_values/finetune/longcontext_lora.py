@@ -19,7 +19,7 @@ import time
 import warnings
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any, Tuple
+from typing import Dict, Literal, Optional, Union, Any
 
 import lightning as L
 import torch
@@ -150,12 +150,14 @@ def setup(
             "max_num_ranges": 4,
         },
         randomize_chunk_sizes=False,
+        chunks_per_cell_multiplier=1.0,
         single_tokens_for_targets=False,
         verbose=VerbosityLevels.SOME.value,
         attention_forward_temp_size_gb=4,
         attention_backward_temp_size_gb=2,
         use_new_cache=False,
         max_match_trials_pack_arg=8,
+        use_old_forward_code=False,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
@@ -454,6 +456,7 @@ def main(
             head_model=head_model,
             kv_cache=kv_cache,
             max_batch_size=batch_size,
+            profile_grad_times=profile_grad_times > 0,
         )
     mark_only_lora_as_trainable(model.gpt_model)
 
@@ -491,12 +494,14 @@ def main(
     if profile_grad_times > 0:
         thresh = kv_cache.max_match_trials_pack_arg
         name = "new" if kv_cache.use_new_cache else "old"
-        profile_grad_params = (
-            Path(out_dir) / f"profile_grad_times_{name}_{thresh}.csv",
-            kv_cache.use_new_cache,
-            thresh,
-            profile_grad_times,
-        )
+        profile_grad_params = {
+            "path": Path(out_dir) / f"profile_grad_times_{name}_{thresh}.csv",
+            "use_new_cache": kv_cache.use_new_cache,
+            "max_match_trials_pack_arg": thresh,
+            "profile_grad_times": profile_grad_times,
+            "use_old_forward_code": kv_cache.use_old_forward_code,
+            "cache_name": kv_cache.name,
+        }
     else:
         profile_grad_params = None
     train_time = time.perf_counter()
@@ -586,7 +591,7 @@ def fit(
     debug_check_updates: bool,
     num_trainable_params: int,
     generate_with_eval: bool,
-    profile_grad_params: Optional[Tuple[Path, bool, int, int]],
+    profile_grad_params: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     model = state["model"]
     optimizer = state["optimizer"]
@@ -646,7 +651,6 @@ def fit(
     )
     total_t0 = time.perf_counter()
 
-    profile_grad_times = []
     while state["step_count"] < max_steps:
         state["iter_num"] += 1
         iter_t0 = time.perf_counter()
@@ -686,7 +690,6 @@ def fit(
                 model, DEBUG_NUM_SELECTED_PARAMS, num_trainable_params,
             )
             debug_orig_params = debug_clone_selected_params(model, debug_names)
-        time_grad_t0 = time.perf_counter()
         with fabric.no_backward_sync(model, enabled=is_accumulating):
             loss = model(
                 input_ids=batch[INPUT_IDS_NAME],
@@ -698,19 +701,25 @@ def fit(
             fabric.backward(loss)
 
         running_loss.update(loss.detach())
-        time_grad_in_secs = time.perf_counter() - time_grad_t0
-        print_with_rank_and_timestamp(f"Finished gradient computation [{time_grad_in_secs:.2} secs]", fabric.global_rank)
         flush_io_streams()
-        profile_grad_times.append(time_grad_in_secs)
         if profile_grad_params is not None:
-            profile_path, use_new_cache, thresh, num_steps = profile_grad_params
-            with profile_path.open("w") as fp:
+            records = model.profile_records()
+            skip_names = ("path", "profile_grad_times")
+            fixed_col_names = [
+                name
+                for name in profile_grad_params.keys()
+                if name not in skip_names
+            ]
+            prefix = [profile_grad_params[name] for name in fixed_col_names]
+            var_col_names = list(records[0].keys())
+            with profile_grad_params["path"].open("w") as fp:
                 writer = csv.writer(fp, delimiter=",")
-                writer.writerow(["use_new_cache", "max_match_trials_pack_arg", "time_secs"])
-                prefix = [use_new_cache, thresh]
-                for time_secs in profile_grad_times:
-                    writer.writerow(prefix + [time_secs])
-            if len(profile_grad_times) >= num_steps:
+                writer.writerow(fixed_col_names + var_col_names)
+                for record in records:
+                    row = prefix + [record[name] for name in var_col_names]
+                    writer.writerow(row)
+            num_steps = profile_grad_params["profile_grad_times"]
+            if len(records) >= num_steps:
                 print(f"Done {num_steps} updates. Stopping.")
                 exit(0)
 

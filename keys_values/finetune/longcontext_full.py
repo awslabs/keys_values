@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import csv
 import dataclasses
 import random
 import sys
@@ -146,12 +147,14 @@ def setup(
             "max_num_ranges": 4,
         },
         randomize_chunk_sizes=False,
+        chunks_per_cell_multiplier=1.0,
         single_tokens_for_targets=False,
         verbose=VerbosityLevels.SOME.value,
         attention_forward_temp_size_gb=4,
         attention_backward_temp_size_gb=2,
         use_new_cache=False,
         max_match_trials_pack_arg=8,
+        use_old_forward_code=False,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
@@ -159,6 +162,7 @@ def setup(
     record_gpu_memory_kind: int = 0,
     record_gpu_memory_period: int = 0,
     debug_check_updates: bool = False,
+    profile_grad_times: int = 0,
 ) -> None:
     """Finetune a model.
 
@@ -306,6 +310,7 @@ def setup(
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
         debug_check_updates=debug_check_updates,
+        profile_grad_times=profile_grad_times,
     )
 
 
@@ -329,6 +334,7 @@ def main(
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
     debug_check_updates: bool,
+    profile_grad_times: int,
 ) -> None:
     validate_args(train, eval)
 
@@ -393,6 +399,7 @@ def main(
             head_model=head_model,
             kv_cache=kv_cache,
             max_batch_size=batch_size,
+            profile_grad_times=profile_grad_times > 0,
         )
 
     num_trainable_params = num_parameters(model, requires_grad=True)
@@ -426,6 +433,19 @@ def main(
         if file_path.exists():
             load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
+    if profile_grad_times > 0:
+        thresh = kv_cache.max_match_trials_pack_arg
+        name = "new" if kv_cache.use_new_cache else "old"
+        profile_grad_params = {
+            "path": Path(out_dir) / f"profile_grad_times_{name}_{thresh}.csv",
+            "use_new_cache": kv_cache.use_new_cache,
+            "max_match_trials_pack_arg": thresh,
+            "profile_grad_times": profile_grad_times,
+            "use_old_forward_code": kv_cache.use_old_forward_code,
+            "cache_name": kv_cache.name,
+        }
+    else:
+        profile_grad_params = None
     train_time = time.perf_counter()
     token_counts = fit(
         fabric=fabric,
@@ -446,6 +466,7 @@ def main(
         record_gpu_memory_period=record_gpu_memory_period,
         debug_check_updates=debug_check_updates,
         num_trainable_params=num_trainable_params,
+        profile_grad_params=profile_grad_params,
     )
     training_time = time.perf_counter() - train_time
     output = create_finetuning_performance_report(training_time, token_counts, fabric.device.type)
@@ -488,6 +509,7 @@ def wrap_gpt_model(
     kv_cache: KVCacheArgs,
     max_batch_size: int,
     model_for_training: bool = True,
+    profile_grad_times: bool = False,
 ) -> LongContextGradientModel:
     fabric.print(
         "Assigning KV caches to layers of model:\n"
@@ -517,6 +539,7 @@ def wrap_gpt_model(
         head_model=head_model,
         chunk_size=kv_cache.chunk_size,
         randomize_chunk_sizes=kv_cache.randomize_chunk_sizes,
+        chunks_per_cell_multiplier=kv_cache.chunks_per_cell_multiplier,
         single_tokens_for_targets=kv_cache.single_tokens_for_targets,
         verbose=kv_cache.verbosity_level,
         tmp_array_limit_gb=tmp_array_limit_gb,
@@ -536,6 +559,7 @@ def wrap_gpt_model(
         train_cache_kwargs = {
             "sdpa_kernels": cache_kwargs["sdpa_kernels"],
             "use_new_cache": kv_cache.use_new_cache,
+            "use_old_forward_code": kv_cache.use_old_forward_code,
         }
         if kv_cache.max_match_trials_pack_arg is not None:
             autograd_hooks_kwargs = dict(
@@ -551,6 +575,7 @@ def wrap_gpt_model(
             train_cache_kwargs=train_cache_kwargs,
             backward_tmp_array_limit_gb=backward_tmp_array_limit_gb,
             autograd_hooks_kwargs=autograd_hooks_kwargs,
+            profile_steps=profile_grad_times,
         )
     else:
         model = LongContextInferenceModel(**common_kwargs)
@@ -595,6 +620,7 @@ def fit(
     record_gpu_memory_period: int,
     debug_check_updates: bool,
     num_trainable_params: int,
+    profile_grad_params: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     model = state["model"]
     optimizer = state["optimizer"]
@@ -684,7 +710,6 @@ def fit(
                 model, DEBUG_NUM_SELECTED_PARAMS, num_trainable_params,
             )
             debug_orig_params = debug_clone_selected_params(model, debug_names)
-        time_grad_t0 = time.perf_counter()
         with fabric.no_backward_sync(model, enabled=is_accumulating):
             loss = model(
                 input_ids=batch[INPUT_IDS_NAME],
@@ -695,9 +720,27 @@ def fit(
             fabric.backward(loss)
 
         running_loss.update(loss.detach())
-        time_grad_in_secs = time.perf_counter() - time_grad_t0
-        print_with_rank_and_timestamp(f"Finished gradient computation [{time_grad_in_secs:.2} s]", fabric.global_rank)
         flush_io_streams()
+        if profile_grad_params is not None:
+            records = model.profile_records()
+            skip_names = ("path", "profile_grad_times")
+            fixed_col_names = [
+                name
+                for name in profile_grad_params.keys()
+                if name not in skip_names
+            ]
+            prefix = [profile_grad_params[name] for name in fixed_col_names]
+            var_col_names = list(records[0].keys())
+            with profile_grad_params["path"].open("w") as fp:
+                writer = csv.writer(fp, delimiter=",")
+                writer.writerow(fixed_col_names + var_col_names)
+                for record in records:
+                    row = prefix + [record[name] for name in var_col_names]
+                    writer.writerow(row)
+            num_steps = profile_grad_params["profile_grad_times"]
+            if len(records) >= num_steps:
+                print(f"Done {num_steps} updates. Stopping.")
+                exit(0)
 
         if record_gpu_memory_snapshots is not None:
             # Stop recording and store snapshot. For kind 0, this is the single

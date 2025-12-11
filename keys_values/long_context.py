@@ -50,6 +50,7 @@ class KVCacheArgs:
     chunk_size: int = 16
     cache_kwargs: Optional[Dict[str, Any]] = None
     randomize_chunk_sizes: bool = False
+    chunks_per_cell_multiplier: float = 1.0
     single_tokens_for_targets: bool = False,
     verbose: str = VerbosityLevels.SOME.value
     allocate_buffers: bool = False
@@ -57,6 +58,7 @@ class KVCacheArgs:
     attention_backward_temp_size_gb: Optional[float] = None
     use_new_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
+    use_old_forward_code: bool = False
 
     def __post_init__(self):
         supported_names = KVCacheFactory.supported_names()
@@ -65,6 +67,7 @@ class KVCacheArgs:
         assert self.cache_length >= 1
         assert self.attention_forward_temp_size_gb is None or self.attention_forward_temp_size_gb > 0
         assert self.attention_backward_temp_size_gb is None or self.attention_backward_temp_size_gb > 0
+        assert self.chunks_per_cell_multiplier >= 0.1, f"chunks_per_cell_multiplier = {self.chunks_per_cell_multiplier}, must be >= 0.1"
 
     @property
     def verbosity_level(self) -> VerbosityLevels:
@@ -496,6 +499,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         head_model: HeadModel,
         chunk_size: int = 16,
         randomize_chunk_sizes: bool = False,
+        chunks_per_cell_multiplier: float = 1.0,
         single_tokens_for_targets: bool = False,
         verbose: VerbosityLevels = VerbosityLevels.SOME,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
@@ -518,6 +522,13 @@ class LongContextInferenceModel(GPTAndHeadModel):
             randomize_chunk_sizes: If `True`, chunk sizes are randomized (with
                 mean `chunk_size`). This may have advantages for model
                 training. Defaults to `False`.
+            chunks_per_cell_multiplier: Each cell contains a number of chunks.
+                The length of a cell is the sum of lengths of its cells. We
+                assign chunks to cells so that cell lengths are close to
+                `int(cache_length * chunks_per_cell_multiplier)`, but not
+                larger. The larger this multiplier, the fewer cells per row,
+                which speeds up computation, but also memory requirements of
+                gradient computation per cell scales linearly in this value.
             single_tokens_for_targets: If `True`, the targets part of a
                 sequence is processed token per token (i.e., with chunk size
                 1). This is slower, but more realistic, mirroring how inference
@@ -534,6 +545,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self.config = gpt_model.config
         self.chunk_size = chunk_size
         self.randomize_chunk_sizes = randomize_chunk_sizes
+        if chunks_per_cell_multiplier < 0.1:
+            raise ValueError(f"chunks_per_cell_multiplier = {chunks_per_cell_multiplier}, must be >=0.1")
+        self.chunks_per_cell_multiplier = chunks_per_cell_multiplier
         self.single_tokens_for_targets = single_tokens_for_targets
         self.verbose = verbose
         self._debug_single_cell_per_row = debug_single_cell_per_row
@@ -679,12 +693,15 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 block.attn.kv_cache.cache_length
                 for block in block_iterator(self.gpt_model)
             )
+            max_cell_length = int(
+                max_cache_length * self.chunks_per_cell_multiplier
+            )
             chunks_per_cell = []
             cell_length = 0
             num_chunks = 0
             for chunk_size in chunk_sizes:
                 new_length = cell_length + chunk_size
-                if new_length > max_cache_length:
+                if new_length > max_cell_length:
                     assert num_chunks > 0  # Sanity check
                     chunks_per_cell.append(num_chunks)
                     cell_length = chunk_size

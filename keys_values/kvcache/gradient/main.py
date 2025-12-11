@@ -11,10 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Dict, Any, Tuple, Union, List
 from functools import partial
 import gc
 from pathlib import Path
+import time
+from typing import Optional, Dict, Any, Tuple, Union, List
 
 import torch
 
@@ -172,6 +173,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         layers_per_cell: int,
         chunk_size: int = 16,
         randomize_chunk_sizes: bool = False,
+        chunks_per_cell_multiplier: float = 1.0,
         single_tokens_for_targets: bool = False,
         verbose: VerbosityLevels = VerbosityLevels.SOME,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
@@ -183,6 +185,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         autograd_hooks_kwargs: Optional[Dict[str, Any]] = None,
         debug_dont_use_autograd_hooks: bool = False,
         use_arrays_cleanup: bool = True,
+        profile_steps: bool = False,
     ):
         """
         Args:
@@ -197,6 +200,13 @@ class LongContextGradientModel(LongContextInferenceModel):
             randomize_chunk_sizes: If `True`, chunk sizes are randomized (with
                 mean `chunk_size`). This may have advantages for model
                 training. Defaults to `False`.
+            chunks_per_cell_multiplier: Each cell contains a number of chunks.
+                The length of a cell is the sum of lengths of its cells. We
+                assign chunks to cells so that cell lengths are close to
+                `int(cache_length * chunks_per_cell_multiplier)`, but not
+                larger. The larger this multiplier, the fewer cells per row,
+                which speeds up computation, but also memory requirements of
+                gradient computation per cell scales linearly in this value.
             single_tokens_for_targets: If `True`, the targets part of a
                 sequence is processed token per token (i.e., with chunk size
                 1). This is slower, but more realistic, mirroring how inference
@@ -219,6 +229,11 @@ class LongContextGradientModel(LongContextInferenceModel):
             debug_dont_use_autograd_hooks: Internal option, used for unit
                 testing. If this is set, autograd saved tensors hooks are not
                 used, and we also do not use memory efficient attention.
+            use_arrays_cleanup: We try and track arrays allocated during the
+                backward computation and free them in :meth:`_clear_backward`.
+                Supports recovery from OOM errors mechanism.
+            profile_steps: We measure times of different parts of a gradient
+                computation.
 
         """
         super().__init__(
@@ -226,6 +241,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             head_model,
             chunk_size,
             randomize_chunk_sizes,
+            chunks_per_cell_multiplier,
             single_tokens_for_targets,
             verbose,
             tmp_array_limit_gb,
@@ -273,6 +289,8 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._targets = None
         self._record_gpu_memory_snapshots = None
         self._record_gpu_memory_kind = None
+        self._profile_records = [] if profile_steps else None
+        self._timer_start = None
 
     @property
     def status(self) -> str:
@@ -311,6 +329,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             if self._record_gpu_memory_snapshots is not None:
                 self._record_gpu_memory_kind = kwargs.get("record_gpu_memory_kind", 0)
         if self.training:
+            self._timer_start = time.perf_counter()  # Start timer
             loss_value = self._inference_forward_pass(
                 input_ids, targets, scale_factor,
             )
@@ -374,6 +393,9 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._annotation_usage_logs = dict()
         gc.collect()
         torch.cuda.empty_cache()
+
+    def profile_records(self) -> Optional[List[Dict[str, float]]]:
+        return self._profile_records
 
     def annotation_usage_logs(self) -> Dict[Tuple[int, int], AnnotationUsageLog]:
         """
@@ -623,6 +645,15 @@ class LongContextGradientModel(LongContextInferenceModel):
         number of times, see :class:`TemporaryArrayLimit`.
 
         """
+        if self._profile_records is not None:
+            if torch.cuda.is_available():
+                torch.cuda.current_stream().synchronize()
+            prof_record = {
+                "forward_time": time.perf_counter() - self._timer_start
+            }
+            self._timer_start = time.perf_counter()
+        else:
+            prof_record = None
         # Collect replay logs from the KV caches
         if self.verbose is not VerbosityLevels.NONE:
             print("\nAllocate storage for backward computation")
@@ -671,6 +702,11 @@ class LongContextGradientModel(LongContextInferenceModel):
                                 print(f"Started recording: {self._record_gpu_memory_snapshots.path}")
                         debug_count += 1
 
+        if self._profile_records is not None:
+            if torch.cuda.is_available():
+                torch.cuda.current_stream().synchronize()
+            prof_record["backward_time"] = time.perf_counter() - self._timer_start
+            self._profile_records.append(prof_record)
         self._status = "init"  # Reset
         # Summary of annotation usage logs
         if not self._debug_dont_use_autograd_hooks and self.verbose is not VerbosityLevels.NONE:
