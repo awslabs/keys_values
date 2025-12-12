@@ -356,6 +356,8 @@ def test_gradient_row_of_cells(
             print(f"\nCell(first_chunk_idx {first_chunk_idx}):")
             print(annotation_usage.report())
             num_unmatched.append(len(annotation_usage.unmatched_pack_args))
+            # All annotations should be matched:
+            assert len(annotation_usage.unmatched_annotations) == 0
         assert len(num_unmatched) == len(limit_num_unmatched)
         assert all (a <= b for a, b in zip(num_unmatched, limit_num_unmatched)), (num_unmatched, limit_num_unmatched)
 

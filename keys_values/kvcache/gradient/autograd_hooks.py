@@ -265,7 +265,7 @@ class AnnotationUsageLog:
     num_4d_indexes: int
     num_unmatched_scatter_cat: int
     unmatched_pack_args: List[UnmatchedPackHookArgument] = field(default_factory=list)
-    remaining_annotations: List[NodeAnnotationForLog] = field(default_factory=list)
+    unmatched_annotations: List[NodeAnnotationForLog] = field(default_factory=list)
 
     def report(self) -> str:
         lines: List[str] = [
@@ -275,9 +275,9 @@ class AnnotationUsageLog:
             f"Number of 4D indexes packed:             {self.num_4d_indexes}",
             f"Number of unmatched scatter annotations: {self.num_unmatched_scatter_cat}",
         ]
-        if self.remaining_annotations:
+        if self.unmatched_annotations:
             lines.append("Remaining unmatched annotations:")
-            for a in self.remaining_annotations:
+            for a in self.unmatched_annotations:
                 line = f"  ({a.layer_idx},{a.chunk_idx}): {a.shape}, {a.dtype}, {a.kind}"
                 if a.debug_msg is not None:
                     line += f": {a.debug_msg} -- delta {a.delta_shape}"
@@ -764,7 +764,7 @@ class CellComputationAutogradHooks(AutogradHooks):
             num_4d_indexes=self._num_4d_indexes,
             num_unmatched_scatter_cat=self._num_unmatched_scatter_cat,
             unmatched_pack_args=self._unmatched_pack_args.copy(),
-            remaining_annotations=remaining_annotations,
+            unmatched_annotations=remaining_annotations,
         )
 
     def debug_log_args(self) -> Optional[List[Tuple[torch.Tensor, NodeAnnotation]]]:
@@ -1269,8 +1269,8 @@ class CellComputationAutogradHooks(AutogradHooks):
             Transformed annotation, fit for purpose (2)
 
         """
-        if not annotation.is_scatter and x is None:
-            raise ValueError("x must be given for non-scatter annotation")
+        if not (annotation.is_scatter or annotation.is_cat) and x is None:
+            raise ValueError("x must be given for non-scatter/cat annotation")
         if annotation.kind == "padded-query":
             # We store the full query (without padding) in `delta`. This is
             # different from what is stored there for matching

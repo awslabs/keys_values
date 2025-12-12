@@ -444,8 +444,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         debug_msg: Optional[str] = None,
     ):
         chunk_idx = self._token_chunk_pos - 1  # Counter has already been advanced
-        idx_thres = max(1, self._start_token_chunk_pos)
-        if self._node_annotations is not None and chunk_idx > idx_thres:
+        if self._node_annotations is not None and chunk_idx > self._start_token_chunk_pos:
             is_keys = NodeAnnotation.kind_is_keys(kind)
             x = self.kv_buffers.keys() if is_keys else self.kv_buffers.values()
             x = x.detach()[:, :, :self.current_length, :]

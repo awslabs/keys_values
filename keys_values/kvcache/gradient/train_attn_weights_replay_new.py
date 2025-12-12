@@ -449,11 +449,11 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         debug_msg: Optional[str] = None,
     ):
         chunk_idx = self._token_chunk_pos - 1  # Counter has already been advanced
-        # For the first cell, we do not create an annotation for `chunk_idx - 1`
-        # if `chunk_idx == 1`. This is because the first (prefill) SDPA call
-        # does not need to be supported by an "ext" annotation.
-        idx_thres = max(1, self._start_token_chunk_pos)
-        if self._node_annotations is not None and chunk_idx > idx_thres:
+        # If this is the first cell and `chunk_idx == 1`, we do not have to create
+        # an annotation, because the corresponding "ext" annotation does not need
+        # to be supported.
+        thres_idx = max(self._start_token_chunk_pos, 1)
+        if self._node_annotations is not None and chunk_idx > thres_idx:
             # This annotation is for `x` before the node is created, so the
             # chunk index is `chunk_idx - 1`.
             is_keys = NodeAnnotation.kind_is_keys(kind)
