@@ -24,7 +24,7 @@ from keys_values.kvcache.quant_buffers import QuantizedKVCacheBuffers
 
 DEFAULT_COMBINATION_CONSTANT = 0.5
 
-DEFAULT_SCRATCH_BLOCKSIZE = 20
+DEFAULT_SCRATCH_BLOCKSIZE = 1024
 
 
 class QuantizedH2OKVCache(H2OKVCache):

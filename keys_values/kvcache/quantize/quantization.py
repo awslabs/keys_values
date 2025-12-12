@@ -190,7 +190,8 @@ class Quantizer(torch.nn.Module):
             x: Array to be quantized, shape `(batch_size, n_query_groups, num, head_size)`
 
         Returns:
-            L2 quantization error `vector_norm(x - dequant(quant(x)), dim=-1)`
+            L2 quantization error `vector_norm(x - dequant(quant(x)), dim=-1)`.
+            Here, `dtype=float32` independent of `x.dtype`.
 
         """
         raise NotImplementedError

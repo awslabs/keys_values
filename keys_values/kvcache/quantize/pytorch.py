@@ -377,7 +377,7 @@ class TorchBasicQuantizer(Quantizer):
         ).reshape(fin_shape)
         if self.blocks_over_heads:
             dq_x = dq_x.transpose(1, 2)
-        return vector_norm(x - dq_x, dim=-1, dtype=torch.float)
+        return vector_norm(x - dq_x, dim=-1, dtype=torch.float32)
 
     def create_quantizer_state(
         self,

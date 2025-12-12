@@ -388,7 +388,7 @@ class BitsAndBytesQuantizer(Quantizer):
         else:
             q_x, state = quant_func(x.reshape(-1, self.blocksize).contiguous())
             dq_x = dequant_func(q_x, quant_state=state).view_as(x)
-        return vector_norm(x - dq_x, dim=-1, dtype=torch.float)
+        return vector_norm(x - dq_x, dim=-1, dtype=torch.float32)
 
     def create_quantizer_state(
         self,
