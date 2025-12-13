@@ -223,7 +223,7 @@ def copy_gradients(
     model: torch.nn.Module, device: Optional[torch.device] = None,
 ) -> Dict[str, torch.Tensor]:
     return {
-        name: param.grad.to(device=device, copy=True)
+        name: param.grad.data.to(device=device, copy=True)
         for name, param in model.named_parameters()
         if param.grad is not None
     }
@@ -254,9 +254,9 @@ def exchange_kv_cache_checkpoints(accumulator: GradientAccumulator):
     )
 
 
-def available_backends() -> List[torch.device]:
+def available_backends(do_mps: bool = True) -> List[torch.device]:
     result = [torch.device("cpu")]
-    if RUN_TESTS_FOR_MPS and torch.backends.mps.is_available():
+    if do_mps and RUN_TESTS_FOR_MPS and torch.backends.mps.is_available():
         result.append(torch.device("mps"))
     if torch.cuda.is_available():
         result.append(torch.device("cuda:0"))
@@ -348,3 +348,15 @@ def range_from_args(
         "value": data["value"][:, :, start:end, :],
         "token_idx": data["token_idx"][:, start:end],
     }
+
+
+def debug_print_gradients(model: torch.nn.Module):
+    rows = []
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if param.grad is not None:
+                row = f"{name}: {param.grad.data.shape}"
+            else:
+                row = f"{name}: None"
+            rows.append(row)
+    print("\n".join(rows))

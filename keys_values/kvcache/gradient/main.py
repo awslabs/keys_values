@@ -22,8 +22,10 @@ import torch
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import MultiHeadSelfAttention
 from keys_values.head_model import HeadModel
-from keys_values.kvcache.base import KVCacheReplayLog
-from keys_values.kvcache.factory import SUPPORTED_QUANTIZERS
+from keys_values.kvcache.factory import (
+    SUPPORTED_QUANTIZERS,
+    deallocate_kv_cache_buffers_of_model,
+)
 from keys_values.kvcache.gradient.accumulate import GradientAccumulator
 from keys_values.kvcache.gradient.autograd_hooks import (
     CellComputationAutogradHooks,
@@ -49,6 +51,16 @@ from keys_values.long_context import (
     LongContextInferenceModel, GPTAndHeadModel, oom_exception_action,
 )
 from keys_values.model import GPT, block_iterator, device_for_layer
+from keys_values.optimize.clone_model import (
+    clone_model_via_flat_vectors,
+    copy_flat_vectors_to,
+)
+from keys_values.optimize.model_factory import (
+    ModelFromFlatVectorsFactory,
+    BlockComponentName,
+)
+from keys_values.optimize.module_wrapper import AccessWeightsGradients
+from keys_values.utils import copy_parameters  # DEBUG
 
 
 class LossValue(torch.Tensor):
@@ -103,6 +115,12 @@ class LossValue(torch.Tensor):
         if not self._model.ready_for_backward():
             raise IndexError("Model not ready to run 'backward'")
         self._model.backward()
+
+
+def check_model_is_on_cpu(model: torch.nn.Module, model_name: str):
+    for name, param in model.named_parameters():
+        if param.device.type != "cpu":
+            raise ValueError(f"Model {model_name} must be on CPU, but device['{name}'] = {param.device}")
 
 
 class LongContextGradientModel(LongContextInferenceModel):
@@ -165,6 +183,20 @@ class LongContextGradientModel(LongContextInferenceModel):
     is shared between forward and backward computations. The KV cache buffers
     are automatically reallocated when required next.
 
+    CPU offloading:
+
+    If `cpu_offload_device` is given, the models `gpt_model`, `head_model` are
+    on the CPU. They are temporarily copied to the device `cpu_offload_device`.
+    This feature is used in training mode only.
+
+    * The complete model is copied to the device for
+      :meth:`_inference_forward_pass`. The copy is deallocated at the end of
+      this method.
+    * During :meth:`_backward_accumulate_gradients`, we create device copies
+      of shards which are needed for each row of cells. Since the full model
+      is not on the device, device memory can be used to speed up the gradient
+      computations.
+
     """
     def __init__(
         self,
@@ -186,6 +218,10 @@ class LongContextGradientModel(LongContextInferenceModel):
         debug_dont_use_autograd_hooks: bool = False,
         use_arrays_cleanup: bool = True,
         profile_steps: bool = False,
+        cpu_offload_device: Optional[torch.device] = None,
+        clone_model_via_flat_vectors: bool = False,
+        debug_gpt_model: Optional[GPT] = None,
+        debug_store_intermediates: bool = False,
     ):
         """
         Args:
@@ -234,6 +270,12 @@ class LongContextGradientModel(LongContextInferenceModel):
                 Supports recovery from OOM errors mechanism.
             profile_steps: We measure times of different parts of a gradient
                 computation.
+            cpu_offload_device: See above. If given, computations are done on
+                this device, but the model is on the CPU.
+            clone_model_via_flat_vectors: If `cpu_offload_device` is given and
+                this is `True`, the model is cloned by extracting parameters as
+                flat vectors and copying them. This could be faster. Can only
+                be used if `cpu_offload_device` is not the CPU.
 
         """
         super().__init__(
@@ -246,6 +288,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             verbose,
             tmp_array_limit_gb,
             debug_single_cell_per_row,
+            debug_store_intermediates,
         )
         if qname is None:
             qname = "torch-quantized8"
@@ -287,14 +330,36 @@ class LongContextGradientModel(LongContextInferenceModel):
         self.accumulator = None
         self._input_ids = None
         self._targets = None
+        self._replay_logs = None
         self._record_gpu_memory_snapshots = None
         self._record_gpu_memory_kind = None
         self._profile_records = [] if profile_steps else None
         self._timer_start = None
+        self.cpu_offload_device = cpu_offload_device
+        self._clone_model_via_flat_vectors = clone_model_via_flat_vectors
+        self._gpt_model_on_device = None
+        self._head_model_on_device = None
+        self._init_cpu_offloading()
+        # DEBUG:
+        self._debug_gpt_model = debug_gpt_model
+        if debug_store_intermediates:
+            self._train_cache_kwargs = dict(
+                self._train_cache_kwargs,
+                debug_intermediates=self.debug_intermediates,
+            )
 
     @property
     def status(self) -> str:
         return self._status
+
+    def _init_cpu_offloading(self):
+        if self.cpu_offload_device is not None:
+            if self.cpu_offload_device.type == "cuda" and not torch.cuda.is_available():
+                raise ValueError(f"cpu_offload_device.type = {self.cpu_offload_device.type}, but CUDA is not available")
+            check_model_is_on_cpu(self.gpt_model, "gpt_model")
+            check_model_is_on_cpu(self.head_model, "head_model")
+            if self._clone_model_via_flat_vectors and self.cpu_offload_device.type == "cpu":
+                raise ValueError("If clone_model_via_flat_vectors is set, cpu_offload_device must not be CPU")
 
     def forward(
         self,
@@ -375,6 +440,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         self.layer_checkpoints = None
         self._input_ids = None
         self._targets = None
+        self._replay_logs = None
         self._record_gpu_memory_snapshots = None
         self._record_gpu_memory_kind = None
         self._clear_backward()
@@ -391,6 +457,10 @@ class LongContextGradientModel(LongContextInferenceModel):
             del self.autograd_hooks
             self.autograd_hooks = None
         self._annotation_usage_logs = dict()
+        del self._gpt_model_on_device
+        self._gpt_model_on_device = None
+        del self._head_model_on_device
+        self._head_model_on_device = None
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -586,6 +656,43 @@ class LongContextGradientModel(LongContextInferenceModel):
                 input_pos=input_pos,
             )
 
+    def _copy_model_to_device(self) -> Tuple[GPT, HeadModel]:
+        """
+        Creates deep copies of `self.gpt_model`, `self.head_model` on device
+        `self.cpu_offload_device`. For the KV caches, we use shallow copies
+        based on :meth:`KVCache.clone`.
+
+        Returns:
+            `gpt_model, head_model`. These are copies of `self.cpu_offload_device``
+            is given, otherwise equal to `self.gpt_model, self.head_model`
+
+        """
+        if self.cpu_offload_device is not None:
+            deallocate_kv_cache_buffers_of_model(self.gpt_model)
+            if not self._clone_model_via_flat_vectors:
+                gpt_model = self.gpt_model.clone(device=self.cpu_offload_device)
+            else:
+                gpt_model = clone_model_via_flat_vectors(
+                    model=self.gpt_model,
+                    device=self.cpu_offload_device,
+                )
+            head_model = self.head_model.clone(device=self.cpu_offload_device)
+            # DEBUG
+            print("\n[_copy_model_to_device]")
+            if self._debug_gpt_model is not None:
+                # Exact copy (DEBUG)
+                print("_copy_model_to_device: Exact copy")
+                copy_parameters(self._debug_gpt_model, gpt_model)
+                #for name, param in self._debug_gpt_model.named_parameters():
+                #    param_comp = gpt_model.get_parameter(name)
+                #    print(f"Compare {name}")
+                #    torch.testing.assert_close(param.data, param_comp.data)
+            # END DEBUG
+        else:
+            gpt_model = self.gpt_model
+            head_model = self.head_model
+        return gpt_model, head_model
+
     def _inference_forward_pass(
         self,
         input_ids: torch.Tensor,
@@ -617,21 +724,56 @@ class LongContextGradientModel(LongContextInferenceModel):
                 ]
             )
             print("\n".join(lines))
-        # Ensure that all KV caches record replay logs
-        for block in block_iterator(self.gpt_model):
-            block.attn.kv_cache.switch_replay_logging(True)
+        gpt_model, head_model = self._copy_model_to_device()
+        if self.cpu_offload_device is not None:
+            # We need them in the backward pass
+            self._gpt_model_on_device = gpt_model
+            self._head_model_on_device = head_model
+        gpt_model_old = self.gpt_model
+        head_model_old = self.head_model
+        try:
+            self.gpt_model = gpt_model
+            self.head_model = head_model
+            # Ensure that all KV caches record replay logs
+            for block in block_iterator(self.gpt_model):
+                block.attn.kv_cache.switch_replay_logging(True)
 
-        if self._record_gpu_memory_kind == 1:
-            self._record_gpu_memory_snapshots.set_path(
-                self._record_gpu_memory_snapshots.path.parent / "snapshot_forward.pickle"
-            )
-            self._record_gpu_memory_snapshots.start_recording()
+            if self._record_gpu_memory_kind == 1:
+                self._record_gpu_memory_snapshots.set_path(
+                    self._record_gpu_memory_snapshots.path.parent / "snapshot_forward.pickle"
+                )
+                self._record_gpu_memory_snapshots.start_recording()
 
-        # Run inference forward pass. Layer inputs are checkpointed. Mean
-        # reduction over batch dimension.
-        loss_full = self._forward_internal(
-            input_ids, targets, scale_factor,
-        ).mean()
+            # Run inference forward pass. Layer inputs are checkpointed. Mean
+            # reduction over batch dimension.
+            loss_full = self._forward_internal(
+                input_ids, targets, scale_factor,
+            ).mean()
+        finally:
+            # Restore
+            self.gpt_model = gpt_model_old
+            self.head_model = head_model_old
+
+        # Replay logs from KV caches are required in
+        # :meth:`_backward_accumulate_gradients`
+        self._replay_logs = []
+        for block in block_iterator(gpt_model):
+            cache = block.attn.kv_cache
+            self._replay_logs.append(cache.get_replay_log())
+            cache.switch_replay_logging(False)
+        if self.cpu_offload_device is not None:
+            # We keep the model on the device, but remove parameters for all
+            # blocks (layers). In :meth:`_backward_accumulate_gradients`, we
+            # bring back parameters in separate shards.
+            ModelFromFlatVectorsFactory.remove_params_of_model(gpt_model)
+            # DEBUG
+            print("\n[Model nodes in _inference_forward_pass]")
+            for k, v in gpt_model.state_dict().items():
+                if v is not None:
+                    print(k)
+            # END DEBUG
+
+        torch.cuda.empty_cache()
         self._status = "forward_done"
         return LossValue(loss_full, model=self)
 
@@ -654,15 +796,10 @@ class LongContextGradientModel(LongContextInferenceModel):
             self._timer_start = time.perf_counter()
         else:
             prof_record = None
-        # Collect replay logs from the KV caches
+        if self._replay_logs is None:
+            raise IndexError("No KV cache replay logs: Must call `forward` before `backward`")
         if self.verbose is not VerbosityLevels.NONE:
             print("\nAllocate storage for backward computation")
-        replay_logs = []
-        for block in block_iterator(self.gpt_model):
-            cache = block.attn.kv_cache
-            replay_logs.append(cache.get_replay_log())
-            cache.switch_replay_logging(False)
-        torch.cuda.empty_cache()
 
         if self._record_gpu_memory_kind == 1:
             self._record_gpu_memory_snapshots.store_current_snapshot()
@@ -676,13 +813,13 @@ class LongContextGradientModel(LongContextInferenceModel):
         # Call :meth:`_backward_accumulate_gradients_nocheck`. May be done
         # several times with reduced memory limits
         if self._backward_tmp_array_limit_gb is None:
-            self._backward_accumulate_gradients_nocheck(replay_logs)
+            self._backward_accumulate_gradients_nocheck()
         else:
             is_done = False
             debug_count = 0
             while not is_done:
                 try:
-                    self._backward_accumulate_gradients_nocheck(replay_logs)
+                    self._backward_accumulate_gradients_nocheck()
                     is_done = True
                 except RuntimeError as ex:
                     oom_exception_action(ex, self._backward_tmp_array_limit_gb)
@@ -734,9 +871,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                         ] + [""]
                 print("\n".join(lines))
 
-    def _backward_accumulate_gradients_nocheck(
-        self, replay_logs: List[KVCacheReplayLog],
-    ):
+    def _backward_accumulate_gradients_nocheck(self):
         """
         Main workhorse. Runs nested activation checkpointing in order to
         accumulate gradients in the model.
@@ -745,17 +880,23 @@ class LongContextGradientModel(LongContextInferenceModel):
         `layer_idx = config.n_layer + 1`.
 
         """
+        def device_for_slice(layer_idx):
+            if self.cpu_offload_device is not None:
+                return self.cpu_offload_device
+            else:
+                return device_for_layer(
+                    self.gpt_model,
+                    min(layer_idx, self.gpt_model.config.n_layer - 1),
+                )
+
         def get_inputs_slice(
             start: int, end: int, layer_idx: int,
         ) -> torch.Tensor:
-            n_layer = self.gpt_model.config.n_layer
             return self.layer_checkpoints.get_checkpoint(
                 layer_idx=layer_idx,
                 input_pos=start,
                 num=end - start,
-                device=device_for_layer(
-                    self.gpt_model, min(layer_idx, n_layer - 1),
-                ),
+                device=device_for_slice(layer_idx),
             )
 
         def get_head_gradients_slice(start: int, end: int) -> torch.Tensor:
@@ -764,7 +905,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 layer_idx=n_layer + 1,
                 input_pos=start,
                 num=end - start,
-                device=device_for_layer(self.gpt_model, n_layer - 1),
+                device=device_for_slice(n_layer - 1),
             )
 
         def write_head_gradients_slice(
@@ -782,21 +923,61 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._create_members_for_backward()
         # Reset annotation usage logs
         self._annotation_usage_logs = dict()
+        if self.cpu_offload_device is None:
+            gpt_model_on_device = self.gpt_model
+            head_model_on_device = self.head_model
+        else:
+            gpt_model_on_device = self._gpt_model_on_device
+            head_model_on_device = self._head_model_on_device
 
         # Start with gradient w.r.t. head model, which also provides the
         # head gradients for the final layer.
         if self.verbose is VerbosityLevels.SOME:
             num_rows = len(self.layer_checkpoints.layer_numbers) - 2
             print(f"\nRunning backward pass over {num_rows} rows of cells, {self.config.n_layer} layers, using activation checkpointing")
+        if self.cpu_offload_device is None:
+            final_device = device_for_layer(self.gpt_model, -1)
+            self._targets = self._targets.to(device=final_device)
+            head_model_on_device = head_model_on_device.to(device=final_device)
+        else:
+            self._targets = self._targets.to(device=self.cpu_offload_device)
         self.accumulator.run_head_model(
-            gpt_model=self.gpt_model,
-            head_model=self.head_model,
-            replay_logs=replay_logs,
+            gpt_model=gpt_model_on_device,
+            head_model=head_model_on_device,
+            replay_logs=self._replay_logs,
             chunks_per_cell=self.chunks_per_cell,
             get_inputs_slice=partial(get_inputs_slice, layer_idx=self.config.n_layer),
             write_head_gradients_slice=write_head_gradients_slice,
             targets=self._targets,
         )
+        if self.cpu_offload_device is not None:
+            module_pairs = [
+                (
+                    self._gpt_model_on_device.transformer.ln_f,
+                    self.gpt_model.transformer.ln_f,
+                ),
+                (
+                    self._head_model_on_device,
+                    self.head_model,
+                )
+            ]
+            if self.head_model.needs_logits():
+                module_pairs.append(
+                    (
+                        self._gpt_model_on_device.lm_head,
+                        self.gpt_model.lm_head,
+                    )
+                )
+            if self._debug_gpt_model is not None:
+                debug_modules = [
+                    self._debug_gpt_model.transformer.ln_f,
+                    None,
+                ]
+                if self.head_model.needs_logits():
+                    debug_modules.append(self._debug_gpt_model.lm_head)
+            else:
+                debug_modules = None
+            self._accumulate_gradients(module_pairs, debug_modules)
 
         if self._record_gpu_memory_kind == 0:
             # End of recording for initial snapshot (everything before the
@@ -817,11 +998,23 @@ class LongContextGradientModel(LongContextInferenceModel):
             if self._use_arrays_cleanup and self.autograd_hooks is not None:
                 self.autograd_hooks.arrays_cleanup.reset()
             num_layers = end_layer_idx - first_layer_idx
-            model_part = DefaultCellBlocks(
-                model=self.gpt_model,
-                first_layer_idx=first_layer_idx,
-                num_layers=num_layers,
-            )
+            if self.cpu_offload_device is None:
+                model_part = DefaultCellBlocks(
+                    model=self.gpt_model,
+                    first_layer_idx=first_layer_idx,
+                    num_layers=num_layers,
+                )
+            else:
+                model_part = self._create_model_shard_on_device(
+                    first_layer_idx=first_layer_idx,
+                    num_layers=num_layers,
+                )
+                # DEBUG
+                print("\n[Model nodes after restore_params_of_model]")
+                for k, v in gpt_model_on_device.state_dict().items():
+                    if v is not None:
+                        print(k)
+                # END DEBUG
             # Does gradient accumulation for all weights in layers covered
             # by `model_part`. Also,
             # `head_gradients` is overwritten by the "bottom gradients", which
@@ -845,6 +1038,27 @@ class LongContextGradientModel(LongContextInferenceModel):
                 write_head_gradients_slice=write_head_gradients_slice,
                 record_gpu_memory_snapshots=snapshots,
             )
+            if self.cpu_offload_device is not None:
+                module_pairs = [
+                    (
+                        self._gpt_model_on_device.transformer.h[i],
+                        self.gpt_model.transformer.h[i],
+                    )
+                    for i in range(first_layer_idx, end_layer_idx)
+                ]
+                if self._debug_gpt_model is not None:
+                    debug_modules = [
+                        self._debug_gpt_model.transformer.h[i]
+                        for i in range(first_layer_idx, end_layer_idx)
+                    ]
+                else:
+                    debug_modules = None
+                self._accumulate_gradients(module_pairs, debug_modules)
+                ModelFromFlatVectorsFactory.remove_params_of_model(
+                    model=self._gpt_model_on_device,
+                    start=first_layer_idx,
+                    end=end_layer_idx,
+                )
             for first_chunk_idx, annot_log in self.accumulator.annotation_usage_logs().items():
                 self._annotation_usage_logs[
                     (first_layer_idx, first_chunk_idx)
@@ -857,11 +1071,109 @@ class LongContextGradientModel(LongContextInferenceModel):
             self._record_gpu_memory_snapshots.path = str(record_path.parent / "snapshot_final.pickle")
             self._record_gpu_memory_snapshots.start_recording()
         self.accumulator.run_input_embeddings(
-            gpt_model=self.gpt_model,
+            gpt_model=gpt_model_on_device,
             input_ids=self._input_ids,
             get_head_gradients_slice=get_head_gradients_slice,
         )
+        if self.cpu_offload_device is not None:
+            if self._debug_gpt_model is not None:
+                debug_modules = [self._debug_gpt_model.transformer.wte]
+            else:
+                debug_modules = None
+            self._accumulate_gradients(
+                [
+                    (
+                        self._gpt_model_on_device.transformer.wte,
+                        self.gpt_model.transformer.wte,
+                    )
+                ],
+                debug_modules,
+            )
         self._deallocate_buffers()
+
+    def _create_model_shard_on_device(
+        self,
+        first_layer_idx: int,
+        num_layers: int,
+    ) -> DefaultCellBlocks:
+        """
+        Helper function for :meth:`_backward_accumulate_gradients_nocheck`, if
+        `cpu_offload_device` is used. In this case, `gpt_model` is on CPU,
+        `_gpt_model_on_device` is on device `cpu_offload_device`, but has all
+        parameters removed. We restore parameters of the model on device for
+        the shard `range(first_layer_idx, first_layer_idx + num_layers)` from
+        values of `gpt_model`, then return a :class:`DefaultCellBlocks` object
+        for the shard.
+
+        Args:
+            first_layer_idx: Index of first layer of shard
+            num_layers: Number of layers of shard
+
+        Returns:
+            :class:`DefaultCellBlocks` object for the shard
+
+        """
+        assert self.cpu_offload_device is not None
+        # Read out flat vectors from `gpt_model` and copy to device
+        param_structures = dict()
+        weights_vecs = dict()
+        for layer_idx in range(first_layer_idx, first_layer_idx + num_layers):
+            name = BlockComponentName.h(layer_idx)
+            access = AccessWeightsGradients(
+                self.gpt_model.transformer.h[layer_idx]
+            )
+            weights_vecs[name] = copy_flat_vectors_to(
+                access.get_weights(), device=self.cpu_offload_device,
+            )
+            param_structures[name] = access.param_structure()
+        # Restore parameters
+        ModelFromFlatVectorsFactory.restore_params_of_model(
+            model=self._gpt_model_on_device,
+            param_structures=param_structures,
+            weights_vecs=weights_vecs,
+        )
+        # DEBUG (exact copy)
+        if self._debug_gpt_model is not None:
+            print(f"_create_model_shard_on_device: Exact copy {first_layer_idx}:{first_layer_idx + num_layers}")
+            for block_from, block_to in zip(
+                self._debug_gpt_model.transformer.h[first_layer_idx:(first_layer_idx + num_layers)],
+                self._gpt_model_on_device.transformer.h[first_layer_idx:(first_layer_idx + num_layers)],
+            ):
+                copy_parameters(block_from, block_to)
+        # END DEBUG
+        return DefaultCellBlocks(
+            model=self._gpt_model_on_device,
+            first_layer_idx=first_layer_idx,
+            num_layers=num_layers,
+        )
+
+    def _accumulate_gradients(
+        self,
+        module_pairs: List[Tuple[torch.nn.Module, torch.nn.Module]],
+        debug_modules: Optional[List[torch.nn.Module]] = None,
+    ):
+        if debug_modules is None:
+            debug_modules = [None] * len(module_pairs)
+        else:
+            assert len(debug_modules) == len(module_pairs)
+        print("\n[_accumulate_gradients]")
+        for (mod_from, mod_to), mod_debug in zip(module_pairs, debug_modules):
+            access = AccessWeightsGradients(mod_from)
+            flat_vectors = copy_flat_vectors_to(
+                access.get_gradients(), device=torch.device("cpu"),
+            )
+            AccessWeightsGradients(mod_to).accumulate_gradients(flat_vectors)
+            if mod_debug is not None:
+                for name, param in mod_debug.named_parameters():
+                    param_comp = mod_from.get_parameter(name)
+                    print(f"Compare {name}")
+                    torch.testing.assert_close(param.data, param_comp.data)
+                    if param.requires_grad:
+                        src_arg = mod_from.get_parameter(name).grad.data
+                        if param.grad is None:
+                            param.grad = torch.nn.Parameter(src_arg)
+                        else:
+                            param.grad.data.copy_(src_arg)
 
 
 class NaiveGPTAndHeadModel(GPTAndHeadModel):

@@ -15,21 +15,17 @@
 import csv
 import dataclasses
 import os
-import time
-import warnings
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any
+import random
+import time
+from typing import Dict, Literal, Optional, Any
 
-import lightning as L
 import torch
-from lightning.fabric.plugins import BitsandbytesPrecision
-from lightning.fabric.strategies import DDPStrategy
-from lightning.fabric.utilities import ThroughputMonitor
-from lightning_utilities.core.imports import RequirementCache
 from torch.utils.data import DataLoader
-from torchmetrics import RunningMean
 from torch.nn.attention import SDPBackend
+from torchmetrics import RunningMean
+from lightning.fabric.utilities.load import _lazy_load as lazy_load
 
 from litgpt.args import TrainArgs
 from litgpt.data import DataModule
@@ -40,17 +36,13 @@ from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     CycleIterator,
     auto_download_checkpoint,
-    check_nvlink_connectivity,
     check_valid_checkpoint_dir,
     copy_config_files,
     create_finetuning_performance_report,
     get_default_supported_precision,
     init_out_dir,
-    instantiate_bnb_optimizer,
     instantiate_torch_optimizer,
-    load_checkpoint,
     num_parameters,
-    parse_devices,
 )
 
 from keys_values.array_limit import TemporaryArrayLimit
@@ -71,11 +63,6 @@ from keys_values.finetune.longcontext_full import (
     validate_and_all_reduce,
     print_with_rank_and_timestamp,
     flush_io_streams,
-    debug_sum_gradient_norms,
-    debug_random_trainable_param_names,
-    debug_clone_selected_params,
-    debug_compare_selected_params,
-    DEBUG_NUM_SELECTED_PARAMS,
     choose_logger,
     EvalArgs,
 )
@@ -96,7 +83,6 @@ from keys_values.kvcache.utils import (
 from keys_values.long_context import KVCacheArgs, GPTAndHeadModel
 from keys_values.lora import GPT
 from keys_values.parser_config import save_hyperparameters
-from keys_values.pos_encoding import position_encoding_factory
 
 
 DEFAULT_OUT_DIR = "out/finetune/longcontext_lora"
@@ -106,15 +92,13 @@ def setup(
     checkpoint_dir: Path,
     out_dir: Path = Path(DEFAULT_OUT_DIR),
     precision: Optional[str] = None,
-    quantize: Optional[Literal["bnb.nf4", "bnb.nf4-dq", "bnb.fp4", "bnb.fp4-dq", "bnb.int8-training"]] = None,
-    devices: Union[int, str] = 1,
-    num_nodes: int = 1,
+    device: int = 0,
     data: Optional[DataModule] = None,
     train: TrainArgs = TrainArgs(
         save_interval=1000,
         log_interval=1,
-        global_batch_size=16,
-        micro_batch_size=1,
+        global_batch_size=2,
+        micro_batch_size=2,
         lr_warmup_steps=None,
         lr_warmup_fraction=0.15,
         epochs=5,
@@ -135,7 +119,7 @@ def setup(
         interval=100,
         max_new_tokens=100,
         max_iters=100,
-        initial_validation=None,  # Default set below
+        initial_validation=False,
         final_validation=True,
     ),
     optimizer: Optional[OptimizerArgs] = None,
@@ -163,24 +147,20 @@ def setup(
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
-    yarn_rope: bool = True,
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
     record_gpu_memory_period: int = 0,
-    debug_check_updates: bool = False,
     generate_with_eval: bool = False,
     profile_grad_times: int = 0,
 ) -> None:
-    """Finetune a model using the LoRA method.
+    """Finetune a model using the LoRA method, with CPU offloading (single GPU)
 
     Arguments:
         checkpoint_dir: The path to the base model's checkpoint directory to load for finetuning.
         out_dir: Directory in which to save checkpoints and logs. If running in a Lightning Studio Job, look for it in
             /teamspace/jobs/<job-name>/share.
         precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
-        quantize: If set, quantize the model with this algorithm. See ``tutorials/quantize.md`` for more information.
-        devices: How many devices/GPUs to use.
-        num_nodes: How many nodes the code is being run on.
+        device: GPU device on which to run computations
         data: Data-related arguments. If not provided, the default is
             ``keys_values.data.LongBenchV2``.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
@@ -214,10 +194,6 @@ def setup(
             :class:`HeadModelFactory`. Defaults to "next_token_prediction"
         head_model_kwargs: Extra keyword arguments to pass to the head model
             factory.
-        yarn_rope: Should YaRN be used to adjust RoPE (position encoding) to the
-            sequence length for each batch? Defaults to `True`. If not, RoPE is
-            determined by the model configuration, and is static (no dependence
-            on sequence length).
         record_gpu_memory_snapshots: If given, we record GPU memory traces in
             snapshots. This argument is the `max_entries` parameter, a good
             value is 50000 or 100000.
@@ -238,7 +214,9 @@ def setup(
             Defaults to 0.
 
     """
-    checkpoint_dir = auto_download_checkpoint(model_name=checkpoint_dir, access_token=access_token)
+    checkpoint_dir = auto_download_checkpoint(
+        model_name=checkpoint_dir, access_token=access_token,
+    )
     pprint(locals())
     data = LongBenchV2() if data is None else data
     if isinstance(data, LongBenchV2) and data.metadata_dir is None:
@@ -248,16 +226,20 @@ def setup(
     data.metadata_dir = str(init_out_dir(data.metadata_dir))
     if head_model_kwargs is None:
         head_model_kwargs = dict()
-    devices = parse_devices(devices)
-    if eval.initial_validation is None:
-        # Run initial evaluation in multi-device setup, but not with a
-        # single device
-        eval.initial_validation = devices > 1
+    device = int(device)
+    if device < 0:
+        raise ValueError("device must be non-negative integer")
+    if not torch.cuda.is_available():
+        raise ValueError("CUDA not available")
+    if device >= torch.cuda.device_count():
+        raise ValueError(f"device = {device}, must be in [0, {torch.cuda.device_count() - 1}]")
     if optimizer is None:
         optimizer = OptimizerArgs(name="AdamW")
         print("Choosing optimizer AdamW with default learning rate. We highly recommend to at least tune optimizer.learning_rate")
     else:
         print(str(optimizer))
+    if train.global_batch_size != train.micro_batch_size:
+        raise NotImplementedError(f"train.global_batch_size = {train.global_batch_size}, train.micro_batch_size = {train.micro_batch_size}: must be the same for this script")
 
     check_kv_cache(kv_cache)
     check_valid_checkpoint_dir(checkpoint_dir)
@@ -275,6 +257,7 @@ def setup(
     )
 
     precision = precision or get_default_supported_precision(training=True)
+    # TODO: Currently not used!
     logger = choose_logger(
         logger_name,
         out_dir,
@@ -283,66 +266,14 @@ def setup(
         log_interval=train.log_interval,
     )
 
-    plugins = None
-    if quantize is not None and quantize.startswith("bnb."):
-        if "mixed" in precision:
-            raise ValueError("Quantization and mixed precision is not supported.")
-        if RequirementCache("bitsandbytes != 0.42.0"):
-            warnings.warn(
-                "LitGPT only supports bitsandbytes v0.42.0. This may result in errors when using quantization."
-            )
-        dtype = {"16-true": torch.float16, "bf16-true": torch.bfloat16, "32-true": torch.float32}[precision]
-        plugins = BitsandbytesPrecision(quantize[4:], dtype)
-        precision = None
-
-    if devices * num_nodes > 1:
-        if quantize:
-            raise NotImplementedError(
-                "Quantization is currently not supported for multi-GPU training. Please set devices=1 and num_nodes=1"
-                " when using the --quantize flag."
-            )
-        # FSDP without cpu off load
-        #strategy = FSDPStrategy(
-        #    auto_wrap_policy={torch.nn.Linear},
-        #    activation_checkpointing_policy={Block},
-        #    state_dict_type="full",
-        #    limit_all_gathers=True,
-        #    cpu_offload=False,
-        #)
-        # Baseline DDP strategy (just data parallelism)
-        # - static_graph=True: Optimizes communication by assuming the
-        #   computation graph is the same every iteration (no dynamic control
-        #   flow, like in MoE). Without this flag, our code does not work,
-        #   because it calls `autograd.backwards` several times internally.
-        # - broadcast_buffers=False: Avoids broadcasting model buffers from rank
-        #   0 to others at every forward pass, which can save bandwidth and avoid
-        #   conflicting with our own buffer manipulation.
-        # Note: Strictly speaking, the computation graph during training
-        # changes with each new batch, since the graph depends on the sequence
-        # length of the batch. However, DDP still seems to work.
-        strategy = DDPStrategy(static_graph=True, broadcast_buffers=False)
-    else:
-        strategy = "auto"
-
-    fabric = L.Fabric(
-        devices=devices,
-        num_nodes=num_nodes,
-        strategy=strategy,
-        precision=precision,
-        loggers=logger,
-        plugins=plugins,
-    )
-
-    if torch.cuda.is_available() and devices > 1:
-        check_nvlink_connectivity(fabric)
-
     if record_gpu_memory_snapshots is not None:
         record_gpu_memory_snapshots = RecordGPUMemory(
             max_entries=record_gpu_memory_snapshots,
         )
-    fabric.launch(
-        main,
-        devices=devices,
+    main(
+        device=torch.device("cuda", device),
+        precision=precision,
+        logger=logger,
         seed=seed,
         config=config,
         data=data,
@@ -352,22 +283,20 @@ def setup(
         eval=eval,
         optimizer=optimizer,
         kv_cache=kv_cache,
-        num_nodes=num_nodes,
         head_model_name=head_model,
         head_model_kwargs=head_model_kwargs,
-        yarn_rope=yarn_rope,
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
-        debug_check_updates=debug_check_updates,
         generate_with_eval=generate_with_eval,
         profile_grad_times=profile_grad_times,
     )
 
 
 def main(
-    fabric: L.Fabric,
-    devices: int,
+    device: torch.device,
+    precision: Optional[str],
+    logger: Any,
     seed: int,
     config: Config,
     data: DataModule,
@@ -377,14 +306,11 @@ def main(
     eval: EvalArgs,
     optimizer: OptimizerArgs,
     kv_cache: KVCacheArgs,
-    num_nodes: int,
     head_model_name: str,
     head_model_kwargs: Dict[str, Any],
-    yarn_rope: bool,
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
-    debug_check_updates: bool,
     generate_with_eval: bool,
     profile_grad_times: int,
 ) -> None:
@@ -397,7 +323,6 @@ def main(
         head_model=head_model_name,
         train=train,
         eval=eval,
-        fabric=fabric,
     )
     ignore_index = getattr(data, "ignore_index", -100)
     batch_transform = BatchTransformFactory.from_head_model(
@@ -406,54 +331,36 @@ def main(
         eos_id=tokenizer.eos_id,
         ignore_index=ignore_index,
     )
-    steps_per_epoch = len(train_dataloader) // train.gradient_accumulation_iters(devices, num_nodes)
+    steps_per_epoch = len(train_dataloader) // train.gradient_accumulation_iters(devices=1, num_nodes=1)
     lr_max_steps = min(train.epochs * steps_per_epoch, (train.max_steps or float("inf")))
-    print_message(f"Number of optimizer steps per epoch: {lr_max_steps}", fabric)
+    print(f"Number of optimizer steps per epoch: {lr_max_steps}")
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    optim_device = torch.device("cpu")
 
-    fabric.seed_everything(seed)  # same seed for every process to init model (FSDP)
-
-    if fabric.global_rank == 0:
-        os.makedirs(out_dir, exist_ok=True)
-
-    with fabric.init_module(empty_init=(fabric.world_size > 1)):
-        # Order of preference for SDPA kernels
-        sdpa_kernels = [
-            SDPBackend.FLASH_ATTENTION,
-            SDPBackend.EFFICIENT_ATTENTION,
-            SDPBackend.CUDNN_ATTENTION,
-            SDPBackend.MATH,
-        ]
-        limit_gb = kv_cache.attention_forward_temp_size_gb
-        if limit_gb is None:
-            limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
-        print_message(f"Setting limit attention_forward_temp_size_gb to {limit_gb} GB", fabric)
-        tmp_array_limit_forward = TemporaryArrayLimit(
-            init_val=limit_gb,
-            name="attention_forward_temp_size_gb",
-        )
-        mha_kwargs = dict(
-            sdpa_kernels=sdpa_kernels,
-            tmp_array_limit_gb=tmp_array_limit_forward,
-            pos_encoding=position_encoding_factory(config, do_yarn=yarn_rope),
-        )
-        if "sdpa_kernels" not in kv_cache.cache_kwargs:
-            kv_cache.cache_kwargs["sdpa_kernels"] = sdpa_kernels
-        kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
-        kv_cache.cache_kwargs["pos_encoding"] = mha_kwargs["pos_encoding"]
+    os.makedirs(out_dir, exist_ok=True)
+    # Order of preference for SDPA kernels
+    sdpa_kernels = [
+        SDPBackend.FLASH_ATTENTION,
+        SDPBackend.EFFICIENT_ATTENTION,
+        SDPBackend.CUDNN_ATTENTION,
+        SDPBackend.MATH,
+    ]
+    mha_kwargs = {"sdpa_kernels": sdpa_kernels}
+    if "sdpa_kernels" not in kv_cache.cache_kwargs:
+        kv_cache.cache_kwargs["sdpa_kernels"] = sdpa_kernels
+    limit_gb = kv_cache.attention_forward_temp_size_gb
+    if limit_gb is None:
+        limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
+    print(f"Setting limit attention_forward_temp_size_gb to {limit_gb} GB")
+    tmp_array_limit_forward = TemporaryArrayLimit(
+        init_val=limit_gb,
+        name="attention_forward_temp_size_gb",
+    )
+    mha_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
+    kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
+    with torch.device(optim_device):
         gpt_model = GPT(config, **mha_kwargs)
-        if isinstance(fabric.strategy.precision, BitsandbytesPrecision):
-            from bitsandbytes.nn import StableEmbedding
-
-            old_embedding = gpt_model.transformer.wte
-            new_wte = StableEmbedding(
-                old_embedding.num_embeddings, old_embedding.embedding_dim,
-            )
-            with torch.no_grad():
-                new_wte.weight.copy_(old_embedding.weight)
-            gpt_model.transformer.wte = new_wte.to(
-                device=old_embedding.weight.device,
-                dtype=old_embedding.weight.dtype,
-            )
         head_model = HeadModelFactory.create(
             name=head_model_name,
             config=config,
@@ -468,25 +375,19 @@ def main(
             head_model=head_model,
             kv_cache=kv_cache,
             max_batch_size=batch_size,
-            dtype=fabric_precision_to_dtype(fabric._precision.precision),
+            dtype=fabric_precision_to_dtype(precision),
             profile_grad_times=profile_grad_times > 0,
-            fabric=fabric,
+            cpu_offload_device=device,
         )
     mark_only_lora_as_trainable(model.gpt_model)
 
     num_trainable_params = num_parameters(model, requires_grad=True)
-    print_message(f"\nNumber of trainable parameters: {num_trainable_params:,}", fabric)
-    print_message(f"Number of non-trainable parameters: {num_parameters(model, requires_grad=False):,}", fabric)
+    print_message(f"\nNumber of trainable parameters: {num_trainable_params:,}")
+    print_message(f"Number of non-trainable parameters: {num_parameters(model, requires_grad=False):,}")
 
-    model = fabric.setup_module(model)
-
-    if isinstance(fabric.strategy.precision, BitsandbytesPrecision):
-        optimizer = instantiate_bnb_optimizer(optimizer.name, model.parameters())
-    else:
-        optimizer = instantiate_torch_optimizer(
-            optimizer.name, model.parameters(), **optimizer.optimizer_kwargs(),
-        )
-    optimizer = fabric.setup_optimizers(optimizer)
+    optimizer = instantiate_torch_optimizer(
+        optimizer.name, model.parameters(), **optimizer.optimizer_kwargs(),
+    )
     scheduler = get_lr_scheduler(optimizer, train_args=train, max_steps=lr_max_steps)
     state = {
         "model": model,
@@ -498,12 +399,12 @@ def main(
 
     # strict=False because missing keys due to LoRA weights not contained in state dict
     file_path = checkpoint_dir / LIT_MODEL_FNAME
-    load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
+    load_checkpoint(model.gpt_model, file_path, strict=False)
     # If there are head model weights, load them as well. Otherwise, we use
     # random initialization (or the head model may not have weights)
     file_path = checkpoint_dir / HEAD_MODEL_FNAME
     if file_path.exists():
-        load_checkpoint(fabric, model.head_model, file_path, strict=True)
+        load_checkpoint(model.head_model, file_path, strict=True)
 
     if profile_grad_times > 0:
         thresh = kv_cache.max_match_trials_pack_arg
@@ -519,34 +420,31 @@ def main(
         profile_grad_params = None
     train_time = time.perf_counter()
     token_counts = fit(
-        fabric=fabric,
         state=state,
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
         batch_transform=batch_transform,
-        devices=devices,
+        device=device,
         checkpoint_dir=checkpoint_dir,
         out_dir=out_dir,
         train=train,
         eval=eval,
         data=data,
-        num_nodes=num_nodes,
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
-        debug_check_updates=debug_check_updates,
         num_trainable_params=num_trainable_params,
         generate_with_eval=generate_with_eval,
         profile_grad_params=profile_grad_params,
     )
     training_time = time.perf_counter() - train_time
-    output = create_finetuning_performance_report(training_time, token_counts, fabric.device.type)
-    print_message(output, fabric)
+    output = create_finetuning_performance_report(training_time, token_counts, device.type)
+    print_message(output)
 
     # Final evaluation
     if eval.final_validation:
-        print_with_rank_and_timestamp("Starting validation evaluations.", fabric.global_rank)
-        print_message(f"\nFinal validation evaluation (batch_size = {val_dataloader.batch_size}) ...", fabric)
+        print_with_rank_and_timestamp("Starting validation evaluations.", 0)
+        print_message(f"\nFinal validation evaluation (batch_size = {val_dataloader.batch_size}) ...")
         if generate_with_eval:
             generate_example_kwargs = dict(
                 tokenizer=tokenizer,
@@ -561,17 +459,15 @@ def main(
             batch_transform=batch_transform,
             log_metrics=False,
             generate_example_kwargs=generate_example_kwargs,
-            fabric=fabric,
         )
-        fabric.log_dict(metrics, step=state["iter_num"])
         print_message(
-            f"Final evaluation | val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}",
-            fabric,
+            f"Final evaluation | val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}"
         )
         flush_io_streams()
 
     # Save the final LoRA checkpoint at the end of training
     save_dir = out_dir / "final"
+    # TODO!!
     save_lora_checkpoint(fabric, model, save_dir)
     if fabric.global_rank == 0:
         # Copy checkpoint files from original checkpoint dir
@@ -587,22 +483,19 @@ def main(
 
 
 def fit(
-    fabric: L.Fabric,
     state: Dict[str, Any],
     train_dataloader: DataLoader,
     val_dataloader: DataLoader,
     batch_transform: BatchTransform,
-    devices: int,
+    device: torch.device,
     checkpoint_dir: Path,
     out_dir: Path,
     train: TrainArgs,
     eval: EvalArgs,
     data: DataModule,
-    num_nodes: int,
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
-    debug_check_updates: bool,
     num_trainable_params: int,
     generate_with_eval: bool,
     profile_grad_params: Optional[Dict[str, Any]],
@@ -611,17 +504,22 @@ def fit(
     optimizer = state["optimizer"]
     scheduler = state["scheduler"]
     tokenizer = Tokenizer(checkpoint_dir)
+    optim_device = torch.device("cpu")
 
     # Initial evaluation
     token_counts = {
-        "raw_tokens": torch.tensor(0, device=fabric.device, dtype=torch.long),
-        "raw_tokens_plus_prompt_template": torch.tensor(0, device=fabric.device, dtype=torch.long),
-        "raw_tokens_plus_prompt_template_and_padding": torch.tensor(0, device=fabric.device, dtype=torch.long),
+        "raw_tokens": torch.tensor(0, device=optim_device, dtype=torch.long),
+        "raw_tokens_plus_prompt_template": torch.tensor(
+            0, device=optim_device, dtype=torch.long,
+        ),
+        "raw_tokens_plus_prompt_template_and_padding": torch.tensor(
+            0, device=optim_device, dtype=torch.long,
+        ),
     }
     val_loss = "n/a"
     if eval.initial_validation:
-        print_with_rank_and_timestamp("Starting validation evaluations.", fabric.global_rank)
-        print_message(f"\nInitial validation evaluation  (batch_size = {val_dataloader.batch_size}) ...", fabric)
+        print_with_rank_and_timestamp("Starting validation evaluations.", 0)
+        print_message(f"\nInitial validation evaluation  (batch_size = {val_dataloader.batch_size}) ...")
         if generate_with_eval:
             generate_example_kwargs = dict(
                 tokenizer=tokenizer,
@@ -635,17 +533,15 @@ def fit(
             eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
             batch_transform=batch_transform,
             generate_example_kwargs=generate_example_kwargs,
-            fabric=fabric,
         )
         val_loss = f"{metrics['val_loss']:.3f}"
         print_message(
-            f"Initial evaluation | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}",
-            fabric,
+            f"Initial evaluation | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}"
         )
         flush_io_streams()
     else:
         # Note: Even if `generate_with_eval == True`, we don't generate here
-        print_message("Verifying settings ...", fabric)
+        print_message("Verifying settings ...")
         with torch.no_grad():
             validate(
                 model,
@@ -656,14 +552,13 @@ def fit(
 
     max_steps = train.max_steps or float("inf")
     train_iterator = CycleIterator(train_dataloader)
-    throughput = ThroughputMonitor(fabric, window_size=50)
-    running_loss = RunningMean(window=train.gradient_accumulation_iters(devices, num_nodes), sync_on_compute=False).to(
-        fabric.device
+    running_loss = RunningMean(
+        window=train.gradient_accumulation_iters(1, 1),
+        sync_on_compute=False,
     )
     total_lengths = 0
     print_message(
-        "\nGPU memory before training starts:\n" + message_memory_all_devices(),
-        fabric,
+        "\nGPU memory before training starts:\n" + message_memory_all_devices()
     )
     total_t0 = time.perf_counter()
 
@@ -699,24 +594,19 @@ def fit(
             if record_gpu_memory_kind != 2:
                 record_gpu_memory_snapshots.start_recording()
 
-        is_accumulating = state["iter_num"] % train.gradient_accumulation_iters(devices, num_nodes) != 0
-        print_with_rank_and_timestamp("Starting gradient computation.", fabric.global_rank)
-        if debug_check_updates:
-            debug_names = debug_random_trainable_param_names(
-                model, DEBUG_NUM_SELECTED_PARAMS, num_trainable_params,
-            )
-            debug_orig_params = debug_clone_selected_params(model, debug_names)
-        with fabric.no_backward_sync(model, enabled=is_accumulating):
-            loss = model(
-                input_ids=batch[INPUT_IDS_NAME],
-                targets=batch["targets"],
-                scale_factor=1.0 / train.gradient_accumulation_iters(devices, num_nodes),
-                record_gpu_memory_snapshots=None if record_gpu_memory_kind == 0 else record_gpu_memory_snapshots,
-                record_gpu_memory_kind=None if record_gpu_memory_kind == 0 else record_gpu_memory_kind - 1,
-            )
-            fabric.backward(loss)
+        is_accumulating = state["iter_num"] % train.gradient_accumulation_iters(1, 1) != 0
+        print_with_rank_and_timestamp("Starting gradient computation.", 0)
 
+        loss = model(
+            input_ids=batch[INPUT_IDS_NAME],
+            targets=batch["targets"],
+            scale_factor=1.0 / train.gradient_accumulation_iters(1, 1),
+            record_gpu_memory_snapshots=None if record_gpu_memory_kind == 0 else record_gpu_memory_snapshots,
+            record_gpu_memory_kind=None if record_gpu_memory_kind == 0 else record_gpu_memory_kind - 1,
+        )
+        loss.backward()
         running_loss.update(loss.detach())
+
         flush_io_streams()
         if profile_grad_params is not None:
             records = model.profile_records()
@@ -745,40 +635,17 @@ def fit(
             record_gpu_memory_snapshots.store_current_snapshot()
             record_gpu_memory_snapshots.stop_recording()
 
-        if not is_accumulating:
-            print_with_rank_and_timestamp("Waiting for optimizer to update.", fabric.global_rank)
-            if debug_check_updates:
-                norm = debug_sum_gradient_norms(model)
-                print_with_rank_and_timestamp(
-                    f"Gradient average norm before update: {norm}",
-                    fabric.global_rank,
-                    start_newline=False,
-                )
-            optimizer.step()
-            print_message("Optimizer update done.", fabric)
-            if debug_check_updates:
-                if fabric.global_rank == 0:
-                    norm = debug_sum_gradient_norms(model)
-                    print_with_rank_and_timestamp(
-                        f"Gradient average norm after update: {norm}",
-                        fabric.global_rank,
-                        start_newline=False,
-                    )
-                num_changed = debug_compare_selected_params(model, debug_orig_params)
-                msg = f"{num_changed} of {DEBUG_NUM_SELECTED_PARAMS} parameters changed"
-                print_with_rank_and_timestamp(
-                    msg, fabric.global_rank, start_newline=False,
-                )
-            optimizer.zero_grad(set_to_none=True)
-            scheduler.step()
-            state["step_count"] += 1
+        optimizer.step()
+        print_message("Optimizer update done.")
+        optimizer.zero_grad(set_to_none=True)
+        scheduler.step()
+        state["step_count"] += 1
 
         del loss
         torch.cuda.empty_cache()
         print_message(
             f"\nGPU memory at training step {state['iter_num'] - 1}:\n"
-            + message_memory_all_devices() + "\n",
-            fabric,
+            + message_memory_all_devices() + "\n"
         )
 
         token_counts["raw_tokens"] += batch["token_counts"]["raw"].sum().item()
@@ -790,15 +657,8 @@ def fit(
 
         total_lengths += num_tokens
         if state["iter_num"] % train.log_interval == 0:
-            loss = running_loss.compute().item()  # expensive device-to-host synchronization
+            loss = running_loss.compute().item()
             t1 = time.perf_counter()
-            throughput.update(
-                time=t1 - total_t0,
-                batches=state["iter_num"],
-                samples=state["iter_num"] * train.micro_batch_size,
-                lengths=total_lengths,
-            )
-            throughput.compute_and_log(step=state["iter_num"])
             metrics = {
                 "loss": loss,
                 "iter": state["iter_num"],
@@ -817,14 +677,12 @@ def fit(
                 f" loss train: {metrics['loss']:.3f},"
                 f" val: {val_loss} |"
                 f" iter time: {metrics['iter_time']:.2f} s"
-                f"{' (step)' if not is_accumulating else ''}",
-                fabric,
+                f"{' (step)' if not is_accumulating else ''}"
             )
-            fabric.log_dict(metrics, step=state["iter_num"])
 
         if not is_accumulating and state["step_count"] % eval.interval == 0:
-            print_with_rank_and_timestamp("Starting validation evaluations.", fabric.global_rank)
-            print_message(f"\nPeriodic validation evaluation  (batch_size = {val_dataloader.batch_size}) ...", fabric)
+            print_with_rank_and_timestamp("Starting validation evaluations.", 0)
+            print_message(f"\nPeriodic validation evaluation  (batch_size = {val_dataloader.batch_size}) ...")
             if generate_with_eval:
                 generate_example_kwargs = dict(
                     tokenizer=tokenizer,
@@ -840,18 +698,15 @@ def fit(
                 batch_transform=batch_transform,
                 generate_example_kwargs=generate_example_kwargs,
                 log_metrics=False,
-                fabric=fabric,
             )
-            fabric.log_dict(metrics, step=state["iter_num"])
-            print_with_rank_and_timestamp("Finished validation evaluations.", fabric.global_rank)
+            print_with_rank_and_timestamp("Finished validation evaluations.", 0)
             flush_io_streams()
             val_loss = f"{metrics['val_loss']:.3f}"
             print_message(
-                f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}",
-                fabric,
+                f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}"
             )
-            fabric.barrier()
 
+        # TODO!!
         if train.save_interval is not None and not is_accumulating and state["step_count"] % train.save_interval == 0:
             interval_dir = out_dir / f"step-{state['step_count']:06d}"
             save_lora_checkpoint(fabric, model, interval_dir)
@@ -861,12 +716,20 @@ def fit(
                 if hasattr(data, "prompt_style"):
                     save_prompt_style(data.prompt_style, interval_dir)
 
-    return {
-        key: fabric.all_reduce(token_counts[key], reduce_op="sum").item()
-        for key in token_counts.keys()
-    }
+    return token_counts
 
 
+def load_checkpoint(
+    model: torch.nn.Module,
+    checkpoint_path: Path,
+    strict: bool = True,
+) -> None:
+    state_dict = lazy_load(checkpoint_path)
+    state_dict = state_dict.get("model", state_dict)
+    model.load_state_dict(state_dict, strict=strict)
+
+
+# TODO!!
 def save_lora_checkpoint(
     fabric: L.Fabric,
     model: GPTAndHeadModel,
@@ -874,7 +737,7 @@ def save_lora_checkpoint(
 ) -> None:
     file_dir.mkdir(parents=True, exist_ok=True)
     file_path = file_dir / LORA_WEIGHTS_FNAME
-    print_message(f"\nSaving LoRA weights to {str(file_path)!r}", fabric)
+    print_message(f"\nSaving LoRA weights to {str(file_path)!r}")
     fabric.save(
         file_path,
         state={"model": model.gpt_model},
@@ -882,7 +745,7 @@ def save_lora_checkpoint(
     )
     if model.head_model.state_dict():
         file_path = file_dir / HEAD_MODEL_FNAME
-        print_message(f"Saving head model weights to {str(file_path)!r}", fabric)
+        print_message(f"Saving head model weights to {str(file_path)!r}")
         fabric.save(file_path, state={"model": model.head_model})
 
 

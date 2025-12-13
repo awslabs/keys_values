@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from ast import Index
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 import math
@@ -25,6 +24,7 @@ class ParameterSpec:
     offset: int
     size: int
     shape: Tuple[int, ...]
+    requires_grad: bool
 
     def __post_init__(self):
         assert self.offset >= 0
@@ -47,7 +47,7 @@ class ParameterStructure:
         if sum_sizes != self.size:
             raise ValueError(f"size = {self.size}, sum_sizes = {sum_sizes}. Must be the same")
 
-    def append(self, name: str, shape: Tuple[int, ...]):
+    def append(self, name: str, shape: Tuple[int, ...], requires_grad: bool):
         size = math.prod(shape)
         self.entries.append(
             ParameterSpec(
@@ -55,6 +55,7 @@ class ParameterStructure:
                 offset=self.size,
                 size=size,
                 shape=shape,
+                requires_grad=requires_grad,
             )
         )
         self.size += size
@@ -75,6 +76,13 @@ class AccessWeightsGradients:
 
     """
     def __init__(self, module: torch.nn.Module):
+        """
+        Args:
+            module (torch.nn.Module): Module to be wrapped. It is OK for the
+                module not to have named parameters with gradients, or no
+                named parameters at all.
+
+        """
         self._module = module
         self._param_structure = None
         self._grad_structure = None
@@ -93,13 +101,13 @@ class AccessWeightsGradients:
                 self._param_structure[dtype] = ParameterStructure(
                     entries=[], dtype=param.dtype, size=0,
                 )
-            self._param_structure[dtype].append(name, shape)
+            self._param_structure[dtype].append(name, shape, requires_grad)
             if requires_grad:
                 if dtype not in self._grad_structure:
                     self._grad_structure[dtype] = ParameterStructure(
                         entries=[], dtype=param.dtype, size=0,
                     )
-                self._grad_structure[dtype].append(name, shape)
+                self._grad_structure[dtype].append(name, shape, requires_grad)
 
     @property
     def size_weights(self) -> Dict[str, int]:
@@ -123,6 +131,8 @@ class AccessWeightsGradients:
         vname: str,
     ):
         for dtype, vec in vecs.items():
+            if dtype not in structures:
+                raise ValueError(f"{vname}[{dtype}] exists, but {dtype} not a key in structures")
             structure = structures[dtype]
             vsize = vec.numel()
             if vsize != structure.size:
@@ -137,6 +147,8 @@ class AccessWeightsGradients:
         device: Optional[torch.device] = None,
     ) -> FlatVectors:
         structures = self._grad_structure if do_gradients else self._param_structure
+        if not structures:
+            return dict()
         if out is None:
             out = {
                 dtype: torch.empty(
@@ -146,13 +158,14 @@ class AccessWeightsGradients:
             }
         else:
             self._check_sizes(structures, out, "out")
-        state_dict = self._module.state_dict()
         for dtype, target_vec in out.items():
-            for pspec in structures[dtype]:
+            for pspec in structures[dtype].entries:
                 start, end = pspec.range
-                param = state_dict[pspec.name]
+                param = self._module.get_parameter(pspec.name)
                 if do_gradients:
-                    src_vec = param.data.grad.flatten()
+                    if param.grad is None:
+                        raise IndexError(f"Parameter {pspec.name} has no gradient")
+                    src_vec = param.grad.data.flatten()
                 else:
                     src_vec = param.data.flatten()
                 target_vec[start:end].copy_(src_vec)
@@ -183,14 +196,17 @@ class AccessWeightsGradients:
     ):
         structures = self._grad_structure if do_gradients else self._param_structure
         self._check_sizes(structures, src_vecs, "src_vecs")
-        state_dict = self._module.state_dict()
         for dtype, src_vec in src_vecs.items():
-            for pspec in structures[dtype]:
+            for pspec in structures[dtype].entries:
                 start, end = pspec.range
-                param = state_dict[pspec.name]
+                param = self._module.get_parameter(pspec.name)
                 src_arg = src_vec[start:end].view(param.shape)
                 if do_gradients:
-                    param.data.grad.add_(src_arg.to(param.data.device))
+                    src_arg = src_arg.to(param.data.device)
+                    if param.grad is None:
+                        param.grad = torch.nn.Parameter(src_arg)
+                    else:
+                        param.grad.data.add_(src_arg.to(param.data.device))
                 else:
                     param.data.copy_(src_arg)
 

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict, List, Any
 
 import torch
 from torch.linalg import vector_norm
@@ -19,7 +19,7 @@ from torch.linalg import vector_norm
 from litgpt.config import Config
 
 from keys_values.kvcache.attn_weights import AttnWeightsKVCache
-from keys_values.kvcache.base import KVCacheParams
+from keys_values.kvcache.base import KVCacheParams, KVCache
 from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.kvcache.buffers import KVCacheBuffers
 from keys_values.kvcache.utils import bitsize_of, bits_for_torch_dtype
@@ -204,6 +204,23 @@ class H2OKVCache(AttnWeightsKVCache):
             sz_sc += sz
         return sz_total + sz_sc, dict(dct_sz, scores=sz_sc)
 
+    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+        if device is not None and device != self.device:
+            if self.kv_buffers.buffers_are_allocated:
+                raise ValueError(f"Can only change device of buffers to {device} if buffers are deallocated")
+            self.kv_buffers.deallocate(device)
+        return H2OKVCache(
+            config=self.config,
+            buffers=self.kv_buffers,
+            block_idx=self.block_idx,
+            **self._base_kwargs_for_clone(),
+        )
+
+    def _base_kwargs_for_clone(self) -> Dict[str, Any]:
+        base_kwargs = super()._base_kwargs_for_clone()
+        base_kwargs["normalize_scores"] = self.normalize_scores
+        return base_kwargs
+
 
 class VLengthInstantScoreMixin:
     """
@@ -383,6 +400,18 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
     def get_kv_buffers(self) -> KVCacheBuffers:
         return self.kv_buffers
 
+    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+        if device is not None and device != self.device:
+            if self.kv_buffers.buffers_are_allocated:
+                raise ValueError(f"Can only change device of buffers to {device} if buffers are deallocated")
+            self.kv_buffers.deallocate(device)
+        return VLengthH2OKVCache(
+            config=self.config,
+            buffers=self.kv_buffers,
+            block_idx=self.block_idx,
+            **self._base_kwargs_for_clone(),
+        )
+
 
 class H2OOriginalKVCache(AttnWeightsKVCache):
     """
@@ -487,3 +516,15 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
     @classmethod
     def _score_buffer_names(cls) -> List[str]:
         return ["scores"]
+
+    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+        if device is not None and device != self.device:
+            if self.kv_buffers.buffers_are_allocated:
+                raise ValueError(f"Can only change device of buffers to {device} if buffers are deallocated")
+            self.kv_buffers.deallocate(device)
+        return H2OOriginalKVCache(
+            config=self.config,
+            buffers=self.kv_buffers,
+            block_idx=self.block_idx,
+            **self._base_kwargs_for_clone(),
+        )

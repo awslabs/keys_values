@@ -880,3 +880,14 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                 dtype=torch.int64,
                 device=self.device
             ).view(1, 1, -1).expand(self.batch_size, self.n_query_groups, -1)
+
+    def _base_kwargs_for_clone(self) -> Dict[str, Any]:
+        base_kwargs = super()._base_kwargs_for_clone()
+        base_kwargs.update(
+            dict(
+                grace_period=self.grace_period,
+                replay_log_blocksize=self.replay_log_blocksize,
+                detach_attn_weights=self._detach_attn_weights,
+            )
+        )
+        return base_kwargs

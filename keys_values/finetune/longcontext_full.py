@@ -380,7 +380,10 @@ def main(
         limit_gb = kv_cache.attention_forward_temp_size_gb
         if limit_gb is None:
             limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
-        fabric.print(f"Setting limit attention_forward_temp_size_gb to {limit_gb} GB")
+        print_message(
+            f"Setting limit attention_forward_temp_size_gb to {limit_gb} GB",
+            fabric,
+        )
         tmp_array_limit_forward = TemporaryArrayLimit(
             init_val=limit_gb,
             name="attention_forward_temp_size_gb",
@@ -405,16 +408,20 @@ def main(
         if eval.micro_batch_size is not None:
             batch_size = max(batch_size, eval.micro_batch_size)
         model = wrap_gpt_model(
-            fabric=fabric,
             gpt_model=gpt_model,
             head_model=head_model,
             kv_cache=kv_cache,
             max_batch_size=batch_size,
+            dtype=fabric_precision_to_dtype(fabric._precision.precision),
             profile_grad_times=profile_grad_times > 0,
+            fabric=fabric,
         )
 
     num_trainable_params = num_parameters(model, requires_grad=True)
-    fabric.print(f"\nNumber of trainable parameters: {num_trainable_params:,}")
+    print_message(
+        f"\nNumber of trainable parameters: {num_trainable_params:,}",
+        fabric,
+    )
 
     model = fabric.setup(model)
 
@@ -433,7 +440,7 @@ def main(
 
     resume = find_resume_path(resume, out_dir)
     if resume:
-        fabric.print(f"Resuming training from {resume}")
+        print_message(f"Resuming training from {resume}", fabric)
         fabric.load(resume, state)
     else:
         file_path = checkpoint_dir / LIT_MODEL_FNAME
@@ -480,23 +487,24 @@ def main(
     )
     training_time = time.perf_counter() - train_time
     output = create_finetuning_performance_report(training_time, token_counts, fabric.device.type)
-    fabric.print(output)
+    print_message(output, fabric)
 
     # Final evaluation
     if eval.final_validation:
         print_with_rank_and_timestamp("Starting validation evaluations.", fabric.global_rank)
-        fabric.print("\nFinal validation evaluation ...")
+        print_message("\nFinal validation evaluation ...", fabric)
         metrics = validate_and_all_reduce(
-            fabric=fabric,
             model=model,
             val_dataloader=val_dataloader,
             eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
             batch_transform=batch_transform,
             log_metrics=False,
+            fabric=fabric,
         )
         fabric.log_dict(metrics, step=state["iter_num"])
-        fabric.print(
-            f"Final evaluation | val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}"
+        print_message(
+            f"Final evaluation | val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}",
+            fabric,
         )
         flush_io_streams()
 
@@ -511,23 +519,32 @@ def main(
             save_prompt_style(data.prompt_style, save_dir)
 
 
+def print_message(msg: str, fabric: Optional[L.Fabric] = None):
+    if fabric is not None:
+        fabric.print(msg)
+    else:
+        print(msg)
+
+
 # TODO: Support caches of different lengths, maybe even different types
 def wrap_gpt_model(
-    fabric: L.Fabric,
     gpt_model: GPT,
     head_model: HeadModel,
     kv_cache: KVCacheArgs,
     max_batch_size: int,
+    dtype: torch.dtype,
     model_for_training: bool = True,
     profile_grad_times: bool = False,
+    cpu_offload_device: Optional[torch.device] = None,
+    fabric: Optional[L.Fabric] = None,
 ) -> LongContextGradientModel:
-    fabric.print(
+    print_message(
         "Assigning KV caches to layers of model:\n"
         f"name:           {kv_cache.name}\n"
         f"cache_length:   {kv_cache.cache_length}\n"
-        f"max_batch_size: {max_batch_size}"
+        f"max_batch_size: {max_batch_size}",
+        fabric,
     )
-    dtype = fabric_precision_to_dtype(fabric._precision.precision)
     gpt_model.clear_kv_caches()
     cache_kwargs = cleanup_cache_kwargs(
         split_name(kv_cache.name)[0], kv_cache.cache_kwargs,
@@ -561,7 +578,10 @@ def wrap_gpt_model(
             limit_gb = kv_cache.attention_forward_temp_size_gb
             if limit_gb is None:
                 limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
-        fabric.print(f"Setting limit attention_backward_temp_size_gb to {limit_gb} GB")
+        print_message(
+            f"Setting limit attention_backward_temp_size_gb to {limit_gb} GB",
+            fabric,
+        )
         backward_tmp_array_limit_gb = TemporaryArrayLimit(
             init_val=limit_gb,
             name="attention_backward_temp_size_gb",
@@ -585,6 +605,7 @@ def wrap_gpt_model(
             backward_tmp_array_limit_gb=backward_tmp_array_limit_gb,
             autograd_hooks_kwargs=autograd_hooks_kwargs,
             profile_steps=profile_grad_times,
+            cpu_offload_device=cpu_offload_device,
         )
     else:
         model = LongContextInferenceModel(**common_kwargs)
@@ -645,21 +666,22 @@ def fit(
     val_loss = "n/a"
     if eval.initial_validation:
         print_with_rank_and_timestamp("Starting validation evaluations.", fabric.global_rank)
-        fabric.print("\nInitial validation evaluation ...")
+        print_message("\nInitial validation evaluation ...", fabric)
         metrics = validate_and_all_reduce(
-            fabric=fabric,
             model=model,
             val_dataloader=val_dataloader,
             eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
             batch_transform=batch_transform,
+            fabric=fabric,
         )
         val_loss = f"{metrics['val_loss']:.3f}"
-        fabric.print(
-            f"Initial evaluation | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}"
+        print_message(
+            f"Initial evaluation | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}",
+            fabric,
         )
         flush_io_streams()
     else:
-        fabric.print("Verifying settings ...")
+        print_message("Verifying settings ...", fabric)
         with torch.no_grad():
             validate(
                 model,
@@ -678,19 +700,24 @@ def fit(
         for resume_iter in range(initial_iter):
             next(train_iterator)
             if resume_iter % 1000 == 0:
-                fabric.print(f"Resuming dataset: {resume_iter} / {initial_iter}")
+                print_message(
+                    f"Resuming dataset: {resume_iter} / {initial_iter}",
+                    fabric,
+                )
         fabric.barrier()
-        fabric.print(
-            f"Resuming data loader finished. Took {time.perf_counter() - resume_t0:.1f} seconds to reach iteration"
-            f" {initial_iter}."
+        print_message(
+            f"Resuming data loader finished. Took {time.perf_counter() - resume_t0:.1f}"
+            " seconds to reach iteration {initial_iter}.",
+            fabric,
         )
 
     running_loss = RunningMean(window=train.gradient_accumulation_iters(devices, num_nodes), sync_on_compute=False).to(
         fabric.device
     )
     fabric.barrier()
-    fabric.print(
-        "\nGPU memory before training starts:\n" + message_memory_all_devices()
+    print_message(
+        "\nGPU memory before training starts:\n" + message_memory_all_devices(),
+        fabric,
     )
 
     while state["step_count"] < max_steps:
@@ -767,7 +794,7 @@ def fit(
                     start_newline=False,
                 )
             optimizer.step()
-            fabric.print("Optimizer update done.")
+            print_message("Optimizer update done.", fabric)
             if debug_check_updates:
                 if fabric.global_rank == 0:
                     norm = debug_sum_gradient_norms(model)
@@ -787,9 +814,10 @@ def fit(
 
         del loss
         torch.cuda.empty_cache()
-        fabric.print(
+        print_message(
             f"\nGPU memory at training step {state['iter_num'] - 1}:\n"
-            + message_memory_all_devices() + "\n"
+            + message_memory_all_devices() + "\n",
+            fabric,
         )
 
         token_counts["raw_tokens"] += batch["token_counts"]["raw"].sum().item()
@@ -815,37 +843,39 @@ def fit(
             }
             if isinstance(val_loss, torch.Tensor):
                 val_loss = f"{val_loss:.3f}"
-            fabric.print(
+            print_message(
                 f"Epoch {metrics['epoch']} | iter {metrics['iter']} step {metrics['step']} |"
                 f" loss train: {metrics['loss']:.3f},"
                 f" val: {val_loss} |"
                 f" iter time: {metrics['iter_time'] * 1000:.2f} s"
-                f"{' (step)' if not is_accumulating else ''}"
+                f"{' (step)' if not is_accumulating else ''}",
+                fabric,
             )
             fabric.log_dict(metrics, step=state["iter_num"])
 
         if not is_accumulating and state["step_count"] % eval.interval == 0:
             print_with_rank_and_timestamp("Starting validation evaluations.", fabric.global_rank)
-            fabric.print("\nPeriodic validation evaluation ...")
+            print_message("\nPeriodic validation evaluation ...", fabric)
             generate_example_kwargs = dict(
                 tokenizer=tokenizer,
                 data=data,
             )
             # TODO: Fix bug in generation!
             metrics = validate_and_all_reduce(
-                fabric=fabric,
                 model=model,
                 val_dataloader=val_dataloader,
                 eval=eval,
                 batch_transform=batch_transform,
                 # generate_example_kwargs=generate_example_kwargs,
                 log_metrics=False,
+                fabric=fabric,
             )
             fabric.log_dict(metrics, step=state["iter_num"])
             print_with_rank_and_timestamp("Finished validation evaluations.", fabric.global_rank)
             val_loss = f"{metrics['val_loss']:.3f}"
-            fabric.print(
-                f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}"
+            print_message(
+                f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}",
+                fabric,
             )
             flush_io_streams()
             fabric.barrier()
@@ -853,7 +883,10 @@ def fit(
         if train.save_interval is not None and not is_accumulating and state["step_count"] % train.save_interval == 0:
             checkpoint_file = out_dir / f"step-{state['step_count']:06d}" / LIT_MODEL_FNAME
             checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
-            fabric.print(f"Saving checkpoint to {str(checkpoint_file.parent)!r}")
+            print_message(
+                f"Saving checkpoint to {str(checkpoint_file.parent)!r}",
+                fabric,
+            )
             fabric.save(checkpoint_file, state)
             if fabric.global_rank == 0:
                 copy_config_files(checkpoint_dir, checkpoint_file.parent)
@@ -876,13 +909,13 @@ def check_kv_cache(kv_cache: KVCacheArgs):
 
 
 def validate_and_all_reduce(
-    fabric: L.Fabric,
     model: GPTAndHeadModel,
     val_dataloader: DataLoader,
     eval: EvalArgs,
     batch_transform: BatchTransform,
     generate_example_kwargs: Optional[Dict[str, Any]] = None,
     log_metrics: bool = True,
+    fabric: Optional[L.Fabric] = None,
 ) -> Dict[str, float]:
     with torch.no_grad():
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
@@ -900,19 +933,23 @@ def validate_and_all_reduce(
         # buffers not to waste memory
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
 
-    val_loss_tensor = val_loss.clone().to(fabric.device)
-    val_time_tensor = torch.tensor(
-        val_time, device=fabric.device, dtype=torch.float32,
-    )
-    fabric.all_reduce(val_loss_tensor, reduce_op="mean")
-    fabric.all_reduce(val_time_tensor, reduce_op="mean")
+    if fabric is not None:
+        val_loss_tensor = val_loss.clone().to(fabric.device)
+        val_time_tensor = torch.tensor(
+            val_time, device=fabric.device, dtype=torch.float32,
+        )
+        fabric.all_reduce(val_loss_tensor, reduce_op="mean")
+        fabric.all_reduce(val_time_tensor, reduce_op="mean")
+        val_time = val_time_tensor.item()
+    else:
+        val_loss_tensor = val_loss.clone()
     val_loss = val_loss_tensor.item()
     metrics = {
         "val_loss": val_loss,
         "val_ppl": math.exp(val_loss),
-        "val_time_in_ms": val_time_tensor.item() * 1000,
+        "val_time_in_ms": val_time * 1000,
     }
-    if log_metrics:
+    if fabric is not None and log_metrics:
         fabric.log_dict(metrics)
     return metrics
 
@@ -947,8 +984,8 @@ def generate_example(
     data: DataModule,
 ):
     instruction = select_sft_generate_example(eval, data)
-    fabric.print("\n[Instruction]:")
-    _print_but_limit_size(fabric, instruction)
+    print_message("\n[Instruction]:", fabric)
+    print_but_limit_size(fabric, instruction)
     if hasattr(data, "prompt_style"):
         prompt = data.prompt_style.apply(instruction)
     else:
@@ -972,13 +1009,14 @@ def generate_example(
         )
         model.train()
         output = tokenizer.decode(output)
-        fabric.print("\n[Generated Output (without prompt)]:")
-        _print_but_limit_size(fabric, output)
+        print_message("\n[Generated Output (without prompt)]:", fabric)
+        print_but_limit_size(fabric, output)
     else:
-        print(
+        print_message(
             f"Length of encoded instruction ({len(encoded)}) and eval.max_new_tokens ({eval.max_new_tokens}) "
             f"exceeds model.max_seq_length ({gpt_model.max_seq_length}) used for training. Skipping example generation for efficiency. "
-            f"The model's supported context size (post-training) is {gpt_model.config.block_size}."
+            f"The model's supported context size (post-training) is {gpt_model.config.block_size}.",
+            fabric,
         )
 
 
@@ -987,16 +1025,17 @@ MAX_PRINT_HEAD = 256
 MAX_PRINT_TAIL = 128
 
 
-def _print_but_limit_size(
+def print_but_limit_size(
     fabric: L.Fabric,
     text: str,
 ):
     text_length = len(text)
     if text_length <= MAX_PRINT_HEAD + MAX_PRINT_TAIL:
-        fabric.print("\n" + text)
+        print_message("\n" + text, fabric)
     else:
-        fabric.print(
-            "\n" + text[:MAX_PRINT_HEAD] + "\n\n[...]\n\n" + text[(-MAX_PRINT_TAIL):]
+        print_message(
+            "\n" + text[:MAX_PRINT_HEAD] + "\n\n[...]\n\n" + text[(-MAX_PRINT_TAIL):],
+            fabric,
         )
 
 
@@ -1082,11 +1121,17 @@ def save_model_checkpoint(
 ) -> None:
     file_dir.mkdir(parents=True, exist_ok=True)
     file_path = file_dir / LIT_MODEL_FNAME
-    fabric.print(f"\nSaving model weights to {str(file_path)!r}")
+    print_message(
+        f"\nSaving model weights to {str(file_path)!r}",
+        fabric,
+    )
     fabric.save(file_path, state={"model": model.gpt_model})
     if model.head_model.state_dict():
         file_path = file_dir / HEAD_MODEL_FNAME
-        fabric.print(f"Saving head model weights to {str(file_path)!r}")
+        print_message(
+            f"Saving head model weights to {str(file_path)!r}",
+            fabric,
+        )
         fabric.save(file_path, state={"model": model.head_model})
 
 

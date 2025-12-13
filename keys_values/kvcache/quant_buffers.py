@@ -98,9 +98,9 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
     def debug_label(self) -> Optional[str]:
         return self._debug_label
 
-    def deallocate(self):
-        self.quantizer_k.deallocate()
-        self.quantizer_v.deallocate()
+    def deallocate(self, device: Optional[torch.device] = None):
+        self.quantizer_k.deallocate(device)
+        self.quantizer_v.deallocate(device)
 
     def _allocate_buffers(self, device: Optional[torch.device] = None):
         batch_size = self.batch_size

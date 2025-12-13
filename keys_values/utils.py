@@ -82,3 +82,28 @@ def repeat_interleave(x: torch.Tensor, n_head: int) -> torch.Tensor:
         assert n_head == n_query_groups * q_per_kv
         x = torch.repeat_interleave(x, q_per_kv, dim=1)
     return x
+
+
+def copy_parameters(
+    from_model: torch.nn.Module,
+    to_model: torch.nn.Module,
+    copy_requires_grad: bool = True,
+):
+    """
+    Copies parameter values from `from_model` to `to_model`.
+
+    Args:
+        from_model (torch.nn.Module): Source model
+        to_model (torch.nn.Module): Target model
+        copy_requires_grad (bool): Should `param.requires_grad` be copied as well?
+            Defaults to `True`.
+
+    """
+    # Note: Don't use `from_model.state_dict`, this does not retain the
+    # `requires_grad` flag!
+    for name, param in to_model.named_parameters():
+        if param is not None:
+            src_param = from_model.get_parameter(name)
+            param.data.copy_(src_param.data, non_blocking=True)
+            if copy_requires_grad:
+                param.requires_grad_(src_param.requires_grad)

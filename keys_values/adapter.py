@@ -75,6 +75,15 @@ class GPT(BaseModel):
         if isinstance(module, CausalSelfAttention):
             module.reset_parameters()
 
+    def _empty_clone(self, device: Optional[torch.device] = None) -> "GPT":
+        if device is None:
+            model_copy = GPT(self.config)
+        else:
+            with torch.device(device):
+                model_copy = GPT(self.config)
+        model_copy.mha = self.mha
+        return model_copy
+
 
 class Block(BaseBlock):
     def __init__(

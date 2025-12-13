@@ -135,11 +135,14 @@ class Quantizer(torch.nn.Module):
     ) -> torch.Tensor:
        raise NotImplementedError
 
-    def deallocate(self):
+    def deallocate(self, device: Optional[torch.device] = None):
         """
         Deallocates the buffers. They are automatically reallocated with the
         next :meth:`prefill` call. Use this method only if device memory is
         scarce and is needed by other operations in between inference calls.
+
+        Args:
+            device: If given, the default device is set to this value.
 
         """
         raise NotImplementedError

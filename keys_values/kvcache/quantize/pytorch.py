@@ -152,6 +152,8 @@ class TorchBasicQuantizer(Quantizer):
         # Note: If buffers are allocated with batch size >= `batch_size`, they
         # are not re-allocated
         if (not self.buffers_are_allocated) or batch_size > self.shape[0] or device != self.device:
+            if device is None:
+                raise ValueError("device is not set. Use device argument")
             self.shape = (batch_size,) + self.shape[1:]
             self._init_blocksize_quant_shape()
             shape = self._quant_shape
@@ -166,7 +168,7 @@ class TorchBasicQuantizer(Quantizer):
             )
         self._batch_size = batch_size  # Effective batch size
 
-    def deallocate(self):
+    def deallocate(self, device: Optional[torch.device] = None):
         if self.buffers_are_allocated:
             del self.quant_buffer
             self.quant_buffer = None
@@ -175,6 +177,8 @@ class TorchBasicQuantizer(Quantizer):
             del self.quant_zero_points
             self.quant_zero_points = None
             self._batch_size = None
+        if device is not None:
+            self._device = device
 
     @property
     def buffers_are_allocated(self) -> bool:
@@ -416,13 +420,13 @@ class TorchBasicQuantizerState(QuantizerState):
             quantizer._quant_shape[2],
         )
         self.quant_buffer = torch.zeros(
-            shape, dtype=quantizer._quant_buffer_dtype(), device=device,
+            shape, dtype=quantizer._quant_buffer_dtype(), device=self.device,
         )
         self.quant_scales = torch.zeros(
-            shape[:-1], dtype=torch.float32, device=device,
+            shape[:-1], dtype=torch.float32, device=self.device,
         )
         self.quant_zero_points = torch.zeros(
-            shape[:-1], dtype=torch.float32, device=device,
+            shape[:-1], dtype=torch.float32, device=self.device,
         )
 
     def copy_(

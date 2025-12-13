@@ -442,6 +442,7 @@ def test_gradient_new_and_old_spda(
     )
     with torch.device(device):
         gpt_model = GPT(config, sdpa_kernels=sdpa_kernels)
+    gpt_model.apply(gpt_model._init_weights)  # Initialize
     token_idxs = torch.randint(
         low=0,
         high=config.vocab_size,

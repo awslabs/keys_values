@@ -109,7 +109,7 @@ def create_chunk_sizes(
             set(
                 block.attn.kv_cache.cache_length
                 for block in block_iterator(gpt_model)
-                if block.attn.kv_cache.cache_length < seq_length
+                if block.attn.kv_cache.cache_length <= seq_length
             )
         )
         chunk_sizes = [mpl]  # First chunk (prefill)
@@ -503,6 +503,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         verbose: VerbosityLevels = VerbosityLevels.SOME,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
         debug_single_cell_per_row: bool = False,
+        debug_store_intermediates: bool = False,
     ):
         """
         If `tmp_array_limit_gb` is given, it maintains a limit on
@@ -567,6 +568,11 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self._tmp_array_limit_gb = tmp_array_limit_gb
         self._record_gpu_memory_snapshots = None
         self._record_gpu_memory_kind = None
+        # DEBUG:
+        if debug_store_intermediates:
+            self.debug_intermediates = dict()
+        else:
+            self.debug_intermediates = None
 
     def _check_args(
         self,
@@ -800,6 +806,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
         chunks_for_cells = get_chunks_for_cells(
             self.chunks_per_cell, self.chunk_sizes,
         )
+        if self.debug_intermediates is not None:
+            self.debug_intermediates.clear()  # Reset
 
         # Need each layer separately
         model_blocks = [
@@ -823,6 +831,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 embeddings = wte(input_ids[:, start:end].to(device=wte_device))
                 if self.config.scale_embeddings:
                     embeddings = embeddings * alpha
+                if self.debug_intermediates is not None:
+                    name = f"forward_wte_{start}:{end}"
+                    self.debug_intermediates[name] = embeddings.detach().clone().to(device=torch.device("cpu"))
                 # Loop over layers
                 for block_idx, block in enumerate(model_blocks):
                     input_pos = start
@@ -839,13 +850,15 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         x = embeddings[:, rel_start:rel_end, :]
                         abs_start = start + rel_start
                         idx = input_ids[:, abs_start:(abs_start + ch_size)]
-                        new_embed_parts.append(
-                            block.forward(
-                                x=x,
-                                idx=idx,
-                                input_pos=input_pos,
-                            )
+                        y = block.forward(
+                            x=x,
+                            idx=idx,
+                            input_pos=input_pos,
                         )
+                        if self.debug_intermediates is not None:
+                            name = f"forward_block{block_idx}_{start}:{end}_{rel_start}:{rel_end}"
+                            self.debug_intermediates[name] = y.detach().clone().to(device=torch.device("cpu"))
+                        new_embed_parts.append(y)
                         input_pos += ch_size
                     assert input_pos == end  # Sanity check
                     del embeddings
@@ -864,6 +877,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     chunks_for_cell.chunk_ranges,
                     weight_per_chunk[a:b],
                 ):
+                    ch_size = rel_end - rel_start
                     output_chunk = embeddings[:, rel_start:rel_end, :]
                     if self.head_model.needs_logits():
                         loss_part = compute_loss_with_limited_logits_tensor(
@@ -885,7 +899,10 @@ class LongContextInferenceModel(GPTAndHeadModel):
                             scale_factor=weight * scale_factor,
                         )
                     loss_full = loss_part + loss_full
-                    input_pos += (rel_end - rel_start)
+                    input_pos += ch_size
+                    if self.debug_intermediates is not None:
+                        name = f"forward_loss_{start}:{end}_{rel_start}:{rel_end}"
+                        self.debug_intermediates[name] = loss_part.detach().clone().to(device=torch.device("cpu"))
 
         write_back_cache_buffers(self.gpt_model)  # Just to be safe
         if self.verbose is not VerbosityLevels.NONE:

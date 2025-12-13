@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Any
 
 import torch
 
@@ -304,6 +304,22 @@ class KVCache(torch.nn.Module):
     def reset_parameters(self) -> None:
         pass
 
+    def clone(self, device: Optional[torch.device] = None) -> "KVCache":
+        """
+        Creates and returns a shallow copy of this object. If the cache has
+        buffers (see :class:`KVCacheBuffers`), these are not copied.
+
+        Args:
+            device: Device on which the copy is created. If the cache has
+                buffers, they must be deallocated. Their default `device` is
+                set to this value. If not given, the device of the copy remains
+                the same.
+
+        Returns:
+            Shallow copy of this object on device `device`
+
+        """
+        raise NotImplementedError()
 
 class DefaultKVCache(KVCache):
     """
@@ -504,6 +520,20 @@ class DefaultKVCache(KVCache):
 
         """
         raise NotImplementedError()
+
+    def _base_kwargs_for_clone(self) -> Dict[str, Any]:
+        """
+        Supports :meth:`clone` implementations in subclasses.
+        Note that the copy created by :meth:`clone` uses the same `self.mha`
+        object (shallow copy).
+
+        Returns:
+            Keyword arguments for calling the constructor in :meth:`clone`
+        """
+        return dict(
+            head_size=self.head_size,
+            mha=self.mha,
+        )
 
 
 class KVCacheReplayLog:

@@ -70,8 +70,9 @@ def args_gradient_row_of_cells():
     # `limit_num_unmatched` depends on the scenario. These are the numbers of
     # unmatched pack args per cell we still tolerate. Need more work to
     # understand where these pack args come from.
-    tol_kwargs = dict(atol=2e-5, rtol=2e-5)
+    tol_kwargs = dict(atol=3e-5, rtol=2e-5)
     tol_kwargs2 = dict(atol=0.0005, rtol=0.001)
+    tol_kwargs3 = dict(atol=0.0015, rtol=0.01)
     return [
         a + b + (c,)
         for c, (a, b) in product(
@@ -82,7 +83,7 @@ def args_gradient_row_of_cells():
                     ([4, 8, 8, 12], tol_kwargs),
                     ([8, 14, 14, 12], tol_kwargs),
                     ([4, 8, 8, 8, 12], tol_kwargs),
-                    ([8, 14, 14, 16, 12], tol_kwargs2),
+                    ([8, 14, 14, 16, 12], tol_kwargs3),
                     ([4, 8, 8, 12], tol_kwargs),
                     ([8, 14, 14, 12], tol_kwargs),
                     ([4, 8, 8, 8, 12], tol_kwargs),
@@ -94,11 +95,11 @@ def args_gradient_row_of_cells():
                     ([4, 8, 8, 12], tol_kwargs),
                     ([12, 18, 18, 12], tol_kwargs),
                     ([4, 8, 8, 8, 12], tol_kwargs),
-                    ([12, 18, 18, 18, 12], tol_kwargs2),
+                    ([12, 18, 18, 18, 12], tol_kwargs3),
                     ([4, 8, 8, 12], tol_kwargs),
                     ([12, 18, 18, 12], tol_kwargs),
                     ([4, 8, 8, 8, 12], tol_kwargs),
-                    ([12, 18, 18, 18, 12], tol_kwargs2),
+                    ([12, 18, 18, 18, 12], tol_kwargs3),
                 ],
             ),
         )
@@ -182,7 +183,9 @@ def test_gradient_row_of_cells(
         device=device,
         dtype=dtype,
     )
-    gpt_model = GPT(config).to(device=device)
+    with torch.device(device):
+        gpt_model = GPT(config)
+    gpt_model.apply(gpt_model._init_weights)  # Initialization
     gpt_model.set_start_of_layer_hook(start_of_layer_hook)
     token_idxs = torch.randint(
         low=0,

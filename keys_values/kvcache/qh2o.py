@@ -11,12 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict, Optional, Any
 
 import torch
 
 from litgpt.config import Config
 
+from keys_values.kvcache.basics import KVCache
 from keys_values.kvcache.buffers import KVCacheBuffers
 from keys_values.kvcache.h2o import H2OKVCache, VLengthInstantScoreMixin
 from keys_values.kvcache.quant_buffers import QuantizedKVCacheBuffers
@@ -198,6 +199,24 @@ class QuantizedH2OKVCache(H2OKVCache):
         _scores = (_scores - _min) / _denom
         return _scores.view(*scores.shape)
 
+    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+        if device is not None and device != self.device:
+            if self.kv_buffers.buffers_are_allocated:
+                raise ValueError(f"Can only change device of buffers to {device} if buffers are deallocated")
+            self.kv_buffers.deallocate(device)
+        return QuantizedH2OKVCache(
+            config=self.config,
+            buffers=self.kv_buffers,
+            block_idx=self.block_idx,
+            **self._base_kwargs_for_clone(),
+        )
+
+    def _base_kwargs_for_clone(self) -> Dict[str, Any]:
+        base_kwargs = super()._base_kwargs_for_clone()
+        base_kwargs["combination_constant"] = self.combination_constant
+        base_kwargs["scratch_blocksize"] = self._scratch_blocksize
+        return base_kwargs
+
 
 class QuantizedVLengthH2OKVCache(QuantizedH2OKVCache, VLengthInstantScoreMixin):
     def __init__(
@@ -264,3 +283,15 @@ class QuantizedVLengthH2OKVCache(QuantizedH2OKVCache, VLengthInstantScoreMixin):
 
     def get_kv_buffers(self) -> KVCacheBuffers:
         return self.kv_buffers
+
+    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+        if device is not None and device != self.device:
+            if self.kv_buffers.buffers_are_allocated:
+                raise ValueError(f"Can only change device of buffers to {device} if buffers are deallocated")
+            self.kv_buffers.deallocate(device)
+        return QuantizedVLengthH2OKVCache(
+            config=self.config,
+            buffers=self.kv_buffers,
+            block_idx=self.block_idx,
+            **self._base_kwargs_for_clone(),
+        )
