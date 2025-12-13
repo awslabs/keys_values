@@ -555,6 +555,7 @@ def create_layers_and_buffers_for_model(
     batch_size: int,
     qname: str,
     cache_kwargs: Optional[Dict[str, Any]] = None,
+    default_device: Optional[torch.device] = None,
 ) -> List[Tuple[List[int], QuantizedKVCacheBuffers]]:
     # Determine the devices
     # Note: `n_layer` may be in `layer_numbers`, for which we use the device
@@ -564,6 +565,8 @@ def create_layers_and_buffers_for_model(
     for l_ix in layer_numbers:
         params = model.get_kv_cache_params(min(l_ix, n_layer - 1))
         device = params.device
+        if device is None:
+            device = default_device
         lnums = lnums_and_device.get(device)
         if lnums is None:
             lnums_and_device[device] = [l_ix]
@@ -583,6 +586,7 @@ def create_layers_and_buffers_for_model(
         layer_activations=True,
         cache_kwargs=cache_kwargs,
         dequant_kwargs=dequant_kwargs,
+        default_device=default_device,
     )
     return [
         (lnums, quant_buffers[device])

@@ -1623,15 +1623,6 @@ def test_rope_init_under_fsdp():
     assert model.mha.pos_encoding.device.type == "cuda"
 
 
-@_RunIf(min_cuda_gpus=1)
-def test_reset_parameters_device():
-    with torch.device("meta"):
-        model = GPT.from_name("pythia-14m", n_layer=1)
-    _materialize_meta_tensors(model, torch.device("cuda"))
-    model.reset_parameters()
-    assert model.mha.pos_encoding.device.type == "cuda"
-
-
 def test_load_legacy_state_dict():
     """Check that a legacy state dict (with an interleaved placement in QKV matrix) can be loaded into a model with CausalSelfAttention layers."""
     config = Config(

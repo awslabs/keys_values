@@ -20,22 +20,26 @@ import pytest
 
 from litgpt.config import Config
 
-from keys_values.head_model import CrossEntropyOnLogits
+from keys_values.head_model import CrossEntropyOnLogits, SequenceClassification
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
-from keys_values.kvcache.gradient.main import LongContextGradientModel
+from keys_values.kvcache.gradient.main import (
+    LongContextGradientModel,
+    create_offload_model,
+)
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     copy_gradients,
     available_backends,
+    cache_names_and_devices,
 )
-from keys_values.model import GPT
+from keys_values.model import GPT, block_iterator
 
 
 def args_complete_gradient_computation():
     return [
-        a + b + (c, d)
-        for d, a, b, c in product(
+        b + c + (d, a)
+        for a, b, c, d in product(
             available_backends(),
             [
                 ("lastrec", dict()),
@@ -94,7 +98,9 @@ def test_complete_gradient_computation(
         device=device,
         dtype=dtype,
     )
-    gpt_model = GPT(config)
+    with torch.device(device):
+        gpt_model = GPT(config)
+    gpt_model.apply(gpt_model._init_weights)  # Initialization
     gpt_model.assign_kv_caches(
         [
             create_kv_cache(
@@ -184,6 +190,124 @@ def test_complete_gradient_computation(
             raise IndexError(f"name = {name} is in gradients[0], but not in gradients[1]")
         print(f"Comparing gradient for {name}")
         torch.testing.assert_close(value, value_comp, **kwargs)
+
+
+def args_copy_model_to_device():
+    return [
+        (device, dtype, name)
+        for device, dtype, name in product(
+            available_backends(do_mps=False),
+            [torch.bfloat16, torch.float16, torch.float32],
+            [
+                name
+                for name, _ in cache_names_and_devices(only_cpu=True)
+                if not name.startswith("dense")
+            ],
+        )
+    ]
+
+@pytest.mark.parametrize(
+    "cpu_offload_device, dtype, cache_name", args_copy_model_to_device(),
+)
+def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
+    seed = 31415927
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    torch.set_default_dtype(dtype)
+
+    device = torch.device("cpu")
+    cache_lengths = [128, 128]
+    batch_size = 5
+    n_layer = len(cache_lengths)
+    n_head = 8
+    n_query_groups = 4
+    head_size = 64
+    vocab_size = 48
+    layers_per_cell = 1
+    chunk_size = 8
+    max_sequence_length = max(cache_lengths) * 8
+    head_model_name = SequenceClassification.NAME
+
+    # Create model and KV caches
+    config = Config(
+        n_layer=n_layer,
+        n_head=n_head,
+        n_query_groups=n_query_groups,
+        n_embd=n_head * head_size,
+        block_size=max_sequence_length,
+        vocab_size=vocab_size,
+        rotary_percentage=1,
+    )
+    params = KVCacheParams.from_config(
+        config=config,
+        max_batch_size=batch_size,
+        cache_length=cache_lengths[0],
+        device=device,
+        dtype=dtype,
+    )
+    gpt_model = GPT(config)
+    gpt_model.apply(gpt_model._init_weights)  # Initialization
+    gpt_model.assign_kv_caches(
+        [
+            create_kv_cache(
+                name=cache_name,
+                params=replace(params, cache_length=cache_length),
+                block_idx=block_idx,
+            )
+            for block_idx, cache_length in enumerate(cache_lengths)
+        ]
+    )
+    for l_ix, block in enumerate(block_iterator(gpt_model)):
+        kv_cache = block.attn.kv_cache
+        assert kv_cache.device == device, (l_ix, kv_cache.device, device)
+    with torch.device(cpu_offload_device):
+        head_model = HeadModelFactory.create(name=head_model_name, config=config)
+    offload_model = create_offload_model(
+        gpt_model,
+        target_device=cpu_offload_device,
+        use_lm_head=head_model.needs_logits(),
+    )
+    model = LongContextGradientModel(
+        gpt_model=gpt_model,
+        head_model=head_model,
+        layers_per_cell=layers_per_cell,
+        chunk_size=chunk_size,
+        qname="default",
+        offload_model=offload_model,
+        offload_device=cpu_offload_device,
+    )
+    model.zero_grad()
+
+    # Deep copy of model
+    model_copy = model.copy_model_for_evaluation()
+    # Compare all params
+    _model = model.gpt_model
+    _model_copy = model_copy.gpt_model
+    state_dict = _model_copy.state_dict()
+    for name, param in _model.named_parameters():
+        assert name in state_dict, f"name='{name}' in original, but not copy"
+        param_copy = state_dict[name]
+        if param is None:
+            assert param_copy is None, f"name='{name}': param is None, param_copy is not None"
+        else:
+            assert param.data.device == device, (param.data.device, device)
+            assert param_copy.data.device == cpu_offload_device, (param_copy.data.device, cpu_offload_device)
+            torch.testing.assert_close(param.data, param_copy.data.to(device=device))
+    copy_names = _model_copy.state_dict().keys()
+    names = _model.state_dict().keys()
+    diff = set(copy_names).difference(names)
+    assert len(diff) == 0, f"Entries in copy but not in original:\n{diff}"
+    # All KV caches exist
+    for l_ix, (block, block_copy) in enumerate(
+        zip(block_iterator(model.gpt_model), block_iterator(model_copy.gpt_model))
+    ):
+        kv_cache = block.attn.kv_cache
+        kv_cache_copy = block_copy.attn.kv_cache
+        assert kv_cache is not None and kv_cache_copy is not None, (l_ix, kv_cache, kv_cache_copy)
+        assert type(kv_cache) == type(kv_cache_copy), (l_ix, type(kv_cache), type(kv_cache_copy))
+        assert block.attn.device == device, (l_ix, block.attn.device, device)
+        assert block_copy.attn.device == cpu_offload_device, (l_ix, block_copy.attn.device, cpu_offload_device)
+        assert kv_cache_copy.device == cpu_offload_device, (l_ix, kv_cache_copy.device, cpu_offload_device)
 
 
 if __name__ == "__main__":

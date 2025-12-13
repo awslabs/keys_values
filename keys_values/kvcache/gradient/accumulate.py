@@ -62,7 +62,7 @@ from keys_values.long_context import (
     compute_loss_for_chunk,
     HEAD_OR_INITIAL_TENSORS_MAX_BYTES,
 )
-from keys_values.model import GPT, device_for_layer
+from keys_values.model import GPT
 
 
 def checkpoint_hook(
@@ -139,8 +139,12 @@ class GradientAccumulator:
         self._clear_internal()
         # Annotation usage logs
         self._annotation_usage_logs: Dict[int, AnnotationUsageLog] = dict()
+        self._debug_intermediates = None
         if train_cache_kwargs is None:
             train_cache_kwargs = dict()
+        elif "debug_intermediates" in train_cache_kwargs:
+            train_cache_kwargs = train_cache_kwargs.copy()
+            self._debug_intermediates = train_cache_kwargs.pop("debug_intermediates")
         self._train_cache_kwargs = train_cache_kwargs
         self._debug_tensors = debug_tensors  # DEBUG
 
@@ -416,6 +420,13 @@ class GradientAccumulator:
             # Loop over cells from right to left
             # Important to switch MHA to memory efficient version for use in training
             # mode
+            if self._debug_intermediates is not None:
+                debug_intermediates = (
+                    self._debug_intermediates,
+                    f"backward_blocks{first_layer_idx}:{first_layer_idx + num_layers}"
+                )
+            else:
+                debug_intermediates = None
             cell = CellComputation(
                 model_part=model_part,
                 autograd_hooks=self._hooks_for_cell_computation(),
@@ -423,6 +434,7 @@ class GradientAccumulator:
                 batch_size=self._batch_size,
                 debug_tensors=self._debug_tensors,
                 **self._train_cache_kwargs,
+                debug_intermediates=debug_intermediates,
             )
             first_layer_device = None
             last_layer_device = None
@@ -489,8 +501,6 @@ class GradientAccumulator:
                                 head_gradients_v=head_gradients_v,
                                 first_chunk_idx=first_chunk_idx,
                                 num_chunks=num_chunks,
-                                first_layer_idx=first_layer_idx,
-                                autograd_hooks=self._hooks_for_cell_computation(),
                             )
                     else:
                         scalar_output = self.forward_computation(
@@ -503,7 +513,6 @@ class GradientAccumulator:
                             head_gradients_v=head_gradients_v,
                             first_chunk_idx=first_chunk_idx,
                             num_chunks=num_chunks,
-                            first_layer_idx=first_layer_idx,
                         )
 
                     scalar_output.backward()
@@ -561,8 +570,6 @@ class GradientAccumulator:
         head_gradients_v: Optional[List[torch.Tensor]],
         first_chunk_idx: int,
         num_chunks: int,
-        first_layer_idx: int,
-        autograd_hooks: Optional[CellComputationAutogradHooks] = None,
     ):
         # Why not use `get_inputs_slice` passed to :meth:`run`? This won't work,
         # since we need to create the input to the cell as tensor with
@@ -751,7 +758,9 @@ class GradientAccumulator:
                 a slice `range(start, end)` of the head gradients for the final
                 transformer layer. This can be used as argument of :meth:`run`
                 for the topmost row of cells.
-            targets: Tensor of targets, aligned with `input_ids` on the right
+            targets: Tensor of targets, aligned with `input_ids` on the right.
+                Must be on the same device as `head_model` and final layer of
+                `gpt_model`
 
         Returns:
             Loss function value. We use mean reduction over the sequence.
@@ -766,7 +775,9 @@ class GradientAccumulator:
         if not (1 <= batch_size <= max_batch_size):
             raise ValueError(f"targets.shape[0] = {batch_size}, must be in [1, {max_batch_size}]")
         self._batch_size = batch_size
-        weights_dtype = gpt_model.transformer.wte.weight.dtype
+        weights_dtype = replay_logs[0].dtype
+        if weights_dtype is None:
+            weights_dtype = torch.bfloat16
         self._initialize_internal(
             replay_logs,
             chunks_per_cell,
@@ -783,9 +794,6 @@ class GradientAccumulator:
         else:
             clamp_head = None
         # Head model must be on the same device as the final outputs
-        device_final = device_for_layer(gpt_model, -1)
-        head_model = head_model.to(device_final)
-        targets = targets.to(device_final)
         if self._verbose_more:
             print("\nGradient accumulation for head model")
         # First loop to obtain normalization constants

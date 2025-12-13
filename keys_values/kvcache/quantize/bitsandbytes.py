@@ -151,6 +151,8 @@ class BitsAndBytesQuantizer(Quantizer):
         if device is None:
             device = self.device
         if not self.buffers_are_allocated or batch_size > self.shape[0] or device != self.device:
+            if device is None:
+                raise ValueError("device is not set. Use device argument")
             self.shape = (batch_size,) + self.shape[1:]
             self._init_blocksize_quant_shape()
             shape = self._quant_shape
@@ -168,13 +170,15 @@ class BitsAndBytesQuantizer(Quantizer):
         _, quant_state = quant_func(x)
         self._quant_code = quant_state.code
 
-    def deallocate(self):
+    def deallocate(self, device: Optional[torch.device] = None):
         if self.buffers_are_allocated:
             del self.quant_buffer
             self.quant_buffer = None
             del self.quant_absmax
             self.quant_absmax = None
             self._batch_size = None
+        if device is not None:
+            self._device = device
 
     @property
     def buffers_are_allocated(self) -> bool:
@@ -425,10 +429,10 @@ class BitsAndBytesQuantizerState(QuantizerState):
         pos = 0 if self.quantizer.blocks_over_heads else 1
         shape[pos] = self.cache_length
         self.quant_buffer = torch.zeros(
-            shape, dtype=quantizer.target_dtype, device=device,
+            shape, dtype=quantizer.target_dtype, device=self.device,
         )
         self.quant_absmax = torch.zeros(
-            shape[:-1], dtype=torch.float32, device=device,
+            shape[:-1], dtype=torch.float32, device=self.device,
         )
 
     def copy_(

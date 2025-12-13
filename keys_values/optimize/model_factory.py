@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import re
 from typing import Dict, List, Optional, Union, Tuple
 
 import torch
@@ -32,6 +33,52 @@ from keys_values.optimize.module_wrapper import (
     ParameterStructure,
 )
 from keys_values.use_eager_kernel import transform_mha_kwargs
+
+
+class BlockComponentName:
+    @staticmethod
+    def wte() -> str:
+        return "transformer.wte"
+
+    @staticmethod
+    def ln_f() -> str:
+        return "transformer.ln_f"
+
+    @staticmethod
+    def h(layer_idx: int) -> str:
+        return "transformer.h." + str(layer_idx)
+
+    @staticmethod
+    def lm_head() -> str:
+        return "lm_head"
+
+    @staticmethod
+    def components(
+        model: GPTFull,
+        lm_head: bool = True,
+    ) -> List[Tuple[str, torch.nn.Module]]:
+        result = [
+            (BlockComponentName.wte(), model.transformer.wte),
+            (BlockComponentName.ln_f(), model.transformer.ln_f),
+        ] + [
+            (BlockComponentName.h(layer_idx), block)
+            for layer_idx, block in enumerate(model.transformer.h)
+        ]
+        if lm_head:
+            result.append(
+                (BlockComponentName.lm_head(), model.lm_head)
+            )
+        return result
+
+    REGEX_H_NAME = re.compile(r"transformer\.h\.(\d+)$")
+
+    @staticmethod
+    def is_h(name: str) -> Optional[int]:
+        m = BlockComponentName.REGEX_H_NAME.match(name)
+        if m:
+            return int(m.group(1))
+        else:
+            return None
 
 
 def parent_of_parameter(
@@ -58,16 +105,96 @@ def get_weights_as_flat_vectors(
     lm_head: bool = True,
     device: Optional[torch.device] = None,
 ) -> Dict[str, FlatVectors]:
-    parts = [("wte", model.transformer.wte)] + [
-        (f"layer{block_idx}", block)
-        for block_idx, block in enumerate(model.transformer.h)
-    ]
-    if lm_head:
-        parts.append(("lm_head", model.lm_head))
     return {
         name: AccessWeightsGradients(block).get_weights(device=device)
-        for name, block in parts
+        for name, block in BlockComponentName.components(model, lm_head)
     }
+
+
+def device_of_flat_vectors(
+    flat_vectors: Union[FlatVectors, Dict[str, FlatVectors]],
+) -> torch.device:
+    test_val = next(iter(flat_vectors.values()))
+    if isinstance(test_val, torch.Tensor):
+        devices = {vec.device for vec in flat_vectors.values()}
+    else:
+        devices = {
+            vec.device for vecs in flat_vectors.values() for vec in vecs.values()
+        }
+    if len(devices) > 2:
+        raise ValueError(f"flat_vectors contains vectors on more than one device: {devices}")
+    return next(iter(devices))
+
+
+REGEX_SHARD_TYPE = re.compile(r"h(\d+):(\d+)$")
+
+
+def names_and_modules_for_shard(
+    gpt_model: Union[GPTFull, GPTLoRA],
+    shard_type: Optional[str],
+    use_lm_head: bool = True,
+) -> Tuple[List[Tuple[str, torch.nn.Module]], Optional[Tuple[int, int]]]:
+    """
+    Returns list of `(name, module)` tuples for modules of a shard determined
+    by `shard_type`. This can be "wte", "lm_head" (which includes "ln_f"), or
+    "h{start}:{end}". If `shard_type is None`, the union of all shards is used.
+
+    Args:
+        gpt_model: Model to extract modules of
+        shard_type: See above
+        use_lm_head: If `False`, the `lm_head` module is not included
+
+    Returns:
+        List of `(name, module)` tuples, see above. If `shard_type ==
+        "h{start}:{end}"`, we also return `(start, end)`.
+
+    """
+    names_and_modules = []
+    start = None
+    end = None
+    include_all = shard_type is None
+    if include_all or shard_type == "wte":
+        names_and_modules.append(
+            (BlockComponentName.wte(), gpt_model.transformer.wte)
+        )
+    if include_all or (
+        (not names_and_modules) and shard_type == "lm_head"
+    ):
+        names_and_modules.append(
+            (BlockComponentName.ln_f(), gpt_model.transformer.ln_f)
+        )
+        if use_lm_head:
+            names_and_modules.append(
+                (BlockComponentName.lm_head(), gpt_model.lm_head)
+            )
+    if include_all or not names_and_modules:
+        if include_all:
+            start = 0
+            end = gpt_model.config.n_layer
+        else:
+            m = REGEX_SHARD_TYPE.match(shard_type)
+            if m:
+                start = int(m.group(1))
+                end = int(m.group(2))
+                if not (0 <= start < end <= gpt_model.config.n_layer):
+                    start = end = None
+        if start is not None:
+            names_and_modules.extend(
+                [
+                    (
+                        BlockComponentName.h(layer_idx),
+                        gpt_model.transformer.h[layer_idx],
+                    )
+                    for layer_idx in range(start, end)
+                ]
+            )
+    ret2 = None
+    if not include_all:
+        if not names_and_modules:
+            raise ValueError(f"shard_type = {shard_type} unknown, must be 'wte', 'lm_head', or 'h<start>:<end>'")
+        if start is not None:
+            ret2 = (start, end)
+    return names_and_modules, ret2
 
 
 class GPTFullWrapper(GPTFull):
@@ -75,14 +202,16 @@ class GPTFullWrapper(GPTFull):
         self,
         config: ConfigFull,
         components: Dict[str, nn.Module],
+        mha: Optional[MultiHeadSelfAttention] = None,
         **mha_kwargs,
     ):
         nn.Module.__init__(self)
         assert config.padded_vocab_size is not None
         self.config = config
 
-        if "lm_head" in components:
-            self.lm_head = components["lm_head"]
+        name = BlockComponentName.lm_head()
+        if name in components:
+            self.lm_head = components[name]
         else:
             self.lm_head = nn.Linear(
                 config.n_embd,
@@ -91,17 +220,20 @@ class GPTFullWrapper(GPTFull):
             )
         self.transformer = nn.ModuleDict(
             dict(
-                wte=components["wte"],
+                wte=components[BlockComponentName.wte()],
                 h=nn.ModuleList(
-                    components[f"layer{block_idx}"]
+                    components[BlockComponentName.h(block_idx)]
                     for block_idx in range(config.n_layer)
                 ),
-                ln_f=components["ln_f"],
+                ln_f=components[BlockComponentName.ln_f()],
             )
         )
-        self.mha = MultiHeadSelfAttention(
-            config, **transform_mha_kwargs(mha_kwargs, config),
-        )
+        if mha is None:
+            self.mha = MultiHeadSelfAttention(
+                config, **transform_mha_kwargs(mha_kwargs, config),
+            )
+        else:
+            self.mha = mha
         self.max_seq_length = config.block_size
         self._start_of_layer_hook = None
         self._default_kv_cache = False
@@ -119,14 +251,16 @@ class GPTLoRAWrapper(GPTLoRA):
         self,
         config: ConfigLoRA,
         components: Dict[str, nn.Module],
+        mha: Optional[MultiHeadSelfAttention] = None,
         **mha_kwargs,
     ):
         nn.Module.__init__(self)
         assert config.padded_vocab_size is not None
         self.config = config
 
-        if "lm_head" in components:
-            self.lm_head = components["lm_head"]
+        name = BlockComponentName.lm_head()
+        if name in components:
+            self.lm_head = components[name]
         else:
             self.lm_head = create_lora_linear(
                 config,
@@ -137,17 +271,20 @@ class GPTLoRAWrapper(GPTLoRA):
             )
         self.transformer = nn.ModuleDict(
             dict(
-                wte=components["wte"],
+                wte=components[BlockComponentName.wte()],
                 h=nn.ModuleList(
-                    components[f"layer{block_idx}"]
+                    components[BlockComponentName.h(block_idx)]
                     for block_idx in range(config.n_layer)
                 ),
-                ln_f=components["ln_f"],
+                ln_f=components[BlockComponentName.ln_f()],
             )
         )
-        self.mha = MultiHeadSelfAttention(
-            config, **transform_mha_kwargs(mha_kwargs, config),
-        )
+        if mha is None:
+            self.mha = MultiHeadSelfAttention(
+                config, **transform_mha_kwargs(mha_kwargs, config),
+            )
+        else:
+            self.mha = mha
         self.max_seq_length = config.block_size
         self._start_of_layer_hook = None
         self._default_kv_cache = False
@@ -160,11 +297,17 @@ class GPTLoRAWrapper(GPTLoRA):
         return get_weights_as_flat_vectors(self, lm_head, device)
 
 
+# TODO:
+# Needed if removing parameters from a full model does not work.
+# ==> Must be updated to represent current model!
+# - Why subclass of GPTFull?
+# - Relation to stack_layers?
 class GPTStackBlocks(GPTFull):
     def __init__(
         self,
         config: ConfigFull,
         components: Union[List[BlockFull], List[BlockLoRA]],
+        mha: Optional[MultiHeadSelfAttention] = None,
         **mha_kwargs,
     ):
         nn.Module.__init__(self)
@@ -173,9 +316,12 @@ class GPTStackBlocks(GPTFull):
 
         self.transformer = nn.ModuleDict(dict(h=nn.ModuleList(components)))
         self.lm_head = None
-        self.mha = MultiHeadSelfAttention(
-            config, **transform_mha_kwargs(mha_kwargs, config),
-        )
+        if mha is None:
+            self.mha = MultiHeadSelfAttention(
+                config, **transform_mha_kwargs(mha_kwargs, config),
+            )
+        else:
+            self.mha = mha
         self.max_seq_length = config.block_size
         self._default_kv_cache = False
 
@@ -261,7 +407,9 @@ class ModelFromFlatVectorsFactory:
             :class:`litgpt.model.Block` object with initialized weights
 
         """
-        block = BlockFull(config, block_idx)
+        device = device_of_flat_vectors(weights_vecs)
+        with torch.device(device):
+            block = BlockFull(config, block_idx)
         AccessWeightsGradients(block).set_weights(weights_vecs)
         return block
 
@@ -284,7 +432,9 @@ class ModelFromFlatVectorsFactory:
             :class:`litgpt.lora.Block` object with initialized weights
 
         """
-        block = BlockLoRA(config, block_idx)
+        device = device_of_flat_vectors(weights_vecs)
+        with torch.device(device):
+            block = BlockLoRA(config, block_idx)
         AccessWeightsGradients(block).set_weights(weights_vecs)
         return block
 
@@ -293,7 +443,9 @@ class ModelFromFlatVectorsFactory:
         config: ConfigFull,
         weights_vecs: FlatVectors,
     ) -> nn.Embedding:
-        wte = nn.Embedding(config.padded_vocab_size, config.n_embd)
+        device = device_of_flat_vectors(weights_vecs)
+        with torch.device(device):
+            wte = nn.Embedding(config.padded_vocab_size, config.n_embd)
         AccessWeightsGradients(wte).set_weights(weights_vecs)
         return wte
 
@@ -302,7 +454,9 @@ class ModelFromFlatVectorsFactory:
         config: ConfigFull,
         weights_vecs: FlatVectors,
     ) -> nn.Module:
-        ln_f = config.norm_class(config.n_embd, eps=config.norm_eps)
+        device = device_of_flat_vectors(weights_vecs)
+        with torch.device(device):
+            ln_f = config.norm_class(config.n_embd, eps=config.norm_eps)
         AccessWeightsGradients(ln_f).set_weights(weights_vecs)
         return ln_f
 
@@ -311,11 +465,13 @@ class ModelFromFlatVectorsFactory:
         config: ConfigFull,
         weights_vecs: FlatVectors,
     ) -> nn.Linear:
-        lm_head = nn.Linear(
-            config.n_embd,
-            config.padded_vocab_size,
-            bias=config.lm_head_bias,
-        )
+        device = device_of_flat_vectors(weights_vecs)
+        with torch.device(device):
+            lm_head = nn.Linear(
+                config.n_embd,
+                config.padded_vocab_size,
+                bias=config.lm_head_bias,
+            )
         AccessWeightsGradients(lm_head).set_weights(weights_vecs)
         return lm_head
 
@@ -324,25 +480,42 @@ class ModelFromFlatVectorsFactory:
         config: ConfigLoRA,
         weights_vecs: FlatVectors,
     ) -> LoRALinear:
-        lm_head = create_lora_linear(
-            config,
-            config.n_embd,
-            config.padded_vocab_size,
-            bias=config.lm_head_bias,
-            use_r=config.lora_head,
-        )
+        device = device_of_flat_vectors(weights_vecs)
+        with torch.device(device):
+            lm_head = create_lora_linear(
+                config,
+                config.n_embd,
+                config.padded_vocab_size,
+                bias=config.lm_head_bias,
+                use_r=config.lora_head,
+            )
         AccessWeightsGradients(lm_head).set_weights(weights_vecs)
         return lm_head
 
     @staticmethod
     def _get_component_keys(all_keys: List[str], n_layer: int) -> List[str]:
-        component_keys = [f"layer{i}" for i in range(n_layer)] + ["wte", "ln_f"]
+        component_keys = [
+            BlockComponentName.h(i) for i in range(n_layer)
+        ] + [BlockComponentName.wte(), BlockComponentName.ln_f()]
         for key in component_keys:
             if key not in all_keys:
                 raise ValueError(f"weights_vecs is missing key {key}")
-        if "lm_head" in all_keys:
-            component_keys.append("lm_head")
+        name = BlockComponentName.lm_head()
+        if name in all_keys:
+            component_keys.append(name)
         return component_keys
+
+    CHOICES_FULL = {
+        BlockComponentName.wte(): create_wte,
+        BlockComponentName.ln_f(): create_ln_f,
+        BlockComponentName.lm_head(): create_full_lm_head,
+    }
+
+    CHOICES_LORA = {
+        BlockComponentName.wte(): create_wte,
+        BlockComponentName.ln_f(): create_ln_f,
+        BlockComponentName.lm_head(): create_lora_lm_head,
+    }
 
     @staticmethod
     def _create_components_full_model(
@@ -353,27 +526,19 @@ class ModelFromFlatVectorsFactory:
         components = dict()
         for comp_name in component_keys:
             _weights_vecs = weights_vecs[comp_name]
-            if comp_name.startswith("layer"):
-                block_idx = int(comp_name[len("layer") :])
-                components[comp_name] = ModelFromFlatVectorsFactory.create_full_block(
-                    config=config,
-                    block_idx=block_idx,
-                    weights_vecs=_weights_vecs,
-                )
-            elif comp_name == "wte":
-                components[comp_name] = ModelFromFlatVectorsFactory.create_wte(
-                    config=config,
-                    weights_vecs=_weights_vecs,
-                )
-            elif comp_name == "ln_f":
-                components[comp_name] = ModelFromFlatVectorsFactory.create_ln_f(
+            creator = ModelFromFlatVectorsFactory.CHOICES_FULL.get(comp_name)
+            if creator is not None:
+                components[comp_name] = creator(
                     config=config,
                     weights_vecs=_weights_vecs,
                 )
             else:
-                assert comp_name == "lm_head"
-                components[comp_name] = ModelFromFlatVectorsFactory.create_full_lm_head(
+                block_idx = BlockComponentName.is_h(comp_name)
+                if block_idx is None:
+                    raise ValueError(f"Entry '{comp_name}' in component_keys is not valid")
+                components[comp_name] = ModelFromFlatVectorsFactory.create_full_block(
                     config=config,
+                    block_idx=block_idx,
                     weights_vecs=_weights_vecs,
                 )
             # Deallocate
@@ -386,12 +551,12 @@ class ModelFromFlatVectorsFactory:
         config: ConfigFull,
         weights_vecs: Dict[str, FlatVectors],
         **mha_kwargs,
-    ) -> GPTFull:
+    ) -> GPTFullWrapper:
         """
         Creates complete :class:`litgpt.model.GPT` model, initializing all
         weights from `weights_vecs`.
 
-        `weights_vecs`has entries for keys "wte", "layer{block_idx}". The
+        `weights_vecs` has entries for keys "wte", "layer{block_idx}". The
         entry for "lm_head" is optional. The entries of this dictionary
         are deleted once not needed anymore.
 
@@ -429,27 +594,19 @@ class ModelFromFlatVectorsFactory:
         components = dict()
         for comp_name in component_keys:
             _weights_vecs = weights_vecs[comp_name]
-            if comp_name.startswith("layer"):
-                block_idx = int(comp_name[len("layer") :])
-                components[comp_name] = ModelFromFlatVectorsFactory.create_lora_block(
-                    config=config,
-                    block_idx=block_idx,
-                    weights_vecs=_weights_vecs,
-                )
-            elif comp_name == "wte":
-                components[comp_name] = ModelFromFlatVectorsFactory.create_wte(
-                    config=config,
-                    weights_vecs=_weights_vecs,
-                )
-            elif comp_name == "ln_f":
-                components[comp_name] = ModelFromFlatVectorsFactory.create_ln_f(
+            creator = ModelFromFlatVectorsFactory.CHOICES_LORA.get(comp_name)
+            if creator is not None:
+                components[comp_name] = creator(
                     config=config,
                     weights_vecs=_weights_vecs,
                 )
             else:
-                assert comp_name == "lm_head"
-                components[comp_name] = ModelFromFlatVectorsFactory.create_lora_lm_head(
+                block_idx = BlockComponentName.is_h(comp_name)
+                if block_idx is None:
+                    raise ValueError(f"Entry '{comp_name}' in component_keys is not valid")
+                components[comp_name] = ModelFromFlatVectorsFactory.create_lora_block(
                     config=config,
+                    block_idx=block_idx,
                     weights_vecs=_weights_vecs,
                 )
             # Deallocate
@@ -462,7 +619,7 @@ class ModelFromFlatVectorsFactory:
         config: ConfigLoRA,
         weights_vecs: Dict[str, FlatVectors],
         **mha_kwargs,
-    ) -> GPTLoRA:
+    ) -> GPTLoRAWrapper:
         """
         Creates complete :class:`litgpt.lora.GPT` model, initializing all
         weights from `weights_vecs`.
@@ -498,45 +655,36 @@ class ModelFromFlatVectorsFactory:
 
     @staticmethod
     def remove_params_of_model(
-        model: Union[GPTFull, GPTLoRA],
-        lm_head: bool = True,
-    ) -> Dict[str, Dict[str, ParameterStructure]]:
+        gpt_model: Union[GPTFull, GPTLoRA],
+        shard_type: Optional[str],
+        use_lm_head: bool = True,
+    ):
         """
-        Removes all named parameters from `model`. Relies on PyTorch
-        default naming convention.
-
-        Note: Do not call this method on a model whose parameters are
-        referred to from elsewhere, e.g. from an optimizer.
+        Removes named parameters for certain blocks from `gpt_model`. The shard
+        is determined by `shard_type`, see :func:`names_and_modules_for_shard`.
+        If `shard_type is None`, parameters for all shards are removed.
 
         Args:
-            model: Module to remove named parameters from
-            lm_head: Remove `lm_head` params as well?
-
-        Returns:
-            Nested dictionary, containing parameter structures for
-            all blocks whose params have been removed
+            gpt_model: Module to remove named parameters of blocks from
+            shard_type: Selects blocks for which parameters are removed. See
+                :func:`names_and_modules_for_shard`. If `None`, parameters
+                for all shards are removed.
+            use_lm_head: If `False`, the `lm_head` module is not included
 
         """
-        components = [
-            (f"layer{i}", block) for i, block in enumerate(model.transformer.h)
-        ] + [
-            ("wte", model.transformer.wte),
-            ("ln_f", model.transformer.ln_f),
-        ]
-        if lm_head:
-            components.append(("lm_head", model.transformer.lm_head))
-        result = dict()
-        for comp_name, block in components:
-            param_structure = AccessWeightsGradients(block).param_structure()
-            result[comp_name] = param_structure
-            for name in [
+        names_and_modules, _ = names_and_modules_for_shard(
+            gpt_model, shard_type, use_lm_head,
+        )
+        for prefix_name, module in names_and_modules:
+            param_structure = AccessWeightsGradients(module).param_structure()
+            for _name in [
                 pspec.name
                 for struct in param_structure.values()
                 for pspec in struct.entries
             ]:
-                parent, pname = parent_of_parameter(model, name)
+                name = ".".join([prefix_name, _name])
+                parent, pname = parent_of_parameter(gpt_model, name)
                 delattr(parent, pname)
-        return result
 
     @staticmethod
     def restore_params_of_model(
@@ -569,7 +717,11 @@ class ModelFromFlatVectorsFactory:
                 for pspec in structure.entries:
                     start, end = pspec.range
                     src_arg = weight_vec[start:end].view(*pspec.shape)
-                    parent, pname = parent_of_parameter(model, pspec.name)
-                    parent.register_parameter(pname, nn.Parameter(src_arg))
+                    name = ".".join([comp_name, pspec.name])
+                    parent, pname = parent_of_parameter(model, name)
+                    parent.register_parameter(
+                        pname,
+                        nn.Parameter(src_arg, requires_grad=pspec.requires_grad),
+                    )
                 del weights_vecs[comp_name][dtype]
             del weights_vecs[comp_name]

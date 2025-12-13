@@ -54,6 +54,7 @@ from keys_values.kvcache.test_utils import (
     create_kv_cache,
 )
 from keys_values.model import GPT, CausalSelfAttention
+from keys_values.optimize.clone_model import clone_model_via_flat_vectors
 from keys_values.pos_encoding import LinearPositionEncoding
 from keys_values.utils import repeat_interleave
 
@@ -500,6 +501,12 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
         rotary_percentage=1.0,
         rope_indices=[0, 1] if is_gemma_3 else None,
     )
+    tol_kwargs = dict()
+    if dtype != torch.float32:
+        if model_name == "gemma-2-27b":
+            tol_kwargs = dict(atol=0.0005, rtol=0.005)
+        else:
+            tol_kwargs = dict(atol=0.001, rtol=0.005)
 
     # Obtain RoPE parameters and compare
     with torch.device(device):
@@ -511,8 +518,8 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
     cos_new = pos_encoding._cos.unsqueeze(0)
     sin_new = pos_encoding._sin.unsqueeze(0)
     cos_old, sin_old = rope_cache_OLD(config)
-    cos_old = cos_old.unsqueeze(0)
-    sin_old = sin_old.unsqueeze(0)
+    cos_old = cos_old.unsqueeze(0).to(device=device)
+    sin_old = sin_old.unsqueeze(0).to(device=device)
     torch.testing.assert_close(cos_new, cos_old)
     torch.testing.assert_close(sin_new, sin_old)
 
@@ -555,7 +562,7 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
             sin=_sin,
             mask=None,
         )
-        torch.testing.assert_close(outputs_new, outputs_old)
+        torch.testing.assert_close(outputs_new, outputs_old, **tol_kwargs)
 
 
 def _get_token_positions(
@@ -748,8 +755,8 @@ def _compare_mhas(
         assert mha1 is mha2, prefix + f"block_idx={block_idx}"
 
 
-def test_mha_is_passed_on():
-    device = torch.device("cpu")
+@pytest.mark.parametrize("device", available_backends())
+def test_mha_is_passed_on(device):
     dtype = torch.float32
     torch.set_default_dtype(dtype)  # Set default dtype
 
@@ -783,26 +790,27 @@ def test_mha_is_passed_on():
         device=device,
         dtype=dtype,
     )
-    gpt_model = GPT(config)
-    gpt_model.assign_kv_caches(
-        [
-            create_kv_cache(
-                name=cache_name,
-                params=replace(params, cache_length=cache_length),
-                block_idx=block_idx,
-            )
-            for block_idx, cache_length in enumerate(cache_lengths)
-        ]
-    )
-    orig_caches = gpt_model.get_kv_caches()
-    head_model = HeadModelFactory.create(name=head_model_name, config=config)
-    lc_model = LongContextGradientModel(
-        gpt_model=gpt_model,
-        head_model=head_model,
-        layers_per_cell=layers_per_cell,
-        chunk_size=chunk_size,
-        qname="default",
-    )
+    with torch.device(device):
+        gpt_model = GPT(config)
+        gpt_model.assign_kv_caches(
+            [
+                create_kv_cache(
+                    name=cache_name,
+                    params=replace(params, cache_length=cache_length),
+                    block_idx=block_idx,
+                )
+                for block_idx, cache_length in enumerate(cache_lengths)
+            ]
+        )
+        orig_caches = gpt_model.get_kv_caches()
+        head_model = HeadModelFactory.create(name=head_model_name, config=config)
+        lc_model = LongContextGradientModel(
+            gpt_model=gpt_model,
+            head_model=head_model,
+            layers_per_cell=layers_per_cell,
+            chunk_size=chunk_size,
+            qname="default",
+        )
     # Input batch
     token_ids = torch.randint(
         low=0,
@@ -814,21 +822,24 @@ def test_mha_is_passed_on():
     input_ids = token_ids[:, :-1]
     targets = token_ids[:, (-num_output_tokens):]
 
-    # After cloning: TODO!!
-    #gpt_model_clone = gpt_model.clone()
-    #_compare_mhas(
-    #    orig_caches, gpt_model_clone.get_kv_caches(), prefix="GPT.clone: ",
-    #)
+    # After cloning
+    gpt_model_clone = gpt_model.clone()
+    _compare_mhas(
+        orig_caches, gpt_model_clone.get_kv_caches(), prefix="GPT.clone: ",
+    )
+    gpt_model_clone = clone_model_via_flat_vectors(
+        model=gpt_model,
+        device=device,
+    )
+    _compare_mhas(
+        orig_caches, gpt_model_clone.get_kv_caches(), prefix="GPT.clone: ",
+    )
 
     # Inference replay caches
     # Forward pass creates replay logs
     lc_model.train()
     loss = lc_model(input_ids, targets)
     print(f"loss = {loss.item()}")
-    replay_logs = []
-    for cache in orig_caches:
-        replay_logs.append(cache.get_replay_log())
-        cache.switch_replay_logging(False)
     lc_model._create_members_for_backward()
 
     def get_inputs_slice(
@@ -850,7 +861,7 @@ def test_mha_is_passed_on():
     accumulator.run_head_model(
         gpt_model=lc_model.gpt_model,
         head_model=lc_model.head_model,
-        replay_logs=replay_logs,
+        replay_logs=lc_model._replay_logs,
         chunks_per_cell=lc_model.chunks_per_cell,
         get_inputs_slice=get_inputs_slice,
         write_head_gradients_slice=write_head_gradients_slice,

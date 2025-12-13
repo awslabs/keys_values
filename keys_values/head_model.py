@@ -18,6 +18,8 @@ import torch.nn.functional as F
 
 from litgpt.config import Config
 
+from keys_values.utils import copy_parameters
+
 
 class HeadModel(torch.nn.Module):
     """
@@ -101,6 +103,33 @@ class HeadModel(torch.nn.Module):
             raise ValueError(f"model_outputs.length = {model_outputs.shape[-2]}, must not be smaller than targets.length = {targets.shape[-1]}")
         return diff
 
+    def _empty_clone(self) -> "HeadModel":
+        """
+        Creates copy of this object on the same device. Parameters are not
+        copied.
+
+        """
+        raise NotImplementedError()
+
+    def clone(self, device: Optional[torch.device] = None) -> "HeadModel":
+        """
+        Creates and returns a copy of this object, situated on device `device`.
+        All named parameter tensors are copied.
+
+        Args:
+            device: Device on which the copy is created.
+
+        Returns:
+            Copy of this object on device `device`
+
+        """
+        # Create empty copy
+        model_copy = self._empty_clone()
+        if device is not None:
+            model_copy = model_copy.to(device=device)
+        copy_parameters(self, model_copy)
+        return model_copy
+
 
 class CrossEntropyOnLogits(HeadModel):
     """
@@ -177,6 +206,11 @@ class CrossEntropyOnLogits(HeadModel):
             targets.ne(self._ignore_index).sum().item()
         )
 
+    def _empty_clone(self) -> "HeadModel":
+        config = Config()
+        config.padded_vocab_size = self._vocab_size
+        return CrossEntropyOnLogits(config, ignore_index=self._ignore_index)
+
 
 class SequenceClassificationOnLogits(HeadModel):
     """
@@ -247,6 +281,13 @@ class SequenceClassificationOnLogits(HeadModel):
         self, targets: Optional[torch.Tensor]
     ) -> Optional[int]:
         return None
+
+    def _empty_clone(self) -> "HeadModel":
+        config = Config()
+        config.padded_vocab_size = self._vocab_size
+        return SequenceClassificationOnLogits(
+            config, class_label_tokens=list(self.class_label_tokens),
+        )
 
 
 SUPPORTED_POOL_TYPES = ("last", "mean")
@@ -329,3 +370,10 @@ class SequenceClassification(HeadModel):
         self, targets: Optional[torch.Tensor]
     ) -> Optional[int]:
         return None
+
+    def _empty_clone(self) -> "HeadModel":
+        config = Config()
+        config.n_embd = self.n_embd
+        return SequenceClassification(
+            config, num_classes=self.num_classes, pool_type=self.pool_type,
+        )

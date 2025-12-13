@@ -33,7 +33,9 @@ from keys_values.attention import (
     do_softcapping,
 )
 from keys_values.kvcache.base import KVCacheParams, KVCache, DefaultKVCache
+from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.use_eager_kernel import transform_mha_kwargs
+from keys_values.utils import copy_parameters
 
 
 # See `GPT.set_start_of_layer_hook`. A start of layer hook is called just before
@@ -444,6 +446,64 @@ class GPT(nn.Module):
             else:
                 return min(mlp for mlp in mlps if mlp is not None)
 
+    def _empty_clone(self, device: Optional[torch.device] = None) -> "GPT":
+        """
+        Creates copy of this object on the same device. Parameters are not
+        copied.
+
+        """
+        if device is None:
+            model_copy = GPT(self.config)
+        else:
+            with torch.device(device):
+                model_copy = GPT(self.config)
+        model_copy.mha = self.mha
+        return model_copy
+
+    def clone(self, device: Optional[torch.device] = None) -> "GPT":
+        """
+        Creates and returns a copy of this object, situated on device `device`.
+        All named parameter tensors are copied. The copy is not entirely deep:
+
+        - Copy uses the same `self.mha` than this object
+        - For KV caches (if any), we use :meth:`KVCache.clone`, which produce
+          shallow copies, in that the underlying buffers are the same, but set
+          to a different device. For this to work, all buffers must be
+          deallocated.
+
+        For this reason, you are discouraged from using the copy and the
+        original at the same time. A typical use case is to create a copy of
+        the model on a device, run computations there, and delete the copy
+        afterwards, before using the original model again.
+
+        Args:
+            device: Device on which the copy is created.
+
+        Returns:
+            Copy of this object on device `device`
+
+        """
+        kv_caches = []
+        try:
+            # Remove KV caches before copy is created
+            for l_ix, block in enumerate(self.transformer.h):
+                kv_cache = block.attn.kv_cache
+                if kv_cache is not None and isinstance(kv_cache, KVCacheWithBuffers) and kv_cache.buffers_are_allocated:
+                    raise ValueError(f"KV cache of layer {l_ix} has buffers allocated. Deallocate buffers with `deallocate_kv_cache_buffers_of_model`")
+                kv_caches.append(kv_cache)
+                block.attn.kv_cache = None
+            # Create empty copy
+            model_copy = self._empty_clone(device)
+            copy_parameters(self, model_copy)
+        finally:
+            for kv_cache, block in zip(kv_caches, self.transformer.h):
+                block.attn.kv_cache = kv_cache
+        # Deal with KV caches
+        for kv_cache, block in zip(kv_caches, model_copy.transformer.h):
+            if kv_cache is not None:
+                block.attn.kv_cache = kv_cache.clone(device=device)
+        return model_copy
+
 
 class Block(nn.Module):
     def __init__(
@@ -557,6 +617,8 @@ class CausalSelfAttention(nn.Module):
 
     @property
     def device(self) -> Optional[torch.device]:
+        if not hasattr(self.qkv, "weight"):
+            return None
         w = self.qkv.weight
         return None if w is None else w.device
 

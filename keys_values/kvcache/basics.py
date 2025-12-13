@@ -19,6 +19,7 @@ from litgpt.config import Config
 
 from keys_values.attention import KeysAndValues
 from keys_values.kvcache.base import (
+    KVCache,
     DefaultKVCache,
     DefaultKVCacheReplayLog,
     KVCacheParams,
@@ -84,6 +85,7 @@ class KVCacheWithBuffers(DefaultKVCache):
             dtype=buffers.dtype,
             **base_kwargs,
         )
+        self.config = config  # Needed for :meth:`clone`
         self.kv_buffers = buffers
         self._checkpoint_hook = None
         self._chunk_idx = None
@@ -382,6 +384,18 @@ class DenseKVCache(KVCacheWithBuffers):
     def get_replay_log(self) -> Optional[KVCacheReplayLog]:
         return self._replay_log
 
+    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+        if device is not None and device != self.device:
+            if self.kv_buffers.buffers_are_allocated:
+                raise ValueError(f"Can only change device of buffers to {device} if buffers are deallocated")
+            self.kv_buffers.deallocate(device)
+        return DenseKVCache(
+            config=self.config,
+            buffers=self.kv_buffers,
+            block_idx=self.block_idx,
+            **self._base_kwargs_for_clone(),
+        )
+
 
 class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
     """
@@ -617,3 +631,15 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
 
     def get_replay_log(self) -> Optional[KVCacheReplayLog]:
         return self._replay_log
+
+    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+        if device is not None and device != self.device:
+            if self.kv_buffers.buffers_are_allocated:
+                raise ValueError(f"Can only change device of buffers to {device} if buffers are deallocated")
+            self.kv_buffers.deallocate(device)
+        return LastRecentlyInsertedKVCache(
+            config=self.config,
+            buffers=self.kv_buffers,
+            block_idx=self.block_idx,
+            **self._base_kwargs_for_clone(),
+        )

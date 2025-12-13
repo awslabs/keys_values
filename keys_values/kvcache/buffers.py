@@ -310,11 +310,14 @@ class KVCacheBuffers(torch.nn.Module):
         """
         pass
 
-    def deallocate(self):
+    def deallocate(self, device: Optional[torch.device] = None):
         """
         Deallocates the buffers. They are automatically reallocated with the
         next :meth:`prefill` call. Use this method only if device memory is
         scarce and is needed by other operations in between inference calls.
+
+        Args:
+            device: If given, the default device is set to this value.
 
         """
         raise NotImplementedError()
@@ -409,13 +412,15 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
             self.k = torch.zeros(shape, device=device, dtype=self.dtype)
             self.v = torch.zeros(shape, device=device, dtype=self.dtype)
 
-    def deallocate(self):
+    def deallocate(self, device: Optional[torch.device] = None):
         if self.k is not None:
             del self.k
             self.k = None
         if self.v is not None:
             del self.v
             self.v = None
+        if device is not None:
+            self._device = device
 
     @property
     def buffers_are_allocated(self) -> bool:

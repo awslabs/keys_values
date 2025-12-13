@@ -491,11 +491,13 @@ def test_quantized_buffers_write_back(dtype, name, device):
         device=device,
         dtype=dtype,
     )
-    model = GPT(config).to(device=device)
+    with torch.device(device):
+        gpt_model = GPT(config)
+    gpt_model.apply(gpt_model._init_weights)  # Initialize
     # Create caches
     # Share the same dequantization buffers
     caches_common = KVCacheFactory.create(
-        gpt_model=model,
+        gpt_model=gpt_model,
         name=name,
         max_batch_size=batch_size,
         dtype=dtype,

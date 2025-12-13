@@ -41,6 +41,10 @@ from keys_values.kvcache.utils import shape_to_tuple
 from keys_values.utils import expand_index
 
 
+def for_debug(x: torch.Tensor) -> torch.Tensor:
+    return x.detach().clone().to(device=torch.device("cpu"))
+
+
 class TrainingAttnWeightsReplayCache(DefaultKVCache):
     """
     Replay cache corresponding to :class:`AttnWeightsKVCache`, to be used in
@@ -108,6 +112,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
         debug_print_annotations: bool = False,
         debug_full_args: bool = False,
+        debug_intermediates: Optional[Tuple[Dict[str, torch.Tensor], str]] = None,
         **base_kwargs,
     ):
         if not (0 <= start_token_pos < len(replay_log)):
@@ -147,6 +152,12 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         # If this is set, we log all annotations being created
         self.debug_print_annotations = debug_print_annotations
         self._debug_full_args = debug_full_args
+        if debug_intermediates is not None:
+            self._debug_intermediates = debug_intermediates[0]
+            self._debug_prefix = debug_intermediates[1]
+        else:
+            self._debug_intermediates = None
+            self._debug_prefix = None
 
     @property
     def batch_size(self) -> Optional[int]:
@@ -249,11 +260,26 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         # For prefill, we use the default implementation based on :meth:`_prefill`.
         # If `input_pos > 0`, we use our own special-purpose operators.
         if input_pos == 0:
-            return super().forward(query, key, value, token_idx, input_pos)
-        else:
-            return self._forward_if_not_prefill(
+            attn_outputs = super().forward(
                 query, key, value, token_idx, input_pos,
             )
+        else:
+            attn_outputs =  self._forward_if_not_prefill(
+                query, key, value, token_idx, input_pos,
+            )
+        # DEBUG
+        if self._debug_intermediates is not None:
+            prefix = self._debug_prefix + f"_inputpos{input_pos}_"
+            for name, x in (
+                ("query", query),
+                ("key", key),
+                ("value", value),
+                ("token_idx", token_idx),
+                ("attn_outputs", attn_outputs),
+            ):
+                self._debug_intermediates[prefix + name] = for_debug(x)
+        # END DEBUG
+        return attn_outputs
 
     def _forward_if_not_prefill(
         self,
@@ -288,6 +314,13 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         else:
             # All slices are the same
             positions = update_result.positions[0, 0, :]
+        # DEBUG
+        if self._debug_intermediates is not None:
+            prefix = self._debug_prefix + f"_sdpa_inputpos{input_pos}"
+            debug_intermediates = (self._debug_intermediates, prefix)
+        else:
+            debug_intermediates = None
+        # END DEBUG
         do_scatter = self.current_length >= self.cache_length
         if do_scatter:
             index_e = expand_index(index, head_size=self.head_size)
@@ -318,6 +351,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 self.mha,
                 positions,
                 self.mha._get_sliding_window_size(self.block_idx),
+                debug_intermediates,
             )
             # Post-processing w.r.t. annotations
             self._create_node_after_creator(
@@ -361,9 +395,9 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 self.kv_buffers.values(),
                 self.mha,
                 self.mha._get_sliding_window_size(self.block_idx),
+                debug_intermediates,
             )
             # Post-processing w.r.t. annotations
-            debug_msg = f"cat-after (clen={self.current_length})"
             self._create_node_after_creator(
                 x=key_buffer_new,
                 kind="cat-key",

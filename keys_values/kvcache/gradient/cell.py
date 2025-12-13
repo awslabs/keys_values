@@ -23,7 +23,10 @@ from litgpt.config import Config
 from keys_values.attention import DefaultKeysAndValues
 from keys_values.kvcache.base import KVCacheReplayLog, DefaultKVCache
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
-from keys_values.kvcache.gradient.train_attn_weights_replay import TrainingAttnWeightsReplayCache
+from keys_values.kvcache.gradient.train_attn_weights_replay import (
+    TrainingAttnWeightsReplayCache,
+    for_debug,
+)
 from keys_values.kvcache.gradient.train_attn_weights_replay_new import TrainingAttnWeightsReplayCacheNew
 from keys_values.kvcache.stack_layers import CellBlocks
 
@@ -38,6 +41,8 @@ def cell_computation(
     model_part: CellBlocks,
     get_inputs_slice: GetInputSlice,
     input_pos: int,
+    debug_intermediates: Optional[dict] = None,
+    name_prefix: Optional[str] = None,
 ) -> List[torch.Tensor]:
     """
     Implements forward pass for one cell, outer loop over chunks in `token_idxs`,
@@ -56,11 +61,17 @@ def cell_computation(
     for token_idx in token_idxs:
         chunk_len = token_idx.shape[-1]
         x = get_inputs_slice(input_pos, input_pos + chunk_len)
+        if debug_intermediates is not None:
+            name = name_prefix + f"_inputpos{input_pos}_input"
+            debug_intermediates[name] = for_debug(x)
         x = model_part.forward(
             x=x,
             idx=token_idx,
             input_pos=input_pos,
         )
+        if debug_intermediates is not None:
+            name = name_prefix + f"_inputpos{input_pos}_output"
+            debug_intermediates[name] = for_debug(x)
         output_parts.append(x)
         input_pos += chunk_len
     return output_parts
@@ -128,6 +139,13 @@ class CellComputation(nn.Module):
         self.autograd_hooks = autograd_hooks
         self.replay_logs = replay_logs
         self.batch_size = batch_size
+        self._debug_intermediates = cache_kwargs.get("debug_intermediates")
+        # DEBUG:
+        if self._debug_intermediates is not None:
+            self._debug_intermediates, self._name_prefix = self._debug_intermediates
+        else:
+            self._name_prefix = None
+        # END DEBUG
         # Arguments for `TrainingAttnWeightsReplayCache` cache objects.
         kwargs = dict(
             cache_kwargs,
@@ -137,19 +155,29 @@ class CellComputation(nn.Module):
         if autograd_hooks is not None:
             kwargs["node_annotations"] = autograd_hooks.node_annotations
         self._train_cache_kwargs = []
-        for _, block in model_part.blocks():
+        extra_kwargs = dict()
+        for i, block in model_part.blocks():
             kv_cache = block.attn.kv_cache
             # Use the same MHA object as in primary cache. Ensures that
             # position encoding is the same
             mha = kv_cache.mha if isinstance(kv_cache, DefaultKVCache) else None
+            if self._debug_intermediates is not None:
+                extra_kwargs = dict(
+                    debug_intermediates=(
+                        self._debug_intermediates,
+                        self._name_prefix + f"_part{i}",
+                    )
+                )
             self._train_cache_kwargs.append(
                 dict(
                     kwargs,
                     device=block.attn.device,
                     cache_length=kv_cache.cache_length,
                     mha=mha,
+                    **extra_kwargs,
                 )
             )
+
         self._token_pos_per_chunk = [0] + list(
             accumulate(
                 idx.shape[-1] for idx in replay_logs[0].token_chunks
@@ -329,6 +357,8 @@ class CellComputation(nn.Module):
                 model_part=self.model_part,
                 get_inputs_slice=get_inputs_slice,
                 input_pos=self.get_input_pos(first_chunk_idx),
+                debug_intermediates=self._debug_intermediates,
+                name_prefix=self._name_prefix,
             )
             # DEBUG:
             if self.autograd_hooks is not None:

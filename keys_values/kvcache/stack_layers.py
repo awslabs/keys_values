@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple, Iterable, Dict, Any
+from typing import Tuple, Iterable, Dict, Any, Optional
 
 import torch
 
@@ -38,7 +38,7 @@ class CellBlocks:
         self,
         x: torch.Tensor,
         idx: torch.Tensor,
-        input_pos: int,
+        input_pos: Optional[int],
     ) -> torch.Tensor:
         batch_size, chunk_len, n_embd = x.shape
         if n_embd != self.config.n_embd:
@@ -53,13 +53,13 @@ class CellBlocks:
             )
         # Loop over blocks
         for block_idx, block, block_kwargs in self.blocks_with_kwargs():
-            device = block.attn.device
-            x = block(
-                x.to(device=device),
-                token_idx=idx.to(device=device),
-                input_pos=input_pos,
-                **block_kwargs,
-            )
+            try:
+                device = block.attn.device
+                x = x.to(device=device)
+                idx = idx.to(device=device)
+            except AttributeError:
+                pass
+            x = block(x, token_idx=idx, input_pos=input_pos, **block_kwargs)
 
         return x
 
@@ -87,29 +87,30 @@ class CellBlocks:
     def _check_kv_cache(
         self,
         kv_cache: KVCache,
-        input_pos: int,
+        input_pos: Optional[int],
         block_idx: int,
         batch_size: int,
         chunk_len: int,
     ):
-        if kv_cache is None:
-            raise ValueError(f"Block {block_idx} has no KV cache")
-        if input_pos == 0:
-            if kv_cache.max_batch_size < batch_size:
-                raise ValueError(
-                    f"Batch size {batch_size} is too large for KV cache layer {block_idx} (batch size {kv_cache.max_batch_size}). Use 'assign_kv_caches' or `set_kv_caches'"
-                )
-        else:
-            if kv_cache.next_token_pos is None:
-                raise ValueError("Inference calls need to start with pre-fill, i.e. 'input_pos=0'")
-            if kv_cache.next_token_pos != input_pos:
-                raise ValueError(
-                    f"KV cache for layer {block_idx}: input_pos = {input_pos} != {kv_cache.next_token_pos} = kv_cache.next_token_pos"
-                )
-            if kv_cache.max_tokens_forward < chunk_len:
-                raise ValueError(
-                    f"KV cache for layer {block_idx}: chunk_len = {chunk_len}, must be <= max_tokens_forward = {kv_cache.max_tokens_forward}"
-                )
+        if (kv_cache is None) != (input_pos is None):
+            raise ValueError(f"kv_cache and input_pos: Both or neither must be None")
+        if kv_cache is not None:
+            if input_pos == 0:
+                if kv_cache.max_batch_size < batch_size:
+                    raise ValueError(
+                        f"Batch size {batch_size} is too large for KV cache layer {block_idx} (batch size {kv_cache.max_batch_size}). Use 'assign_kv_caches' or `set_kv_caches'"
+                    )
+            else:
+                if kv_cache.next_token_pos is None:
+                    raise ValueError("Inference calls need to start with pre-fill, i.e. 'input_pos=0'")
+                if kv_cache.next_token_pos != input_pos:
+                    raise ValueError(
+                        f"KV cache for layer {block_idx}: input_pos = {input_pos} != {kv_cache.next_token_pos} = kv_cache.next_token_pos"
+                    )
+                if kv_cache.max_tokens_forward < chunk_len:
+                    raise ValueError(
+                        f"KV cache for layer {block_idx}: chunk_len = {chunk_len}, must be <= max_tokens_forward = {kv_cache.max_tokens_forward}"
+                    )
 
 
 class DefaultCellBlocks(CellBlocks):
