@@ -97,7 +97,7 @@ def test_inference_replay(cache_name, device, cache_kwargs):
     cache_length = 512
     head_size = 64
     vocab_size = 48
-    tokens_per_chunk = [cache_length - 1, 1, 8, 4, 8, 2, 8, 2, 8, 8]
+    tokens_per_chunk = [cache_length, 8, 4, 8, 2, 8, 2, 8, 8]
     seq_length = sum(tokens_per_chunk)
 
     layer_outputs = dict()
@@ -247,7 +247,7 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_new_c
     cache_length = 512
     head_size = 64
     vocab_size = 48
-    tokens_per_chunk = [cache_length - 1, 1, 8, 4, 8, 2, 8, 2, 8, 8]
+    tokens_per_chunk = [cache_length, 8, 4, 8, 2, 8, 2, 8, 8]
     seq_length = sum(tokens_per_chunk)
     if use_new_cache:
         replay_class = TrainingAttnWeightsReplayCacheNew

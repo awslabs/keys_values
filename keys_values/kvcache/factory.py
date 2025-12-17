@@ -620,13 +620,13 @@ def create_quantized_kv_buffers_for_checkpoints(
 
 
 REMOVE_KEYS = {
-    "dense": ("replay_log_blocksize", "grace_period", "normalize_scores", "combination_constant", "scratch_blocksize"),
-    "lastrec": ("replay_log_blocksize", "grace_period", "normalize_scores" "combination_constant", "scratch_blocksize"),
+    "dense": ("replay_log_blocksize", "grace_period", "detach_attn_weights", "keep_initial_fraction", "normalize_scores", "combination_constant", "scratch_blocksize"),
+    "lastrec": ("replay_log_blocksize", "grace_period", "detach_attn_weights", "keep_initial_fraction", "normalize_scores" "combination_constant", "scratch_blocksize"),
     "h2o": ("combination_constant", "scratch_blocksize"),
     "h2o-vlen": ("combination_constant", "scratch_blocksize"),
     "qh2o": (),
     "qh2o-vlen": (),
-    "h2o-orig": ("replay_log_blocksize", "grace_period", "normalize_scores", "combination_constant", "scratch_blocksize"),
+    "h2o-orig": ("normalize_scores", "combination_constant", "scratch_blocksize"),
 }
 
 

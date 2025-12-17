@@ -154,7 +154,6 @@ def setup(
         attention_backward_temp_size_gb=2,
         use_new_cache=False,
         max_match_trials_pack_arg=8,
-        use_old_forward_code=False,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
@@ -441,7 +440,6 @@ def main(
             "use_new_cache": kv_cache.use_new_cache,
             "max_match_trials_pack_arg": thresh,
             "profile_grad_times": profile_grad_times,
-            "use_old_forward_code": kv_cache.use_old_forward_code,
             "cache_name": kv_cache.name,
         }
     else:
@@ -559,7 +557,6 @@ def wrap_gpt_model(
         train_cache_kwargs = {
             "sdpa_kernels": cache_kwargs["sdpa_kernels"],
             "use_new_cache": kv_cache.use_new_cache,
-            "use_old_forward_code": kv_cache.use_old_forward_code,
         }
         if kv_cache.max_match_trials_pack_arg is not None:
             autograd_hooks_kwargs = dict(

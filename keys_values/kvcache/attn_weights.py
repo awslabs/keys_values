@@ -269,6 +269,8 @@ def update_token_positions(
 
 DEFAULT_REPLAY_LOG_BLOCKSIZE = 1024
 
+DEFAULT_KEEP_INITIAL_FRACTION = 0.05
+
 
 class AttnWeightsKVCache(KVCacheWithBuffers):
     """
@@ -316,6 +318,19 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
     These slot positions allow for re-playing all insert decisions later on,
     which is required for gradient computations.
 
+    First :meth:`forward` call when cache is full:
+
+    In general, the initial (prefill) call fills up the cache, while not
+    returning attention weights. This means that for the second call, we cannot
+    use a score-based decision which slots to overwrite. Instead, for the first
+    :meth:`forward` after the cache is filled up, we use a heuristic rule.
+    Namely, we evict slots starting at position
+    `int(cache_length * keep_initial_fraction)`. This rule is used once only,
+    afterwards we use H2O scores. If `keep_initial_fraction > 0`, the KV
+    information for the initial tokens is not evicted in this step. For
+    `keep_fraction == 0`, this one-time rule corresponds to what a
+    :class:`LastRecentlyInsertedKVCache` would do.
+
     """
     def __init__(
         self,
@@ -325,6 +340,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
         detach_attn_weights: bool = False,
+        keep_initial_fraction: Optional[float] = None,
         **base_kwargs,
     ):
         """
@@ -350,6 +366,11 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             replay_log_blocksize = DEFAULT_REPLAY_LOG_BLOCKSIZE
         elif replay_log_blocksize <= 0:
             raise ValueError(f"replay_log_blocksize must be positive, but got {replay_log_blocksize}")
+        if keep_initial_fraction is None:
+            keep_initial_fraction = DEFAULT_KEEP_INITIAL_FRACTION
+        elif not (0 <= keep_initial_fraction < 1):
+            raise ValueError(f"keep_initial_fraction = {keep_initial_fraction}, must be in [0, 1)")
+        self._keep_initial_fraction = keep_initial_fraction
         self.grace_period = grace_period
         self.replay_log_blocksize = replay_log_blocksize
         self._detach_attn_weights = detach_attn_weights
@@ -366,7 +387,11 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         # Next token position :meth:`forward` is called for
         self._next_token_pos = None
         self.next_grace_pos = None
-        self.prefill_length = None
+        self.prefill_length = None  # TODO: Still needed?
+        # Signals :meth:`forward` to use the initial rule instead of
+        # `_next_positions`. This happens for the first call after the cache
+        # has been filled.
+        self._use_initial_rule = None
         # For replay log
         self._replay_log = None
 
@@ -393,7 +418,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         Returns:
             Maximum length for arguments to :meth:prefill`.
         """
-        return self.cache_length - 1
+        return self.cache_length
 
     @property
     def max_tokens_forward(self) -> int:
@@ -409,9 +434,11 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
-        if self.next_positions(num=1) is None:
-            raise IndexError("Cache needs to be initialized with 'prefill' before being used")
         num = key.shape[2]
+        if self._use_initial_rule is None or (
+            not self._use_initial_rule and self.next_positions(num=1) is None
+        ):
+            raise IndexError("Cache needs to be initialized with 'prefill' before being used")
         diff = self.cache_length - self.current_length
         if not 1 <= num <= self.max_tokens_forward:
             if 0 < diff < num:
@@ -421,6 +448,19 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                 raise ValueError(f"key.shape[2] = {num}, must be <= {diff} as long as the cache is not full")
             else:
                 raise ValueError(f"key.shape[2] = {num}, must be in [1, {self.max_tokens_forward}]")
+        if self._use_initial_rule:
+            # Set `_next_positions` according to the initial rule
+            num_keep = min(
+                int(self._keep_initial_fraction * self.cache_length),
+                self.cache_length - num,
+            )
+            self._next_positions = torch.arange(
+                num_keep,
+                num_keep + num,
+                dtype=torch.int64,
+                device=self.device
+            ).view(1, 1, -1).expand(self.batch_size, self.n_query_groups, -1)
+            self._use_initial_rule = False
         # We need to know how score buffers are initialized for new content. By
         # default, they are filled with 0. But other initial values for scores
         # can be passed via `_initial_scores_in_forward`.
@@ -706,9 +746,9 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             grace_period=self.grace_period,
         )
         self._next_token_pos = init_length
-        # The cache is not completely full, so that :meth:`forward` can be
-        # called without having to call :meth:`update` before
-        self._set_next_positions_to_free_slots()
+        self._use_initial_rule = self.current_length == self.cache_length
+        if not self._use_initial_rule:
+            self._set_next_positions_to_free_slots()
         if self.grace_period > 0:
             # First slot to move out once the cache is full
             self.next_grace_pos = self.cache_length - self.grace_period

@@ -108,7 +108,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
         debug_print_annotations: bool = False,
         debug_full_args: bool = False,
-        use_old_forward_code: bool = False,
         **base_kwargs,
     ):
         if not (0 <= start_token_pos < len(replay_log)):
@@ -148,7 +147,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         # If this is set, we log all annotations being created
         self.debug_print_annotations = debug_print_annotations
         self._debug_full_args = debug_full_args
-        self._use_old_forward_code = use_old_forward_code
 
     @property
     def batch_size(self) -> Optional[int]:
@@ -322,7 +320,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 self.mha._get_sliding_window_size(self.block_idx),
                 self.mha.sdpa_kernels,
                 self.mha.tmp_array_limit_gb_value(),
-                self._use_old_forward_code,
             )
             # Post-processing w.r.t. annotations
             self._create_node_after_creator(
@@ -368,7 +365,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 self.mha._get_sliding_window_size(self.block_idx),
                 self.mha.sdpa_kernels,
                 self.mha.tmp_array_limit_gb_value(),
-                self._use_old_forward_code,
             )
             # Post-processing w.r.t. annotations
             debug_msg = f"cat-after (clen={self.current_length})"

@@ -58,7 +58,6 @@ class KVCacheArgs:
     attention_backward_temp_size_gb: Optional[float] = None
     use_new_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
-    use_old_forward_code: bool = False
 
     def __post_init__(self):
         supported_names = KVCacheFactory.supported_names()

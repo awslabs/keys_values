@@ -16,89 +16,22 @@ from typing import Optional, List, Union, Tuple
 
 import torch
 from torch.autograd import Function
-from torch.nn import functional as F
-from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.nn.attention import SDPBackend
 
 from litgpt.config import Config
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import (
-    scaled_dot_product_attention_in_blocks,
     DefaultKeysAndValues,
     MultiHeadSelfAttention,
 )
 from keys_values.attention_utils import (
-    filter_sdpa_kernels,
     create_temp_array,
     sdpa_attention_weights,
     slice_as_flat,
 )
 from keys_values.use_eager_kernel import transform_mha_kwargs
-from keys_values.utils import expand_index, repeat_interleave
-
-
-# TODO: Remove once SDPAFunction._forward_new is established!
-def sdpa_forward(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    token_positions: Optional[torch.Tensor],
-    input_pos: int,
-    scale_factor: float,
-    sliding_window_size: Optional[int],
-    sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]],
-    tmp_array_limit_gb: Optional[float] = None,
-) -> torch.Tensor:
-    is_causal = input_pos == 0
-    _, n_query_groups, kv_len, _ = key.shape
-    _, n_head, q_len, _ = query.shape
-    enable_gqa = n_query_groups < n_head
-    if is_causal and sliding_window_size is None:
-        # Use `F.scaled_dot_product_attention`, which is optimized for the
-        # causal case
-        if enable_gqa:
-            # Some efficient fused kernels have not implemented
-            # `enabla_gqa=True`. It is better to extend keys, values in
-            # this case.
-            key = repeat_interleave(key, n_head)
-            value = repeat_interleave(value, n_head)
-            enable_gqa = key.shape[1] == n_query_groups
-        # Run the right version of `F.scaled_dot_product_attention`
-        kwargs = dict(
-            query=query,
-            key=key,
-            value=value,
-            attn_mask=None,
-            dropout_p=0.0,
-            scale=scale_factor,
-            is_causal=True,
-            enable_gqa=enable_gqa,
-        )
-        if sdpa_kernels is not None:
-            if not isinstance(sdpa_kernels, list):
-                sdpa_kernels = [sdpa_kernels]
-            # Filter out kernels which are not supported
-            sdpa_kernels = filter_sdpa_kernels(sdpa_kernels, **kwargs)
-        else:
-            sdpa_kernels = []
-        if sdpa_kernels:
-            with sdpa_kernel(sdpa_kernels):
-                attn_output = F.scaled_dot_product_attention(**kwargs)
-        else:
-            attn_output = F.scaled_dot_product_attention(**kwargs)
-    else:
-        # Use own implementation, which limits GPU memory usage
-        attn_output, _ = scaled_dot_product_attention_in_blocks(
-            query=query,
-            k_and_v=DefaultKeysAndValues(key, value),
-            scale_factor=scale_factor,
-            return_attn_weights=False,
-            input_pos=input_pos,
-            token_positions=token_positions,
-            sliding_window_size=sliding_window_size,
-            tmp_array_limit_gb=tmp_array_limit_gb,
-        )
-    return attn_output
+from keys_values.utils import expand_index
 
 
 def sdpa_backward_core(
@@ -320,7 +253,6 @@ class SDPAFunction(Function):
         sliding_window_size: Optional[int] = None,
         sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
         tmp_array_limit_gb: Optional[float] = None,
-        use_old_code: bool = False,
     ) -> torch.Tensor:
         # Check dimensions
         assert query.ndim == 4 and key.ndim == 4 and value.ndim == 4
@@ -336,44 +268,7 @@ class SDPAFunction(Function):
         else:
             assert token_positions is not None
             assert token_positions.shape == key.shape[:-1]
-        if use_old_code:
-            return SDPAFunction._forward_old(
-                query=query,
-                key=key,
-                value=value,
-                token_positions=token_positions,
-                input_pos=input_pos,
-                scale_factor=scale_factor,
-                sliding_window_size=sliding_window_size,
-                sdpa_kernels=sdpa_kernels,
-                tmp_array_limit_gb=tmp_array_limit_gb,
-            )
-        else:
-            return SDPAFunction._forward_new(
-                query=query,
-                key=key,
-                value=value,
-                token_positions=token_positions,
-                input_pos=input_pos,
-                scale_factor=scale_factor,
-                sliding_window_size=sliding_window_size,
-                sdpa_kernels=sdpa_kernels,
-                tmp_array_limit_gb=tmp_array_limit_gb,
-            )
-
-    @staticmethod
-    def _forward_old(
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        token_positions: Optional[torch.Tensor],
-        input_pos: int,
-        scale_factor: float,
-        sliding_window_size: Optional[int] = None,
-        sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
-        tmp_array_limit_gb: Optional[float] = None,
-    ) -> torch.Tensor:
-        return sdpa_forward(
+        return SDPAFunction._forward_new(
             query=query,
             key=key,
             value=value,
@@ -449,7 +344,6 @@ class SDPAFunction(Function):
             sliding_window_size,
             _,
             tmp_array_limit_gb,
-            _,
         ) = inputs
         ctx.save_for_backward(query, key, value)
         ctx.extra_args = dict(
@@ -479,7 +373,7 @@ class SDPAFunction(Function):
             need_value=ctx.needs_input_grad[2],
             tmp_array_limit_gb=ctx.extra_args["tmp_array_limit_gb"],
         )
-        return grad_query, grad_key, grad_value, *([None] * 7)
+        return grad_query, grad_key, grad_value, *([None] * 6)
 
 
 def finalize_gradients_key_or_value(
@@ -605,7 +499,6 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
         sliding_window_size: Optional[int] = None,
         sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
         tmp_array_limit_gb: Optional[float] = None,
-        use_old_code: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Combines updates of K and V cache buffers with SDPA computation.
@@ -666,7 +559,6 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
             sliding_window_size=sliding_window_size,
             sdpa_kernels=sdpa_kernels,
             tmp_array_limit_gb=tmp_array_limit_gb,
-            use_old_code=use_old_code,
         )
         return attn_output, key_buffer_new, value_buffer_new
 
@@ -686,7 +578,6 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
             sliding_window_size,
             _,
             tmp_array_limit_gb,
-            _,
         ) = inputs
         if positions is not None and positions.ndim == 1:
             positions = positions[None, None, :].expand(
@@ -861,7 +752,7 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
                 if not need_value_buffer:
                     grad_value_buffer = None
 
-        return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 11)
+        return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 10)
 
 
 def cat_on_buffers(
@@ -918,7 +809,6 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
         sliding_window_size: Optional[int] = None,
         sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
         tmp_array_limit_gb: Optional[float] = None,
-        use_old_code: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Combines updates of K and V cache buffers with SDPA computation.
@@ -963,7 +853,6 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             sliding_window_size=sliding_window_size,
             sdpa_kernels=sdpa_kernels,
             tmp_array_limit_gb=tmp_array_limit_gb,
-            use_old_code=use_old_code,
         )
         return attn_output, key_buffer_new, value_buffer_new
 
@@ -979,7 +868,6 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             sliding_window_size,
             _,
             tmp_array_limit_gb,
-            _,
         ) = inputs
         ctx.save_for_backward(
             query,
@@ -1067,4 +955,4 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
                     grad_value_buffer_new_indir[:, :, kv_len:, :]
                 )
 
-        return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 5)
+        return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 4)
