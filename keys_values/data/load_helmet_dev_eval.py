@@ -154,13 +154,13 @@ def load_helmet_dev_eval(
     Returns:
         A tuple of (dev_data, eval_data) datasets. Each data instance will contain at least "input", "output", "query_id", "max_length" fields.
     """
-    dataset_parent_dir = Path(dataset_parent_dir)
+    dataset_parent_dir = Path(dataset_parent_dir).expanduser()  # to ensure ~ can also exist in the given path
     source_data_dir = dataset_parent_dir.parent
     # 1) If the source data does not exisit, download it first
     if not os.path.exists(source_data_dir):
         download_source_data(source_data_dir)
 
-    cache_dir = os.path.join(dataset_parent_dir.parent, f"longtrain_{dataset_key}_{max_length}")
+    cache_dir = os.path.join(dataset_parent_dir.parent, f"longtrain/{dataset_key}_{max_length}")
 
     # 2) If cached, load and return
     if os.path.isdir(cache_dir):
@@ -647,14 +647,15 @@ def load_summarization(
         eval_data = instance_data.select(range(eval_questions_num))
         dev_data = instance_data.select(range(eval_questions_num, len(instance_data)))
         eval_data = eval_data.map(
-            lambda x: {"input": instruction_template.format(**x), "output": x["answer"][0]},
+            lambda x: {"input": instruction_template.format(**x), "output": x["answer"][0],
+                       "query_id": str(x["id"]) + "-" + x["question"], "max_length": max_length},
             remove_columns=["id", "question", "answer", "context", "demos", "options"]
         )
         dev_data = dev_data.map(
             lambda x: {
                 "input": instruction_template.format(question=x["question"], context=x["context"],
                                                      demos="Now, read the following story:"),
-                "output": x["answer"][0], "query_id": x["id"] + "-" + x["question"], "max_length": max_length},
+                "output": x["answer"][0], "query_id": str(x["id"]) + "-" + x["question"], "max_length": max_length},
             remove_columns=["id", "question", "answer", "context", "demos", "options"]
         )
     else:
