@@ -25,11 +25,6 @@ import torch
 import torch.nn as nn
 
 from litgpt.config import Config
-from litgpt.model import (
-    build_rope_cache,
-    apply_rope,
-    batched_index_select,
-)
 from litgpt.scripts.convert_hf_checkpoint import qkv_reassemble
 
 from keys_values.attention import (
@@ -49,15 +44,22 @@ StartOfLayerHook = Callable[[Any, int, Optional[int]], None]
 
 
 class GPT(nn.Module):
-    def __init__(self, config: Config, **mha_kwargs) -> None:
+    def __init__(
+        self,
+        config: Config,
+        **mha_kwargs,
+    ) -> None:
         """
         Args:
             config: Configuration parameters
-            mha_kwargs: Extra arguments passed to :class:`MultiHeadSelfAttention`
+            mha_kwargs: Extra arguments passed to :class:`MultiHeadSelfAttention`.
+                For example, `pos_encoding` sets the position encoding.
 
         """
         super().__init__()
         assert config.padded_vocab_size is not None
+        if self.config.rope_indices is not None:
+            raise NotImplementedError("config.rope_indices not currently supported")
         self.config = config
 
         self.lm_head = nn.Linear(
@@ -94,24 +96,17 @@ class GPT(nn.Module):
         If KV caches are of type `DenseKVCache`, and they are too small to hold
         `value` entries, a warning message is printed.
 
+        Args:
+            value: New value for `max_seq_length`. This can be larger than
+                'config.block_size`, which is the context width used during
+                training.
+
         """
         from keys_values.kvcache.basics import DenseKVCache
 
-        if value > self.config.block_size:
-            raise ValueError(
-                f"Cannot attend to {value}, block size is only {self.config.block_size}."
-                " This is likely because the input text exceeds the supported context length of this model."
-            )
+        if value <= 0:
+            raise ValueError(f"value = {value}, must be positive")
         self._max_seq_length = value
-        # RoPE cache:
-        # `cos`, `sin` of shape `(max_seq_length, config.rope_n_elem)`
-        # More precisely, the RoPE cache is recomputed only if
-        # `max_seq_length` increases.
-        # Note: The RoPE cache is independent of KV caches, since positional
-        # encoding is done (on query and key vectors) before the KV cache
-        # gets involved (and the KV cache stores encoded key tensors).
-        if not hasattr(self, "cos") or self.cos.size(0) < value:
-            self.reset_caches()
         # KV caches
         # We do not change them here, but output a warning if default caches are
         # too small
@@ -123,17 +118,8 @@ class GPT(nn.Module):
                     f"KV cache for layer {l_ix} too small: Call 'set_kv_caches(batch_size={kv_cache.max_batch_size}, max_seq_length={value}) before inference"
                 )
                 break
-        # Multi-head attention
-        self.mha.set_seq_length(value, device=self.cos.device)
-
-    def reset_caches(self):
-        if not hasattr(self, "cos"):
-            # first call
-            cos, sin = self.rope_cache()
-            self.register_buffer("cos", cos, persistent=False)
-            self.register_buffer("sin", sin, persistent=False)
-        else:
-            self.cos, self.sin = self.rope_cache(device=self.cos.device)
+        # Multi-head attention (includes position encoding)
+        self.mha.set_seq_length(value)
 
     def are_kv_caches_assigned(self) -> bool:
         status = [block.attn.kv_cache is not None for block in self.transformer.h]
@@ -222,8 +208,7 @@ class GPT(nn.Module):
 
     def reset_parameters(self) -> None:
         # Trigger resetting the rope-cache
-        self.cos, self.sin = self.rope_cache(device=self.cos.device)
-        self.mha.set_seq_length(self.max_seq_length, device=self.cos.device)
+        self.mha.set_seq_length(self.max_seq_length)
 
     @property
     def start_of_layer_hook(self) -> Optional[StartOfLayerHook]:
@@ -363,19 +348,6 @@ class GPT(nn.Module):
                             f"KV cache for layer {block_idx}: T = {T}, must be <= max_tokens_forward = {kv_cache.max_tokens_forward}"
                         )
 
-            if self.config.rope_n_elem > 0:
-                input_pos_array = torch.arange(input_pos, input_pos + T, device=self.cos.device, dtype=torch.int64)
-                cos = batched_index_select(self.cos, 0, input_pos_array).unsqueeze(0)
-                sin = batched_index_select(self.sin, 0, input_pos_array).unsqueeze(0)
-            else:
-                cos = sin = None
-        else:
-            # Unsqueeze to have a batch dimension
-            cos = self.cos[:T].unsqueeze(0)
-            sin = self.sin[:T].unsqueeze(0)
-        # `cos`, `sin` have shape `(1, T, config.rope_n_elem)`, or shape
-        # `(1, T, config.rope_n_elem, 2)`
-
         x = self.transformer.wte(idx)  # token embeddings of shape (B, T, n_embd)
         if self.config.scale_embeddings:
             x = x * torch.tensor(self.config.n_embd**0.5, dtype=x.dtype)
@@ -393,14 +365,7 @@ class GPT(nn.Module):
             if hook is not None:
                 # Call start of layer hook, passing detached layer input
                 hook(x.detach(), block_idx, input_pos)
-            if self.config.rope_indices is not None:
-                # Select global (0) or local (1) variant
-                _cos = cos[..., self.config.rope_indices[block_idx]]
-                _sin = sin[..., self.config.rope_indices[block_idx]]
-            else:
-                _cos = cos
-                _sin = sin
-            x = block(x, _cos, _sin, idx, self.mha, input_pos)
+            x = block(x, idx, self.mha, input_pos)
 
         if hook is not None:
             # Hook is also called for the input to the head block
@@ -413,57 +378,6 @@ class GPT(nn.Module):
     @classmethod
     def from_name(cls, name: str, **kwargs: Any) -> Self:
         return cls(Config.from_name(name, **kwargs))
-
-    def rope_cache(
-        self,
-        device: Optional[torch.device] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Recomputes the RoPE cache, consisting of tensors `cos`, `sin`.
-
-        Args:
-            device: Device for RoPE cache tensors
-
-        Returns:
-            `(cos, sin)`, each of shape `(max_seq_length, config.rope_n_elem)`
-            or of shape `(max_seq_length, config.rope_n_elem, 2)`.
-
-        """
-        if self.config.rope_adjustments is None:
-            extra_config = None
-        else:
-            adjusted_params_required = ["factor", "low_freq_factor", "high_freq_factor", "original_max_seq_len"]
-            params_present = [param in self.config.rope_adjustments for param in adjusted_params_required]
-            num_params_present = sum(params_present)
-
-            if num_params_present == 0:
-                extra_config = None  # uses standard RoPE
-            elif num_params_present == 4:
-                # These parameters should always be used together so that we don't interfere with standard rope
-                extra_config = {name: self.config.rope_adjustments[name] for name in adjusted_params_required}
-            elif "factor" in self.config.rope_adjustments:
-                # linear RoPE
-                adjusted_params_required = ["factor"]
-                extra_config = {name: self.config.rope_adjustments[name] for name in adjusted_params_required}
-            else:
-                # Some but not all parameters are specified; raise an error
-                missing_params = [
-                    param for param, present in zip(adjusted_params_required, params_present) if not present
-                ]
-                raise ValueError(
-                    f"The following adjusted RoPE parameters are missing in rope_adjustments: {', '.join(missing_params)}. "
-                    "All adjusted RoPE parameters must be specified together."
-                )
-
-        return build_rope_cache(
-            seq_len=self.max_seq_length,
-            n_elem=self.config.rope_n_elem,
-            device=device,
-            condense_ratio=self.config.rope_condense_ratio,
-            base=self.config.rope_base,
-            extra_config=extra_config,
-            rope_local_base_freq=self.config.rope_local_base_freq,
-        )
 
     def clear_kv_caches(self) -> None:
         for block in self.transformer.h:
@@ -550,8 +464,6 @@ class Block(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
         token_idx: torch.Tensor,
         mha: MultiHeadSelfAttention,
         input_pos: Optional[int] = None,
@@ -580,8 +492,6 @@ class Block(nn.Module):
         x_normed = self.norm_1(x)
         attention_output = self.attn(
             x_normed,
-            cos=cos,
-            sin=sin,
             token_idx=token_idx,
             mha=mha,
             input_pos=input_pos,
@@ -639,8 +549,6 @@ class CausalSelfAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
         token_idx: torch.Tensor,
         mha: MultiHeadSelfAttention,
         input_pos: Optional[int] = None,
@@ -648,8 +556,6 @@ class CausalSelfAttention(nn.Module):
         """
         Args:
             x: Input tensor
-            cos: RoPE parameters
-            sin: RoPE parameters
             token_idx: Token indexes corresponding to `x`
             mha: Multi-head self-attention code
             input_pos: See :meth:`GPT.forward`
@@ -745,8 +651,13 @@ class CausalSelfAttention(nn.Module):
 
         # Unlike standard positional embeddings rotary embeddings must be applied at every layer.
         if rope_n_elem > 0:
-            q_roped = apply_rope(q[..., :rope_n_elem], cos, sin)
-            k_roped = apply_rope(k[..., :rope_n_elem], cos, sin)
+            _input_pos = 0 if input_pos is None else input_pos
+            q_roped = self.mha.pos_encoding(
+                q[..., :rope_n_elem], input_pos=_input_pos,
+            )
+            k_roped = self.mha.pos_encoding(
+                k[..., :rope_n_elem], input_pos=_input_pos,
+            )
             q = torch.cat((q_roped, q[..., rope_n_elem:]), dim=-1)  # (B, nh_q, T, hs)
             k = torch.cat((k_roped, k[..., rope_n_elem:]), dim=-1)  # (B, nh_k, T, hs)
 

@@ -30,6 +30,7 @@ from keys_values.attention_utils import (
     sdpa_attention_weights,
     slice_as_flat, pytorch_scaled_dot_product_attention,
 )
+from keys_values.pos_encoding import PositionEncoding, YaRNPositionEncoding
 from keys_values.sdpa_wrapper import scaled_dot_product_attention as qpadded_sdpa
 
 
@@ -159,6 +160,7 @@ class MultiHeadSelfAttention:
     def __init__(
         self,
         config: Config,
+        pos_encoding: Optional[PositionEncoding] = None,
         sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
         use_eager_sdpa_always: bool = False,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
@@ -166,6 +168,9 @@ class MultiHeadSelfAttention:
         filter_sdpa_kernels: bool = True,
     ) -> None:
         self.config = config
+        if pos_encoding is None:
+            pos_encoding = YaRNPositionEncoding(config)
+        self.pos_encoding = pos_encoding
         self._sdpa_kernels = sdpa_kernels
         self._do_filter_kernels = filter_sdpa_kernels
         self.use_eager_sdpa_always = use_eager_sdpa_always
@@ -177,6 +182,12 @@ class MultiHeadSelfAttention:
                 "efficient implementations of SDPA cannot be used, you may run "
                 "out of GPU memory. Consider using a model without attention "
                 "logit softcapping."
+            )
+        if self.config.attention_scores_scalar is not None:
+            print(
+                "You have set config.attention_scores_scalar. This is not "
+                "supported here, since the scale_factor is determined by the "
+                "position encoding. The value will be ignored."
             )
         if use_eager_kernel is None and not use_eager_sdpa_always:
             # This is a good choice for `kv_len = 32768`
@@ -199,9 +210,8 @@ class MultiHeadSelfAttention:
     def set_seq_length(
         self,
         value: int,
-        device: torch.device,
     ) -> None:
-        pass  # Currently, we don't use this
+        self.pos_encoding.set_context_width(value)
 
     def __call__(
         self,
@@ -331,7 +341,7 @@ class MultiHeadSelfAttention:
             return SDPA_IMPL_PYTORCH
 
     def _get_scale_factor(self):
-        return 1.0 / math.sqrt(self.config.attention_scores_scalar or self.config.head_size)
+        return self.pos_encoding.sdpa_scale_factor()
 
     def tmp_array_limit_gb_value(self) -> Optional[float]:
         return None if self._tmp_array_limit_gb is None else self._tmp_array_limit_gb()
