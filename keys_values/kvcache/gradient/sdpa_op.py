@@ -11,16 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import math
-from typing import Optional, List, Union, Tuple
+from typing import Optional, Tuple
 
 import torch
 from torch.autograd import Function
-from torch.nn.attention import SDPBackend
 
-from litgpt.config import Config
-
-from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import (
     DefaultKeysAndValues,
     MultiHeadSelfAttention,
@@ -30,7 +25,6 @@ from keys_values.attention_utils import (
     sdpa_attention_weights,
     slice_as_flat,
 )
-from keys_values.use_eager_kernel import transform_mha_kwargs
 from keys_values.utils import expand_index
 
 
@@ -249,10 +243,8 @@ class SDPAFunction(Function):
         value: torch.Tensor,
         token_positions: Optional[torch.Tensor],
         input_pos: int,
-        scale_factor: float,
+        mha: MultiHeadSelfAttention,
         sliding_window_size: Optional[int] = None,
-        sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
-        tmp_array_limit_gb: Optional[float] = None,
     ) -> torch.Tensor:
         # Check dimensions
         assert query.ndim == 4 and key.ndim == 4 and value.ndim == 4
@@ -274,10 +266,8 @@ class SDPAFunction(Function):
             value=value,
             token_positions=token_positions,
             input_pos=input_pos,
-            scale_factor=scale_factor,
+            mha=mha,
             sliding_window_size=sliding_window_size,
-            sdpa_kernels=sdpa_kernels,
-            tmp_array_limit_gb=tmp_array_limit_gb,
         )
 
     @staticmethod
@@ -287,40 +277,9 @@ class SDPAFunction(Function):
         value: torch.Tensor,
         token_positions: Optional[torch.Tensor],
         input_pos: int,
-        scale_factor: float,
+        mha: MultiHeadSelfAttention,
         sliding_window_size: Optional[int] = None,
-        sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
-        tmp_array_limit_gb: Optional[float] = None,
     ) -> torch.Tensor:
-        head_size = query.shape[-1]
-        temp = 1.0 / math.sqrt(head_size)
-        if abs(temp - scale_factor) < 1e-7:
-            attention_scores_scalar = None
-        else:
-            temp = 1.0 / scale_factor
-            attention_scores_scalar = int(temp * temp)
-        config = Config(
-            n_head=query.shape[1],
-            n_query_groups=key.shape[1],
-            head_size=head_size,
-            sliding_window_size=sliding_window_size,
-            attention_logit_softcapping=None,
-            attention_scores_scalar=attention_scores_scalar,
-        )
-        if tmp_array_limit_gb is not None:
-            tmp_array_limit_forward = TemporaryArrayLimit(
-                init_val=tmp_array_limit_gb,
-                name="attention_forward_temp_size_gb",
-            )
-        else:
-            tmp_array_limit_forward = None
-        mha_kwargs = dict(
-            sdpa_kernels=sdpa_kernels,
-            tmp_array_limit_gb=tmp_array_limit_forward,
-        )
-        mha = MultiHeadSelfAttention(
-            config, **transform_mha_kwargs(mha_kwargs, config),
-        )
         return mha.scaled_dot_product_attention(
             query=query,
             k_and_v=DefaultKeysAndValues(key, value),
@@ -340,18 +299,15 @@ class SDPAFunction(Function):
             value,
             token_positions,
             input_pos,
-            scale_factor,
+            mha,
             sliding_window_size,
-            _,
-            tmp_array_limit_gb,
         ) = inputs
         ctx.save_for_backward(query, key, value)
         ctx.extra_args = dict(
             token_positions=token_positions,
             input_pos=input_pos,
-            scale_factor=scale_factor,
+            mha=mha,
             sliding_window_size=sliding_window_size,
-            tmp_array_limit_gb=tmp_array_limit_gb,
         )
 
     @staticmethod
@@ -359,6 +315,7 @@ class SDPAFunction(Function):
         # Inputs from context
         query, key, value = ctx.saved_tensors
         # Main computation
+        mha = ctx.extra_args["mha"]
         grad_query, grad_key, grad_value = sdpa_backward(
             grad_attn_output=grad_attn_output,
             query=query,
@@ -366,14 +323,14 @@ class SDPAFunction(Function):
             value=value,
             token_positions=ctx.extra_args["token_positions"],
             input_pos=ctx.extra_args["input_pos"],
-            scale_factor=ctx.extra_args["scale_factor"],
+            scale_factor=mha.get_scale_factor(),
             sliding_window_size=ctx.extra_args["sliding_window_size"],
             need_query=ctx.needs_input_grad[0],
             need_key=ctx.needs_input_grad[1],
             need_value=ctx.needs_input_grad[2],
-            tmp_array_limit_gb=ctx.extra_args["tmp_array_limit_gb"],
+            tmp_array_limit_gb=mha.tmp_array_limit_gb_value(),
         )
-        return grad_query, grad_key, grad_value, *([None] * 6)
+        return grad_query, grad_key, grad_value, *([None] * 4)
 
 
 def finalize_gradients_key_or_value(
@@ -494,11 +451,9 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
         index: torch.Tensor,
         token_positions: torch.Tensor,
         input_pos: int,
-        scale_factor: float,
+        mha: MultiHeadSelfAttention,
         positions: Optional[torch.Tensor] = None,
         sliding_window_size: Optional[int] = None,
-        sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
-        tmp_array_limit_gb: Optional[float] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Combines updates of K and V cache buffers with SDPA computation.
@@ -521,7 +476,7 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
                 the update. It is needed in order to determine attention masks
             input_pos: New tokens have positions
                 `input_pos:(input_pos + q_len)`
-            scale_factor: Scale factor for SDPA
+            mha: Multi-head self attention to be used
             positions: This index is given iff the KV cache supports a grace
                 period, `(batch_size, n_query_heads, num2)`, where
                 `num2 <= min(q_len, grace_period)`. In this case, the buffer
@@ -529,7 +484,6 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
                 `positions` can also be 1D, in which case it is extended by the
                 first two dimensions.
             sliding_window_size: Affects the attention masking
-            sdpa_kernels: Parameter for SDPA
 
         Returns:
             `(attn_output, key_buffer_new, value_buffer_new)`, the SDPA
@@ -555,10 +509,8 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
             value=value_buffer_new,
             token_positions=token_positions,
             input_pos=input_pos,
-            scale_factor=scale_factor,
+            mha=mha,
             sliding_window_size=sliding_window_size,
-            sdpa_kernels=sdpa_kernels,
-            tmp_array_limit_gb=tmp_array_limit_gb,
         )
         return attn_output, key_buffer_new, value_buffer_new
 
@@ -573,11 +525,9 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
             index,
             token_positions,
             input_pos,
-            scale_factor,
+            mha,
             positions,
             sliding_window_size,
-            _,
-            tmp_array_limit_gb,
         ) = inputs
         if positions is not None and positions.ndim == 1:
             positions = positions[None, None, :].expand(
@@ -595,9 +545,8 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
             token_positions=token_positions,
             positions=positions,
             input_pos=input_pos,
-            scale_factor=scale_factor,
+            mha=mha,
             sliding_window_size=sliding_window_size,
-            tmp_array_limit_gb=tmp_array_limit_gb,
         )
 
     @staticmethod
@@ -641,9 +590,8 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
         index = ctx.extra_args["index"]
         token_positions = ctx.extra_args["token_positions"]
         input_pos = ctx.extra_args["input_pos"]
-        scale_factor = ctx.extra_args["scale_factor"]
+        mha = ctx.extra_args["mha"]
         sliding_window_size = ctx.extra_args["sliding_window_size"]
-        tmp_array_limit_gb = ctx.extra_args["tmp_array_limit_gb"]
         positions = ctx.extra_args["positions"]
         do_grace_period = positions is not None
         grad_query = grad_key = grad_value = None
@@ -711,12 +659,12 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
                 value=value_buffer_new,
                 token_positions=token_positions,
                 input_pos=input_pos,
-                scale_factor=scale_factor,
+                scale_factor=mha.get_scale_factor(),
                 sliding_window_size=sliding_window_size,
                 need_query=need_query,
                 need_key=need_one_of_key,
                 need_value=need_one_of_value,
-                tmp_array_limit_gb=tmp_array_limit_gb,
+                tmp_array_limit_gb=mha.tmp_array_limit_gb_value(),
             )
             if need_one_of_key:
                 grad_key_buffer += grad_key_buffer_new  # F_k in note
@@ -752,7 +700,7 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
                 if not need_value_buffer:
                     grad_value_buffer = None
 
-        return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 10)
+        return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 6)
 
 
 def cat_on_buffers(
@@ -805,10 +753,8 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
         value: torch.Tensor,
         key_buffer: torch.Tensor,
         value_buffer: torch.Tensor,
-        scale_factor: float,
+        mha: MultiHeadSelfAttention,
         sliding_window_size: Optional[int] = None,
-        sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
-        tmp_array_limit_gb: Optional[float] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Combines updates of K and V cache buffers with SDPA computation.
@@ -824,9 +770,8 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
                 `(batch_size, n_query_heads, kv_len, head_size)`. Can be `None`
             value_buffer: Values cache buffer before the update,
                 `(batch_size, n_query_heads, kv_len, head_size)`. Can be `None`
-            scale_factor: Scale factor for SDPA
+            mha: Multi-head self attention to be used
             sliding_window_size: Affects the attention masking
-            sdpa_kernels: Parameter for SDPA
 
         Returns:
             `(attn_output, key_buffer_new, value_buffer_new)`, the SDPA
@@ -849,10 +794,8 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             value=value_buffer_new,
             token_positions=token_positions,
             input_pos=kv_len,
-            scale_factor=scale_factor,
+            mha=mha,
             sliding_window_size=sliding_window_size,
-            sdpa_kernels=sdpa_kernels,
-            tmp_array_limit_gb=tmp_array_limit_gb,
         )
         return attn_output, key_buffer_new, value_buffer_new
 
@@ -864,10 +807,8 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             value,
             key_buffer,
             value_buffer,
-            scale_factor,
+            mha,
             sliding_window_size,
-            _,
-            tmp_array_limit_gb,
         ) = inputs
         ctx.save_for_backward(
             query,
@@ -877,9 +818,8 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             value_buffer,
         )
         ctx.extra_args = dict(
-            scale_factor=scale_factor,
+            mha=mha,
             sliding_window_size=sliding_window_size,
-            tmp_array_limit_gb=tmp_array_limit_gb,
         )
 
     @staticmethod
@@ -901,9 +841,8 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
             key_buffer,
             value_buffer,
         ) = ctx.saved_tensors
-        scale_factor = ctx.extra_args["scale_factor"]
+        mha = ctx.extra_args["mha"]
         sliding_window_size = ctx.extra_args["sliding_window_size"]
-        tmp_array_limit_gb = ctx.extra_args["tmp_array_limit_gb"]
         grad_query = grad_key = grad_value = None
         grad_key_buffer = grad_value_buffer = None
         # Prepare inputs
@@ -927,12 +866,12 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
                 value=value_buffer_new,
                 token_positions=token_positions,
                 input_pos=kv_len,
-                scale_factor=scale_factor,
+                scale_factor=mha.get_scale_factor(),
                 sliding_window_size=sliding_window_size,
                 need_query=need_query,
                 need_key=need_one_of_key,
                 need_value=need_one_of_value,
-                tmp_array_limit_gb=tmp_array_limit_gb,
+                tmp_array_limit_gb=mha.tmp_array_limit_gb_value(),
             )
             if need_key_buffer:
                 grad_key_buffer = (
@@ -955,4 +894,4 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
                     grad_value_buffer_new_indir[:, :, kv_len:, :]
                 )
 
-        return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 4)
+        return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 2)

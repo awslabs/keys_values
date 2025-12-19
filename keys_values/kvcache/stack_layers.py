@@ -11,12 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Tuple, Iterable, Dict, Any
+from typing import Tuple, Iterable, Dict, Any
 
 import torch
 
 from litgpt.config import Config
-from litgpt.model import batched_index_select
 
 from keys_values.kvcache.base import KVCache
 from keys_values.model import Block, GPT
@@ -30,10 +29,6 @@ class CellBlocks:
     """
     def __init__(self, config: Config):
         self.config = config
-
-    @property
-    def _full_rope_params(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError
 
     @property
     def max_seq_length(self) -> int:
@@ -56,19 +51,11 @@ class CellBlocks:
             self._check_kv_cache(
                 block.attn.kv_cache, input_pos, block_idx, batch_size, chunk_len,
             )
-        # `cos`, `sin` have shape `(1, T, config.rope_n_elem)`, or shape
-        # `(1, T, config.rope_n_elem, 2)`
-        rope_params = self._rope_params_for_chunk(input_pos, chunk_len)
         # Loop over blocks
         for block_idx, block, block_kwargs in self.blocks_with_kwargs():
             device = block.attn.device
-            _cos, _sin = self._rope_params_for_block(
-                rope_params, block_idx, device,
-            )
             x = block(
                 x.to(device=device),
-                cos=_cos,
-                sin=_sin,
                 token_idx=idx.to(device=device),
                 input_pos=input_pos,
                 **block_kwargs,
@@ -89,7 +76,7 @@ class CellBlocks:
         Returns:
             Sequence of `(block_idx, block, block_kwargs)` of model blocks,
             in increasing order. We call
-            `x = block(x, cos, sin, token_idx, input_pos, **block_kwargs)`.
+            `x = block(x, token_idx, input_pos, **block_kwargs)`.
 
         """
         raise NotImplementedError
@@ -124,41 +111,6 @@ class CellBlocks:
                     f"KV cache for layer {block_idx}: chunk_len = {chunk_len}, must be <= max_tokens_forward = {kv_cache.max_tokens_forward}"
                 )
 
-    def _rope_params_for_chunk(
-        self,
-        input_pos: int,
-        chunk_len: int,
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-        if self.config.rope_n_elem > 0:
-            full_cos, full_sin = self._full_rope_params
-            input_pos_array = torch.arange(
-                input_pos,
-                input_pos + chunk_len,
-                device=full_cos.device,
-                dtype=torch.int64,
-            )
-            cos = batched_index_select(full_cos, 0, input_pos_array).unsqueeze(0)
-            sin = batched_index_select(full_sin, 0, input_pos_array).unsqueeze(0)
-        else:
-            cos = sin = None
-        return cos, sin
-
-    def _rope_params_for_block(
-        self,
-        rope_params_for_chunk: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]],
-        block_idx: int,
-        device: torch.device,
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-        _cos, _sin = rope_params_for_chunk
-        if _cos is not None and self.config.rope_indices is not None:
-            # Select global (0) or local (1) variant
-            _cos = _cos[..., self.config.rope_indices[block_idx]]
-            _sin = _sin[..., self.config.rope_indices[block_idx]]
-        if _cos is not None:
-            _cos = _cos.to(device=device)
-            _sin = _sin.to(device=device)
-        return _cos, _sin
-
 
 class DefaultCellBlocks(CellBlocks):
     def __init__(
@@ -171,10 +123,6 @@ class DefaultCellBlocks(CellBlocks):
         self._model = model
         self._first_layer_idx = first_layer_idx
         self._num_layers = num_layers
-
-    @property
-    def _full_rope_params(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self._model.cos, self._model.sin
 
     @property
     def max_seq_length(self) -> int:

@@ -299,6 +299,7 @@ class InferenceLastRecentlyInsertedReplayCache(
         InferenceReplayCacheMixin._validate_token_idx(self, token_idx)
 
 
+# HIER: `mha` should be the same object, right?
 def inference_replay_cache_factory(
     kv_cache: KVCacheWithBuffers,
     config: Config,

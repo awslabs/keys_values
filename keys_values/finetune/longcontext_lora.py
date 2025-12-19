@@ -94,6 +94,7 @@ from keys_values.kvcache.utils import (
 from keys_values.long_context import KVCacheArgs, GPTAndHeadModel
 from keys_values.lora import GPT
 from keys_values.parser_config import save_hyperparameters
+from keys_values.pos_encoding import position_encoding_factory
 
 
 DEFAULT_OUT_DIR = "out/finetune/longcontext_lora"
@@ -160,6 +161,7 @@ def setup(
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
+    yarn_rope: bool = True,
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
     record_gpu_memory_period: int = 0,
@@ -210,6 +212,10 @@ def setup(
             :class:`HeadModelFactory`. Defaults to "next_token_prediction"
         head_model_kwargs: Extra keyword arguments to pass to the head model
             factory.
+        yarn_rope: Should YaRN be used to adjust RoPE (position encoding) to the
+            sequence length for each batch? Defaults to `True`. If not, RoPE is
+            determined by the model configuration, and is static (no dependence
+            on sequence length).
         record_gpu_memory_snapshots: If given, we record GPU memory traces in
             snapshots. This argument is the `max_entries` parameter, a good
             value is 50000 or 100000.
@@ -347,6 +353,7 @@ def setup(
         num_nodes=num_nodes,
         head_model_name=head_model,
         head_model_kwargs=head_model_kwargs,
+        yarn_rope=yarn_rope,
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
@@ -371,6 +378,7 @@ def main(
     num_nodes: int,
     head_model_name: str,
     head_model_kwargs: Dict[str, Any],
+    yarn_rope: bool,
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
@@ -413,9 +421,6 @@ def main(
             SDPBackend.CUDNN_ATTENTION,
             SDPBackend.MATH,
         ]
-        mha_kwargs = {"sdpa_kernels": sdpa_kernels}
-        if "sdpa_kernels" not in kv_cache.cache_kwargs:
-            kv_cache.cache_kwargs["sdpa_kernels"] = sdpa_kernels
         limit_gb = kv_cache.attention_forward_temp_size_gb
         if limit_gb is None:
             limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
@@ -424,8 +429,15 @@ def main(
             init_val=limit_gb,
             name="attention_forward_temp_size_gb",
         )
-        mha_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
+        mha_kwargs = dict(
+            sdpa_kernels=sdpa_kernels,
+            tmp_array_limit_gb=tmp_array_limit_forward,
+            pos_encoding=position_encoding_factory(config, do_yarn=yarn_rope),
+        )
+        if "sdpa_kernels" not in kv_cache.cache_kwargs:
+            kv_cache.cache_kwargs["sdpa_kernels"] = sdpa_kernels
         kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
+        kv_cache.cache_kwargs["pos_encoding"] = mha_kwargs["pos_encoding"]
         gpt_model = GPT(config, **mha_kwargs)
         if isinstance(fabric.strategy.precision, BitsandbytesPrecision):
             from bitsandbytes.nn import StableEmbedding

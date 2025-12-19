@@ -387,7 +387,6 @@ class DefaultKVCache(KVCache):
         self._forward_check_args(query, key, value, token_idx, input_pos)
         for_prefill = input_pos == 0
         num = query.shape[2]
-        self.mha.set_seq_length(input_pos + num, device=query.device)
 
         # Call :meth:`_forward` or :meth:`_prefill`, depending on `for_prefill`
         if for_prefill:

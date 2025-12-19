@@ -23,6 +23,7 @@ from torch.nn.attention import SDPBackend
 
 from litgpt.config import Config
 
+from keys_values.attention import MultiHeadSelfAttention
 from keys_values.attention_utils import (
     build_mask_slice,
     sample_token_positions,
@@ -90,6 +91,15 @@ def test_sdpa_op_gradients(device, n_head, n_query_groups, q_len, kv_len, dtype,
         head_size = 2 ** random.randint(3, 6)
         batch_size = random.randint(1, 5)
         print(f"repeat={repeat}, head_size={head_size}, batch_size={batch_size}")
+        config = Config(
+            n_layer=1,
+            n_head=n_head,
+            n_query_groups=n_query_groups,
+            n_embd=n_head * head_size,
+            block_size=128,
+            vocab_size=128,
+        )
+        mha = MultiHeadSelfAttention(config)
         if is_causal:
             token_positions = None
         else:
@@ -109,7 +119,6 @@ def test_sdpa_op_gradients(device, n_head, n_query_groups, q_len, kv_len, dtype,
         print(f"query {_query.shape}, key {_key.shape}, value {_value.shape}")
         if token_positions is not None:
             print(f"token_positions {token_positions.shape}")
-        scale = 1.0 / math.sqrt(head_size)
         gradients = dict()
         for kind in ("op", "noop"):
             query = copy_requires_grad(_query)
@@ -122,7 +131,7 @@ def test_sdpa_op_gradients(device, n_head, n_query_groups, q_len, kv_len, dtype,
                     value,
                     token_positions,
                     input_pos,
-                    scale,
+                    mha,
                     sliding_window_size,
                 )
             else:
@@ -159,7 +168,7 @@ def test_sdpa_op_gradients(device, n_head, n_query_groups, q_len, kv_len, dtype,
                     value=value2,
                     attn_mask=mask,
                     dropout_p=0.0,
-                    scale=scale,
+                    scale=mha.get_scale_factor(),
                     is_causal=is_causal,
                     enable_gqa=_enable_gqa,
                 )
@@ -402,7 +411,6 @@ def test_gradient_new_and_old_spda(
     n_head = 8
     n_query_groups = 4
     head_size = 64
-    scale_factor = 1.0 / math.sqrt(head_size)
     vocab_size = 48
     grace_period = cache_kwargs.get("grace_period", 0)
     sdpa_kernels = [
@@ -432,7 +440,8 @@ def test_gradient_new_and_old_spda(
         device=device,
         dtype=dtype,
     )
-    gpt_model = GPT(config).to(device=device)
+    with torch.device(device):
+        gpt_model = GPT(config, sdpa_kernels=sdpa_kernels)
     token_idxs = torch.randint(
         low=0,
         high=config.vocab_size,
@@ -539,9 +548,7 @@ def test_gradient_new_and_old_spda(
                 value1,
                 None,
                 entry.input_pos,
-                scale_factor,
-                None,
-                sdpa_kernels,
+                gpt_model.mha,
                 None,
             )
         elif is_cat:
@@ -552,9 +559,7 @@ def test_gradient_new_and_old_spda(
                 value1,
                 key_buffer1,
                 value_buffer1,
-                scale_factor,
-                None,
-                sdpa_kernels,
+                gpt_model.mha,
                 None,
             )
         else:
@@ -587,10 +592,8 @@ def test_gradient_new_and_old_spda(
                 index,
                 token_positions,  # after update
                 entry.input_pos,
-                scale_factor,
+                gpt_model.mha,
                 positions,
-                None,
-                sdpa_kernels,
                 None,
             )
         attn_outputs1 = attn_outputs1.transpose(1, 2).reshape(batch_size, num, -1)
@@ -633,7 +636,7 @@ def test_gradient_new_and_old_spda(
             query=query2,
             key=cache_keys_after2,
             value=cache_values_after2,
-            scale_factor=scale_factor,
+            scale_factor=gpt_model.mha.get_scale_factor(),
             input_pos=entry.input_pos,
             token_positions=token_positions,
             sdpa_kernels=sdpa_kernels,

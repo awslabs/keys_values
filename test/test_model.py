@@ -67,6 +67,7 @@ from keys_values.attention import (
     SDPA_IMPL_EAGER_NO_BLOCKS,
 )
 from keys_values.model import GPT, CausalSelfAttention
+from keys_values.pos_encoding import LinearPositionEncoding
 
 
 @torch.inference_mode()
@@ -1616,15 +1617,10 @@ def test_rope_init_under_fsdp():
 
     with fabric.init_module(empty_init=True):
         model = GPT.from_name("pythia-14m", n_layer=1)
-    assert model.cos.device.type == "meta"
-    assert model.sin.device.type == "meta"
+    assert model.mha.pos_encoding.device.type == "meta"
 
     model = fabric.setup(model)
-    assert model.cos.device.type == "cuda"
-    assert model.sin.device.type == "cuda"
-    cos, sin = model.rope_cache(device=fabric.device)
-    torch.testing.assert_close(model.cos, cos)
-    torch.testing.assert_close(model.sin, sin)
+    assert model.mha.pos_encoding.device.type == "cuda"
 
 
 @_RunIf(min_cuda_gpus=1)
@@ -1633,7 +1629,7 @@ def test_reset_parameters_device():
         model = GPT.from_name("pythia-14m", n_layer=1)
     _materialize_meta_tensors(model, torch.device("cuda"))
     model.reset_parameters()
-    assert model.cos.device.type == "cuda"
+    assert model.mha.pos_encoding.device.type == "cuda"
 
 
 def test_load_legacy_state_dict():
@@ -1661,7 +1657,6 @@ def test_load_legacy_state_dict():
 @pytest.mark.parametrize(("rotary_percentage", "final_dim"), ((0.75, 3), (0.25, 2)))
 @torch.inference_mode()
 def test_rope_cos_sin_shapes_if_rope_n_elem_is_odd(rotary_percentage, final_dim):
-    batch_size = 3
     config = Config(
         block_size=25,
         padded_vocab_size=5,
@@ -1672,5 +1667,7 @@ def test_rope_cos_sin_shapes_if_rope_n_elem_is_odd(rotary_percentage, final_dim)
     )
     model = GPT(config)
     required_shape = (config.block_size, final_dim)
-    assert model.cos.shape == required_shape
-    assert model.sin.shape == required_shape
+    pos_encoding = model.mha.pos_encoding
+    assert isinstance(pos_encoding, LinearPositionEncoding)
+    assert pos_encoding._cos.shape == required_shape
+    assert pos_encoding._sin.shape == required_shape

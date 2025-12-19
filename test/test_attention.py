@@ -12,10 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from dataclasses import replace
 from itertools import product
 import math
 import random
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import pytest
 import torch
@@ -41,13 +42,19 @@ from keys_values.attention_utils import (
     sample_token_positions,
     ENTRIES_PER_GB,
 )
-from keys_values.kvcache.base import KVCache
+from keys_values.head_model import CrossEntropyOnLogits
+from keys_values.head_model_factory import HeadModelFactory
+from keys_values.kvcache.base import KVCache, KVCacheParams, DefaultKVCache
+from keys_values.kvcache.gradient.cell import CellComputation
+from keys_values.kvcache.gradient.main import LongContextGradientModel
+from keys_values.kvcache.stack_layers import DefaultCellBlocks
 from keys_values.kvcache.test_utils import (
     product_with_devices,
     available_backends,
+    create_kv_cache,
 )
 from keys_values.model import GPT, CausalSelfAttention
-from keys_values.use_eager_kernel import transform_mha_kwargs
+from keys_values.pos_encoding import LinearPositionEncoding
 from keys_values.utils import repeat_interleave
 
 
@@ -493,36 +500,37 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
         rotary_percentage=1.0,
         rope_indices=[0, 1] if is_gemma_3 else None,
     )
-    kwargs = dict(dtype=dtype, device=device)
 
     # Obtain RoPE parameters and compare
-    model_new = GPT(config).to(**kwargs)
+    with torch.device(device):
+        model_new = GPT(config).to(dtype=dtype)
     model_new.max_seq_length = T
-    cos_new = model_new.cos.unsqueeze(0)
-    sin_new = model_new.sin.unsqueeze(0)
+    mha = model_new.mha
+    pos_encoding = mha.pos_encoding
+    assert isinstance(pos_encoding, LinearPositionEncoding)
+    cos_new = pos_encoding._cos.unsqueeze(0)
+    sin_new = pos_encoding._sin.unsqueeze(0)
     cos_old, sin_old = rope_cache_OLD(config)
-    cos_old = cos_old.unsqueeze(0).to(**kwargs)
-    sin_old = sin_old.unsqueeze(0).to(**kwargs)
+    cos_old = cos_old.unsqueeze(0)
+    sin_old = sin_old.unsqueeze(0)
     torch.testing.assert_close(cos_new, cos_old)
     torch.testing.assert_close(sin_new, sin_old)
 
-    mha = MultiHeadSelfAttention(
-        config, **transform_mha_kwargs(dict(), config)
-    )
     shape = (batch_size, T, config.n_embd)
     for rep in range(num_repeats):
         block_idx = rep % 2
-        attn_new = CausalSelfAttention(
-            config,
-            block_idx=block_idx,
-        ).to(**kwargs)
-        attn_old = CausalSelfAttention_OLD(
-            config,
-            block_idx=block_idx,
-        ).to(**kwargs)
+        with torch.device(device):
+            attn_new = CausalSelfAttention(
+                config,
+                block_idx=block_idx,
+            ).to(dtype=dtype)
+            attn_old = CausalSelfAttention_OLD(
+                config,
+                block_idx=block_idx,
+            ).to(dtype=dtype)
         # Ensure they have the same weights
         attn_old.load_state_dict(attn_new.state_dict())
-        inputs = torch.randn(shape, **kwargs)
+        inputs = torch.randn(shape, dtype=dtype, device=device)
         token_idx = torch.randint(
             0,
             config.padded_vocab_size,
@@ -530,16 +538,8 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
             dtype=torch.int64,
             device=device,
         )
-        if is_gemma_3:
-            _cos = cos_new[..., config.rope_indices[block_idx]]
-            _sin = sin_new[..., config.rope_indices[block_idx]]
-        else:
-            _cos = cos_new
-            _sin = sin_new
         outputs_new = attn_new(
             x=inputs,
-            cos=_cos,
-            sin=_sin,
             token_idx=token_idx,
             mha=mha,
         )
@@ -737,3 +737,140 @@ def test_attention_in_blocks(device, n_head, n_query_groups, q_len, kv_len, dtyp
             torch.testing.assert_close(
                 result[0], result[1], atol=0.0005, rtol=0.05,
             )
+
+
+def _compare_mhas(
+    caches1: List[DefaultKVCache], caches2: List[DefaultKVCache], prefix: str
+):
+    for block_idx, (cache1, cache2) in enumerate(zip(caches1, caches2)):
+        mha1 = cache1.mha
+        mha2 = cache2.mha
+        assert mha1 is mha2, prefix + f"block_idx={block_idx}"
+
+
+def test_mha_is_passed_on():
+    device = torch.device("cpu")
+    dtype = torch.float32
+    torch.set_default_dtype(dtype)  # Set default dtype
+
+    cache_name = "lastrec-default"
+    batch_size = 2
+    n_layer = 8
+    n_head = 8
+    n_query_groups = 2
+    head_size = 64
+    vocab_size = 512
+    head_model_name = CrossEntropyOnLogits.NAME
+    cache_lengths = [128, 256] * (n_layer // 2)
+    layers_per_cell = 1
+    chunk_size = 8
+    seq_length = cache_lengths[1] + 4 * 8
+
+    # Create model and KV caches
+    config = Config(
+        n_layer=n_layer,
+        n_head=n_head,
+        n_query_groups=n_query_groups,
+        n_embd=n_head * head_size,
+        block_size=512,
+        vocab_size=vocab_size,
+        rotary_percentage=1,
+    )
+    params = KVCacheParams.from_config(
+        config=config,
+        max_batch_size=batch_size,
+        cache_length=cache_lengths[0],
+        device=device,
+        dtype=dtype,
+    )
+    gpt_model = GPT(config)
+    gpt_model.assign_kv_caches(
+        [
+            create_kv_cache(
+                name=cache_name,
+                params=replace(params, cache_length=cache_length),
+                block_idx=block_idx,
+            )
+            for block_idx, cache_length in enumerate(cache_lengths)
+        ]
+    )
+    orig_caches = gpt_model.get_kv_caches()
+    head_model = HeadModelFactory.create(name=head_model_name, config=config)
+    lc_model = LongContextGradientModel(
+        gpt_model=gpt_model,
+        head_model=head_model,
+        layers_per_cell=layers_per_cell,
+        chunk_size=chunk_size,
+        qname="default",
+    )
+    # Input batch
+    token_ids = torch.randint(
+        low=0,
+        high=config.vocab_size,
+        size=(batch_size, seq_length),
+        device=device,
+    )
+    num_output_tokens = random.randint(4, int(seq_length * 0.75))
+    input_ids = token_ids[:, :-1]
+    targets = token_ids[:, (-num_output_tokens):]
+
+    # After cloning: TODO!!
+    #gpt_model_clone = gpt_model.clone()
+    #_compare_mhas(
+    #    orig_caches, gpt_model_clone.get_kv_caches(), prefix="GPT.clone: ",
+    #)
+
+    # Inference replay caches
+    # Forward pass creates replay logs
+    lc_model.train()
+    loss = lc_model(input_ids, targets)
+    print(f"loss = {loss.item()}")
+    replay_logs = []
+    for cache in orig_caches:
+        replay_logs.append(cache.get_replay_log())
+        cache.switch_replay_logging(False)
+    lc_model._create_members_for_backward()
+
+    def get_inputs_slice(
+        start: int, end: int,
+    ) -> torch.Tensor:
+        return lc_model.layer_checkpoints.get_checkpoint(
+            layer_idx=n_layer,
+            input_pos=start,
+            num=end - start,
+            device=device,
+        )
+
+    def write_head_gradients_slice(
+        input_pos: int, value: torch.Tensor,
+    ) -> Optional[int]:
+        return None
+
+    accumulator = lc_model.accumulator
+    accumulator.run_head_model(
+        gpt_model=lc_model.gpt_model,
+        head_model=lc_model.head_model,
+        replay_logs=replay_logs,
+        chunks_per_cell=lc_model.chunks_per_cell,
+        get_inputs_slice=get_inputs_slice,
+        write_head_gradients_slice=write_head_gradients_slice,
+        targets=targets,
+    )
+    model_part = DefaultCellBlocks(gpt_model, 0, n_layer)
+    ir_caches = accumulator._create_inference_replay_caches(model_part)
+    _compare_mhas(
+        orig_caches, ir_caches, prefix="Inference replay caches: ",
+    )
+
+    # Training replay caches
+    cell = CellComputation(
+        model_part=model_part,
+        autograd_hooks=None,
+        replay_logs=accumulator.replay_logs,
+        batch_size=batch_size,
+        **accumulator._train_cache_kwargs,
+    )
+    tr_caches = cell._create_train_replay_caches(0, n_layer)
+    _compare_mhas(
+        orig_caches, tr_caches, prefix="Training replay caches: ",
+    )
