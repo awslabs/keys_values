@@ -315,11 +315,9 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 index,
                 self.token_positions(),
                 input_pos,
-                self.mha._get_scale_factor(),
+                self.mha,
                 positions,
                 self.mha._get_sliding_window_size(self.block_idx),
-                self.mha.sdpa_kernels,
-                self.mha.tmp_array_limit_gb_value(),
             )
             # Post-processing w.r.t. annotations
             self._create_node_after_creator(
@@ -361,10 +359,8 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 value,
                 self.kv_buffers.keys(),
                 self.kv_buffers.values(),
-                self.mha._get_scale_factor(),
+                self.mha,
                 self.mha._get_sliding_window_size(self.block_idx),
-                self.mha.sdpa_kernels,
-                self.mha.tmp_array_limit_gb_value(),
             )
             # Post-processing w.r.t. annotations
             debug_msg = f"cat-after (clen={self.current_length})"

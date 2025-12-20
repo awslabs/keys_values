@@ -156,6 +156,7 @@ class MultiHeadSelfAttention:
 
     Look at :class:`DefaultUseEagerKernel` for choosing `use_eager_kernel`.
 
+
     """
     def __init__(
         self,
@@ -340,7 +341,7 @@ class MultiHeadSelfAttention:
         else:
             return SDPA_IMPL_PYTORCH
 
-    def _get_scale_factor(self):
+    def get_scale_factor(self):
         return self.pos_encoding.sdpa_scale_factor()
 
     def tmp_array_limit_gb_value(self) -> Optional[float]:
@@ -358,7 +359,7 @@ class MultiHeadSelfAttention:
         return_attn_weights: bool = False,
         transpose_result: bool = True,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        scale_factor = self._get_scale_factor()
+        scale_factor = self.get_scale_factor()
         # We cannot call PyTorch scaled_dot_product_attention if:
         # - Attention scores need to be returned; or
         # - Logit softcapping is required; or
