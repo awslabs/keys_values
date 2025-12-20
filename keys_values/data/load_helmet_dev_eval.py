@@ -11,6 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Acknowledgement:
+# The loading functions in this file are a re-implementation of the corresponding
+# functionality from the HELMET repository [https://github.com/princeton-nlp/HELMET],
+# rewritten and refactored by the author.
 
 import hashlib
 import json
@@ -34,7 +39,10 @@ from transformers import AutoTokenizer
 
 enable_progress_bars()  # make sure bars aren't globally disabled
 load_dotenv()  # reads .env into environment
-HF_TOKEN = os.getenv("LLAMA3_MODEL_TOKEN")  # place you huggingface token here
+HF_TOKEN = os.getenv("HF_MODEL_TOKEN")  # place you huggingface token here
+SOURCE_DATA_URL = "https://huggingface.co/datasets/princeton-nlp/HELMET/resolve/main/data.tar.gz"
+HELMET_REPO_URL = "https://github.com/princeton-nlp/HELMET/archive/refs/heads/main.zip"
+
 DATASET_PARENT_DIR = "~/.cache/huggingface/helmet/data" # the default place to store the cache data
 
 def download_source_data(download_dir: str) -> None:
@@ -96,8 +104,8 @@ def download_source_data(download_dir: str) -> None:
     step(1, TOTAL_STEPS, f"Ensure dataset directory exists: {download_dir}")
     download_dir.mkdir(parents=True, exist_ok=True)
 
-    data_url = "https://huggingface.co/datasets/princeton-nlp/HELMET/resolve/main/data.tar.gz"
-    repo_zip_url = "https://github.com/princeton-nlp/HELMET/archive/refs/heads/main.zip"
+    data_url = SOURCE_DATA_URL
+    repo_zip_url = HELMET_REPO_URL
 
     step(2, TOTAL_STEPS, "Download dataset archive (data.tar.gz)")
     tar_gz_path = download_dir / "data.tar.gz"
