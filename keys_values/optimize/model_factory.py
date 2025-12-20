@@ -79,8 +79,6 @@ class GPTFullWrapper(GPTFull):
     ):
         nn.Module.__init__(self)
         assert config.padded_vocab_size is not None
-        if config.rope_indices is not None:
-            raise NotImplementedError("config.rope_indices not currently supported")
         self.config = config
 
         if "lm_head" in components:
@@ -125,8 +123,6 @@ class GPTLoRAWrapper(GPTLoRA):
     ):
         nn.Module.__init__(self)
         assert config.padded_vocab_size is not None
-        if config.rope_indices is not None:
-            raise NotImplementedError("config.rope_indices not currently supported")
         self.config = config
 
         if "lm_head" in components:
@@ -173,8 +169,6 @@ class GPTStackBlocks(GPTFull):
     ):
         nn.Module.__init__(self)
         assert config.padded_vocab_size is not None
-        if config.rope_indices is not None:
-            raise NotImplementedError("config.rope_indices not currently supported")
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(h=nn.ModuleList(components)))

@@ -328,7 +328,7 @@ class SDPAFunction(Function):
             need_query=ctx.needs_input_grad[0],
             need_key=ctx.needs_input_grad[1],
             need_value=ctx.needs_input_grad[2],
-            tmp_array_limit_gb=mha.tmp_array_limit_gb(),
+            tmp_array_limit_gb=mha.tmp_array_limit_gb_value(),
         )
         return grad_query, grad_key, grad_value, *([None] * 4)
 
@@ -664,7 +664,7 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
                 need_query=need_query,
                 need_key=need_one_of_key,
                 need_value=need_one_of_value,
-                tmp_array_limit_gb=mha.tmp_array_limit_gb(),
+                tmp_array_limit_gb=mha.tmp_array_limit_gb_value(),
             )
             if need_one_of_key:
                 grad_key_buffer += grad_key_buffer_new  # F_k in note
@@ -871,7 +871,7 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
                 need_query=need_query,
                 need_key=need_one_of_key,
                 need_value=need_one_of_value,
-                tmp_array_limit_gb=mha.tmp_array_limit_gb(),
+                tmp_array_limit_gb=mha.tmp_array_limit_gb_value(),
             )
             if need_key_buffer:
                 grad_key_buffer = (

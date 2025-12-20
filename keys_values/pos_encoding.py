@@ -26,7 +26,12 @@ class PositionEncoding:
     context width.
 
     """
-    def __call__(self, x: torch.Tensor, input_pos: int) -> torch.Tensor:
+    def __call__(
+        self,
+        x: torch.Tensor,
+        input_pos: int,
+        block_idx: int,
+    ) -> torch.Tensor:
         """
         Encodes `x` (queries, keys) corresponding to token positions
         `range(input_pos, input_pos + x_len)`, where `x_len = x.shape[2]`.
@@ -36,6 +41,8 @@ class PositionEncoding:
                 `(batch_size, n_head, x_len, n_elem)`, where
                 `n_elem <= head_size`
             input_pos (int): Determines token positions
+            block_idx (int): Index of layer. Allows for encodings dependent on
+                the layer
 
         Returns:
             Position encoded tensor, same shape as `x`
@@ -112,6 +119,8 @@ class YaRNPositionEncoding(PositionEncoding):
         """
         self.rope_base = config.rope_base
         self.head_size = config.head_size
+        self.rope_local_base_freq = config.rope_local_base_freq
+        self.rope_indices = config.rope_indices
         context_width = None
         train_context_width = None
         if config.rope_adjustments is not None:
@@ -175,8 +184,9 @@ class YaRNPositionEncoding(PositionEncoding):
 
     def _precompute(self):
         """
-        Precomputations, based on context width. Must be called whenever the
-        context width changes.
+        The state consists of `_cos`, `_sin`, with shapes
+        `(context_width, head_size)` or `(context_width, head_size, 2)`,
+        the latter if `rope_indices` is given.
 
         """
         extra_config = {
@@ -185,17 +195,34 @@ class YaRNPositionEncoding(PositionEncoding):
             "high_freq_factor": self.beta,
             "factor": self._factor(),
         }
-        self._cos, self._sin = build_rope_cache(
+        cos, sin = build_rope_cache(
             seq_len=self.context_width,
             n_elem=self.head_size,
             device=self.device,
             base=self.rope_base,
             extra_config=extra_config,
         )
+        if self.rope_local_base_freq is not None:
+            cos2, sin2 = build_rope_cache(
+                seq_len=self.context_width,
+                n_elem=self.head_size,
+                device=self.device,
+                base=self.rope_local_base_freq,
+                extra_config=extra_config,
+            )
+            cos = torch.cat((cos.unsqueeze(-1), cos2.unsqueeze(-1)), dim=-1)
+            sin = torch.cat((sin.unsqueeze(-1), sin2.unsqueeze(-1)), dim=-1)
+        self._cos = cos
+        self._sin = sin
         sqrt_inv_t = 0.1 * math.log(self._factor()) + 1.0
         self._sdpa_scale_factor = sqrt_inv_t * sqrt_inv_t / math.sqrt(self.head_size)
 
-    def __call__(self, x: torch.Tensor, input_pos: int) -> torch.Tensor:
+    def __call__(
+        self,
+        x: torch.Tensor,
+        input_pos: int,
+        block_idx: int,
+    ) -> torch.Tensor:
         if x.ndim < 2 or x.shape[-1] > self.head_size:
             raise ValueError(f"x.shape = {x.shape}, must be at least 2D, and last dimension must be <= {self.head_size}")
         x_len = x.shape[-2]
@@ -205,8 +232,11 @@ class YaRNPositionEncoding(PositionEncoding):
             self._device = x.device
             self._cos = self._cos.to(device=self._device)
             self._sin = self._sin.to(device=self._device)
-        return apply_rope(
-            x=x,
-            cos = self._cos[input_pos:(input_pos + x_len), :],
-            sin = self._sin[input_pos:(input_pos + x_len), :],
-        )
+        if self.rope_local_base_freq is None:
+            cos = self._cos[input_pos:(input_pos + x_len), :].unsqueeze(0)
+            sin = self._sin[input_pos:(input_pos + x_len), :].unsqueeze(0)
+        else:
+            ind = self.rope_indices[block_idx]
+            cos = self._cos[input_pos:(input_pos + x_len), :, ind].unsqueeze(0)
+            sin = self._sin[input_pos:(input_pos + x_len), :, ind].unsqueeze(0)
+        return apply_rope(x=x, cos=cos, sin=sin)

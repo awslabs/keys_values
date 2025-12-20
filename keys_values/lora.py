@@ -191,8 +191,6 @@ class GPT(BaseModel):
     def __init__(self, config: Config, **mha_kwargs) -> None:
         nn.Module.__init__(self)
         assert config.padded_vocab_size is not None
-        if config.rope_indices is not None:
-            raise NotImplementedError("config.rope_indices not currently supported")
         self.config = config
 
         self.lm_head = create_lora_linear(

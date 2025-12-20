@@ -58,8 +58,6 @@ class GPT(nn.Module):
         """
         super().__init__()
         assert config.padded_vocab_size is not None
-        if config.rope_indices is not None:
-            raise NotImplementedError("config.rope_indices not currently supported")
         self.config = config
 
         self.lm_head = nn.Linear(
