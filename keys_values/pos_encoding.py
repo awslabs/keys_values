@@ -121,7 +121,7 @@ class YaRNPositionEncoding(PositionEncoding):
         self.head_size = config.head_size
         self.rope_local_base_freq = config.rope_local_base_freq
         self.rope_indices = config.rope_indices
-        context_width = None
+        factor = None
         train_context_width = None
         if config.rope_adjustments is not None:
             _alpha = config.rope_adjustments.get("low_freq_factor")
@@ -136,16 +136,14 @@ class YaRNPositionEncoding(PositionEncoding):
                 beta = _beta
             train_context_width = config.rope_adjustments.get("original_max_seq_len")
             factor = config.rope_adjustments.get("factor")
-            if factor is not None:
-                if train_context_width is None:
-                    raise ValueError("config.rope_adjustments: Must have both or none of 'factor', 'original_max_seq_len'")
-                context_width = int(train_context_width * factor)
-        if context_width is None:
-            context_width = config.block_size
-        self._context_width = context_width
         if train_context_width is None:
             train_context_width = config.block_size
         self.train_context_width = train_context_width
+        if factor is None:
+            context_width = config.block_size
+        else:
+            context_width = int(factor * train_context_width)
+        self._context_width = context_width
         if alpha is None:
             alpha = DEFAULT_YARN_ALPHA
         if beta is None:
