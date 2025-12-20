@@ -22,7 +22,7 @@ from litgpt.config import Config
 
 from keys_values.attention import do_softcapping
 from keys_values.head_model import HeadModel
-from keys_values.kvcache.base import KVCacheReplayLog
+from keys_values.kvcache.base import KVCacheReplayLog, DefaultKVCache
 from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.kvcache.buffers import (
     KVCacheBuffersParams,
@@ -309,12 +309,20 @@ class GradientAccumulator:
             cache_buffers,
             checkpoints,
         ):
+            kv_cache = block.attn.kv_cache
+            # Use the same MHA object. Ensures that properties like position
+            # encoding are transferred
+            if isinstance(kv_cache, DefaultKVCache):
+                extra_kwargs = dict(mha=kv_cache.mha)
+            else:
+                extra_kwargs = dict()
             ir_cache = inference_replay_cache_factory(
-                kv_cache=block.attn.kv_cache,
+                kv_cache=kv_cache,
                 config=self.config,
                 buffers=buffers,
                 block_idx=block_idx,
                 replay_log=self.replay_logs[block_idx],
+                **extra_kwargs,
                 **self.cache_kwargs,
             )
             # Set hook to write checkpoints

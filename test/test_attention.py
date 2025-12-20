@@ -47,6 +47,7 @@ from keys_values.kvcache.test_utils import (
     available_backends,
 )
 from keys_values.model import GPT, CausalSelfAttention
+from keys_values.pos_encoding import YaRNPositionEncoding
 from keys_values.use_eager_kernel import transform_mha_kwargs
 from keys_values.utils import repeat_interleave
 
@@ -498,17 +499,17 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
     # Obtain RoPE parameters and compare
     model_new = GPT(config).to(**kwargs)
     model_new.max_seq_length = T
-    cos_new = model_new.cos.unsqueeze(0)
-    sin_new = model_new.sin.unsqueeze(0)
+    mha = model_new.mha
+    pos_encoding = mha.pos_encoding
+    assert isinstance(pos_encoding, YaRNPositionEncoding)
+    cos_new = pos_encoding._cos.unsqueeze(0)
+    sin_new = pos_encoding._sin.unsqueeze(0)
     cos_old, sin_old = rope_cache_OLD(config)
     cos_old = cos_old.unsqueeze(0).to(**kwargs)
     sin_old = sin_old.unsqueeze(0).to(**kwargs)
     torch.testing.assert_close(cos_new, cos_old)
     torch.testing.assert_close(sin_new, sin_old)
 
-    mha = MultiHeadSelfAttention(
-        config, **transform_mha_kwargs(dict(), config)
-    )
     shape = (batch_size, T, config.n_embd)
     for rep in range(num_repeats):
         block_idx = rep % 2
@@ -530,16 +531,8 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
             dtype=torch.int64,
             device=device,
         )
-        if is_gemma_3:
-            _cos = cos_new[..., config.rope_indices[block_idx]]
-            _sin = sin_new[..., config.rope_indices[block_idx]]
-        else:
-            _cos = cos_new
-            _sin = sin_new
         outputs_new = attn_new(
             x=inputs,
-            cos=_cos,
-            sin=_sin,
             token_idx=token_idx,
             mha=mha,
         )

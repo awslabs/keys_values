@@ -145,6 +145,8 @@ class YaRNPositionEncoding(PositionEncoding):
             raise ValueError(f"alpha = {alpha}, beta = {beta}: Must be 0 < alpha < beta")
         self.alpha = alpha
         self.beta = beta
+        if device is None:
+            device = torch.get_default_device()
         self._device = device
         self._cos = None
         self._sin = None

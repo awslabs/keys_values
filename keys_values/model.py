@@ -18,7 +18,7 @@
 Based on the nanoGPT implementation: https://github.com/karpathy/nanoGPT and
 https://github.com/EleutherAI/gpt-neox/tree/main/megatron/model.
 """
-from typing import Any, List, Optional, Tuple, Union, Callable, Iterator
+from typing import Any, List, Optional, Union, Callable, Iterator
 from typing_extensions import Self
 
 import torch
@@ -32,7 +32,7 @@ from keys_values.attention import (
     MultiHeadSelfAttention,
     do_softcapping,
 )
-from keys_values.kvcache.base import KVCacheParams, KVCache
+from keys_values.kvcache.base import KVCacheParams, KVCache, DefaultKVCache
 from keys_values.use_eager_kernel import transform_mha_kwargs
 
 
@@ -58,7 +58,7 @@ class GPT(nn.Module):
         """
         super().__init__()
         assert config.padded_vocab_size is not None
-        if self.config.rope_indices is not None:
+        if config.rope_indices is not None:
             raise NotImplementedError("config.rope_indices not currently supported")
         self.config = config
 
@@ -89,17 +89,23 @@ class GPT(nn.Module):
     @max_seq_length.setter
     def max_seq_length(self, value: int) -> None:
         """
-        When doing inference, the sequences used might be shorter than the
-        model's context length. This allows setting a smaller number to avoid
-        allocating unused memory.
+        Calls to :meth:`forward` must be such that `idx.shape[-1] + input_pos`
+        is no larger than the maximum sequence length.
 
+        This length determines the position encoding. For fine-tuning, we
+        recommend to set it to the batch length for every new batch processed.
         If KV caches are of type `DenseKVCache`, and they are too small to hold
         `value` entries, a warning message is printed.
 
+        Note: Do not change the maximum sequence length in the middle of an
+        inference run, consisting of several processing and generation steps.
+        The keys stored in the KV cache are already encoded and would not be
+        recoded. We plan to support dynamic position encoding in the future.
+
         Args:
             value: New value for `max_seq_length`. This can be larger than
-                'config.block_size`, which is the context width used during
-                training.
+                `config.block_size`, which is the context width used during
+                training. It can also be smaller.
 
         """
         from keys_values.kvcache.basics import DenseKVCache
@@ -107,17 +113,22 @@ class GPT(nn.Module):
         if value <= 0:
             raise ValueError(f"value = {value}, must be positive")
         self._max_seq_length = value
-        # KV caches
+        # KV caches and sequence length.
         # We do not change them here, but output a warning if default caches are
         # too small
         for l_ix, block in enumerate(self.transformer.h):
             attn = block.attn
             kv_cache = attn.kv_cache
-            if kv_cache is not None and isinstance(kv_cache, DenseKVCache) and kv_cache.cache_length < value:
-                print(
-                    f"KV cache for layer {l_ix} too small: Call 'set_kv_caches(batch_size={kv_cache.max_batch_size}, max_seq_length={value}) before inference"
-                )
-                break
+            if kv_cache is not None:
+                if isinstance(kv_cache, DenseKVCache) and kv_cache.cache_length < value:
+                    print(
+                        f"KV cache for layer {l_ix} too small: Call 'set_kv_caches(batch_size={kv_cache.max_batch_size}, max_seq_length={value}) before inference"
+                    )
+                    break
+                if isinstance(kv_cache, DefaultKVCache):
+                    # Multi-head attention (includes position encoding)
+                    kv_cache.mha.set_seq_length(value)
+
         # Multi-head attention (includes position encoding)
         self.mha.set_seq_length(value)
 
@@ -652,10 +663,10 @@ class CausalSelfAttention(nn.Module):
         # Unlike standard positional embeddings rotary embeddings must be applied at every layer.
         if rope_n_elem > 0:
             _input_pos = 0 if input_pos is None else input_pos
-            q_roped = self.mha.pos_encoding(
+            q_roped = mha.pos_encoding(
                 q[..., :rope_n_elem], input_pos=_input_pos,
             )
-            k_roped = self.mha.pos_encoding(
+            k_roped = mha.pos_encoding(
                 k[..., :rope_n_elem], input_pos=_input_pos,
             )
             q = torch.cat((q_roped, q[..., rope_n_elem:]), dim=-1)  # (B, nh_q, T, hs)

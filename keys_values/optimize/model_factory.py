@@ -22,7 +22,6 @@ from litgpt.lora import (
     create_lora_linear,
     Config as ConfigLoRA,
 )
-from litgpt.model import batched_index_select
 
 from keys_values.attention import MultiHeadSelfAttention
 from keys_values.lora import GPT as GPTLoRA, Block as BlockLoRA
@@ -80,6 +79,8 @@ class GPTFullWrapper(GPTFull):
     ):
         nn.Module.__init__(self)
         assert config.padded_vocab_size is not None
+        if config.rope_indices is not None:
+            raise NotImplementedError("config.rope_indices not currently supported")
         self.config = config
 
         if "lm_head" in components:
@@ -124,6 +125,8 @@ class GPTLoRAWrapper(GPTLoRA):
     ):
         nn.Module.__init__(self)
         assert config.padded_vocab_size is not None
+        if config.rope_indices is not None:
+            raise NotImplementedError("config.rope_indices not currently supported")
         self.config = config
 
         if "lm_head" in components:
@@ -170,6 +173,8 @@ class GPTStackBlocks(GPTFull):
     ):
         nn.Module.__init__(self)
         assert config.padded_vocab_size is not None
+        if config.rope_indices is not None:
+            raise NotImplementedError("config.rope_indices not currently supported")
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(h=nn.ModuleList(components)))
@@ -214,19 +219,6 @@ class GPTStackBlocks(GPTFull):
                             f"KV cache for layer {block_idx}: seq_len = {seq_len}, must be <= max_tokens_forward = {kv_cache.max_tokens_forward}"
                         )
 
-            if self.config.rope_n_elem > 0:
-                input_pos_array = torch.arange(input_pos, input_pos + seq_len, device=self.cos.device, dtype=torch.int64)
-                cos = batched_index_select(self.cos, 0, input_pos_array).unsqueeze(0)
-                sin = batched_index_select(self.sin, 0, input_pos_array).unsqueeze(0)
-            else:
-                cos = sin = None
-        else:
-            # Unsqueeze to have a batch dimension
-            cos = self.cos[:seq_len].unsqueeze(0)
-            sin = self.sin[:seq_len].unsqueeze(0)
-        # `cos`, `sin` have shape `(1, T, config.rope_n_elem)`, or shape
-        # `(1, T, config.rope_n_elem, 2)`
-
         for block_idx, block in enumerate(self.transformer.h):
             if for_prefill:
                 # Complain if batch size of cache is too small
@@ -235,14 +227,7 @@ class GPTStackBlocks(GPTFull):
                     raise ValueError(
                         f"Batch size {batch_size} is too large for KV cache layer {block_idx} (batch size {attn.kv_cache.max_batch_size}). Use 'assign_kv_caches' or `set_kv_caches'"
                     )
-            if self.config.rope_indices is not None:
-                # Select global (0) or local (1) variant
-                _cos = cos[..., self.config.rope_indices[block_idx]]
-                _sin = sin[..., self.config.rope_indices[block_idx]]
-            else:
-                _cos = cos
-                _sin = sin
-            x = block(x, _cos, _sin, idx, self.mha, input_pos)
+            x = block(x, idx, self.mha, input_pos)
 
         return x
 
