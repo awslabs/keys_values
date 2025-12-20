@@ -662,10 +662,14 @@ class CausalSelfAttention(nn.Module):
         if rope_n_elem > 0:
             _input_pos = 0 if input_pos is None else input_pos
             q_roped = mha.pos_encoding(
-                q[..., :rope_n_elem], input_pos=_input_pos,
+                q[..., :rope_n_elem],
+                input_pos=_input_pos,
+                block_idx=self.block_idx,
             )
             k_roped = mha.pos_encoding(
-                k[..., :rope_n_elem], input_pos=_input_pos,
+                k[..., :rope_n_elem],
+                input_pos=_input_pos,
+                block_idx=self.block_idx,
             )
             q = torch.cat((q_roped, q[..., rope_n_elem:]), dim=-1)  # (B, nh_q, T, hs)
             k = torch.cat((k_roped, k[..., rope_n_elem:]), dim=-1)  # (B, nh_k, T, hs)
