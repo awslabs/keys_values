@@ -493,10 +493,10 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
         rotary_percentage=1.0,
         rope_indices=[0, 1] if is_gemma_3 else None,
     )
-    kwargs = dict(dtype=dtype, device=device)
 
     # Obtain RoPE parameters and compare
-    model_new = GPT(config).to(**kwargs)
+    with torch.device(device):
+        model_new = GPT(config).to(dtype=dtype)
     model_new.max_seq_length = T
     mha = model_new.mha
     pos_encoding = mha.pos_encoding
@@ -506,28 +506,29 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
     if config.rope_adjustments is not None:
         print(config.rope_adjustments)
     # END DEBUG
-    cos_new = pos_encoding._cos.unsqueeze(0).to(**kwargs)
-    sin_new = pos_encoding._sin.unsqueeze(0).to(**kwargs)
+    cos_new = pos_encoding._cos.unsqueeze(0)
+    sin_new = pos_encoding._sin.unsqueeze(0)
     cos_old, sin_old = rope_cache_OLD(config)
-    cos_old = cos_old.unsqueeze(0).to(**kwargs)
-    sin_old = sin_old.unsqueeze(0).to(**kwargs)
+    cos_old = cos_old.unsqueeze(0)
+    sin_old = sin_old.unsqueeze(0)
     torch.testing.assert_close(cos_new, cos_old)
     torch.testing.assert_close(sin_new, sin_old)
 
     shape = (batch_size, T, config.n_embd)
     for rep in range(num_repeats):
         block_idx = rep % 2
-        attn_new = CausalSelfAttention(
-            config,
-            block_idx=block_idx,
-        ).to(**kwargs)
-        attn_old = CausalSelfAttention_OLD(
-            config,
-            block_idx=block_idx,
-        ).to(**kwargs)
+        with torch.device(device):
+            attn_new = CausalSelfAttention(
+                config,
+                block_idx=block_idx,
+            ).to(dtype=dtype)
+            attn_old = CausalSelfAttention_OLD(
+                config,
+                block_idx=block_idx,
+            ).to(dtype=dtype)
         # Ensure they have the same weights
         attn_old.load_state_dict(attn_new.state_dict())
-        inputs = torch.randn(shape, **kwargs)
+        inputs = torch.randn(shape, dtype=dtype, device=device)
         token_idx = torch.randint(
             0,
             config.padded_vocab_size,

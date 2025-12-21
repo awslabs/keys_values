@@ -182,12 +182,6 @@ class MultiHeadSelfAttention:
                 "out of GPU memory. Consider using a model without attention "
                 "logit softcapping."
             )
-        if self.config.attention_scores_scalar is not None:
-            print(
-                "You have set config.attention_scores_scalar. This is not "
-                "supported here, since the scale_factor is determined by the "
-                "position encoding. The value will be ignored."
-            )
         if use_eager_kernel is None and not use_eager_sdpa_always:
             # This is a good choice for `kv_len = 32768`
             use_eager_kernel = lambda kv_len, q_len: q_len < 512

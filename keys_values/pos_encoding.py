@@ -105,7 +105,7 @@ class LinearPositionEncoding(PositionEncoding):
 
         """
         self.rope_base = config.rope_base
-        self.head_size = config.head_size
+        self.n_elem = config.rope_n_elem
         self.rope_local_base_freq = config.rope_local_base_freq
         self.rope_indices = config.rope_indices
         self._fixed_factor = None
@@ -152,32 +152,21 @@ class LinearPositionEncoding(PositionEncoding):
     def _precompute(self):
         """
         The state consists of `_cos`, `_sin`, with shapes
-        `(context_width, head_size)` or `(context_width, head_size, 2)`,
+        `(context_width, n_elem)` or `(context_width, n_elem, 2)`,
         the latter if `rope_indices` is given.
 
         """
         self._precompute_internal({"factor": self._factor()})
 
     def _precompute_internal(self, extra_config: Dict[str, Any]):
-        """
-        The state consists of `_cos`, `_sin`, with shapes
-        `(context_width, head_size)` or `(context_width, head_size, 2)`,
-        the latter if `rope_indices` is given.
-
-        """
-        kwargs = dict(
+        self._cos, self._sin = build_rope_cache(
             seq_len=self.context_width,
-            n_elem=self.head_size,
+            n_elem=self.n_elem,
             device=self.device,
+            base=self.rope_base,
             extra_config=extra_config,
+            rope_local_base_freq=self.rope_local_base_freq,
         )
-        cos, sin = build_rope_cache(base=self.rope_base, **kwargs)
-        if self.rope_local_base_freq is not None:
-            cos2, sin2 = build_rope_cache(base=self.rope_local_base_freq, **kwargs)
-            cos = torch.cat((cos.unsqueeze(-1), cos2.unsqueeze(-1)), dim=-1)
-            sin = torch.cat((sin.unsqueeze(-1), sin2.unsqueeze(-1)), dim=-1)
-        self._cos = cos
-        self._sin = sin
 
     def __call__(
         self,
@@ -185,8 +174,8 @@ class LinearPositionEncoding(PositionEncoding):
         input_pos: int,
         block_idx: int,
     ) -> torch.Tensor:
-        if x.ndim < 2 or x.shape[-1] > self.head_size:
-            raise ValueError(f"x.shape = {x.shape}, must be at least 2D, and last dimension must be <= {self.head_size}")
+        if x.ndim < 2 or x.shape[-1] != self.n_elem:
+            raise ValueError(f"x.shape = {x.shape}, must be at least 2D, and last dimension must be {self.n_elem}")
         x_len = x.shape[-2]
         if input_pos < 0 or input_pos + x_len > self.context_width:
             raise ValueError(f"input_pos = {input_pos}, x_len = {x_len}, must have 0 <= input_pos, input_pos + x_len <= {self.context_width}")
@@ -240,8 +229,15 @@ class YaRNPositionEncoding(LinearPositionEncoding):
         """
         self.rope_base = config.rope_base
         self.head_size = config.head_size
+        self.n_elem = config.rope_n_elem
         self.rope_local_base_freq = config.rope_local_base_freq
         self.rope_indices = config.rope_indices
+        if config.attention_scores_scalar is not None:
+            print(
+                "You have set config.attention_scores_scalar. This is not "
+                "supported here, since the scale_factor is determined by the "
+                "position encoding. The value will be ignored."
+            )
         factor = None
         train_context_width = None
         if config.rope_adjustments is not None:
@@ -301,12 +297,6 @@ class YaRNPositionEncoding(LinearPositionEncoding):
         return max(1.0, self.context_width / self.train_context_width)
 
     def _precompute(self):
-        """
-        The state consists of `_cos`, `_sin`, with shapes
-        `(context_width, head_size)` or `(context_width, head_size, 2)`,
-        the latter if `rope_indices` is given.
-
-        """
         extra_config = {
             "original_max_seq_len": self.train_context_width,
             "low_freq_factor": self.alpha,
