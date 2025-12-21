@@ -215,6 +215,11 @@ class GPT(nn.Module):
                 )
         self._default_kv_cache = True
 
+    def get_kv_caches(self) -> List[KVCache]:
+        return [
+            block.attn.kv_cache for block in self.transformer.h
+        ]
+
     def reset_parameters(self) -> None:
         # Trigger resetting the rope-cache
         self.mha.set_seq_length(self.max_seq_length)
