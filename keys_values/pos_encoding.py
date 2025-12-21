@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from litgpt.config import Config
 from litgpt.model import build_rope_cache, apply_rope
@@ -83,12 +83,133 @@ class PositionEncoding:
         raise NotImplementedError
 
 
+class LinearPositionEncoding(PositionEncoding):
+    """
+    Implements linear interpolation with a fixed scale factor and a fixed
+    attention scale factor, as used (for example) in Gemma-2 and Gemma-3.
+
+    """
+    def __init__(
+        self,
+        config: Config,
+        device: Optional[torch.device] = None,
+    ):
+        """
+        Fixed scale factor in `config.rope_adjustments['factor']`, fixed
+        attention scale factor in `config.attention_scores_scalar`. Supports
+        `config.rope_local_base_freq`, `config.rope_indices`.
+
+        Args:
+            config (Config): Configuration of model
+            device (Optional[torch.device]): Device for state
+
+        """
+        self.rope_base = config.rope_base
+        self.head_size = config.head_size
+        self.rope_local_base_freq = config.rope_local_base_freq
+        self.rope_indices = config.rope_indices
+        self._fixed_factor = None
+        if config.rope_adjustments is not None:
+            self._fixed_factor = config.rope_adjustments.get("factor")
+            if self._fixed_factor is None:
+                raise ValueError("config.rope_adjustments must include 'factor'")
+        self.train_context_width = config.block_size
+        self._context_width = config.block_size
+        if device is None:
+            device = torch.get_default_device()
+        self._device = device
+        self._cos = None
+        self._sin = None
+        if config.attention_scores_scalar is not None:
+            self._sdpa_scale_factor = 1.0 / math.sqrt(config.attention_scores_scalar)
+        else:
+            self._sdpa_scale_factor = 1.0 / math.sqrt(config.head_size)
+        self.set_context_width(self._context_width)
+
+    @property
+    def context_width(self) -> int:
+        return self._context_width
+
+    def set_context_width(self, width: int):
+        if width <= 0:
+            raise ValueError(f"width = {width}: Must be positive")
+        self._context_width = width
+        self._precompute()
+
+    def sdpa_scale_factor(self) -> float:
+        return self._sdpa_scale_factor
+
+    @property
+    def device(self) -> Optional[torch.device]:
+        return self._device
+
+    def _factor(self) -> float:
+        if self._fixed_factor is None:
+            return max(1.0, self.context_width / self.train_context_width)
+        else:
+            return self._fixed_factor
+
+    def _precompute(self):
+        """
+        The state consists of `_cos`, `_sin`, with shapes
+        `(context_width, head_size)` or `(context_width, head_size, 2)`,
+        the latter if `rope_indices` is given.
+
+        """
+        self._precompute_internal({"factor": self._factor()})
+
+    def _precompute_internal(self, extra_config: Dict[str, Any]):
+        """
+        The state consists of `_cos`, `_sin`, with shapes
+        `(context_width, head_size)` or `(context_width, head_size, 2)`,
+        the latter if `rope_indices` is given.
+
+        """
+        kwargs = dict(
+            seq_len=self.context_width,
+            n_elem=self.head_size,
+            device=self.device,
+            extra_config=extra_config,
+        )
+        cos, sin = build_rope_cache(base=self.rope_base, **kwargs)
+        if self.rope_local_base_freq is not None:
+            cos2, sin2 = build_rope_cache(base=self.rope_local_base_freq, **kwargs)
+            cos = torch.cat((cos.unsqueeze(-1), cos2.unsqueeze(-1)), dim=-1)
+            sin = torch.cat((sin.unsqueeze(-1), sin2.unsqueeze(-1)), dim=-1)
+        self._cos = cos
+        self._sin = sin
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        input_pos: int,
+        block_idx: int,
+    ) -> torch.Tensor:
+        if x.ndim < 2 or x.shape[-1] > self.head_size:
+            raise ValueError(f"x.shape = {x.shape}, must be at least 2D, and last dimension must be <= {self.head_size}")
+        x_len = x.shape[-2]
+        if input_pos < 0 or input_pos + x_len > self.context_width:
+            raise ValueError(f"input_pos = {input_pos}, x_len = {x_len}, must have 0 <= input_pos, input_pos + x_len <= {self.context_width}")
+        if x.device != self._cos.device:
+            self._device = x.device
+            self._cos = self._cos.to(device=self._device)
+            self._sin = self._sin.to(device=self._device)
+        if self.rope_local_base_freq is None:
+            cos = self._cos[input_pos:(input_pos + x_len), :].unsqueeze(0)
+            sin = self._sin[input_pos:(input_pos + x_len), :].unsqueeze(0)
+        else:
+            ind = self.rope_indices[block_idx]
+            cos = self._cos[input_pos:(input_pos + x_len), :, ind].unsqueeze(0)
+            sin = self._sin[input_pos:(input_pos + x_len), :, ind].unsqueeze(0)
+        return apply_rope(x=x, cos=cos, sin=sin)
+
+
 DEFAULT_YARN_ALPHA = 1.0
 
 DEFAULT_YARN_BETA = 32.0
 
 
-class YaRNPositionEncoding(PositionEncoding):
+class YaRNPositionEncoding(LinearPositionEncoding):
     """
     Implements YaRN, as detailed in:
 
@@ -135,15 +256,14 @@ class YaRNPositionEncoding(PositionEncoding):
                     raise ValueError("Cannot have config.rope_adjustments['high_freq_factor'] and beta")
                 beta = _beta
             train_context_width = config.rope_adjustments.get("original_max_seq_len")
+            if train_context_width is None:
+                raise ValueError("config.rope_adjustments must include 'original_max_seq_len'")
             factor = config.rope_adjustments.get("factor")
-        if train_context_width is None:
-            train_context_width = config.block_size
         self.train_context_width = train_context_width
         if factor is None:
-            context_width = config.block_size
+            self._context_width = config.block_size
         else:
-            context_width = int(factor * train_context_width)
-        self._context_width = context_width
+            self._context_width = int(factor * train_context_width)
         if alpha is None:
             alpha = DEFAULT_YARN_ALPHA
         if beta is None:
@@ -193,48 +313,17 @@ class YaRNPositionEncoding(PositionEncoding):
             "high_freq_factor": self.beta,
             "factor": self._factor(),
         }
-        cos, sin = build_rope_cache(
-            seq_len=self.context_width,
-            n_elem=self.head_size,
-            device=self.device,
-            base=self.rope_base,
-            extra_config=extra_config,
-        )
-        if self.rope_local_base_freq is not None:
-            cos2, sin2 = build_rope_cache(
-                seq_len=self.context_width,
-                n_elem=self.head_size,
-                device=self.device,
-                base=self.rope_local_base_freq,
-                extra_config=extra_config,
-            )
-            cos = torch.cat((cos.unsqueeze(-1), cos2.unsqueeze(-1)), dim=-1)
-            sin = torch.cat((sin.unsqueeze(-1), sin2.unsqueeze(-1)), dim=-1)
-        self._cos = cos
-        self._sin = sin
+        self._precompute_internal(extra_config)
         sqrt_inv_t = 0.1 * math.log(self._factor()) + 1.0
         self._sdpa_scale_factor = sqrt_inv_t * sqrt_inv_t / math.sqrt(self.head_size)
 
-    def __call__(
-        self,
-        x: torch.Tensor,
-        input_pos: int,
-        block_idx: int,
-    ) -> torch.Tensor:
-        if x.ndim < 2 or x.shape[-1] > self.head_size:
-            raise ValueError(f"x.shape = {x.shape}, must be at least 2D, and last dimension must be <= {self.head_size}")
-        x_len = x.shape[-2]
-        if input_pos < 0 or input_pos + x_len > self.context_width:
-            raise ValueError(f"input_pos = {input_pos}, x_len = {x_len}, must have 0 <= input_pos, input_pos + x_len <= {self.context_width}")
-        if x.device != self._cos.device:
-            self._device = x.device
-            self._cos = self._cos.to(device=self._device)
-            self._sin = self._sin.to(device=self._device)
-        if self.rope_local_base_freq is None:
-            cos = self._cos[input_pos:(input_pos + x_len), :].unsqueeze(0)
-            sin = self._sin[input_pos:(input_pos + x_len), :].unsqueeze(0)
-        else:
-            ind = self.rope_indices[block_idx]
-            cos = self._cos[input_pos:(input_pos + x_len), :, ind].unsqueeze(0)
-            sin = self._sin[input_pos:(input_pos + x_len), :, ind].unsqueeze(0)
-        return apply_rope(x=x, cos=cos, sin=sin)
+
+def position_encoding_factory(
+    config: Config,
+    **kwargs,
+) -> PositionEncoding:
+    rope_adjustments = config.rope_adjustments
+    if rope_adjustments is not None and "original_max_seq_len" in rope_adjustments:
+        return YaRNPositionEncoding(config, **kwargs)
+    else:
+        return LinearPositionEncoding(config, **kwargs)

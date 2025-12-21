@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import math
 from typing import List, Optional, Tuple, Union, Callable
 
 import torch
@@ -30,7 +29,7 @@ from keys_values.attention_utils import (
     sdpa_attention_weights,
     slice_as_flat, pytorch_scaled_dot_product_attention,
 )
-from keys_values.pos_encoding import PositionEncoding, YaRNPositionEncoding
+from keys_values.pos_encoding import position_encoding_factory, PositionEncoding
 from keys_values.sdpa_wrapper import scaled_dot_product_attention as qpadded_sdpa
 
 
@@ -156,7 +155,6 @@ class MultiHeadSelfAttention:
 
     Look at :class:`DefaultUseEagerKernel` for choosing `use_eager_kernel`.
 
-
     """
     def __init__(
         self,
@@ -170,7 +168,7 @@ class MultiHeadSelfAttention:
     ) -> None:
         self.config = config
         if pos_encoding is None:
-            pos_encoding = YaRNPositionEncoding(config)
+            pos_encoding = position_encoding_factory(config)
         self.pos_encoding = pos_encoding
         self._sdpa_kernels = sdpa_kernels
         self._do_filter_kernels = filter_sdpa_kernels

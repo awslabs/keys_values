@@ -47,8 +47,7 @@ from keys_values.kvcache.test_utils import (
     available_backends,
 )
 from keys_values.model import GPT, CausalSelfAttention
-from keys_values.pos_encoding import YaRNPositionEncoding
-from keys_values.use_eager_kernel import transform_mha_kwargs
+from keys_values.pos_encoding import LinearPositionEncoding
 from keys_values.utils import repeat_interleave
 
 
@@ -501,9 +500,14 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
     model_new.max_seq_length = T
     mha = model_new.mha
     pos_encoding = mha.pos_encoding
-    assert isinstance(pos_encoding, YaRNPositionEncoding)
-    cos_new = pos_encoding._cos.unsqueeze(0)
-    sin_new = pos_encoding._sin.unsqueeze(0)
+    assert isinstance(pos_encoding, LinearPositionEncoding)
+    # DEBUG
+    print(f"factor = {pos_encoding._factor()}")
+    if config.rope_adjustments is not None:
+        print(config.rope_adjustments)
+    # END DEBUG
+    cos_new = pos_encoding._cos.unsqueeze(0).to(**kwargs)
+    sin_new = pos_encoding._sin.unsqueeze(0).to(**kwargs)
     cos_old, sin_old = rope_cache_OLD(config)
     cos_old = cos_old.unsqueeze(0).to(**kwargs)
     sin_old = sin_old.unsqueeze(0).to(**kwargs)

@@ -67,7 +67,7 @@ from keys_values.attention import (
     SDPA_IMPL_EAGER_NO_BLOCKS,
 )
 from keys_values.model import GPT, CausalSelfAttention
-from keys_values.pos_encoding import YaRNPositionEncoding
+from keys_values.pos_encoding import LinearPositionEncoding
 
 
 @torch.inference_mode()
@@ -1668,6 +1668,6 @@ def test_rope_cos_sin_shapes_if_rope_n_elem_is_odd(rotary_percentage, final_dim)
     model = GPT(config)
     required_shape = (config.block_size, final_dim)
     pos_encoding = model.mha.pos_encoding
-    assert isinstance(pos_encoding, YaRNPositionEncoding)
+    assert isinstance(pos_encoding, LinearPositionEncoding)
     assert pos_encoding._cos.shape == required_shape
     assert pos_encoding._sin.shape == required_shape
