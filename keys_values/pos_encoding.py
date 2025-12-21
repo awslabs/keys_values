@@ -198,6 +198,93 @@ DEFAULT_YARN_ALPHA = 1.0
 DEFAULT_YARN_BETA = 32.0
 
 
+class AdjustedPositionEncoding(LinearPositionEncoding):
+    """
+    Implements non-dynamic "adjusted RoPE", given by setting fields
+    "factor", "original_max_seq_len", "low_freq_factor", "high_freq_factor" in
+    `config.rope_adjustments`. Calling :meth:`set_context_width` does not
+    scale the encoding, different to :class:`YaRNPositionEncoding`.
+
+    """
+    def __init__(
+        self,
+        config: Config,
+        device: Optional[torch.device] = None,
+    ):
+        """
+        The pre-training context width must be `config.block_size`, the
+        RoPE base b used during training must be `config.rope_base`.
+
+        Args:
+            config (Config): Configuration of model
+
+        """
+        self.rope_base = config.rope_base
+        self.head_size = config.head_size
+        self.n_elem = config.rope_n_elem
+        self.rope_local_base_freq = config.rope_local_base_freq
+        self.rope_indices = config.rope_indices
+        if config.rope_adjustments is None:
+            raise ValueError("config.rope_adjustments must be given")
+        alpha = config.rope_adjustments.get("low_freq_factor")
+        beta = config.rope_adjustments.get("high_freq_factor")
+        self.train_context_width = config.rope_adjustments.get("original_max_seq_len")
+        if self.train_context_width is None:
+            raise ValueError("Must have config.rope_adjustments['original_max_seq_len']")
+        self._fixed_factor = config.rope_adjustments.get("factor")
+        if self._fixed_factor is None:
+            raise ValueError("Must have config.rope_adjustments['factor']")
+        self._context_width = int(self._fixed_factor * self.train_context_width)
+        if alpha is None:
+            alpha = DEFAULT_YARN_ALPHA
+        if beta is None:
+            beta = DEFAULT_YARN_BETA
+        if not (0 < alpha < beta):
+            raise ValueError(f"alpha = {alpha}, beta = {beta}: Must be 0 < alpha < beta")
+        self.alpha = alpha
+        self.beta = beta
+        if device is None:
+            device = torch.get_default_device()
+        self._device = device
+        self._cos = None
+        self._sin = None
+        if config.attention_scores_scalar is not None:
+            temp = config.attention_scores_scalar
+        else:
+            temp = config.head_size
+        self._sdpa_scale_factor = 1.0 / math.sqrt(temp)
+        self.set_context_width(self._context_width)
+
+    @property
+    def context_width(self) -> int:
+        return self._context_width
+
+    def set_context_width(self, width: int):
+        if width <= 0:
+            raise ValueError(f"width = {width}: Must be positive")
+        self._context_width = width
+        self._precompute()
+
+    def sdpa_scale_factor(self) -> float:
+        return self._sdpa_scale_factor
+
+    @property
+    def device(self) -> Optional[torch.device]:
+        return self._device
+
+    def _factor(self) -> float:
+        return self._fixed_factor
+
+    def _precompute(self):
+        extra_config = {
+            "original_max_seq_len": self.train_context_width,
+            "low_freq_factor": self.alpha,
+            "high_freq_factor": self.beta,
+            "factor": self._factor(),
+        }
+        self._precompute_internal(extra_config)
+
+
 class YaRNPositionEncoding(LinearPositionEncoding):
     """
     Implements YaRN, as detailed in:
@@ -235,11 +322,11 @@ class YaRNPositionEncoding(LinearPositionEncoding):
         if config.attention_scores_scalar is not None:
             print(
                 "You have set config.attention_scores_scalar. This is not "
-                "supported here, since the scale_factor is determined by the "
-                "position encoding. The value will be ignored."
+                "supported, since for YaRN the scale_factor is determined by "
+                "the position encoding. The value will be ignored."
             )
-        factor = None
         train_context_width = None
+        factor = None
         if config.rope_adjustments is not None:
             _alpha = config.rope_adjustments.get("low_freq_factor")
             if _alpha is not None:
@@ -252,9 +339,16 @@ class YaRNPositionEncoding(LinearPositionEncoding):
                     raise ValueError("Cannot have config.rope_adjustments['high_freq_factor'] and beta")
                 beta = _beta
             train_context_width = config.rope_adjustments.get("original_max_seq_len")
-            if train_context_width is None:
-                raise ValueError("config.rope_adjustments must include 'original_max_seq_len'")
             factor = config.rope_adjustments.get("factor")
+            if factor is not None:
+                print(
+                    "You have set config.rope_adjustments['factor']. For YaRN, "
+                    "the scale factor is dynamic. Value here will be used to "
+                    "initialize context_width, but will be updated with each "
+                    "call of set_context_width."
+                )
+        if train_context_width is None:
+            train_context_width = config.block_size
         self.train_context_width = train_context_width
         if factor is None:
             self._context_width = config.block_size
@@ -310,10 +404,14 @@ class YaRNPositionEncoding(LinearPositionEncoding):
 
 def position_encoding_factory(
     config: Config,
+    do_yarn: bool = False,
     **kwargs,
 ) -> PositionEncoding:
-    rope_adjustments = config.rope_adjustments
-    if rope_adjustments is not None and "original_max_seq_len" in rope_adjustments:
+    if do_yarn:
         return YaRNPositionEncoding(config, **kwargs)
     else:
-        return LinearPositionEncoding(config, **kwargs)
+        rope_adjustments = config.rope_adjustments
+        if rope_adjustments is not None and "original_max_seq_len" in rope_adjustments:
+            return AdjustedPositionEncoding(config, **kwargs)
+        else:
+            return LinearPositionEncoding(config, **kwargs)

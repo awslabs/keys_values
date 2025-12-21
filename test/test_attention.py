@@ -508,11 +508,6 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
     mha = model_new.mha
     pos_encoding = mha.pos_encoding
     assert isinstance(pos_encoding, LinearPositionEncoding)
-    # DEBUG
-    print(f"factor = {pos_encoding._factor()}")
-    if config.rope_adjustments is not None:
-        print(config.rope_adjustments)
-    # END DEBUG
     cos_new = pos_encoding._cos.unsqueeze(0)
     sin_new = pos_encoding._sin.unsqueeze(0)
     cos_old, sin_old = rope_cache_OLD(config)

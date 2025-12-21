@@ -661,6 +661,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         num_output_tokens = targets.shape[-1]
         if self.batch_size != targets.shape[0] or not (1 <= num_output_tokens <= seq_length):
             raise ValueError(f"targets.shape = {targets.shape}: Not compatible with batch_size = {self.batch_size} or num_input_tokens = {seq_length}")
+        # Adjust position encoding?
         self.gpt_model.max_seq_length = seq_length
         # Select chunk sizes and chunks per cell
         self._select_chunks_and_cells(num_output_tokens)
