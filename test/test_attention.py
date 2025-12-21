@@ -45,6 +45,7 @@ from keys_values.attention_utils import (
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCache, KVCacheParams, DefaultKVCache
+from keys_values.kvcache.gradient.cell import CellComputation
 from keys_values.kvcache.gradient.main import LongContextGradientModel
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
 from keys_values.kvcache.test_utils import (
@@ -823,14 +824,58 @@ def test_mha_is_passed_on():
     #_compare_mhas(
     #    orig_caches, gpt_model_clone.get_kv_caches(), prefix="GPT.clone: ",
     #)
+
     # Inference replay caches
     # Forward pass creates replay logs
     lc_model.train()
     loss = lc_model(input_ids, targets)
+    print(f"loss = {loss.item()}")
+    replay_logs = []
+    for cache in orig_caches:
+        replay_logs.append(cache.get_replay_log())
+        cache.switch_replay_logging(False)
     lc_model._create_members_for_backward()
+
+    def get_inputs_slice(
+        start: int, end: int,
+    ) -> torch.Tensor:
+        return lc_model.layer_checkpoints.get_checkpoint(
+            layer_idx=n_layer,
+            input_pos=start,
+            num=end - start,
+            device=device,
+        )
+
+    def write_head_gradients_slice(
+        input_pos: int, value: torch.Tensor,
+    ) -> Optional[int]:
+        return None
+
+    accumulator = lc_model.accumulator
+    accumulator.run_head_model(
+        gpt_model=lc_model.gpt_model,
+        head_model=lc_model.head_model,
+        replay_logs=replay_logs,
+        chunks_per_cell=lc_model.chunks_per_cell,
+        get_inputs_slice=get_inputs_slice,
+        write_head_gradients_slice=write_head_gradients_slice,
+        targets=targets,
+    )
     model_part = DefaultCellBlocks(gpt_model, 0, n_layer)
-    ir_caches = lc_model.accumulator._create_inference_replay_caches(model_part)
+    ir_caches = accumulator._create_inference_replay_caches(model_part)
     _compare_mhas(
         orig_caches, ir_caches, prefix="Inference replay caches: ",
     )
+
     # Training replay caches
+    cell = CellComputation(
+        model_part=model_part,
+        autograd_hooks=None,
+        replay_logs=accumulator.replay_logs,
+        batch_size=batch_size,
+        **accumulator._train_cache_kwargs,
+    )
+    tr_caches = cell._create_train_replay_caches(0, n_layer)
+    _compare_mhas(
+        orig_caches, tr_caches, prefix="Training replay caches: ",
+    )
