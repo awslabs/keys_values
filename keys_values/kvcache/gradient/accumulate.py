@@ -501,8 +501,6 @@ class GradientAccumulator:
                                 head_gradients_v=head_gradients_v,
                                 first_chunk_idx=first_chunk_idx,
                                 num_chunks=num_chunks,
-                                first_layer_idx=first_layer_idx,
-                                autograd_hooks=self._hooks_for_cell_computation(),
                             )
                     else:
                         scalar_output = self.forward_computation(
@@ -515,7 +513,6 @@ class GradientAccumulator:
                             head_gradients_v=head_gradients_v,
                             first_chunk_idx=first_chunk_idx,
                             num_chunks=num_chunks,
-                            first_layer_idx=first_layer_idx,
                         )
 
                     scalar_output.backward()
@@ -573,8 +570,6 @@ class GradientAccumulator:
         head_gradients_v: Optional[List[torch.Tensor]],
         first_chunk_idx: int,
         num_chunks: int,
-        first_layer_idx: int,
-        autograd_hooks: Optional[CellComputationAutogradHooks] = None,
     ):
         # Why not use `get_inputs_slice` passed to :meth:`run`? This won't work,
         # since we need to create the input to the cell as tensor with
