@@ -139,19 +139,12 @@ class CellComputation(nn.Module):
         self.autograd_hooks = autograd_hooks
         self.replay_logs = replay_logs
         self.batch_size = batch_size
+        self._debug_intermediates = cache_kwargs.get("debug_intermediates")
         # DEBUG:
-        if "debug_intermediates" in cache_kwargs:
-            self._debug_intermediates, self._name_prefix = cache_kwargs.pop("debug_intermediates")
-            extra_kwargs = dict(
-                debug_intermediates=(
-                    self._debug_intermediates,
-                    self._name_prefix + f"_part{i}",
-                )
-            )
+        if self._debug_intermediates is not None:
+            self._debug_intermediates, self._name_prefix = self._debug_intermediates
         else:
-            self._debug_intermediates = None
             self._name_prefix = None
-            extra_kwargs = dict()
         # END DEBUG
         # Arguments for `TrainingAttnWeightsReplayCache` cache objects.
         kwargs = dict(
@@ -162,11 +155,19 @@ class CellComputation(nn.Module):
         if autograd_hooks is not None:
             kwargs["node_annotations"] = autograd_hooks.node_annotations
         self._train_cache_kwargs = []
-        for _, block in model_part.blocks():
+        extra_kwargs = dict()
+        for i, block in model_part.blocks():
             kv_cache = block.attn.kv_cache
             # Use the same MHA object as in primary cache. Ensures that
             # position encoding is the same
             mha = kv_cache.mha if isinstance(kv_cache, DefaultKVCache) else None
+            if self._debug_intermediates is not None:
+                extra_kwargs = dict(
+                    debug_intermediates=(
+                        self._debug_intermediates,
+                        self._name_prefix + f"_part{i}",
+                    )
+                )
             self._train_cache_kwargs.append(
                 dict(
                     kwargs,
