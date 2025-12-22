@@ -133,7 +133,7 @@ def test_compare_gradient_to_approximations(cache_name, cache_kwargs):
     torch.set_default_dtype(dtype)  # Set default dtype
 
     # Model: Qwen2.5-0.5B with 3 layers and LoRA parameierization
-    config_dict = name_to_config[model_name]
+    config_dict = name_to_config[model_name].copy()
     config_dict["n_layer"] = 3
     config_dict["block_size"] = 2 ** 14
     config_dict.update(

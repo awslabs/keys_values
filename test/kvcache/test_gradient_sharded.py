@@ -84,7 +84,7 @@ def test_gradient_sharded(
     torch.set_default_dtype(dtype)  # Set default dtype
 
     # Create model and KV caches
-    config_dict = name_to_config[model_name]
+    config_dict = name_to_config[model_name].copy()
     config_dict["n_layer"] = 3 * layers_per_cell
     config_dict["block_size"] = seq_length + 2
     config_dict.update(
@@ -190,6 +190,133 @@ def test_gradient_sharded(
             print("\n*** Computing gradients normally (no CPU offloading) ***")
             _input_ids = input_ids.to(device=cpu_offload_device)
             _targets = targets.to(device=cpu_offload_device)
+        loss = model(_input_ids, _targets)
+        loss.backward()
+        loss_values.append(loss.detach())
+        gradients.append(
+            copy_gradients(model.gpt_model, device=torch.device("cpu"))
+        )
+        debug_intermediates.append(model.debug_intermediates)
+    # Compare the two
+    print("\nComparing loss values:")
+    torch.testing.assert_close(loss_values[0], loss_values[1])
+    print("\nComparing intermediates during forward:")
+    for name, value in debug_intermediates[0].items():
+        value_comp = debug_intermediates[1].get(name)
+        if value_comp is None:
+            raise IndexError(f"name = {name} is in debug_intermediates[0], but not in debug_intermediates[1]")
+        print(name)
+        torch.testing.assert_close(value, value_comp)
+    print("\nComparing gradients:")
+    for name, value in gradients[0].items():
+        value_comp = gradients[1].get(name)
+        if value_comp is None:
+            raise IndexError(f"name = {name} is in gradients[0], but not in gradients[1]")
+        # DEBUG
+        value_debug = debug_gpt_model.get_parameter(name).grad.data.to(
+            device=device
+        )
+        print(name)
+        torch.testing.assert_close(value, value_debug)
+        #print(f"Comparing gradient for {name}")
+        #torch.testing.assert_close(value, value_comp)
+
+
+def test_gradient_sharded_simple():
+    seed = 31415927
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+
+    #cache_name = "lastrec-default"
+    #cache_length = 128
+    seq_length = 128
+    dtype = torch.float32
+    device = torch.device("cpu")
+    cpu_offload_device = torch.device("cuda", 0)
+    batch_size = 2
+    model_name = "Qwen2.5-0.5B"
+    head_model_name = "next_token_prediction"
+    num_output_tokens = max(1, seq_length // 4)
+    torch.set_default_dtype(dtype)  # Set default dtype
+
+    # Create model and KV caches
+    config_dict = name_to_config[model_name].copy()
+    config_dict["n_layer"] = 2
+    config_dict["block_size"] = seq_length + 2
+    config_dict.update(
+        dict(
+            lora_r = 8,
+            lora_alpha = 16,
+            lora_dropout = 0.05,
+            lora_query=True,
+            lora_key=False,
+            lora_value=True,
+            lora_projection=False,
+            lora_mlp=False,
+            lora_head=False,
+        )
+    )
+    config = Config(**config_dict)
+    # We need two versions of the model, on the different devices. The first
+    # is for computations without CPU offloading, the second for computations
+    # with CPU offloading
+    gpt_models = []
+    head_models = []
+    for _device in (cpu_offload_device, device):
+        with torch.device(_device):
+            gpt_model = GPT(config)
+            mark_only_lora_as_trainable(gpt_model)
+            #cache_params = KVCacheParams.from_config(
+            #    config=config,
+            #    max_batch_size=batch_size,
+            #    cache_length=cache_length,
+            #    device=_device,
+            #    dtype=dtype,
+            #)
+            #gpt_model.assign_kv_caches(
+            #    [
+            #        create_kv_cache(
+            #            name=cache_name,
+            #            params=cache_params,
+            #            block_idx=block_idx,
+            #        )
+            #        for block_idx in range(config.n_layer)
+            #    ]
+            #)
+            if gpt_models:
+                gpt_model.apply(gpt_model._init_weights)  # Initialize
+                # Copy from CPU to GPU
+                copy_parameters(gpt_model, gpt_models[0])
+            gpt_models.append(gpt_model)
+            head_models.append(
+                HeadModelFactory.create(name=head_model_name, config=config)
+            )
+    # Create data batch
+    token_ids = torch.randint(
+        low=0,
+        high=config.vocab_size,
+        size=(batch_size, seq_length + 1),
+        device=device,
+    )
+    input_ids = token_ids[:, :-1]
+    targets = token_ids[:, (-num_output_tokens):]
+    # Compute gradients in two different ways: without and with CPU
+    # offloading
+    gradients = []
+    loss_values = []
+    for gpt_model in gpt_models:
+        is_offload = len(gradients) > 0
+        gpt_model.zero_grad()
+        gpt_model.train()
+        if is_offload:
+            print("\n*** Computing gradients with CPU offloading ***")
+            _input_ids = input_ids
+            _targets = targets
+        else:
+            print("\n*** Computing gradients normally (no CPU offloading) ***")
+            _input_ids = input_ids.to(device=cpu_offload_device)
+            _targets = targets.to(device=cpu_offload_device)
+        outputs = gpt_model(_input_ids)
         loss = model(_input_ids, _targets)
         loss.backward()
         loss_values.append(loss.detach())
