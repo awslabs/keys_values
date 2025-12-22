@@ -123,6 +123,104 @@ def check_model_is_on_cpu(model: torch.nn.Module, model_name: str):
             raise ValueError(f"Model {model_name} must be on CPU, but device['{name}'] = {param.device}")
 
 
+def copy_model_to_device(
+    gpt_model: GPT,
+    head_model: HeadModel,
+    cpu_offload_device: torch.device,
+    clone_via_flat_vectors: bool,
+    debug_gpt_model: Optional[GPT] = None,
+) -> Tuple[GPT, HeadModel]:
+    deallocate_kv_cache_buffers_of_model(gpt_model)
+    if not clone_via_flat_vectors:
+        gpt_model_copy = gpt_model.clone(device=cpu_offload_device)
+    else:
+        gpt_model_copy = clone_model_via_flat_vectors(
+            model=gpt_model,
+            device=cpu_offload_device,
+        )
+    # DEBUG
+    if debug_gpt_model is not None:
+        # Exact copy (DEBUG)
+        print("_copy_model_to_device: Exact copy")
+        copy_parameters(debug_gpt_model, gpt_model)
+        # for name, param in self._debug_gpt_model.named_parameters():
+        #    param_comp = gpt_model.get_parameter(name)
+        #    print(f"Compare {name}")
+        #    torch.testing.assert_close(param.data, param_comp.data)
+    # END DEBUG
+    return gpt_model_copy, head_model.clone(device=cpu_offload_device)
+
+
+def create_model_shard_on_device(
+    gpt_model: GPT,
+    gpt_model_copy: GPT,
+    cpu_offload_device: torch.device,
+    first_layer_idx: int,
+    num_layers: int,
+    debug_gpt_model: Optional[GPT] = None,
+) -> DefaultCellBlocks:
+    # Read out flat vectors from `gpt_model` and copy to device
+    param_structures = dict()
+    weights_vecs = dict()
+    for layer_idx in range(first_layer_idx, first_layer_idx + num_layers):
+        name = BlockComponentName.h(layer_idx)
+        access = AccessWeightsGradients(
+            gpt_model.transformer.h[layer_idx]
+        )
+        weights_vecs[name] = copy_flat_vectors_to(
+            access.get_weights(), device=cpu_offload_device,
+        )
+        param_structures[name] = access.param_structure()
+    # Restore parameters
+    ModelFromFlatVectorsFactory.restore_params_of_model(
+        model=gpt_model_copy,
+        param_structures=param_structures,
+        weights_vecs=weights_vecs,
+    )
+    # DEBUG (exact copy)
+    if debug_gpt_model is not None:
+        print(f"_create_model_shard_on_device: Exact copy {first_layer_idx}:{first_layer_idx + num_layers}")
+        for block_from, block_to in zip(
+            debug_gpt_model.transformer.h[first_layer_idx:(first_layer_idx + num_layers)],
+            gpt_model_copy.transformer.h[first_layer_idx:(first_layer_idx + num_layers)],
+        ):
+            copy_parameters(block_from, block_to)
+    # END DEBUG
+    return DefaultCellBlocks(
+        model=gpt_model_copy,
+        first_layer_idx=first_layer_idx,
+        num_layers=num_layers,
+    )
+
+
+def accumulate_gradients(
+    module_pairs: List[Tuple[torch.nn.Module, torch.nn.Module]],
+    debug_modules: Optional[List[torch.nn.Module]] = None,
+):
+    if debug_modules is None:
+        debug_modules = [None] * len(module_pairs)
+    else:
+        assert len(debug_modules) == len(module_pairs)
+    print("\n[_accumulate_gradients]")
+    for (mod_from, mod_to), mod_debug in zip(module_pairs, debug_modules):
+        access = AccessWeightsGradients(mod_from)
+        flat_vectors = copy_flat_vectors_to(
+            access.get_gradients(), device=torch.device("cpu"),
+        )
+        AccessWeightsGradients(mod_to).accumulate_gradients(flat_vectors)
+        if mod_debug is not None:
+            for name, param in mod_debug.named_parameters():
+                param_comp = mod_from.get_parameter(name)
+                print(f"Compare {name}")
+                torch.testing.assert_close(param.data, param_comp.data)
+                if param.requires_grad:
+                    src_arg = mod_from.get_parameter(name).grad.data
+                    if param.grad is None:
+                        param.grad = torch.nn.Parameter(src_arg)
+                    else:
+                        param.grad.data.copy_(src_arg)
+
+
 class LongContextGradientModel(LongContextInferenceModel):
     """
     Wraps a `GPT` model, provides both inference and gradient computation
@@ -668,26 +766,13 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         """
         if self.cpu_offload_device is not None:
-            deallocate_kv_cache_buffers_of_model(self.gpt_model)
-            if not self._clone_model_via_flat_vectors:
-                gpt_model = self.gpt_model.clone(device=self.cpu_offload_device)
-            else:
-                gpt_model = clone_model_via_flat_vectors(
-                    model=self.gpt_model,
-                    device=self.cpu_offload_device,
-                )
-            head_model = self.head_model.clone(device=self.cpu_offload_device)
-            # DEBUG
-            print("\n[_copy_model_to_device]")
-            if self._debug_gpt_model is not None:
-                # Exact copy (DEBUG)
-                print("_copy_model_to_device: Exact copy")
-                copy_parameters(self._debug_gpt_model, gpt_model)
-                #for name, param in self._debug_gpt_model.named_parameters():
-                #    param_comp = gpt_model.get_parameter(name)
-                #    print(f"Compare {name}")
-                #    torch.testing.assert_close(param.data, param_comp.data)
-            # END DEBUG
+            gpt_model, head_model = copy_model_to_device(
+                gpt_model=self.gpt_model,
+                head_model=self.head_model,
+                cpu_offload_device=self.cpu_offload_device,
+                clone_via_flat_vectors=self._clone_model_via_flat_vectors,
+                debug_gpt_model=self._debug_gpt_model,
+            )
         else:
             gpt_model = self.gpt_model
             head_model = self.head_model
@@ -1080,7 +1165,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 debug_modules = [self._debug_gpt_model.transformer.wte]
             else:
                 debug_modules = None
-            self._accumulate_gradients(
+            accumulate_gradients(
                 [
                     (
                         self._gpt_model_on_device.transformer.wte,
@@ -1114,66 +1199,14 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         """
         assert self.cpu_offload_device is not None
-        # Read out flat vectors from `gpt_model` and copy to device
-        param_structures = dict()
-        weights_vecs = dict()
-        for layer_idx in range(first_layer_idx, first_layer_idx + num_layers):
-            name = BlockComponentName.h(layer_idx)
-            access = AccessWeightsGradients(
-                self.gpt_model.transformer.h[layer_idx]
-            )
-            weights_vecs[name] = copy_flat_vectors_to(
-                access.get_weights(), device=self.cpu_offload_device,
-            )
-            param_structures[name] = access.param_structure()
-        # Restore parameters
-        ModelFromFlatVectorsFactory.restore_params_of_model(
-            model=self._gpt_model_on_device,
-            param_structures=param_structures,
-            weights_vecs=weights_vecs,
-        )
-        # DEBUG (exact copy)
-        if self._debug_gpt_model is not None:
-            print(f"_create_model_shard_on_device: Exact copy {first_layer_idx}:{first_layer_idx + num_layers}")
-            for block_from, block_to in zip(
-                self._debug_gpt_model.transformer.h[first_layer_idx:(first_layer_idx + num_layers)],
-                self._gpt_model_on_device.transformer.h[first_layer_idx:(first_layer_idx + num_layers)],
-            ):
-                copy_parameters(block_from, block_to)
-        # END DEBUG
-        return DefaultCellBlocks(
-            model=self._gpt_model_on_device,
+        return create_model_shard_on_device(
+            gpt_model=self.gpt_model,
+            gpt_model_copy=self._gpt_model_on_device,
+            cpu_offload_device=self.cpu_offload_device,
             first_layer_idx=first_layer_idx,
             num_layers=num_layers,
+            debug_gpt_model=self._debug_gpt_model,
         )
-
-    def _accumulate_gradients(
-        self,
-        module_pairs: List[Tuple[torch.nn.Module, torch.nn.Module]],
-        debug_modules: Optional[List[torch.nn.Module]] = None,
-    ):
-        if debug_modules is None:
-            debug_modules = [None] * len(module_pairs)
-        else:
-            assert len(debug_modules) == len(module_pairs)
-        print("\n[_accumulate_gradients]")
-        for (mod_from, mod_to), mod_debug in zip(module_pairs, debug_modules):
-            access = AccessWeightsGradients(mod_from)
-            flat_vectors = copy_flat_vectors_to(
-                access.get_gradients(), device=torch.device("cpu"),
-            )
-            AccessWeightsGradients(mod_to).accumulate_gradients(flat_vectors)
-            if mod_debug is not None:
-                for name, param in mod_debug.named_parameters():
-                    param_comp = mod_from.get_parameter(name)
-                    print(f"Compare {name}")
-                    torch.testing.assert_close(param.data, param_comp.data)
-                    if param.requires_grad:
-                        src_arg = mod_from.get_parameter(name).grad.data
-                        if param.grad is None:
-                            param.grad = torch.nn.Parameter(src_arg)
-                        else:
-                            param.grad.data.copy_(src_arg)
 
 
 class NaiveGPTAndHeadModel(GPTAndHeadModel):

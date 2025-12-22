@@ -13,7 +13,6 @@
 # limitations under the License.
 import random
 from itertools import product
-from typing import Tuple, List
 
 import torch
 import pytest
@@ -26,22 +25,18 @@ from keys_values.head_model import HeadModel
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.gradient.accumulate import copy_requires_grad
-from keys_values.kvcache.gradient.main import LongContextGradientModel
-from keys_values.kvcache.stack_layers import DefaultCellBlocks
+from keys_values.kvcache.gradient.main import (
+    LongContextGradientModel,
+    copy_model_to_device,
+    create_model_shard_on_device,
+    accumulate_gradients,
+)
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     copy_gradients,
 )
 from keys_values.lora import GPT
-from keys_values.optimize.clone_model import (
-    clone_model_via_flat_vectors,
-    copy_flat_vectors_to,
-)
-from keys_values.optimize.model_factory import (
-    ModelFromFlatVectorsFactory,
-    BlockComponentName,
-)
-from keys_values.optimize.module_wrapper import AccessWeightsGradients
+from keys_values.optimize.model_factory import ModelFromFlatVectorsFactory
 from keys_values.utils import copy_parameters
 
 
@@ -235,63 +230,6 @@ def test_gradient_sharded(
         #torch.testing.assert_close(value, value_comp)
 
 
-def copy_model_to_device(
-    gpt_model: GPT,
-    head_model: HeadModel,
-    cpu_offload_device: torch.device,
-    clone_via_flat_vectors: bool,
-) -> Tuple[GPT, HeadModel]:
-    if not clone_via_flat_vectors:
-        gpt_model_copy = gpt_model.clone(device=cpu_offload_device)
-    else:
-        gpt_model_copy = clone_model_via_flat_vectors(
-            model=gpt_model,
-            device=cpu_offload_device,
-        )
-    return gpt_model_copy, head_model.clone(device=cpu_offload_device)
-
-
-def create_model_shard_on_device(
-    gpt_model: GPT,
-    gpt_model_copy: GPT,
-    cpu_offload_device: torch.device,
-    layer_idx: int,
-) -> DefaultCellBlocks:
-    # Read out flat vectors from `gpt_model` and copy to device
-    name = BlockComponentName.h(layer_idx)
-    access = AccessWeightsGradients(
-        gpt_model.transformer.h[layer_idx]
-    )
-    weights_vecs = {
-        name: copy_flat_vectors_to(
-            access.get_weights(), device=cpu_offload_device,
-        )
-    }
-    param_structures = {name: access.param_structure()}
-    # Restore parameters
-    ModelFromFlatVectorsFactory.restore_params_of_model(
-        model=gpt_model_copy,
-        param_structures=param_structures,
-        weights_vecs=weights_vecs,
-    )
-    return DefaultCellBlocks(
-        model=gpt_model_copy,
-        first_layer_idx=layer_idx,
-        num_layers=1,
-    )
-
-
-def accumulate_gradients(
-    module_pairs: List[Tuple[torch.nn.Module, torch.nn.Module]],
-):
-    for mod_from, mod_to in module_pairs:
-        access = AccessWeightsGradients(mod_from)
-        flat_vectors = copy_flat_vectors_to(
-            access.get_gradients(), device=torch.device("cpu"),
-        )
-        AccessWeightsGradients(mod_to).accumulate_gradients(flat_vectors)
-
-
 def compute_gradients_on_device(
     gpt_model: GPT,
     head_model: HeadModel,
@@ -334,7 +272,8 @@ def compute_gradients_on_device(
             gpt_model=gpt_model,
             gpt_model_copy=gpt_model_copy,
             cpu_offload_device=cpu_offload_device,
-            layer_idx=layer_idx,
+            first_layer_idx=layer_idx,
+            num_layers=1,
         )
         output = model_part.forward(x, input_ids, input_pos=None)
         _loss = (output * head_gradient).sum()
@@ -358,8 +297,6 @@ def test_gradient_sharded_simple(clone_via_flat_vectors):
     random.seed(seed)
     torch.random.manual_seed(seed)
 
-    #cache_name = "lastrec-default"
-    #cache_length = 128
     seq_length = 128
     dtype = torch.float32
     device = torch.device("cpu")
@@ -397,23 +334,6 @@ def test_gradient_sharded_simple(clone_via_flat_vectors):
         with torch.device(_device):
             gpt_model = GPT(config)
             mark_only_lora_as_trainable(gpt_model)
-            #cache_params = KVCacheParams.from_config(
-            #    config=config,
-            #    max_batch_size=batch_size,
-            #    cache_length=cache_length,
-            #    device=_device,
-            #    dtype=dtype,
-            #)
-            #gpt_model.assign_kv_caches(
-            #    [
-            #        create_kv_cache(
-            #            name=cache_name,
-            #            params=cache_params,
-            #            block_idx=block_idx,
-            #        )
-            #        for block_idx in range(config.n_layer)
-            #    ]
-            #)
             if gpt_models:
                 gpt_model.apply(gpt_model._init_weights)  # Initialize
                 # Copy from CPU to GPU
