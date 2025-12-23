@@ -536,6 +536,7 @@ def wrap_gpt_model(
     model_for_training: bool = True,
     profile_grad_times: bool = False,
     cpu_offload_device: Optional[torch.device] = None,
+    clone_model_via_flat_vectors: bool = False,
     fabric: Optional[L.Fabric] = None,
 ) -> LongContextGradientModel:
     print_message(
@@ -606,6 +607,7 @@ def wrap_gpt_model(
             autograd_hooks_kwargs=autograd_hooks_kwargs,
             profile_steps=profile_grad_times,
             cpu_offload_device=cpu_offload_device,
+            clone_model_via_flat_vectors=clone_model_via_flat_vectors,
         )
     else:
         model = LongContextInferenceModel(**common_kwargs)

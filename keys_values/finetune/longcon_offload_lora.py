@@ -154,6 +154,7 @@ def setup(
     record_gpu_memory_period: int = 0,
     generate_with_eval: bool = False,
     profile_grad_times: int = 0,
+    clone_model_via_flat_vectors: bool = False,
 ) -> None:
     """Finetune a model using the LoRA method, with CPU offloading (single GPU)
 
@@ -162,7 +163,7 @@ def setup(
         out_dir: Directory in which to save checkpoints and logs. If running in a Lightning Studio Job, look for it in
             /teamspace/jobs/<job-name>/share.
         precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
-        device: GPU device on which to run computations
+        device: GPU device on which to run computations. Defaults to 0.
         data: Data-related arguments. If not provided, the default is
             ``keys_values.data.LongBenchV2``.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
@@ -297,6 +298,7 @@ def setup(
         record_gpu_memory_period=record_gpu_memory_period,
         generate_with_eval=generate_with_eval,
         profile_grad_times=profile_grad_times,
+        clone_model_via_flat_vectors=clone_model_via_flat_vectors,
     )
 
 
@@ -321,6 +323,7 @@ def main(
     record_gpu_memory_period: int,
     generate_with_eval: bool,
     profile_grad_times: int,
+    clone_model_via_flat_vectors: bool,
 ) -> None:
     validate_args(train, eval)
 
@@ -371,8 +374,12 @@ def main(
         kv_cache.cache_kwargs["sdpa_kernels"] = sdpa_kernels
     kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
     kv_cache.cache_kwargs["pos_encoding"] = mha_kwargs["pos_encoding"]
-    with torch.device(optim_device):
+    print("Creating model on CPU")
+    # We create the GPT model on the device, then copy. This is faster
+    with torch.device(device):
         gpt_model = GPT(config, **mha_kwargs)
+    gpt_model = gpt_model.to(optim_device)
+    with torch.device(optim_device):
         head_model = HeadModelFactory.create(
             name=head_model_name,
             config=config,
@@ -390,6 +397,7 @@ def main(
             dtype=fabric_precision_to_dtype(precision),
             profile_grad_times=profile_grad_times > 0,
             cpu_offload_device=device,
+            clone_model_via_flat_vectors=clone_model_via_flat_vectors,
         )
     mark_only_lora_as_trainable(model.gpt_model)
 
@@ -410,6 +418,7 @@ def main(
     }
 
     # strict=False because missing keys due to LoRA weights not contained in state dict
+    print(f"Loading model checkpoint: {checkpoint_dir}")
     file_path = checkpoint_dir / LIT_MODEL_FNAME
     load_checkpoint(model.gpt_model, file_path, strict=False)
     # If there are head model weights, load them as well. Otherwise, we use
@@ -436,7 +445,6 @@ def main(
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
         batch_transform=batch_transform,
-        device=device,
         checkpoint_dir=checkpoint_dir,
         out_dir=out_dir,
         train=train,
@@ -445,7 +453,6 @@ def main(
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
-        num_trainable_params=num_trainable_params,
         generate_with_eval=generate_with_eval,
         profile_grad_params=profile_grad_params,
     )
@@ -464,8 +471,9 @@ def main(
             )
         else:
             generate_example_kwargs = None
+        valid_model = model.copy_model_for_evaluation()
         metrics = validate_and_all_reduce(
-            model=model,
+            model=valid_model,
             val_dataloader=val_dataloader,
             eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
             batch_transform=batch_transform,
@@ -475,23 +483,22 @@ def main(
         print_message(
             f"Final evaluation | val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}"
         )
+        del valid_model
         flush_io_streams()
 
     # Save the final LoRA checkpoint at the end of training
     save_dir = out_dir / "final"
-    # TODO!!
-    save_lora_checkpoint(fabric, model, save_dir)
-    if fabric.global_rank == 0:
-        # Copy checkpoint files from original checkpoint dir
-        copy_config_files(checkpoint_dir, save_dir)
-        save_hyperparameters(setup, save_dir)
-        if hasattr(data, "prompt_style"):
-            save_prompt_style(data.prompt_style, save_dir)
-        merge_lora(
-            checkpoint_dir=save_dir,
-            lora_fname=LORA_WEIGHTS_FNAME,
-            pretrained_fname=LIT_MODEL_FNAME,
-        )
+    save_lora_checkpoint(model, save_dir)
+    # Copy checkpoint files from original checkpoint dir
+    copy_config_files(checkpoint_dir, save_dir)
+    save_hyperparameters(setup, save_dir)
+    if hasattr(data, "prompt_style"):
+        save_prompt_style(data.prompt_style, save_dir)
+    merge_lora(
+        checkpoint_dir=save_dir,
+        lora_fname=LORA_WEIGHTS_FNAME,
+        pretrained_fname=LIT_MODEL_FNAME,
+    )
 
 
 def fit(
@@ -499,7 +506,6 @@ def fit(
     train_dataloader: DataLoader,
     val_dataloader: DataLoader,
     batch_transform: BatchTransform,
-    device: torch.device,
     checkpoint_dir: Path,
     out_dir: Path,
     train: TrainArgs,
@@ -508,7 +514,6 @@ def fit(
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
-    num_trainable_params: int,
     generate_with_eval: bool,
     profile_grad_params: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
@@ -529,6 +534,7 @@ def fit(
         ),
     }
     val_loss = "n/a"
+    valid_model = model.copy_model_for_evaluation()
     if eval.initial_validation:
         print_with_rank_and_timestamp("Starting validation evaluations.", 0)
         print_message(f"\nInitial validation evaluation  (batch_size = {val_dataloader.batch_size}) ...")
@@ -540,7 +546,7 @@ def fit(
         else:
             generate_example_kwargs = None
         metrics = validate_and_all_reduce(
-            model=model,
+            model=valid_model,
             val_dataloader=val_dataloader,
             eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
             batch_transform=batch_transform,
@@ -556,11 +562,12 @@ def fit(
         print_message("Verifying settings ...")
         with torch.no_grad():
             validate(
-                model,
+                valid_model,
                 val_dataloader,
                 dataclasses.replace(eval, max_iters=1),
                 batch_transform,
             )  # sanity check
+    del valid_model
 
     max_steps = train.max_steps or float("inf")
     train_iterator = CycleIterator(train_dataloader)
@@ -703,8 +710,9 @@ def fit(
             else:
                 generate_example_kwargs = None
             # TODO: Fix bug in generation!
+            valid_model = model.copy_model_for_evaluation()
             metrics = validate_and_all_reduce(
-                model=model,
+                model=valid_model,
                 val_dataloader=val_dataloader,
                 eval=eval,
                 batch_transform=batch_transform,
@@ -718,15 +726,13 @@ def fit(
                 f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}"
             )
 
-        # TODO!!
         if train.save_interval is not None and not is_accumulating and state["step_count"] % train.save_interval == 0:
             interval_dir = out_dir / f"step-{state['step_count']:06d}"
-            save_lora_checkpoint(fabric, model, interval_dir)
-            if fabric.global_rank == 0:
-                copy_config_files(checkpoint_dir, interval_dir)
-                save_hyperparameters(setup, interval_dir)
-                if hasattr(data, "prompt_style"):
-                    save_prompt_style(data.prompt_style, interval_dir)
+            save_lora_checkpoint(model, interval_dir)
+            copy_config_files(checkpoint_dir, interval_dir)
+            save_hyperparameters(setup, interval_dir)
+            if hasattr(data, "prompt_style"):
+                save_prompt_style(data.prompt_style, interval_dir)
 
     return token_counts
 
@@ -741,16 +747,17 @@ def load_checkpoint(
     model.load_state_dict(state_dict, strict=strict)
 
 
-# TODO!!
 def save_lora_checkpoint(
-    fabric: L.Fabric,
     model: GPTAndHeadModel,
     file_dir: Path,
 ) -> None:
+    from lightning.fabric.strategies import SingleDeviceStrategy
+
     file_dir.mkdir(parents=True, exist_ok=True)
     file_path = file_dir / LORA_WEIGHTS_FNAME
     print_message(f"\nSaving LoRA weights to {str(file_path)!r}")
-    fabric.save(
+    strategy = SingleDeviceStrategy()
+    strategy.save_checkpoint(
         file_path,
         state={"model": model.gpt_model},
         filter={"model": lora_filter},
@@ -758,6 +765,6 @@ def save_lora_checkpoint(
     if model.head_model.state_dict():
         file_path = file_dir / HEAD_MODEL_FNAME
         print_message(f"Saving head model weights to {str(file_path)!r}")
-        fabric.save(file_path, state={"model": model.head_model})
+        strategy.save_checkpoint(file_path, state={"model": model.head_model})
 
 
