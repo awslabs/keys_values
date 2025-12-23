@@ -534,8 +534,8 @@ def create_quantized_kv_buffers(
 
 def deallocate_kv_cache_buffers(caches: List[KVCacheWithBuffers]):
     for cache in caches:
-        buffers = cache.kv_buffers
-        buffers.deallocate()
+        if cache is not None:
+            cache.kv_buffers.deallocate()
 
 
 def deallocate_kv_cache_buffers_of_model(model: GPT):

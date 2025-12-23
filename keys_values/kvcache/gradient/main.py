@@ -1062,7 +1062,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                     debug_modules.append(self._debug_gpt_model.lm_head)
             else:
                 debug_modules = None
-            self._accumulate_gradients(module_pairs, debug_modules)
+            accumulate_gradients(module_pairs, debug_modules)
 
         if self._record_gpu_memory_kind == 0:
             # End of recording for initial snapshot (everything before the
@@ -1138,7 +1138,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                     ]
                 else:
                     debug_modules = None
-                self._accumulate_gradients(module_pairs, debug_modules)
+                accumulate_gradients(module_pairs, debug_modules)
                 ModelFromFlatVectorsFactory.remove_params_of_model(
                     model=self._gpt_model_on_device,
                     start=first_layer_idx,
