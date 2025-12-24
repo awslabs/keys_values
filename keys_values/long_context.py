@@ -28,6 +28,7 @@ from keys_values.kvcache.factory import (
     split_name,
     deallocate_kv_cache_buffers_of_model,
 )
+from keys_values.kvcache.gradient.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
 from keys_values.kvcache.utils import (
     wrap_tqdm_if_verbose,
@@ -629,6 +630,14 @@ class LongContextInferenceModel(GPTAndHeadModel):
             raise ValueError(f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention")
         return self._forward_only(input_ids, targets, scale_factor)
 
+    def set_record_gpu_memory(
+        self,
+        record_gpu_memory_snapshots: Optional[RecordGPUMemory],
+        record_gpu_memory_kind: int,
+    ):
+        self._record_gpu_memory_snapshots = record_gpu_memory_snapshots
+        self._record_gpu_memory_kind = record_gpu_memory_kind
+
     def clear(self):
         """
         Resets members created in `_init_members_from_tokens` to `None`.
@@ -760,7 +769,6 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     self._record_gpu_memory_snapshots.path.parent / "snapshot_forward.pickle"
                 )
                 self._record_gpu_memory_snapshots.start_recording()
-                print(f"Start profiling GPU memory: {self._record_gpu_memory_snapshots.path}")
             result = None
             retry_count = 0
             while result is None:
@@ -774,10 +782,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     deallocate_kv_cache_buffers_of_model(self.gpt_model)
                     torch.cuda.empty_cache()
                     retry_count += 1
-                    if self._record_gpu_memory_kind == 1 and retry_count == 2:
+                    if self._record_gpu_memory_kind in (1, 3) and retry_count == 2:
                         self._record_gpu_memory_snapshots.store_current_snapshot()
                         self._record_gpu_memory_snapshots.stop_recording()
-                        print(f"Stop profiling GPU memory: {self._record_gpu_memory_snapshots.path}")
 
             return result
 

@@ -212,6 +212,7 @@ def setup(
                 each update, we store one snapshot file per row of cells being
                 processed.
             - 2: Special case (DEBUG)
+            - 3: One snapshot file during initial validation
             Defaults to 0.
         record_gpu_memory_period: Only if `record_gpu_memory_snapshots` is used.
             Snapshot files are written once per update step. Files are overwritten
@@ -374,9 +375,11 @@ def main(
         kv_cache.cache_kwargs["sdpa_kernels"] = sdpa_kernels
     kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
     kv_cache.cache_kwargs["pos_encoding"] = mha_kwargs["pos_encoding"]
-    print("Creating model on CPU")
     # We create the GPT model on the device, then copy. This is faster
-    with torch.device(device):
+    print("Creating model on CPU")
+    dtype = fabric_precision_to_dtype(precision)
+    torch.set_default_dtype(dtype)
+    with (torch.device(device)):
         gpt_model = GPT(config, **mha_kwargs)
     gpt_model = gpt_model.to(optim_device)
     with torch.device(optim_device):
@@ -394,12 +397,17 @@ def main(
             head_model=head_model,
             kv_cache=kv_cache,
             max_batch_size=batch_size,
-            dtype=fabric_precision_to_dtype(precision),
+            dtype=dtype,
             profile_grad_times=profile_grad_times > 0,
             cpu_offload_device=device,
             clone_model_via_flat_vectors=clone_model_via_flat_vectors,
         )
     mark_only_lora_as_trainable(model.gpt_model)
+    # DEBUG
+    for name, param in model.named_parameters():
+        if param.dtype != dtype:
+            print(f"{name} has dtype {param.dtype}")
+    # END DEBUG
 
     num_trainable_params = num_parameters(model, requires_grad=True)
     print_message(f"\nNumber of trainable parameters: {num_trainable_params:,}")
@@ -533,8 +541,20 @@ def fit(
             0, device=optim_device, dtype=torch.long,
         ),
     }
+    if record_gpu_memory_kind == 3:
+        path = out_dir / "gpu_memory_snapshots" / "snapshot_validation.pickle"
+        record_gpu_memory_snapshots = RecordGPUMemory(
+            path=str(path),
+            max_entries=record_gpu_memory_snapshots.max_entries,
+            verbose=VerbosityLevels.MORE,
+        )
+        record_gpu_memory_snapshots.start_recording()
     val_loss = "n/a"
     valid_model = model.copy_model_for_evaluation()
+    if record_gpu_memory_kind == 3:
+        valid_model.set_record_gpu_memory(
+            record_gpu_memory_snapshots, record_gpu_memory_kind,
+        )
     if eval.initial_validation:
         print_with_rank_and_timestamp("Starting validation evaluations.", 0)
         print_message(f"\nInitial validation evaluation  (batch_size = {val_dataloader.batch_size}) ...")
@@ -569,6 +589,9 @@ def fit(
             )  # sanity check
     del valid_model
 
+    if record_gpu_memory_kind == 3 and record_gpu_memory_snapshots.is_recording:
+        record_gpu_memory_snapshots.store_current_snapshot()
+        record_gpu_memory_snapshots.stop_recording()
     max_steps = train.max_steps or float("inf")
     train_iterator = CycleIterator(train_dataloader)
     running_loss = RunningMean(
@@ -579,7 +602,6 @@ def fit(
     print_message(
         "\nGPU memory before training starts:\n" + message_memory_all_devices()
     )
-    total_t0 = time.perf_counter()
 
     while state["step_count"] < max_steps:
         state["iter_num"] += 1

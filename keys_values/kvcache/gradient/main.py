@@ -131,6 +131,22 @@ def copy_model_to_device(
     clone_via_flat_vectors: bool,
     debug_gpt_model: Optional[GPT] = None,
 ) -> Tuple[GPT, HeadModel]:
+    """
+    Creates copy of `gpt_model`, `head_model` on device `cpu_offload_device`.
+    The copy is shallow in the sense of :meth:`GPT.clone`.
+
+    Args:
+        gpt_model (GPT): Source GPT model
+        head_model (HeadModel): Source head model
+        cpu_offload_device (torch.device): Device for copies
+        clone_via_flat_vectors (bool): Clone `gpt_model` via flat vectors for
+            the weights?
+        debug_gpt_model (Optional[GPT]): Use for debugging only
+
+    Returns:
+        `(gpt_model_copy, head_model_copy)` copies
+
+    """
     if not clone_via_flat_vectors:
         gpt_model_copy = gpt_model.clone(device=cpu_offload_device)
     else:
@@ -156,6 +172,25 @@ def create_model_shard_on_device(
     num_layers: int,
     debug_gpt_model: Optional[GPT] = None,
 ) -> DefaultCellBlocks:
+    """
+    Copies parameter values from `gpt_model` to `gpt_model_copy`, the latter
+    on device `cpu_offload_device`. Only for transformer blocks numbered
+    `range(first_layer_idx, first_layer_idx + num_layers)`. Parameters may not
+    exist in `gpt_model_copy`, they are created there.
+
+    Args:
+        gpt_model (GPT): Source GPT model
+        gpt_model_copy (GPT): Target GPT model, with parameters removed
+        cpu_offload_device (torch.device): Device for target parameters
+        first_layer_idx (int): Index of first layer
+        num_layers (int): Number of layers
+        debug_gpt_model (Optional[GPT]): Use for debugging only
+
+    Returns:
+        :class:`DefaultCellBlocks` object wrapping the layers in
+        `gpt_model_copy`.
+
+    """
     # Read out flat vectors from `gpt_model` and copy to device
     param_structures = dict()
     weights_vecs = dict()
@@ -192,6 +227,16 @@ def accumulate_gradients(
     module_pairs: List[Tuple[torch.nn.Module, torch.nn.Module]],
     debug_modules: Optional[List[torch.nn.Module]] = None,
 ):
+    """
+    `module_pairs` contains tuples `(mod_from, mod_to)`. For each tuple,
+    read gradients of parameters in `mod_from` and add to gradients in
+    `mod_to`.
+
+    Args:
+        module_pairs: List of `(mod_from, mod_to)` tuples
+        debug_modules: Use for debugging only
+
+    """
     if debug_modules is None:
         debug_modules = [None] * len(module_pairs)
     else:
@@ -202,6 +247,7 @@ def accumulate_gradients(
         flat_vectors = copy_flat_vectors_to(
             access.get_gradients(), device=torch.device("cpu"),
         )
+        mod_from.zero_grad(set_to_none=True)
         AccessWeightsGradients(mod_to).accumulate_gradients(flat_vectors)
         if mod_debug is not None:
             for name, param in mod_debug.named_parameters():
@@ -289,6 +335,8 @@ class LongContextGradientModel(LongContextInferenceModel):
       of shards which are needed for each row of cells. Since the full model
       is not on the device, device memory can be used to speed up the gradient
       computations.
+    * For evaluation, use :meth:`copy_model_for_evaluation` to obtain a
+      :class:`LongContextInferenceModel` copy on the device.
 
     """
     def __init__(
@@ -940,7 +988,6 @@ class LongContextGradientModel(LongContextInferenceModel):
                 self._record_gpu_memory_snapshots.path.parent / "snapshot_backward0.pickle"
             )
             self._record_gpu_memory_snapshots.start_recording()
-            print(f"Started recording: {self._record_gpu_memory_snapshots.path}")
 
         # Call :meth:`_backward_accumulate_gradients_nocheck`. May be done
         # several times with reduced memory limits
@@ -962,13 +1009,11 @@ class LongContextGradientModel(LongContextInferenceModel):
                         if debug_count <= 2:
                             self._record_gpu_memory_snapshots.store_current_snapshot()
                             self._record_gpu_memory_snapshots.stop_recording()
-                            print("Stopped recording")
                             if debug_count < 2:
                                 self._record_gpu_memory_snapshots.set_path(
                                     self._record_gpu_memory_snapshots.path.parent / f"snapshot_backward{debug_count + 1}.pickle"
                                 )
                                 self._record_gpu_memory_snapshots.start_recording()
-                                print(f"Started recording: {self._record_gpu_memory_snapshots.path}")
                         debug_count += 1
 
         if self._profile_records is not None:

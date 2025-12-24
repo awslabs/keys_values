@@ -41,6 +41,7 @@ class RecordGPUMemory:
         self._path = path
         self.max_entries = max_entries
         self.verbose = verbose
+        self._is_recording = False
 
     @property
     def path(self) -> Path:
@@ -56,11 +57,17 @@ class RecordGPUMemory:
         if self._path is not None and self._print_message():
             print(f"Start recording GPU memory snapshot to {self._path}")
         torch.cuda.memory._record_memory_history(max_entries=self.max_entries)
+        self._is_recording = True
 
     def stop_recording(self):
         if self._path is not None and self._print_message():
             print(f"Stop recording GPU memory snapshot to {self._path}")
         torch.cuda.memory._record_memory_history(enabled=None)
+        self._is_recording = False
+
+    @property
+    def is_recording(self) -> bool:
+        return self._is_recording
 
     def store_current_snapshot(self):
         if self._path is not None:
