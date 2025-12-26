@@ -611,7 +611,9 @@ class LongContextGradientModel(LongContextInferenceModel):
 
     def copy_model_for_evaluation(self) -> LongContextInferenceModel:
         """
-        Only if `offload_model` is given.
+        Only if `offload_model` is given. We use
+        :class:`InferenceWithOffloadModel`, so that the layer parameters are
+        removed again once this object is deleted.
 
         Returns:
             :class:`LongContextInferenceModel` copy of this model, to be used
@@ -632,7 +634,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._create_model_shard_on_device(
             first_layer_idx=0, num_layers=self.config.n_layer,
         )
-        model_copy = LongContextInferenceModel(
+        model_copy = InferenceWithOffloadModel(
             gpt_model=self.offload_model,
             head_model=self.head_model,
             chunk_size=self.chunk_size,
@@ -1232,3 +1234,44 @@ class NaiveGPTAndHeadModel(GPTAndHeadModel):
         model_outputs = self.gpt_model(input_ids)
         loss_value = self.head_model(model_outputs, targets, input_pos=0) * scale_factor
         return loss_value
+
+
+class InferenceWithOffloadModel(LongContextInferenceModel):
+    """
+    Helper class for :meth:`LongContextGradientModel.copy_model_for_evaluation`.
+    We implement :meth:`__del__` here to ensure that `gpt_model` is put back
+    into its original state, after having been used during evaluation.
+
+    """
+    def __init__(
+        self,
+        gpt_model: GPT,
+        head_model: HeadModel,
+        chunk_size: int = 16,
+        randomize_chunk_sizes: bool = False,
+        chunks_per_cell_multiplier: float = 1.0,
+        single_tokens_for_targets: bool = False,
+        verbose: VerbosityLevels = VerbosityLevels.SOME,
+        tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        debug_single_cell_per_row: bool = False,
+        debug_store_intermediates: bool = False,
+    ):
+        super().__init__(
+            gpt_model,
+            head_model,
+            chunk_size,
+            randomize_chunk_sizes,
+            chunks_per_cell_multiplier,
+            single_tokens_for_targets,
+            verbose,
+            tmp_array_limit_gb,
+            debug_single_cell_per_row,
+            debug_store_intermediates,
+        )
+
+    def __del__(self):
+        self.clear_offload_model()
+
+    def clear_offload_model(self):
+        deallocate_kv_cache_buffers_of_model(self.gpt_model)
+        ModelFromFlatVectorsFactory.remove_params_of_model(self.gpt_model)

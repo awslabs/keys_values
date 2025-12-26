@@ -14,6 +14,7 @@
 # limitations under the License.
 import csv
 import dataclasses
+import gc
 import os
 from pathlib import Path
 from pprint import pprint
@@ -629,6 +630,8 @@ def fit(
         sync_on_compute=False,
     )
     total_lengths = 0
+    gc.collect()
+    torch.cuda.empty_cache()
     print_message(
         "\nGPU memory before training starts:\n" + message_memory_all_devices()
     )

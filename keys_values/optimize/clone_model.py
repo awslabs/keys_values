@@ -67,7 +67,7 @@ def clone_model_via_flat_vectors(
     if copy_function is None:
         copy_function = copy_flat_vectors_to
     is_lora = isinstance(model, GPTLoRA)
-    if not is_lora and isinstance(model, GPTAdapter):
+    if isinstance(model, GPTAdapter):
         raise NotImplementedError("model must not be GPTAdapter: Not implemented")
     kv_caches = []
     try:
@@ -97,7 +97,7 @@ def clone_model_via_flat_vectors(
             mha=model.mha,
         )
     _transfer_requires_grad(model, model_copy)
-    # Deal with KV caches
+    # Deal with KV caches. Default device for buffers should be `device`.
     for kv_cache, block in zip(kv_caches, model_copy.transformer.h):
         if kv_cache is not None:
             block.attn.kv_cache = kv_cache.clone(device=device)
