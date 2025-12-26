@@ -52,18 +52,18 @@ def args_gradient_sharded():
         (128, 32, 128 + 2 * 32 + 15),
     ]
     return [
-        a + b + c
+        a + b + (c,)
         for a, b, c in product(
             name_kwargs,
             setups,
-            [(1, False), (1, True), (2, False)],
+            [1, 2],
         )
     ]
 
 
 @_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_length, chunk_size, seq_length, layers_per_cell, clone_model_via_flat_vectors",
+    "cache_name, cache_kwargs, cache_length, chunk_size, seq_length, layers_per_cell",
     args_gradient_sharded(),
 )
 def test_gradient_sharded(
@@ -73,7 +73,6 @@ def test_gradient_sharded(
     chunk_size,
     seq_length,
     layers_per_cell,
-    clone_model_via_flat_vectors,
 ):
     seed = 31415927
     random.seed(seed)
@@ -296,7 +295,7 @@ def compute_gradients_on_device(
 
 
 @_RunIf(min_cuda_gpus=1)
-def test_gradient_sharded_simple(clone_via_flat_vectors):
+def test_gradient_sharded_simple():
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)

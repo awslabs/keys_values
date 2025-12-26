@@ -1053,7 +1053,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         if self.offload_model is None:
             gpt_model_on_device = self.gpt_model
         else:
-            gpt_model_on_device = self._offload_model
+            gpt_model_on_device = self.offload_model
             if self.verbose is not VerbosityLevels.NONE:
                 print(
                     f"\nDeallocated weights of model on device {self._offload_device}:\n"
