@@ -28,9 +28,9 @@ from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.gradient.accumulate import copy_requires_grad
 from keys_values.kvcache.gradient.main import (
     LongContextGradientModel,
-    copy_model_to_device,
     create_model_shard_on_device,
     accumulate_gradients,
+    create_offload_model,
 )
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
@@ -117,65 +117,64 @@ def test_gradient_sharded(
     lcg_models = []
     debug_gpt_model = None
     for _device in (cpu_offload_device, device):
-        with torch.device(_device):
+        with torch.device(cpu_offload_device):
             gpt_model = GPT(config)
-            mark_only_lora_as_trainable(gpt_model)
             head_model = HeadModelFactory.create(name=head_model_name, config=config)
-            cache_params = KVCacheParams.from_config(
-                config=config,
-                max_batch_size=batch_size,
-                cache_length=cache_length,
-                device=_device,
-                dtype=dtype,
-            )
-            gpt_model.assign_kv_caches(
-                [
-                    create_kv_cache(
-                        name=cache_name,
-                        params=cache_params,
-                        block_idx=block_idx,
-                        **cache_kwargs,
-                    )
-                    for block_idx in range(config.n_layer)
-                ]
-            )
-            if gpt_models:
-                gpt_model.apply(gpt_model._init_weights)  # Initialize
-                # Copy from CPU to GPU
-                copy_parameters(gpt_model, gpt_models[0])
-                copy_parameters(head_model, head_models[0])
-                lcg_kwargs = dict(
-                    cpu_offload_device=cpu_offload_device,
-                    clone_model_via_flat_vectors=clone_model_via_flat_vectors,
+        mark_only_lora_as_trainable(gpt_model)
+        gpt_model = gpt_model.to(device=_device)
+        cache_params = KVCacheParams.from_config(
+            config=config,
+            max_batch_size=batch_size,
+            cache_length=cache_length,
+            device=_device,
+            dtype=dtype,
+        )
+        gpt_model.assign_kv_caches(
+            [
+                create_kv_cache(
+                    name=cache_name,
+                    params=cache_params,
+                    block_idx=block_idx,
+                    **cache_kwargs,
                 )
-                if use_debug_gpt_model:
-                    with torch.device(cpu_offload_device):
-                        debug_gpt_model = GPT(config)
-                    mark_only_lora_as_trainable(debug_gpt_model)
-                    copy_parameters(gpt_model, debug_gpt_model)
-                    debug_gpt_model.zero_grad()
-            else:
-                lcg_kwargs = dict()
-            gpt_models.append(gpt_model)
-            head_models.append(head_model)
-            lcg_models.append(
-                LongContextGradientModel(
-                    gpt_model=gpt_model,
-                    head_model=head_model,
-                    layers_per_cell=layers_per_cell,
-                    chunk_size=chunk_size,
-                    qname="default",
-                    debug_gpt_model=debug_gpt_model,
-                    debug_store_intermediates=debug_store_intermediates,
-                    **lcg_kwargs,
-                )
+                for block_idx in range(config.n_layer)
+            ]
+        )
+        if gpt_models:
+            gpt_model.apply(gpt_model._init_weights)  # Initialize
+            # Copy from CPU to GPU
+            copy_parameters(gpt_model, gpt_models[0])
+            copy_parameters(head_model, head_models[0])
+            offload_model = create_offload_model(gpt_model, cpu_offload_device)
+            lcg_kwargs = dict(offload_model=offload_model)
+            if use_debug_gpt_model:
+                with torch.device(cpu_offload_device):
+                    debug_gpt_model = GPT(config)
+                mark_only_lora_as_trainable(debug_gpt_model)
+                copy_parameters(gpt_model, debug_gpt_model)
+                debug_gpt_model.zero_grad()
+        else:
+            lcg_kwargs = dict()
+        gpt_models.append(gpt_model)
+        head_models.append(head_model)
+        lcg_models.append(
+            LongContextGradientModel(
+                gpt_model=gpt_model,
+                head_model=head_model,
+                layers_per_cell=layers_per_cell,
+                chunk_size=chunk_size,
+                qname="default",
+                debug_gpt_model=debug_gpt_model,
+                debug_store_intermediates=debug_store_intermediates,
+                **lcg_kwargs,
             )
+        )
     # Create data batch
     token_ids = torch.randint(
         low=0,
         high=config.vocab_size,
         size=(batch_size, seq_length + 1),
-        device=device,
+        device=cpu_offload_device,
     )
     input_ids = token_ids[:, :-1]
     targets = token_ids[:, (-num_output_tokens):]
@@ -190,15 +189,11 @@ def test_gradient_sharded(
         model.train()
         if is_offload:
             print("\n*** Computing gradients with CPU offloading ***")
-            _input_ids = input_ids
-            _targets = targets
             if use_debug_gpt_model:
                 debug_gpt_model.zero_grad()
         else:
             print("\n*** Computing gradients normally (no CPU offloading) ***")
-            _input_ids = input_ids.to(device=cpu_offload_device)
-            _targets = targets.to(device=cpu_offload_device)
-        loss = model(_input_ids, _targets)
+        loss = model(input_ids, targets)
         loss.backward()
         loss_values.append(loss.detach())
         gradients.append(
@@ -234,46 +229,49 @@ def test_gradient_sharded(
 def compute_gradients_on_device(
     gpt_model: GPT,
     head_model: HeadModel,
+    offload_model: GPT,
     cpu_offload_device: torch.device,
     input_ids: torch.Tensor,
     targets: torch.Tensor,
-    clone_via_flat_vectors: bool = False,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    # Make copy on `cpu_offload_device`
-    gpt_model_copy, head_model_copy = copy_model_to_device(
-        gpt_model, head_model, cpu_offload_device, clone_via_flat_vectors,
-    )
+    gpt_model.zero_grad()
     # Forward pass:
     # - Store inputs to each layer
     # - Compute head gradient for last layer
-    gpt_model_copy.zero_grad()
-    gpt_model_copy.train()
+    create_model_shard_on_device(
+        gpt_model=gpt_model,
+        gpt_model_copy=offload_model,
+        target_device=cpu_offload_device,
+        first_layer_idx=0,
+        num_layers=len(gpt_model.transformer.h),
+    )
+    offload_model.train()
     input_ids = input_ids.to(device=cpu_offload_device)
     targets = targets.to(device=cpu_offload_device)
     with torch.no_grad():
-        x = gpt_model_copy.transformer.wte(input_ids)
+        x = offload_model.transformer.wte(input_ids)
         layer_inputs = []
-        for block in gpt_model_copy.transformer.h:
+        for block in offload_model.transformer.h:
             layer_inputs.append(x)
-            x = block(x, input_ids, gpt_model_copy.mha)
+            x = block(x, input_ids, offload_model.mha)
     head_input = copy_requires_grad(x)
-    x = gpt_model_copy.transformer.ln_f(head_input)
-    if head_model_copy.needs_logits():
-        x = gpt_model_copy.lm_head(x)
+    x = offload_model.transformer.ln_f(head_input)
+    if head_model.needs_logits():
+        x = offload_model.lm_head(x)
     loss = head_model(x, targets, input_pos=0).mean()
     loss.backward()
     loss_value = loss.detach()
     del loss
     head_gradient = head_input.grad
     # Remove parameters for all layers
-    ModelFromFlatVectorsFactory.remove_params_of_model(gpt_model_copy)
+    ModelFromFlatVectorsFactory.remove_params_of_model(offload_model)
     # Compute gradients layer per layer. Each layer is one shard
     for layer_idx, layer_input in reversed(list(enumerate(layer_inputs))):
         x = copy_requires_grad(layer_input)
         model_part = create_model_shard_on_device(
             gpt_model=gpt_model,
-            gpt_model_copy=gpt_model_copy,
-            cpu_offload_device=cpu_offload_device,
+            gpt_model_copy=offload_model,
+            target_device=cpu_offload_device,
             first_layer_idx=layer_idx,
             num_layers=1,
         )
@@ -282,44 +280,22 @@ def compute_gradients_on_device(
         _loss.backward()
         module_pairs = [
             (
-                gpt_model_copy.transformer.h[layer_idx],
+                offload_model.transformer.h[layer_idx],
                 gpt_model.transformer.h[layer_idx],
             ),
         ]
         accumulate_gradients(module_pairs)
         head_gradient = x.grad
+        ModelFromFlatVectorsFactory.remove_params_of_model(
+            model=offload_model,
+            start=layer_idx,
+            end=layer_idx + 1,
+        )
 
     return loss_value, copy_gradients(gpt_model, device=torch.device("cpu"))
 
 
-def version1(
-    gpt_model: GPT,
-    head_model: HeadModel,
-    cpu_offload_device: torch.device,
-    input_ids: torch.Tensor,
-    targets: torch.Tensor,
-    clone_via_flat_vectors: bool = False,
-) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    # Make copy on `cpu_offload_device`
-    gpt_model_copy, head_model_copy = copy_model_to_device(
-        gpt_model, head_model, cpu_offload_device, clone_via_flat_vectors,
-    )
-    # Compute gradients normally
-    gpt_model_copy.zero_grad()
-    gpt_model_copy.train()
-    input_ids = input_ids.to(device=cpu_offload_device)
-    targets = targets.to(device=cpu_offload_device)
-    outputs = gpt_model_copy(input_ids)
-    loss = head_model_copy(outputs, targets, input_pos=0).mean()
-    loss.backward()
-    return loss.detach(), copy_gradients(gpt_model_copy, device=torch.device("cpu"))
-
-
 @_RunIf(min_cuda_gpus=1)
-@pytest.mark.parametrize(
-    "clone_via_flat_vectors",
-    [False, True],
-)
 def test_gradient_sharded_simple(clone_via_flat_vectors):
     seed = 31415927
     random.seed(seed)
@@ -359,24 +335,27 @@ def test_gradient_sharded_simple(clone_via_flat_vectors):
     # with CPU offloading
     gpt_models = []
     head_models = []
+    offload_model = None
     for _device in (cpu_offload_device, device):
-        with torch.device(_device):
+        with torch.device(cpu_offload_device):
             gpt_model = GPT(config)
-            mark_only_lora_as_trainable(gpt_model)
-            if gpt_models:
-                gpt_model.apply(gpt_model._init_weights)  # Initialize
-                # Copy from CPU to GPU
-                copy_parameters(gpt_model, gpt_models[0])
-            gpt_models.append(gpt_model)
-            head_models.append(
-                HeadModelFactory.create(name=head_model_name, config=config)
-            )
+            head_model = HeadModelFactory.create(name=head_model_name, config=config)
+        mark_only_lora_as_trainable(gpt_model)
+        gpt_model = gpt_model.to(device=_device)
+        if gpt_models:
+            gpt_model.apply(gpt_model._init_weights)  # Initialize
+            # Copy from CPU to GPU
+            copy_parameters(gpt_model, gpt_models[0])
+            copy_parameters(head_model, head_models[0])
+            offload_model = create_offload_model(gpt_model, cpu_offload_device)
+        gpt_models.append(gpt_model)
+        head_models.append(head_model)
     # Create data batch
     token_ids = torch.randint(
         low=0,
         high=config.vocab_size,
         size=(batch_size, seq_length + 1),
-        device=device,
+        device=cpu_offload_device,
     )
     input_ids = token_ids[:, :-1]
     targets = token_ids[:, (-num_output_tokens):]
@@ -393,19 +372,17 @@ def test_gradient_sharded_simple(clone_via_flat_vectors):
             loss_value, grads = compute_gradients_on_device(
                 gpt_model=gpt_model,
                 head_model=head_model,
+                offload_model=offload_model,
                 cpu_offload_device=cpu_offload_device,
                 input_ids=input_ids,
                 targets=targets,
-                clone_via_flat_vectors=clone_via_flat_vectors,
             )
             loss_values.append(loss_value)
             gradients.append(grads)
         else:
             print("\n*** Computing gradients normally (no CPU offloading) ***")
-            _input_ids = input_ids.to(device=cpu_offload_device)
-            _targets = targets.to(device=cpu_offload_device)
-            outputs = gpt_model(_input_ids)
-            loss = head_model(outputs, _targets, input_pos=0).mean()
+            outputs = gpt_model(input_ids)
+            loss = head_model(outputs, targets, input_pos=0).mean()
             loss.backward()
             loss_values.append(loss.detach())
             gradients.append(

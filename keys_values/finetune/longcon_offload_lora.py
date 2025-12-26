@@ -19,7 +19,7 @@ from pathlib import Path
 from pprint import pprint
 import random
 import time
-from typing import Dict, Literal, Optional, Any
+from typing import Dict, Literal, Optional, Any, Tuple
 
 import torch
 from torch.utils.data import DataLoader
@@ -71,7 +71,7 @@ from keys_values.finetune.utils import (
     HEAD_MODEL_FNAME,
     LIT_MODEL_FNAME,
 )
-from keys_values.head_model import CrossEntropyOnLogits
+from keys_values.head_model import CrossEntropyOnLogits, HeadModel
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.gradient.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.utils import (
@@ -82,8 +82,10 @@ from keys_values.kvcache.utils import (
 )
 from keys_values.long_context import KVCacheArgs, GPTAndHeadModel
 from keys_values.lora import GPT
+from keys_values.optimize.model_factory import BlockComponentName
 from keys_values.parser_config import save_hyperparameters
 from keys_values.pos_encoding import position_encoding_factory
+from keys_values.utils import copy_parameters
 
 
 DEFAULT_OUT_DIR = "out/finetune/longcontext_lora"
@@ -154,7 +156,6 @@ def setup(
     record_gpu_memory_period: int = 0,
     generate_with_eval: bool = False,
     profile_grad_times: int = 0,
-    clone_model_via_flat_vectors: bool = False,
 ) -> None:
     """Finetune a model using the LoRA method, with CPU offloading (single GPU)
 
@@ -299,7 +300,6 @@ def setup(
         record_gpu_memory_period=record_gpu_memory_period,
         generate_with_eval=generate_with_eval,
         profile_grad_times=profile_grad_times,
-        clone_model_via_flat_vectors=clone_model_via_flat_vectors,
     )
 
 
@@ -324,7 +324,6 @@ def main(
     record_gpu_memory_period: int,
     generate_with_eval: bool,
     profile_grad_times: int,
-    clone_model_via_flat_vectors: bool,
 ) -> None:
     validate_args(train, eval)
 
@@ -379,29 +378,28 @@ def main(
     print("Creating model on CPU")
     dtype = fabric_precision_to_dtype(precision)
     torch.set_default_dtype(dtype)
-    with (torch.device(device)):
+    with torch.device(device):
         gpt_model = GPT(config, **mha_kwargs)
-    gpt_model = gpt_model.to(optim_device)
-    with torch.device(optim_device):
         head_model = HeadModelFactory.create(
             name=head_model_name,
             config=config,
             data=data,
             **head_model_kwargs,
         )
-        batch_size = train.micro_batch_size
-        if eval.micro_batch_size is not None:
-            batch_size = max(batch_size, eval.micro_batch_size)
-        model = wrap_gpt_model(
-            gpt_model=gpt_model,
-            head_model=head_model,
-            kv_cache=kv_cache,
-            max_batch_size=batch_size,
-            dtype=dtype,
-            profile_grad_times=profile_grad_times > 0,
-            cpu_offload_device=device,
-            clone_model_via_flat_vectors=clone_model_via_flat_vectors,
-        )
+    gpt_model = gpt_model.to(optim_device)
+    batch_size = train.micro_batch_size
+    if eval.micro_batch_size is not None:
+        batch_size = max(batch_size, eval.micro_batch_size)
+    model = wrap_gpt_model(
+        gpt_model=gpt_model,
+        head_model=head_model,
+        kv_cache=kv_cache,
+        max_batch_size=batch_size,
+        dtype=dtype,
+        profile_grad_times=profile_grad_times > 0,
+        cpu_offload_device=device,
+    )
+    offload_model = model.offload_model
     mark_only_lora_as_trainable(model.gpt_model)
     # DEBUG
     for name, param in model.named_parameters():
@@ -413,14 +411,44 @@ def main(
     print_message(f"\nNumber of trainable parameters: {num_trainable_params:,}")
     print_message(f"Number of non-trainable parameters: {num_parameters(model, requires_grad=False):,}")
 
-    optimizer = instantiate_torch_optimizer(
-        optimizer.name, model.parameters(), **optimizer.optimizer_kwargs(),
+    # We use one optimizer on CPU for the layers, one on GPU for the remaining
+    # parameters.
+    gpt_param_prefixes = tuple(
+        BlockComponentName.h(layer_idx) for layer_idx in range(config.n_layer)
     )
-    scheduler = get_lr_scheduler(optimizer, train_args=train, max_steps=lr_max_steps)
+    cpu_optimizer = create_optimizer(
+        optim_args=optimizer,
+        gpt_model=gpt_model,
+        gpt_param_prefixes=gpt_param_prefixes,
+    )
+    cpu_scheduler = get_lr_scheduler(
+        cpu_optimizer,
+        train_args=train,
+        max_steps=lr_max_steps,
+    )
+    gpt_param_prefixes = (
+        BlockComponentName.wte(),
+        BlockComponentName.ln_f(),
+    )
+    if head_model.needs_logits():
+        gpt_param_prefixes += (BlockComponentName.lm_head(),)
+    gpu_optimizer = create_optimizer(
+        optim_args=optimizer,
+        gpt_model=offload_model,
+        gpt_param_prefixes=gpt_param_prefixes,
+        head_model=head_model,
+    )
+    gpu_scheduler = get_lr_scheduler(
+        gpu_optimizer,
+        train_args=train,
+        max_steps=lr_max_steps,
+    )
     state = {
         "model": model,
-        "optimizer": optimizer,
-        "scheduler": scheduler,
+        "cpu_optimizer": cpu_optimizer,
+        "cpu_scheduler": cpu_scheduler,
+        "gpu_optimizer": gpu_optimizer,
+        "gpu_scheduler": gpu_scheduler,
         "iter_num": 0,
         "step_count": 0,
     }
@@ -526,8 +554,10 @@ def fit(
     profile_grad_params: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     model = state["model"]
-    optimizer = state["optimizer"]
-    scheduler = state["scheduler"]
+    cpu_optimizer = state["cpu_optimizer"]
+    cpu_scheduler = state["cpu_scheduler"]
+    gpu_optimizer = state["gpu_optimizer"]
+    gpu_scheduler = state["gpu_scheduler"]
     tokenizer = Tokenizer(checkpoint_dir)
     optim_device = torch.device("cpu")
 
@@ -676,12 +706,21 @@ def fit(
             record_gpu_memory_snapshots.store_current_snapshot()
             record_gpu_memory_snapshots.stop_recording()
 
-        optimizer.step()
+        cpu_optimizer.step()
+        gpu_optimizer.step()
         print_message("Optimizer update done.")
-        optimizer.zero_grad(set_to_none=True)
-        scheduler.step()
+        cpu_optimizer.zero_grad(set_to_none=True)
+        gpu_optimizer.zero_grad(set_to_none=True)
+        cpu_scheduler.step()
+        gpu_scheduler.step()
         state["step_count"] += 1
-
+        # Copy parameters: Not really necessary, but ensures that all params
+        # of `gpt_model` are up-to-date
+        copy_remaining_parameters(
+            source_model=model.offload_model,
+            target_model=model.gpt_model,
+            needs_logits=model.head_model.needs_logits(),
+        )
         del loss
         torch.cuda.empty_cache()
         print_message(
@@ -708,7 +747,7 @@ def fit(
                 "iter_time": t1 - iter_t0,
                 "tokens": token_counts["raw_tokens_plus_prompt_template"],
                 "total_tokens": token_counts["raw_tokens_plus_prompt_template"],
-                "learning_rate": scheduler.get_last_lr()[0],
+                "learning_rate": cpu_scheduler.get_last_lr()[0],
                 **log_memory_all_devices(),
             }
             if isinstance(val_loss, torch.Tensor):
@@ -790,3 +829,34 @@ def save_lora_checkpoint(
         strategy.save_checkpoint(file_path, state={"model": model.head_model})
 
 
+def create_optimizer(
+    optim_args: OptimizerArgs,
+    gpt_model: GPT,
+    gpt_param_prefixes: Tuple[str, ...],
+    head_model: Optional[HeadModel] = None,
+):
+    parameters = [
+        param
+        for name, param in gpt_model.named_parameters()
+        if name.startswith(gpt_param_prefixes)
+    ]
+    if head_model is not None:
+        parameters.extend(head_model.parameters())
+    return instantiate_torch_optimizer(
+        optim_args.name, parameters, **optim_args.optimizer_kwargs(),
+    )
+
+
+def copy_remaining_parameters(
+    source_model: GPT,
+    target_model: GPT,
+    needs_logits: bool,
+):
+    modules = [
+        (source_model.wte, target_model.wte),
+        (source_model.ln_f, target_model.ln_f),
+    ]
+    if needs_logits:
+        modules.append((source_model.lm_head, target_model.lm_head))
+    for from_model, to_model in modules:
+        copy_parameters(from_model, to_model)

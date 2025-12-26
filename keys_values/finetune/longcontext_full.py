@@ -77,6 +77,7 @@ from keys_values.kvcache.gradient.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.gradient.main import (
     LongContextGradientModel,
     NaiveGPTAndHeadModel,
+    create_offload_model,
 )
 from keys_values.kvcache.utils import (
     fabric_precision_to_dtype,
@@ -536,7 +537,6 @@ def wrap_gpt_model(
     model_for_training: bool = True,
     profile_grad_times: bool = False,
     cpu_offload_device: Optional[torch.device] = None,
-    clone_model_via_flat_vectors: bool = False,
     fabric: Optional[L.Fabric] = None,
 ) -> LongContextGradientModel:
     print_message(
@@ -597,6 +597,11 @@ def wrap_gpt_model(
             )
         else:
             autograd_hooks_kwargs = None
+        if cpu_offload_device is not None:
+            offload_model = create_offload_model(gpt_model, cpu_offload_device)
+            common_kwargs["head_model"] = head_model.to(device=cpu_offload_device)
+        else:
+            offload_model = None
         model = LongContextGradientModel(
             **common_kwargs,
             layers_per_cell=kv_cache.layers_per_cell,
@@ -606,8 +611,7 @@ def wrap_gpt_model(
             backward_tmp_array_limit_gb=backward_tmp_array_limit_gb,
             autograd_hooks_kwargs=autograd_hooks_kwargs,
             profile_steps=profile_grad_times,
-            cpu_offload_device=cpu_offload_device,
-            clone_model_via_flat_vectors=clone_model_via_flat_vectors,
+            offload_model=offload_model,
         )
     else:
         model = LongContextInferenceModel(**common_kwargs)
