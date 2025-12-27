@@ -543,10 +543,18 @@ def deallocate_kv_cache_buffers_of_model(model: GPT):
     deallocate_kv_cache_buffers(kv_caches)
 
 
-def _get_length_for_device(model_part: CellBlocks) -> Dict[torch.device, int]:
+def _get_length_for_device(
+    model_part: CellBlocks,
+    default_device: Optional[torch.device] = None,
+) -> Dict[torch.device, int]:
     length_for_device = dict()
     for _, block in model_part.blocks():
-        device = block.attn.device
+        try:
+            device = block.attn.device
+            if device is None:
+                device = default_device
+        except AttributeError:
+            device = default_device
         cache_length = block.attn.kv_cache.cache_length
         length_for_device[device] = max(
             cache_length, length_for_device.get(device, 0),
@@ -561,6 +569,7 @@ def create_quantized_kv_buffers_for_checkpoints(
     layer_activations: bool = False,
     cache_kwargs: Optional[Dict[str, Any]] = None,
     dequant_kwargs: Optional[Dict[str, Any]] = None,
+    default_device: Optional[torch.device] = None,
 ) -> Dict[torch.device, QuantizedKVCacheBuffers]:
     """
     Creates a dictionary from device to :class:`QuantizedKVCacheBuffers` for
@@ -591,7 +600,7 @@ def create_quantized_kv_buffers_for_checkpoints(
     else:
         layer_act_cache_length = None
     buffer_params = KVCacheBuffersParams.from_params(cache_params)
-    length_for_device = _get_length_for_device(model_part)
+    length_for_device = _get_length_for_device(model_part, default_device)
     if dequant_kwargs is None:
         dequant_kwargs = dict()
 

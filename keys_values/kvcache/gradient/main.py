@@ -611,9 +611,11 @@ class LongContextGradientModel(LongContextInferenceModel):
 
     def copy_model_for_evaluation(self) -> LongContextInferenceModel:
         """
-        Only if `offload_model` is given. We use
-        :class:`InferenceWithOffloadModel`, so that the layer parameters are
-        removed again once this object is deleted.
+        Only if `offload_model` is given.
+
+        Attention: We use :class:`InferenceWithOffloadModel`, so that the layer
+        parameters of `offload_model` are removed again once this object is
+        deleted.
 
         Returns:
             :class:`LongContextInferenceModel` copy of this model, to be used
@@ -683,15 +685,22 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         else:
             # Checkpoints are quantized
+            if self.offload_model is not None:
+                eff_model = self.offload_model
+                default_device = self._offload_device
+            else:
+                eff_model = self.gpt_model
+                default_device = None
             layers_and_buffers = create_layers_and_buffers_for_model(
-                model=self.gpt_model,
+                model=eff_model,
                 layer_numbers=layer_numbers,
                 batch_size=self.batch_size,
                 qname=self.qname,
                 cache_kwargs=dict(
                     self.cache_kwargs,
                     tmp_array_limit_gb=self._tmp_array_limit_gb,
-                )
+                ),
+                default_device=default_device,
             )
             self.layer_checkpoints = LayerInputQuantizedCheckpoints(
                 layers_and_buffers=layers_and_buffers,
@@ -864,7 +873,9 @@ class LongContextGradientModel(LongContextInferenceModel):
             print("\n".join(lines))
         if self.offload_model is not None:
             # Copy layer parameters to `offline_model`
-            self.copy_model_for_evaluation()
+            self._create_model_shard_on_device(
+                first_layer_idx=0, num_layers=self.config.n_layer,
+            )
             gpt_model = self.offload_model
             if self.verbose is not VerbosityLevels.NONE:
                 print(

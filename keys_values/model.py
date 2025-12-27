@@ -617,6 +617,8 @@ class CausalSelfAttention(nn.Module):
 
     @property
     def device(self) -> Optional[torch.device]:
+        if not hasattr(self.qkv, "weight"):
+            return None
         w = self.qkv.weight
         return None if w is None else w.device
 

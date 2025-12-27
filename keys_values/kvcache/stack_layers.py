@@ -53,13 +53,13 @@ class CellBlocks:
             )
         # Loop over blocks
         for block_idx, block, block_kwargs in self.blocks_with_kwargs():
-            device = block.attn.device
-            x = block(
-                x.to(device=device),
-                token_idx=idx.to(device=device),
-                input_pos=input_pos,
-                **block_kwargs,
-            )
+            try:
+                device = block.attn.device
+                x = x.to(device=device)
+                idx = idx.to(device=device)
+            except AttributeError:
+                pass
+            x = block(x, token_idx=idx, input_pos=input_pos, **block_kwargs)
 
         return x
 
