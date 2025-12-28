@@ -587,7 +587,7 @@ class ModelFromFlatVectorsFactory:
             use_lm_head: If `False`, the `lm_head` module is not included
 
         """
-        names_and_modules = names_and_modules_for_shard(
+        names_and_modules, _ = names_and_modules_for_shard(
             gpt_model, shard_type, use_lm_head,
         )
         for prefix_name, module in names_and_modules:

@@ -145,7 +145,10 @@ def test_gradient_sharded(
             copy_parameters(gpt_model, gpt_models[0])
             copy_parameters(head_model, head_models[0])
             offload_model = create_offload_model(gpt_model, cpu_offload_device)
-            lcg_kwargs = dict(offload_model=offload_model)
+            lcg_kwargs = dict(
+                offload_model=offload_model,
+                offload_device=cpu_offload_device,
+            )
             if use_debug_gpt_model:
                 with torch.device(cpu_offload_device):
                     debug_gpt_model = GPT(config)
@@ -237,13 +240,13 @@ def compute_gradients_on_device(
     # Forward pass:
     # - Store inputs to each layer
     # - Compute head gradient for last layer
-    create_model_shard_on_device(
+    cmsod_kwargs = dict(
         gpt_model=gpt_model,
         gpt_model_copy=offload_model,
         target_device=cpu_offload_device,
-        first_layer_idx=0,
-        num_layers=len(gpt_model.transformer.h),
+        use_lm_head=head_model.needs_logits(),
     )
+    create_model_shard_on_device(shard_type=None, **cmsod_kwargs)
     offload_model.train()
     input_ids = input_ids.to(device=cpu_offload_device)
     targets = targets.to(device=cpu_offload_device)
@@ -263,16 +266,15 @@ def compute_gradients_on_device(
     del loss
     head_gradient = head_input.grad
     # Remove parameters for all layers
-    ModelFromFlatVectorsFactory.remove_params_of_model(offload_model)
+    ModelFromFlatVectorsFactory.remove_params_of_model(
+        offload_model, shard_type=None, use_lm_head=head_model.needs_logits(),
+    )
     # Compute gradients layer per layer. Each layer is one shard
     for layer_idx, layer_input in reversed(list(enumerate(layer_inputs))):
         x = copy_requires_grad(layer_input)
+        shard_type = f"h{layer_idx}:{layer_idx + 1}"
         model_part = create_model_shard_on_device(
-            gpt_model=gpt_model,
-            gpt_model_copy=offload_model,
-            target_device=cpu_offload_device,
-            first_layer_idx=layer_idx,
-            num_layers=1,
+            shard_type=shard_type, **cmsod_kwargs,
         )
         output = model_part.forward(x, input_ids, input_pos=None)
         _loss = (output * head_gradient).sum()
@@ -286,9 +288,9 @@ def compute_gradients_on_device(
         accumulate_gradients(module_pairs)
         head_gradient = x.grad
         ModelFromFlatVectorsFactory.remove_params_of_model(
-            gpt_model=offload_model,
-            start=layer_idx,
-            end=layer_idx + 1,
+            offload_model,
+            shard_type=shard_type,
+            use_lm_head=head_model.needs_logits(),
         )
 
     return loss_value, copy_gradients(gpt_model, device=torch.device("cpu"))
