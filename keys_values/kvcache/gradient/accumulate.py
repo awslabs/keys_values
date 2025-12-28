@@ -775,7 +775,9 @@ class GradientAccumulator:
         if not (1 <= batch_size <= max_batch_size):
             raise ValueError(f"targets.shape[0] = {batch_size}, must be in [1, {max_batch_size}]")
         self._batch_size = batch_size
-        weights_dtype = gpt_model.transformer.wte.weight.dtype
+        weights_dtype = replay_logs[0].dtype
+        if weights_dtype is None:
+            weights_dtype = torch.bfloat16
         self._initialize_internal(
             replay_logs,
             chunks_per_cell,

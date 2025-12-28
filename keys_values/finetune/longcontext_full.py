@@ -598,7 +598,11 @@ def wrap_gpt_model(
         else:
             autograd_hooks_kwargs = None
         if cpu_offload_device is not None:
-            offload_model = create_offload_model(gpt_model, cpu_offload_device)
+            offload_model = create_offload_model(
+                gpt_model,
+                target_device=cpu_offload_device,
+                use_lm_head=head_model.needs_logits(),
+            )
             common_kwargs["head_model"] = head_model.to(device=cpu_offload_device)
         else:
             offload_model = None
@@ -612,6 +616,7 @@ def wrap_gpt_model(
             autograd_hooks_kwargs=autograd_hooks_kwargs,
             profile_steps=profile_grad_times,
             offload_model=offload_model,
+            offload_device=cpu_offload_device,
         )
     else:
         model = LongContextInferenceModel(**common_kwargs)

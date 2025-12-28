@@ -130,14 +130,16 @@ def check_model_is_on_device(
 def create_offload_model(
     gpt_model: GPT,
     target_device: torch.device,
+    use_lm_head: bool = False,
 ) -> GPT:
     """
-    Creates model of the same structure as `gpt_model`, but with parameters of
-    all layers being removed. Other parameters are copied from `gpt_model`.
+    Creates model of the same structure as `gpt_model`, but with parameters
+    removed.
 
     Args:
         gpt_model (GPT): Source GPT model
         target_device (torch.device): Device for new model
+        use_lm_head: If `False`, the `lm_head` module is not removed
 
     Returns:
         See above.
@@ -150,7 +152,7 @@ def create_offload_model(
         device=target_device,
     )
     ModelFromFlatVectorsFactory.remove_params_of_model(
-        gpt_model_copy, shard_type=None,
+        gpt_model_copy, shard_type=None, use_lm_head=use_lm_head,
     )
     return gpt_model_copy
 

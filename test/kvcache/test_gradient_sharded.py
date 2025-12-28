@@ -144,7 +144,11 @@ def test_gradient_sharded(
             # Copy from CPU to GPU
             copy_parameters(gpt_model, gpt_models[0])
             copy_parameters(head_model, head_models[0])
-            offload_model = create_offload_model(gpt_model, cpu_offload_device)
+            offload_model = create_offload_model(
+                gpt_model,
+                target_device=cpu_offload_device,
+                use_lm_head=head_model.needs_logits(),
+            )
             lcg_kwargs = dict(
                 offload_model=offload_model,
                 offload_device=cpu_offload_device,
@@ -348,7 +352,11 @@ def test_gradient_sharded_simple():
             # Copy from CPU to GPU
             copy_parameters(gpt_model, gpt_models[0])
             copy_parameters(head_model, head_models[0])
-            offload_model = create_offload_model(gpt_model, cpu_offload_device)
+            offload_model = create_offload_model(
+                gpt_model,
+                target_device=cpu_offload_device,
+                use_lm_head=head_model.needs_logits(),
+            )
         gpt_models.append(gpt_model)
         head_models.append(head_model)
     # Create data batch

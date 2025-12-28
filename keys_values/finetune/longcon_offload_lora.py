@@ -412,11 +412,16 @@ def main(
     print_message(f"\nNumber of trainable parameters: {num_trainable_params:,}")
     print_message(f"Number of non-trainable parameters: {num_parameters(model, requires_grad=False):,}")
 
-    # We use one optimizer on CPU for the layers, one on GPU for the remaining
-    # parameters.
+    # We use a optimizer on CPU for all parameters of `gpt_model`. If
+    # `head_model` has parameters, we use another optimizer on GPU for them.
     gpt_param_prefixes = tuple(
         BlockComponentName.h(layer_idx) for layer_idx in range(config.n_layer)
+    ) + (
+        BlockComponentName.wte(),
+        BlockComponentName.ln_f(),
     )
+    if head_model.needs_logits():
+        gpt_param_prefixes += (BlockComponentName.lm_head(),)
     cpu_optimizer = create_optimizer(
         optim_args=optimizer,
         gpt_model=gpt_model,
@@ -427,32 +432,25 @@ def main(
         train_args=train,
         max_steps=lr_max_steps,
     )
-    gpt_param_prefixes = (
-        BlockComponentName.wte(),
-        BlockComponentName.ln_f(),
-    )
-    if head_model.needs_logits():
-        gpt_param_prefixes += (BlockComponentName.lm_head(),)
-    gpu_optimizer = create_optimizer(
-        optim_args=optimizer,
-        gpt_model=offload_model,
-        gpt_param_prefixes=gpt_param_prefixes,
-        head_model=head_model,
-    )
-    gpu_scheduler = get_lr_scheduler(
-        gpu_optimizer,
-        train_args=train,
-        max_steps=lr_max_steps,
-    )
     state = {
         "model": model,
         "cpu_optimizer": cpu_optimizer,
         "cpu_scheduler": cpu_scheduler,
-        "gpu_optimizer": gpu_optimizer,
-        "gpu_scheduler": gpu_scheduler,
         "iter_num": 0,
         "step_count": 0,
     }
+    head_model_params = list(head_model.parameters())
+    if head_model_params:
+        gpu_optimizer = instantiate_torch_optimizer(
+            optimizer.name, head_model_params, **optimizer.optimizer_kwargs(),
+        )
+        gpu_scheduler = get_lr_scheduler(
+            gpu_optimizer,
+            train_args=train,
+            max_steps=lr_max_steps,
+        )
+        state["gpu_optimizer"] = gpu_optimizer
+        state["gpu_scheduler"] = gpu_scheduler
 
     # strict=False because missing keys due to LoRA weights not contained in state dict
     print(f"Loading model checkpoint: {checkpoint_dir}")
@@ -557,8 +555,8 @@ def fit(
     model = state["model"]
     cpu_optimizer = state["cpu_optimizer"]
     cpu_scheduler = state["cpu_scheduler"]
-    gpu_optimizer = state["gpu_optimizer"]
-    gpu_scheduler = state["gpu_scheduler"]
+    gpu_optimizer = state.get("gpu_optimizer")
+    gpu_scheduler = state.get("gpu_scheduler")
     tokenizer = Tokenizer(checkpoint_dir)
     optim_device = torch.device("cpu")
 
@@ -710,12 +708,13 @@ def fit(
             record_gpu_memory_snapshots.stop_recording()
 
         cpu_optimizer.step()
-        gpu_optimizer.step()
-        print_message("Optimizer update done.")
         cpu_optimizer.zero_grad(set_to_none=True)
-        gpu_optimizer.zero_grad(set_to_none=True)
         cpu_scheduler.step()
-        gpu_scheduler.step()
+        if gpu_optimizer is not None:
+            gpu_optimizer.step()
+            gpu_optimizer.zero_grad(set_to_none=True)
+            gpu_scheduler.step()
+        print_message("Optimizer update done.")
         state["step_count"] += 1
         # Copy parameters: Not really necessary, but ensures that all params
         # of `gpt_model` are up-to-date
@@ -836,15 +835,12 @@ def create_optimizer(
     optim_args: OptimizerArgs,
     gpt_model: GPT,
     gpt_param_prefixes: Tuple[str, ...],
-    head_model: Optional[HeadModel] = None,
 ):
     parameters = [
         param
         for name, param in gpt_model.named_parameters()
         if name.startswith(gpt_param_prefixes)
     ]
-    if head_model is not None:
-        parameters.extend(head_model.parameters())
     return instantiate_torch_optimizer(
         optim_args.name, parameters, **optim_args.optimizer_kwargs(),
     )

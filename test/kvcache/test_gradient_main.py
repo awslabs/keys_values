@@ -38,8 +38,8 @@ from keys_values.model import GPT, block_iterator
 
 def args_complete_gradient_computation():
     return [
-        a + b + (c, d)
-        for d, a, b, c in product(
+        b + c + (d, a)
+        for a, b, c, d in product(
             available_backends(),
             [
                 ("lastrec", dict()),
@@ -262,7 +262,11 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
         assert kv_cache.device == device, (l_ix, kv_cache.device, device)
     with torch.device(cpu_offload_device):
         head_model = HeadModelFactory.create(name=head_model_name, config=config)
-    offload_model = create_offload_model(gpt_model, cpu_offload_device)
+    offload_model = create_offload_model(
+        gpt_model,
+        target_device=cpu_offload_device,
+        use_lm_head=head_model.needs_logits(),
+    )
     model = LongContextGradientModel(
         gpt_model=gpt_model,
         head_model=head_model,
@@ -270,6 +274,7 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
         chunk_size=chunk_size,
         qname="default",
         offload_model=offload_model,
+        offload_device=cpu_offload_device,
     )
     model.zero_grad()
 
