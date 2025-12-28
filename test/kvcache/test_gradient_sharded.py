@@ -286,7 +286,7 @@ def compute_gradients_on_device(
         accumulate_gradients(module_pairs)
         head_gradient = x.grad
         ModelFromFlatVectorsFactory.remove_params_of_model(
-            model=offload_model,
+            gpt_model=offload_model,
             start=layer_idx,
             end=layer_idx + 1,
         )

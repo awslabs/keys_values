@@ -126,6 +126,77 @@ def device_of_flat_vectors(
     return next(iter(devices))
 
 
+REGEX_SHARD_TYPE = re.compile(r"h(\d+):(\d+)$")
+
+
+def names_and_modules_for_shard(
+    gpt_model: Union[GPTFull, GPTLoRA],
+    shard_type: Optional[str],
+    use_lm_head: bool = True,
+) -> Tuple[List[Tuple[str, torch.nn.Module]], Optional[Tuple[int, int]]]:
+    """
+    Returns list of `(name, module)` tuples for modules of a shard determined
+    by `shard_type`. This can be "wte", "lm_head" (which includes "ln_f"), or
+    "h{start}:{end}". If `shard_type is None`, the union of all shards is used.
+
+    Args:
+        gpt_model: Model to extract modules of
+        shard_type: See above
+        use_lm_head: If `False`, the `lm_head` module is not included
+
+    Returns:
+        List of `(name, module)` tuples, see above. If `shard_type ==
+        "h{start}:{end}"`, we also return `(start, end)`.
+
+    """
+    names_and_modules = []
+    start = None
+    end = None
+    include_all = shard_type is None
+    if include_all or shard_type == "wte":
+        names_and_modules.append(
+            (BlockComponentName.wte(), gpt_model.transformer.wte)
+        )
+    if include_all or (
+        (not names_and_modules) and shard_type == "lm_head"
+    ):
+        names_and_modules.append(
+            (BlockComponentName.ln_f(), gpt_model.transformer.ln_f)
+        )
+        if use_lm_head:
+            names_and_modules.append(
+                (BlockComponentName.lm_head(), gpt_model.lm_head)
+            )
+    if include_all or not names_and_modules:
+        if include_all:
+            start = 0
+            end = gpt_model.config.n_layer
+        else:
+            m = REGEX_SHARD_TYPE.match(shard_type)
+            if m:
+                start = int(m.group(1))
+                end = int(m.group(2))
+                if not (0 <= start < end <= gpt_model.config.n_layer):
+                    start = end = None
+        if start is not None:
+            names_and_modules.extend(
+                [
+                    (
+                        BlockComponentName.h(layer_idx),
+                        gpt_model.transformer.h[layer_idx],
+                    )
+                    for layer_idx in range(start, end)
+                ]
+            )
+    ret2 = None
+    if not include_all:
+        if not names_and_modules:
+            raise ValueError(f"shard_type = {shard_type} unknown, must be 'wte', 'lm_head', or 'h<start>:<end>'")
+        if start is not None:
+            ret2 = (start, end)
+    return names_and_modules, ret2
+
+
 class GPTFullWrapper(GPTFull):
     def __init__(
         self,
@@ -499,37 +570,35 @@ class ModelFromFlatVectorsFactory:
 
     @staticmethod
     def remove_params_of_model(
-        model: Union[GPTFull, GPTLoRA],
-        start: int = 0,
-        end: Optional[int] = None,
+        gpt_model: Union[GPTFull, GPTLoRA],
+        shard_type: Optional[str],
+        use_lm_head: bool = True,
     ):
         """
-        Removes named parameters for blocks (layers) from `model`. Relies
-        on PyTorch default naming convention. Named parameters of components
-        other than layers are not removed.
-
-        Note: Do not call this method on a model whose parameters are referred
-        to from elsewhere, e.g. from an optimizer.
+        Removes named parameters for certain blocks from `gpt_model`. The shard
+        is determined by `shard_type`, see :func:`names_and_modules_for_shard`.
+        If `shard_type is None`, parameters for all shards are removed.
 
         Args:
-            model: Module to remove named parameters of blocks from
-            start: Parameters of blocks numbered `range(start, end)` are removed
-            end: Parameters of blocks numbered `range(start, end)` are removed
+            gpt_model: Module to remove named parameters of blocks from
+            shard_type: Selects blocks for which parameters are removed. See
+                :func:`names_and_modules_for_shard`. If `None`, parameters
+                for all shards are removed.
+            use_lm_head: If `False`, the `lm_head` module is not included
 
         """
-        if end is None:
-            end = len(model.transformer.h)
-        for layer_idx in range(start, end):
-            param_structure = AccessWeightsGradients(
-                model.transformer.h[layer_idx]
-            ).param_structure()
+        names_and_modules = names_and_modules_for_shard(
+            gpt_model, shard_type, use_lm_head,
+        )
+        for prefix_name, module in names_and_modules:
+            param_structure = AccessWeightsGradients(module).param_structure()
             for _name in [
                 pspec.name
                 for struct in param_structure.values()
                 for pspec in struct.entries
             ]:
-                name = ".".join([BlockComponentName.h(layer_idx), _name])
-                parent, pname = parent_of_parameter(model, name)
+                name = ".".join([prefix_name, _name])
+                parent, pname = parent_of_parameter(gpt_model, name)
                 delattr(parent, pname)
 
     @staticmethod

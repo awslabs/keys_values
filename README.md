@@ -109,7 +109,7 @@ into two stages:
 
 * Forward pass in inference mode: This is storing layer input checkpoints
   to CPU and logs all KV cache decisions. At the end of this stage, all KV
-  cache buffers are deallocated (but not the model weights).
+  cache buffers are deallocated.
 * Backward pass to compute gradients: This is an outer loop over rows of
   cells (top down). For each row, we first run another forward pass in
   inference mode to compute KV cache checkpoints at cell boundaries, storing
@@ -153,6 +153,20 @@ the second stage:
 * `--kv_cache.layers_per_cell`: Second stage GPU memory requirements depend
   linearly on this number. It states how many layers are processed in a cell.
   Larger values mean less sequential processing, so faster computation.
-  Ignoring anything else, choose this as large as GPU memory permits.
   Note that the CPU memory for layer input checkpoints scales inverse
   linearly with this number.
+* `--kv_cache.chunks_per_cell_multiplier`: The length of a cell is the sum of
+  its chunk's lengths. If `max_cell_length = int(kv_cache.cache_length *
+  kv_cache.chunks_per_cell_multiplier)`, chunks are grouped into a cell until
+  its length is close to `max_cell_length`, but not larger. By default,
+  `kv_cache.chunks_per_cell_multiplier = 1`, so cells are about as long as
+  the KV cache. For larger values of the multiplier, there are fewer cells per
+  row, which speeds up computations. Second stage GPU memory requirements
+  depend linearly on this number.
+
+Here, `kv_cache.layers_per_cell` and `kv_cache.chunks_per_cell_multiplier`
+determine cell sizes along layer and sequence axes. If there is leftover GPU
+memory during the second stage, they should be increased.
+
+
+TODO: Describe CPU offloading, once it works!
