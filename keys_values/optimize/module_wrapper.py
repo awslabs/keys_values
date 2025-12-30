@@ -86,11 +86,14 @@ class AccessWeightsGradients:
         self._module = module
         self._param_structure = None
         self._grad_structure = None
+        self._device = None
         self._init_structure()
 
     def _init_structure(self):
         self._param_structure: Dict[str, ParameterStructure] = dict()
         self._grad_structure: Dict[str, ParameterStructure] = dict()
+        device = None
+        name_device = None
         for name, param in self._module.named_parameters():
             dtype = str(param.dtype)
             shape = tuple(param.shape)
@@ -101,6 +104,11 @@ class AccessWeightsGradients:
                 self._param_structure[dtype] = ParameterStructure(
                     entries=[], dtype=param.dtype, size=0,
                 )
+            if device is None:
+                device = param.device
+                name_device = name
+            elif device != param.device:
+                raise ValueError(f"All parameters must be on the same device (but {name_device} on {device}; {name} on {param.device})")
             self._param_structure[dtype].append(name, shape, requires_grad)
             if requires_grad:
                 if dtype not in self._grad_structure:
@@ -108,6 +116,7 @@ class AccessWeightsGradients:
                         entries=[], dtype=param.dtype, size=0,
                     )
                 self._grad_structure[dtype].append(name, shape, requires_grad)
+        self._device = device
 
     @property
     def size_weights(self) -> Dict[str, int]:
@@ -146,6 +155,8 @@ class AccessWeightsGradients:
         out: Optional[FlatVectors] = None,
         device: Optional[torch.device] = None,
     ) -> FlatVectors:
+        if device is None:
+            device = self._device
         structures = self._grad_structure if do_gradients else self._param_structure
         if not structures:
             return dict()

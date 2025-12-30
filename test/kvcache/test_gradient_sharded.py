@@ -28,16 +28,15 @@ from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.gradient.accumulate import copy_requires_grad
 from keys_values.kvcache.gradient.main import (
     LongContextGradientModel,
-    create_model_shard_on_device,
     accumulate_gradients,
-    create_offload_model,
 )
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     copy_gradients,
 )
 from keys_values.lora import GPT
-from keys_values.optimize.model_factory import ModelFromFlatVectorsFactory
+from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
+from keys_values.optimize.model_factory import GPTShardCellBlock
 from keys_values.utils import copy_parameters
 
 
@@ -144,15 +143,7 @@ def test_gradient_sharded(
             # Copy from CPU to GPU
             copy_parameters(gpt_model, gpt_models[0])
             copy_parameters(head_model, head_models[0])
-            offload_model = create_offload_model(
-                gpt_model,
-                target_device=cpu_offload_device,
-                use_lm_head=head_model.needs_logits(),
-            )
-            lcg_kwargs = dict(
-                offload_model=offload_model,
-                offload_device=cpu_offload_device,
-            )
+            lcg_kwargs = dict(offload_device=cpu_offload_device)
             if use_debug_gpt_model:
                 with torch.device(cpu_offload_device):
                     debug_gpt_model = GPT(config)
@@ -235,7 +226,6 @@ def test_gradient_sharded(
 def compute_gradients_on_device(
     gpt_model: GPT,
     head_model: HeadModel,
-    offload_model: GPT,
     cpu_offload_device: torch.device,
     input_ids: torch.Tensor,
     targets: torch.Tensor,
@@ -245,57 +235,50 @@ def compute_gradients_on_device(
     # - Store inputs to each layer
     # - Compute head gradient for last layer
     cmsod_kwargs = dict(
-        gpt_model=gpt_model,
-        gpt_model_copy=offload_model,
-        target_device=cpu_offload_device,
-        use_lm_head=head_model.needs_logits(),
+        model=gpt_model,
+        device=cpu_offload_device,
+        lm_head=head_model.needs_logits(),
     )
-    create_model_shard_on_device(shard_type=None, **cmsod_kwargs)
-    offload_model.train()
+    gpt_model_on_device = clone_model_shard_via_flat_vectors(
+        shard_type=None, **cmsod_kwargs,
+    )
+    gpt_model_on_device.train()
     input_ids = input_ids.to(device=cpu_offload_device)
     targets = targets.to(device=cpu_offload_device)
     with torch.no_grad():
-        x = offload_model.transformer.wte(input_ids)
+        x = gpt_model_on_device.transformer.wte(input_ids)
         layer_inputs = []
-        for block in offload_model.transformer.h:
+        for block in gpt_model_on_device.transformer.h:
             layer_inputs.append(x)
-            x = block(x, input_ids, offload_model.mha)
+            x = block(x, input_ids, gpt_model_on_device.mha)
     head_input = copy_requires_grad(x)
-    x = offload_model.transformer.ln_f(head_input)
+    x = gpt_model_on_device.transformer.ln_f(head_input)
     if head_model.needs_logits():
-        x = offload_model.lm_head(x)
+        x = gpt_model_on_device.lm_head(x)
     loss = head_model(x, targets, input_pos=0).mean()
     loss.backward()
     loss_value = loss.detach()
     del loss
     head_gradient = head_input.grad
-    # Remove parameters for all layers
-    ModelFromFlatVectorsFactory.remove_params_of_model(
-        offload_model, shard_type=None, use_lm_head=head_model.needs_logits(),
-    )
     # Compute gradients layer per layer. Each layer is one shard
     for layer_idx, layer_input in reversed(list(enumerate(layer_inputs))):
         x = copy_requires_grad(layer_input)
         shard_type = f"h{layer_idx}:{layer_idx + 1}"
-        model_part = create_model_shard_on_device(
+        shard_on_device = clone_model_shard_via_flat_vectors(
             shard_type=shard_type, **cmsod_kwargs,
         )
+        model_part = GPTShardCellBlock(shard_on_device)
         output = model_part.forward(x, input_ids, input_pos=None)
         _loss = (output * head_gradient).sum()
         _loss.backward()
         module_pairs = [
             (
-                offload_model.transformer.h[layer_idx],
+                shard_on_device.transformer.h[0],
                 gpt_model.transformer.h[layer_idx],
             ),
         ]
         accumulate_gradients(module_pairs)
         head_gradient = x.grad
-        ModelFromFlatVectorsFactory.remove_params_of_model(
-            offload_model,
-            shard_type=shard_type,
-            use_lm_head=head_model.needs_logits(),
-        )
 
     return loss_value, copy_gradients(gpt_model, device=torch.device("cpu"))
 
@@ -352,11 +335,6 @@ def test_gradient_sharded_simple():
             # Copy from CPU to GPU
             copy_parameters(gpt_model, gpt_models[0])
             copy_parameters(head_model, head_models[0])
-            offload_model = create_offload_model(
-                gpt_model,
-                target_device=cpu_offload_device,
-                use_lm_head=head_model.needs_logits(),
-            )
         gpt_models.append(gpt_model)
         head_models.append(head_model)
     # Create data batch
@@ -381,7 +359,6 @@ def test_gradient_sharded_simple():
             loss_value, grads = compute_gradients_on_device(
                 gpt_model=gpt_model,
                 head_model=head_model,
-                offload_model=offload_model,
                 cpu_offload_device=cpu_offload_device,
                 input_ids=input_ids,
                 targets=targets,
@@ -407,3 +384,14 @@ def test_gradient_sharded_simple():
             raise IndexError(f"name = {name} is in gradients[0], but not in gradients[1]")
         print(f"Comparing gradient for {name}")
         torch.testing.assert_close(value, value_comp)
+
+
+if __name__ == "__main__":
+    test_gradient_sharded(
+        cache_name="h2o-torch-quantized8",
+        cache_kwargs={"grace_period": 10, "replay_log_blocksize": 64},
+        cache_length=128,
+        chunk_size=32,
+        seq_length=128 + 2 * 32 + 15,
+        layers_per_cell=1,
+    )

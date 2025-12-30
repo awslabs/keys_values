@@ -23,10 +23,7 @@ from litgpt.config import Config
 from keys_values.head_model import CrossEntropyOnLogits, SequenceClassification
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
-from keys_values.kvcache.gradient.main import (
-    LongContextGradientModel,
-    create_offload_model,
-)
+from keys_values.kvcache.gradient.main import LongContextGradientModel
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     copy_gradients,
@@ -262,18 +259,12 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
         assert kv_cache.device == device, (l_ix, kv_cache.device, device)
     with torch.device(cpu_offload_device):
         head_model = HeadModelFactory.create(name=head_model_name, config=config)
-    offload_model = create_offload_model(
-        gpt_model,
-        target_device=cpu_offload_device,
-        use_lm_head=head_model.needs_logits(),
-    )
     model = LongContextGradientModel(
         gpt_model=gpt_model,
         head_model=head_model,
         layers_per_cell=layers_per_cell,
         chunk_size=chunk_size,
         qname="default",
-        offload_model=offload_model,
         offload_device=cpu_offload_device,
     )
     model.zero_grad()
@@ -311,5 +302,10 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
 
 
 if __name__ == "__main__":
-    args = args_complete_gradient_computation()[1]
-    test_complete_gradient_computation(*args)
+    test_complete_gradient_computation(
+        cache_name="h2o",
+        cache_kwargs={"grace_period": 10, "replay_log_blocksize": 64},
+        cache_lengths=[128, 128],
+        use_new_cache=False,
+        device=torch.device("cuda", 0),
+    )

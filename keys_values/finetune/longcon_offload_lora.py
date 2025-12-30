@@ -72,8 +72,9 @@ from keys_values.finetune.utils import (
     HEAD_MODEL_FNAME,
     LIT_MODEL_FNAME,
 )
-from keys_values.head_model import CrossEntropyOnLogits, HeadModel
+from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
+from keys_values.kvcache.factory import deallocate_kv_cache_buffers_of_model
 from keys_values.kvcache.gradient.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.utils import (
     VerbosityLevels,
@@ -237,11 +238,9 @@ def setup(
     if head_model_kwargs is None:
         head_model_kwargs = dict()
     device = int(device)
-    if device < 0:
-        raise ValueError("device must be non-negative integer")
     if not torch.cuda.is_available():
         raise ValueError("CUDA not available")
-    if device >= torch.cuda.device_count():
+    if not (0 <= device < torch.cuda.device_count()):
         raise ValueError(f"device = {device}, must be in [0, {torch.cuda.device_count() - 1}]")
     if optimizer is None:
         optimizer = OptimizerArgs(name="AdamW")
@@ -400,7 +399,6 @@ def main(
         profile_grad_times=profile_grad_times > 0,
         cpu_offload_device=device,
     )
-    offload_model = model.offload_model
     mark_only_lora_as_trainable(model.gpt_model)
     # DEBUG
     for name, param in model.named_parameters():
@@ -518,6 +516,7 @@ def main(
         print_message(
             f"Final evaluation | val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}"
         )
+        deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
         del valid_model
         flush_io_streams()
 
@@ -616,6 +615,7 @@ def fit(
                 dataclasses.replace(eval, max_iters=1),
                 batch_transform,
             )  # sanity check
+    deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
     del valid_model
 
     if record_gpu_memory_kind == 3:
@@ -666,8 +666,7 @@ def fit(
                 max_entries=record_gpu_memory_snapshots.max_entries,
                 verbose=verbose,
             )
-            if record_gpu_memory_kind != 2:
-                record_gpu_memory_snapshots.start_recording()
+            record_gpu_memory_snapshots.start_recording()
 
         is_accumulating = state["iter_num"] % train.gradient_accumulation_iters(1, 1) != 0
         print_with_rank_and_timestamp("Starting gradient computation.", 0)
@@ -792,6 +791,8 @@ def fit(
             print_message(
                 f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}"
             )
+            deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
+            del valid_model
 
         if train.save_interval is not None and not is_accumulating and state["step_count"] % train.save_interval == 0:
             interval_dir = out_dir / f"step-{state['step_count']:06d}"

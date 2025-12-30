@@ -549,12 +549,12 @@ def _get_length_for_device(
 ) -> Dict[torch.device, int]:
     length_for_device = dict()
     for _, block in model_part.blocks():
-        try:
-            device = block.attn.device
-            if device is None:
-                device = default_device
-        except AttributeError:
-            device = default_device
+        device = default_device
+        if device is None:
+            try:
+                device = block.attn.device
+            except AttributeError:
+                device = None
         cache_length = block.attn.kv_cache.cache_length
         length_for_device[device] = max(
             cache_length, length_for_device.get(device, 0),

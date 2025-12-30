@@ -320,6 +320,10 @@ class KVCacheBuffers(torch.nn.Module):
             device: If given, the default device is set to this value.
 
         """
+        self._deallocate(device)
+        self.current_length = 0
+
+    def _deallocate(self, device: Optional[torch.device] = None):
         raise NotImplementedError()
 
     @property
@@ -412,7 +416,7 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
             self.k = torch.zeros(shape, device=device, dtype=self.dtype)
             self.v = torch.zeros(shape, device=device, dtype=self.dtype)
 
-    def deallocate(self, device: Optional[torch.device] = None):
+    def _deallocate(self, device: Optional[torch.device] = None):
         if self.k is not None:
             del self.k
             self.k = None

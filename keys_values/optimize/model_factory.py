@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import Dict, List, Optional, Union, Tuple
+from typing import Dict, List, Optional, Union, Tuple, Iterable, Any
 
 import torch
 import torch.nn as nn
@@ -25,6 +25,7 @@ from litgpt.lora import (
 )
 
 from keys_values.attention import MultiHeadSelfAttention
+from keys_values.kvcache.stack_layers import CellBlocks
 from keys_values.lora import GPT as GPTLoRA, Block as BlockLoRA
 from keys_values.model import GPT as GPTFull, Block as BlockFull
 from keys_values.optimize.module_wrapper import (
@@ -36,6 +37,11 @@ from keys_values.use_eager_kernel import transform_mha_kwargs
 
 
 class BlockComponentName:
+    """
+    Represents parameter name prefixes. Must be kept in sync with
+    :class:`keys_values.model.GPT`.
+
+    """
     @staticmethod
     def wte() -> str:
         return "transformer.wte"
@@ -198,6 +204,11 @@ def names_and_modules_for_shard(
 
 
 class GPTFullWrapper(GPTFull):
+    """
+    Represents :class:`keys_values.model.GPT`, but based on components
+    passed at construction.
+
+    """
     def __init__(
         self,
         config: ConfigFull,
@@ -247,6 +258,11 @@ class GPTFullWrapper(GPTFull):
 
 
 class GPTLoRAWrapper(GPTLoRA):
+    """
+    Represents :class:`keys_values.lora.GPT`, but based on components
+    passed at construction.
+
+    """
     def __init__(
         self,
         config: ConfigLoRA,
@@ -297,16 +313,19 @@ class GPTLoRAWrapper(GPTLoRA):
         return get_weights_as_flat_vectors(self, lm_head, device)
 
 
-# TODO:
-# Needed if removing parameters from a full model does not work.
-# ==> Must be updated to represent current model!
-# - Why subclass of GPTFull?
-# - Relation to stack_layers?
-class GPTStackBlocks(GPTFull):
+class GPTShardOfBlocks(GPTFull):
+    """
+    Represents a shard of a model of type :class:`keys_values.model.GPT` or
+    :class:`keys_values.lora.GPT`. Different to :class:`GPTFullWrapper` or
+    :class:`GPTLoRAWrapper`, not all model components are present. Objects of
+    this class cannot be used in the normal way, but only with methods of
+    :class:`keys_values.kvcache.gradient.accumulate.GradientAccumulator`.
+`
+    """
     def __init__(
         self,
         config: ConfigFull,
-        components: Union[List[BlockFull], List[BlockLoRA]],
+        components: Dict[str, nn.Module],
         mha: Optional[MultiHeadSelfAttention] = None,
         **mha_kwargs,
     ):
@@ -314,72 +333,133 @@ class GPTStackBlocks(GPTFull):
         assert config.padded_vocab_size is not None
         self.config = config
 
-        self.transformer = nn.ModuleDict(dict(h=nn.ModuleList(components)))
-        self.lm_head = None
+        self.lm_head = components.get(BlockComponentName.lm_head())
+        modules = dict()
+        for name, kname in (
+            (BlockComponentName.wte(), "wte"),
+            (BlockComponentName.ln_f(), "ln_f"),
+        ):
+            block = components.get(name)
+            if block is not None:
+                modules[kname] = block
+        h_modules = sorted(
+            [
+                (BlockComponentName.is_h(name), mod)
+                for name, mod in components.items()
+                if BlockComponentName.is_h(name) is not None
+            ],
+            key=lambda x: x[0],
+        )
+        if h_modules:
+            idxs, mods = zip(*h_modules)
+            first_layer_idx = idxs[0]
+            if idxs != tuple(range(first_layer_idx, first_layer_idx + len(idxs))):
+                raise ValueError(f"Layer components have idxs {idxs}, must be {list(range(first_layer_idx, first_layer_idx + len(idxs)))}")
+            modules["h"] = nn.ModuleList(mods)
+        else:
+            first_layer_idx = None
+        self.first_layer_idx = first_layer_idx
+        if modules:
+            self.transformer = nn.ModuleDict(modules)
+        else:
+            self.transformer = None
         if mha is None:
             self.mha = MultiHeadSelfAttention(
                 config, **transform_mha_kwargs(mha_kwargs, config),
             )
         else:
             self.mha = mha
-        self.max_seq_length = config.block_size
-        self._default_kv_cache = False
+        if self._has_layers():
+            self.max_seq_length = config.block_size
+
+    def _has_layers(self) -> bool:
+        return self.transformer is not None and hasattr(self.transformer,"h")
+
+    @property
+    def max_seq_length(self) -> int:
+        if self._has_layers():
+            return self._max_seq_length
+        else:
+            raise NotImplementedError("Cannot be used for this model shard")
+
+    @max_seq_length.setter
+    def max_seq_length(self, value: int) -> None:
+        if self._has_layers():
+            # See https://gist.github.com/Susensio/979259559e2bebcd0273f1a95d7c1e79
+            # Would be best to get rid of the setter!
+            super(GPTShardOfBlocks, type(self)).max_seq_length.fset(self, value)
+        else:
+            raise NotImplementedError("Cannot be used for this model shard")
 
     def forward(
         self,
-        x: torch.Tensor,
         idx: torch.Tensor,
         input_pos: Optional[int] = None,
-    ) -> torch.Tensor:
-        batch_size, seq_len, _ = x.shape
-        if idx.shape != (batch_size, seq_len):
-            raise ValueError(f"idx.shape = {idx.shape}, must be {(batch_size, seq_len)}")
-        if self.max_seq_length < seq_len:
-            raise ValueError(f"Cannot forward sequence of length {seq_len}, max seq length is only {self.max_seq_length}.")
-        for_prefill = False
-        if input_pos is not None:
-            # Few tokens generation. This needs a KV cache. If none is assigned,
-            # the call fails
-            if not self.are_kv_caches_assigned():
-                raise ValueError(
-                    "KV caches are not assigned. Assign KV caches with 'assign_kv_caches' or create default caches with 'set_kv_caches'"
-                )
-            for_prefill = input_pos == 0
-            if not for_prefill:
-                for block_idx, block in enumerate(self.transformer.h):
-                    kv_cache = block.attn.kv_cache
-                    if kv_cache.next_token_pos is None:
-                        raise ValueError("Inference calls need to start with pre-fill, i.e. 'input_pos=0'")
-                    if kv_cache.next_token_pos != input_pos:
-                        raise ValueError(
-                            f"KV cache for layer {block_idx}: input_pos = {input_pos} != {kv_cache.next_token_pos} = kv_cache.next_token_pos"
-                        )
-                    if kv_cache.max_tokens_forward < seq_len:
-                        raise ValueError(
-                            f"KV cache for layer {block_idx}: seq_len = {seq_len}, must be <= max_tokens_forward = {kv_cache.max_tokens_forward}"
-                        )
-
-        for block_idx, block in enumerate(self.transformer.h):
-            if for_prefill:
-                # Complain if batch size of cache is too small
-                attn = block.attn
-                if attn.kv_cache.max_batch_size < batch_size:
-                    raise ValueError(
-                        f"Batch size {batch_size} is too large for KV cache layer {block_idx} (batch size {attn.kv_cache.max_batch_size}). Use 'assign_kv_caches' or `set_kv_caches'"
-                    )
-            x = block(x, idx, self.mha, input_pos)
-
-        return x
+        skip_lm_head: bool = False,
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        raise NotImplementedError("Must not call `forward` for this object")
 
     def get_gradients_as_flat(
-            self,
-            first_block_idx: int,
-            device: Optional[torch.device] = None,
+        self, device: Optional[torch.device] = None,
     ) -> Dict[str, FlatVectors]:
-        return {
-            f"layer{first_block_idx + i}": AccessWeightsGradients(block).get_gradients(device=device)
-            for i, block in enumerate(self.transformer.h)
-        }
+        if self.first_layer_idx is not None:
+            result = {
+                BlockComponentName.h(
+                    self.first_layer_idx + i
+                ): AccessWeightsGradients(block).get_gradients(device=device)
+                for i, block in enumerate(self.transformer.h)
+            }
+        else:
+            result = dict()
+        if self.lm_head is not None:
+            result[BlockComponentName.lm_head()] = AccessWeightsGradients(
+                self.lm_head
+            ).get_gradients(device=device)
+        if self.transformer is not None:
+            for name, kname in (
+                (BlockComponentName.wte(), "wte"),
+                (BlockComponentName.ln_f(), "ln_f"),
+            ):
+                if hasattr(self.transformer, kname):
+                    result[name] = AccessWeightsGradients(
+                        getattr(self.transformer, kname)
+                    ).get_gradients(device=device)
+        return result
+
+
+class GPTShardCellBlock(CellBlocks):
+    """
+    Wraps shard of type :class:`GPTShardOfBlocks` into
+    :class:`keys_values.kvcache.stack_layers.CellBlocks`, to be used with
+    :class:`keys_values.kvcache.gradient.accumulate.GradientAccumulator`.
+
+    """
+    def __init__(self, shard: GPTShardOfBlocks):
+        super().__init__(shard.config)
+        if shard.first_layer_idx is None:
+            raise ValueError("shard must be stack of layers")
+        self._shard = shard
+
+    @property
+    def max_seq_length(self) -> int:
+        return self._shard.max_seq_length
+
+    def blocks_with_kwargs(self) -> Iterable[Tuple[int, BlockFull, Dict[str, Any]]]:
+        block_kwargs = dict(mha=self._shard.mha)
+        fli = self.first_layer_idx
+        return zip(
+            range(fli, fli + self.num_layers),
+            self._shard.transformer.h,
+            [block_kwargs] * self.num_layers,
+        )
+
+    @property
+    def first_layer_idx(self) -> int:
+        return self._shard.first_layer_idx
+
+    @property
+    def num_layers(self) -> int:
+        return len(self._shard.transformer.h)
 
 
 class ModelFromFlatVectorsFactory:
@@ -653,6 +733,7 @@ class ModelFromFlatVectorsFactory:
             **mha_kwargs,
         )
 
+    # TODO: Not needed anymore?
     @staticmethod
     def remove_params_of_model(
         gpt_model: Union[GPTFull, GPTLoRA],
@@ -686,6 +767,7 @@ class ModelFromFlatVectorsFactory:
                 parent, pname = parent_of_parameter(gpt_model, name)
                 delattr(parent, pname)
 
+    # TODO: Not needed anymore?
     @staticmethod
     def restore_params_of_model(
         model: Union[GPTFull, GPTLoRA],

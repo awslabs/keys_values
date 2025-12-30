@@ -53,13 +53,10 @@ from keys_values.long_context import (
 )
 from keys_values.model import GPT, block_iterator, device_for_layer
 from keys_values.optimize.clone_model import (
-    clone_model_via_flat_vectors,
+    clone_model_shard_via_flat_vectors,
     copy_flat_vectors_to,
 )
-from keys_values.optimize.model_factory import (
-    ModelFromFlatVectorsFactory,
-    names_and_modules_for_shard,
-)
+from keys_values.optimize.model_factory import GPTShardCellBlock
 from keys_values.optimize.module_wrapper import AccessWeightsGradients
 
 
@@ -125,94 +122,6 @@ def check_model_is_on_device(
     for name, param in model.named_parameters():
         if param.device != device:
             raise ValueError(f"Model {model_name} must be on {device}, but device['{name}'] = {param.device}")
-
-
-def create_offload_model(
-    gpt_model: GPT,
-    target_device: torch.device,
-    use_lm_head: bool = False,
-) -> GPT:
-    """
-    Creates model of the same structure as `gpt_model`, but with parameters
-    removed.
-
-    Args:
-        gpt_model (GPT): Source GPT model
-        target_device (torch.device): Device for new model
-        use_lm_head: If `False`, the `lm_head` module is not removed
-
-    Returns:
-        See above.
-
-    """
-    # This is a bit wasteful. First, the whole model is copied, then
-    # all parameters are removed.
-    gpt_model_copy = clone_model_via_flat_vectors(
-        model=gpt_model,
-        device=target_device,
-    )
-    ModelFromFlatVectorsFactory.remove_params_of_model(
-        gpt_model_copy, shard_type=None, use_lm_head=use_lm_head,
-    )
-    return gpt_model_copy
-
-
-def create_model_shard_on_device(
-    gpt_model: GPT,
-    gpt_model_copy: GPT,
-    target_device: torch.device,
-    shard_type: Optional[str],
-    use_lm_head: bool = True,
-) -> Optional[DefaultCellBlocks]:
-    """
-    Copies parameter values from `gpt_model` to `gpt_model_copy`, the latter
-    on device `target_device`. Only for transformer blocks numbered
-    `range(first_layer_idx, first_layer_idx + num_layers)`. Parameters may not
-    exist in `gpt_model_copy`, they are created there.
-
-    Args:
-        gpt_model (GPT): Source GPT model
-        gpt_model_copy (GPT): Target GPT model, with parameters removed
-        target_device (torch.device): Device for target parameters
-        shard_type (str): Shard type, can be "wte", "lm_head", or
-            "h{start}:{end}". If `None`, uses the union of all shards.
-        use_lm_head: If `False`, the `lm_head` module is not included
-
-    Returns:
-        :class:`DefaultCellBlocks` object wrapping the layers in
-        `gpt_model_copy`.
-
-    """
-    # Read out flat vectors from `gpt_model` and copy to device
-    names_and_modules, ret2 = names_and_modules_for_shard(
-        gpt_model, shard_type, use_lm_head,
-    )
-    if ret2 is not None:
-        start, end = ret2
-    else:
-        start = end = None
-    param_structures = dict()
-    weights_vecs = dict()
-    for name, module in names_and_modules:
-        access = AccessWeightsGradients(module)
-        weights_vecs[name] = copy_flat_vectors_to(
-            access.get_weights(), device=target_device,
-        )
-        param_structures[name] = access.param_structure()
-    # Restore parameters
-    ModelFromFlatVectorsFactory.restore_params_of_model(
-        model=gpt_model_copy,
-        param_structures=param_structures,
-        weights_vecs=weights_vecs,
-    )
-    if start is not None:
-        return DefaultCellBlocks(
-            model=gpt_model_copy,
-            first_layer_idx=start,
-            num_layers=end - start,
-        )
-    else:
-        return None
 
 
 def accumulate_gradients(
@@ -315,25 +224,15 @@ class LongContextGradientModel(LongContextInferenceModel):
 
     CPU offloading:
 
-    Only on training mode. If `offload_model` is given, we run a form of CPU
-    offloading. Namely, `gpt_model` is on the CPU, `offload_model` on a GPU
-    device:
+    Only on training mode. If `offload_device` is given, we run a form of CPU
+    offloading. Namely, `gpt_model` is on the CPU, while computations are done
+    using suitable copies on device `offload_device`.
 
-    * `gpt_model` is complete, it is used to accumulate gradients. Its
-      parameters are temporarily copied to `offload_model`.
-    * `offload_model` is a copy of `gpt_model`, with all parameters removed.
-      For the forward pass, all parameters are copied from gpt_model`. During
-      the backward pass, parameters are activated and copied from `gpt_model`
-      in separate shards, while gradients are copied back to `gpt_model`.
-    * If `head_model` has parameters, they are on the same device as
-      `offload_model`.
-    * The idea is to use different optimizers, one on the CPU for all sharded
-      parameters, one on the GPU for all others (if any)s. The former optimizer
-      is coupled to `gpt_model`.
+    * `gpt_model` is on the CPU, it is used to accumulate gradients. Its
+      parameters are temporarily copied.
+    * If `head_model` has parameters, they are on `offload_device`.
     * For evaluation, use :meth:`copy_model_for_evaluation` to obtain a
-      :class:`LongContextInferenceModel` copy on the device. This is using
-      `offload_model` as GPT model, after parameters have been copied from
-      `gpt_model`.
+      :class:`LongContextInferenceModel` copy on device `offload_device`.
 
     """
     def __init__(
@@ -356,7 +255,6 @@ class LongContextGradientModel(LongContextInferenceModel):
         debug_dont_use_autograd_hooks: bool = False,
         use_arrays_cleanup: bool = True,
         profile_steps: bool = False,
-        offload_model: Optional[GPT] = None,
         offload_device: Optional[torch.device] = None,
         debug_gpt_model: Optional[GPT] = None,
         debug_store_intermediates: bool = False,
@@ -408,9 +306,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 Supports recovery from OOM errors mechanism.
             profile_steps: We measure times of different parts of a gradient
                 computation.
-            offload_model: See above. If given, this model copy is used for all
-                computations, after parameters have been copied from `gpt_model`.
-            offload_device: Device on which `offload_model` has its parameters.
+            offload_device: See above.
 
         """
         super().__init__(
@@ -470,13 +366,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._record_gpu_memory_kind = None
         self._profile_records = [] if profile_steps else None
         self._timer_start = None
-        self.offload_model = offload_model
-        if offload_model is not None:
-            if offload_device is None:
-                raise ValueError("offload_device must be given if offload_model is")
-        else:
-            offload_device = None
-        self._offload_device = offload_device
+        self.offload_device = offload_device
         self._init_cpu_offloading()
         self._debug_gpt_model = debug_gpt_model
         if debug_store_intermediates:
@@ -490,12 +380,12 @@ class LongContextGradientModel(LongContextInferenceModel):
         return self._status
 
     def _init_cpu_offloading(self):
-        if self.offload_model is not None:
+        if self.offload_device is not None:
             check_model_is_on_device(
                 self.gpt_model, torch.device("cpu"),"gpt_model",
             )
             check_model_is_on_device(
-                self.head_model, self._offload_device, "head_model",
+                self.head_model, self.offload_device, "head_model",
             )
 
     def forward(
@@ -613,31 +503,30 @@ class LongContextGradientModel(LongContextInferenceModel):
 
     def copy_model_for_evaluation(self) -> LongContextInferenceModel:
         """
-        Only if `offload_model` is given.
-
-        Attention: We use :class:`InferenceWithOffloadModel`, so that the layer
-        parameters of `offload_model` are removed again once this object is
-        deleted.
+        Only if `offload_device` is given.
 
         Returns:
-            :class:`LongContextInferenceModel` copy of this model, to be used
-            for evaluation. Here, `offload_model` is used as GPT part, after
-            parameters have been copied from `gpt_model`, and `head_model` is
-            used as head part.
+            :class:`LongContextInferenceModel` copy of this model on device
+            `offload_device`.
 
         """
-        if self.offload_model is None:
-            raise IndexError("Only to be used if `offload_model` is set")
+        if self.offload_device is None:
+            raise IndexError("Only to be used if `offload_device` is set")
         do_timing = self.verbose is not VerbosityLevels.NONE
         timer_start = None
         if self.verbose is not VerbosityLevels.NONE:
-            print(f"Copy parameters to {self._offload_device}")
+            print(f"Copy parameters to {self.offload_device}")
             if torch.cuda.is_available():
                 torch.cuda.current_stream().synchronize()
             timer_start = time.perf_counter()
-        self._create_model_shard_on_device(shard_type=None)
-        model_copy = InferenceWithOffloadModel(
-            gpt_model=self.offload_model,
+        gpt_model_copy = clone_model_shard_via_flat_vectors(
+            model=self.gpt_model,
+            device=self.offload_device,
+            shard_type=None,
+            lm_head=True,
+        )
+        model_copy = LongContextInferenceModel(
+            gpt_model=gpt_model_copy,
             head_model=self.head_model,
             chunk_size=self.chunk_size,
             randomize_chunk_sizes=self.randomize_chunk_sizes,
@@ -663,13 +552,6 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         """
         super()._init_members_from_tokens(input_ids, targets)
-        if self.offload_model is not None:
-            # Changes to `gpt_model` must be transferred to `offload_model`.
-            # It is important to do this before
-            # :meth:`_create_layer_checkpointers` is called, since this method
-            # uses `offload_model` in place of `gpt_model`.
-            self.offload_model.config = self.gpt_model.config
-            self.offload_model.max_seq_length = self.gpt_model.max_seq_length
         if self.training:
             # Create checkpointing members
             self._create_layer_checkpointers()
@@ -692,14 +574,8 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         else:
             # Checkpoints are quantized
-            if self.offload_model is not None:
-                eff_model = self.offload_model
-                default_device = self._offload_device
-            else:
-                eff_model = self.gpt_model
-                default_device = None
             layers_and_buffers = create_layers_and_buffers_for_model(
-                model=eff_model,
+                model=self.gpt_model,
                 layer_numbers=layer_numbers,
                 batch_size=self.batch_size,
                 qname=self.qname,
@@ -707,7 +583,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                     self.cache_kwargs,
                     tmp_array_limit_gb=self._tmp_array_limit_gb,
                 ),
-                default_device=default_device,
+                default_device=self.offload_device,
             )
             self.layer_checkpoints = LayerInputQuantizedCheckpoints(
                 layers_and_buffers=layers_and_buffers,
@@ -879,20 +755,18 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
             print("\n".join(lines))
 
-        if self._record_gpu_memory_kind == 2:
-            self._record_gpu_memory_snapshots.set_path(
-                self._record_gpu_memory_snapshots.path.parent / "snapshot_forward.pickle"
+        if self.offload_device is not None:
+            # Clone `gpt_model` to `offload_device`
+            gpt_model = clone_model_shard_via_flat_vectors(
+                model=self.gpt_model,
+                device=self.offload_device,
+                shard_type=None,
+                lm_head=self.head_model.needs_logits(),
             )
-            self._record_gpu_memory_snapshots.start_recording()
-
-        if self.offload_model is not None:
-            # Copy all parameters to `offline_model`
-            self._create_model_shard_on_device(shard_type=None)
-            gpt_model = self.offload_model
             if self.verbose is not VerbosityLevels.NONE:
                 print(
-                    f"\nCopied complete model to device {self._offload_device}:\n"
-                    + message_with_device_memory(self._offload_device)
+                    f"\nCopied complete model to device {self.offload_device}:\n"
+                    + message_with_device_memory(self.offload_device)
                 )
         else:
             gpt_model = self.gpt_model
@@ -915,15 +789,22 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         # Replay logs from KV caches are required in
         # :meth:`_backward_accumulate_gradients`.
-        # Note: Deallocation of KV cache buffers and removal of layer parameters
-        # in `offload_model` are done in :meth:`_backward_accumulate_gradients`.
         self._replay_logs = []
         for block in block_iterator(gpt_model):
             cache = block.attn.kv_cache
             self._replay_logs.append(cache.get_replay_log())
             cache.switch_replay_logging(False)
 
+        deallocate_kv_cache_buffers_of_model(gpt_model)
+        if self.offload_device is not None:
+            del gpt_model
+        gc.collect()
         torch.cuda.empty_cache()
+        if self.offload_device is not None and self.verbose is not VerbosityLevels.NONE:
+            print(
+                f"\nDeallocated weights of model on device {self.offload_device}:\n"
+                + message_with_device_memory(self.offload_device)
+            )
         self._status = "forward_done"
         return LossValue(loss_full, model=self)
 
@@ -965,8 +846,6 @@ class LongContextGradientModel(LongContextInferenceModel):
                 except RuntimeError as ex:
                     oom_exception_action(ex, self._backward_tmp_array_limit_gb)
                     self.gpt_model.zero_grad(set_to_none=True)
-                    if self.offload_model is not None:
-                        self.offload_model.zero_grad(set_to_none=True)
                     self._clear_backward()
                     self._status = "forward_done"
                     count += 1
@@ -1015,8 +894,8 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         """
         def device_for_slice(layer_idx):
-            if self.offload_model is not None:
-                return self._offload_device
+            if self.offload_device is not None:
+                return self.offload_device
             else:
                 return device_for_layer(
                     self.gpt_model,
@@ -1054,23 +933,6 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         # Sanity check:
         assert self.layer_checkpoints.layer_numbers[-1] == self.gpt_model.config.n_layer + 1
-        if self.offload_model is None:
-            gpt_model_on_device = self.gpt_model
-        else:
-            gpt_model_on_device = self.offload_model
-        deallocate_kv_cache_buffers_of_model(gpt_model_on_device)
-        if self.offload_model is not None:
-            # Remove all parameters. Below, parameters are brought back shard
-            # by shard.
-            self._remove_params_offload_model(shard_type=None)
-        gc.collect()
-        torch.cuda.empty_cache()
-        if self.offload_model is not None and self.verbose is not VerbosityLevels.NONE:
-            print(
-                f"\nDeallocated weights of model on device {self._offload_device}:\n"
-                + message_with_device_memory(self._offload_device)
-            )
-
         if self._record_gpu_memory_kind in (0, 2):
             self._record_gpu_memory_snapshots.store_current_snapshot()
             if self._record_gpu_memory_kind == 2:
@@ -1090,43 +952,46 @@ class LongContextGradientModel(LongContextInferenceModel):
         if self.verbose is VerbosityLevels.SOME:
             num_rows = len(self.layer_checkpoints.layer_numbers) - 2
             print(f"\nRunning backward pass over {num_rows} rows of cells, {self.config.n_layer} layers, using activation checkpointing")
-        shard_type = "lm_head"
-        try:
-            if self.offload_model is not None:
-                self._create_model_shard_on_device(shard_type)
-                target_device = self._offload_device
-            else:
-                target_device = device_for_layer(self.gpt_model, -1)
-            self._targets = self._targets.to(device=target_device)
-            self.accumulator.run_head_model(
-                gpt_model=gpt_model_on_device,
-                head_model=self.head_model,
-                replay_logs=self._replay_logs,
-                chunks_per_cell=self.chunks_per_cell,
-                get_inputs_slice=partial(get_inputs_slice, layer_idx=self.config.n_layer),
-                write_head_gradients_slice=write_head_gradients_slice,
-                targets=self._targets,
+        if self.offload_device is not None:
+            shard_on_device = clone_model_shard_via_flat_vectors(
+                model=self.gpt_model,
+                device=self.offload_device,
+                shard_type="lm_head",
+                lm_head=self.head_model.needs_logits(),
             )
-            if self.offload_model is not None:
-                module_pairs = [
-                    (
-                        self.offload_model.transformer.ln_f,
-                        self.gpt_model.transformer.ln_f,
-                    )
-                ]
+            target_device = self.offload_device
+        else:
+            shard_on_device = self.gpt_model
+            target_device = device_for_layer(self.gpt_model, -1)
+        self._targets = self._targets.to(device=target_device)
+        self.accumulator.run_head_model(
+            gpt_model=shard_on_device,
+            head_model=self.head_model,
+            replay_logs=self._replay_logs,
+            chunks_per_cell=self.chunks_per_cell,
+            get_inputs_slice=partial(get_inputs_slice, layer_idx=self.config.n_layer),
+            write_head_gradients_slice=write_head_gradients_slice,
+            targets=self._targets,
+        )
+        if self.offload_device is not None:
+            module_pairs = [
+                (
+                    shard_on_device.transformer.ln_f,
+                    self.gpt_model.transformer.ln_f,
+                )
+            ]
+            if self.head_model.needs_logits():
+                module_pairs.append(
+                    (shard_on_device.lm_head, self.gpt_model.lm_head)
+                )
+            if self._debug_gpt_model is not None:
+                debug_modules = [self._debug_gpt_model.transformer.ln_f]
                 if self.head_model.needs_logits():
-                    module_pairs.append(
-                        (self.offload_model.lm_head, self.gpt_model.lm_head)
-                    )
-                if self._debug_gpt_model is not None:
-                    debug_modules = [self._debug_gpt_model.transformer.ln_f]
-                    if self.head_model.needs_logits():
-                        debug_modules.append(self._debug_gpt_model.lm_head)
-                else:
-                    debug_modules = None
-                accumulate_gradients(module_pairs, debug_modules)
-        finally:
-            self._remove_params_offload_model(shard_type)
+                    debug_modules.append(self._debug_gpt_model.lm_head)
+            else:
+                debug_modules = None
+            accumulate_gradients(module_pairs, debug_modules)
+            del shard_on_device
 
         if self._record_gpu_memory_kind == 1:
             # End of recording for initial snapshot (everything before the
@@ -1147,57 +1012,63 @@ class LongContextGradientModel(LongContextInferenceModel):
             if self._use_arrays_cleanup and self.autograd_hooks is not None:
                 self.autograd_hooks.arrays_cleanup.reset()
             num_layers = end_layer_idx - first_layer_idx
-            shard_type = f"h{first_layer_idx}:{end_layer_idx}"
-            try:
-                if self.offload_model is None:
-                    model_part = DefaultCellBlocks(
-                        model=self.gpt_model,
-                        first_layer_idx=first_layer_idx,
-                        num_layers=num_layers,
-                    )
-                else:
-                    model_part = self._create_model_shard_on_device(shard_type)
-                # Does gradient accumulation for all weights in layers covered
-                # by `model_part`. Also,
-                # `head_gradients` is overwritten by the "bottom gradients", which
-                # are head gradients for the row of cells below.
-                record_path = None if self._record_gpu_memory_snapshots is None else self._record_gpu_memory_snapshots.path
-                if record_path is not None and self._record_gpu_memory_kind == 1:
-                    # Change path for storage
-                    record_path = str(Path(record_path).parent / f"snapshot_layer{first_layer_idx}.pickle")
-                    snapshots = RecordGPUMemory(
-                        path=record_path,
-                        max_entries=self._record_gpu_memory_snapshots.max_entries,
-                    )
-                elif self._record_gpu_memory_kind is None:
-                    snapshots = self._record_gpu_memory_snapshots
-                else:
-                    snapshots = None
-                self.accumulator.run(
-                    model_part=model_part,
-                    get_inputs_slice=partial(get_inputs_slice, layer_idx=first_layer_idx),
-                    get_head_gradients_slice=get_head_gradients_slice,
-                    write_head_gradients_slice=write_head_gradients_slice,
-                    record_gpu_memory_snapshots=snapshots,
+            if self.offload_device is None:
+                shard_on_device = None
+                model_part = DefaultCellBlocks(
+                    model=self.gpt_model,
+                    first_layer_idx=first_layer_idx,
+                    num_layers=num_layers,
                 )
-                if self.offload_model is not None:
-                    module_pairs = [
-                        (
-                            self.offload_model.transformer.h[i],
-                            self.gpt_model.transformer.h[i],
-                        )
+            else:
+                shard_on_device = clone_model_shard_via_flat_vectors(
+                    model=self.gpt_model,
+                    device=self.offload_device,
+                    shard_type=f"h{first_layer_idx}:{end_layer_idx}",
+                    lm_head=self.head_model.needs_logits(),
+                )
+                model_part = GPTShardCellBlock(shard_on_device)
+            # Does gradient accumulation for all weights in layers covered
+            # by `model_part`. Also,
+            # `head_gradients` is overwritten by the "bottom gradients", which
+            # are head gradients for the row of cells below.
+            record_path = None if self._record_gpu_memory_snapshots is None else self._record_gpu_memory_snapshots.path
+            if record_path is not None and self._record_gpu_memory_kind == 1:
+                # Change path for storage
+                record_path = str(Path(record_path).parent / f"snapshot_layer{first_layer_idx}.pickle")
+                snapshots = RecordGPUMemory(
+                    path=record_path,
+                    max_entries=self._record_gpu_memory_snapshots.max_entries,
+                )
+            elif self._record_gpu_memory_kind is None:
+                snapshots = self._record_gpu_memory_snapshots
+            else:
+                snapshots = None
+            self.accumulator.run(
+                model_part=model_part,
+                get_inputs_slice=partial(get_inputs_slice, layer_idx=first_layer_idx),
+                get_head_gradients_slice=get_head_gradients_slice,
+                write_head_gradients_slice=write_head_gradients_slice,
+                record_gpu_memory_snapshots=snapshots,
+            )
+            if self.offload_device is not None:
+                module_pairs = [
+                    (
+                        shard_on_device.transformer.h[i - first_layer_idx],
+                        self.gpt_model.transformer.h[i],
+                    )
+                    for i in range(first_layer_idx, end_layer_idx)
+                ]
+                if self._debug_gpt_model is not None:
+                    debug_modules = [
+                        self._debug_gpt_model.transformer.h[i]
                         for i in range(first_layer_idx, end_layer_idx)
                     ]
-                    if self._debug_gpt_model is not None:
-                        debug_modules = [
-                            self._debug_gpt_model.transformer.h[i]
-                            for i in range(first_layer_idx, end_layer_idx)
-                        ]
-                    else:
-                        debug_modules = None
-                    accumulate_gradients(module_pairs, debug_modules)
-            finally:
-                self._remove_params_offload_model(shard_type)
+                else:
+                    debug_modules = None
+                accumulate_gradients(module_pairs, debug_modules)
+                del model_part
+                del shard_on_device
+
             for first_chunk_idx, annot_log in self.accumulator.annotation_usage_logs().items():
                 self._annotation_usage_logs[
                     (first_layer_idx, first_chunk_idx)
@@ -1212,57 +1083,39 @@ class LongContextGradientModel(LongContextInferenceModel):
             record_path = Path(self._record_gpu_memory_snapshots.path)
             self._record_gpu_memory_snapshots.path = str(record_path.parent / "snapshot_final.pickle")
             self._record_gpu_memory_snapshots.start_recording()
-        shard_type = "wte"
-        try:
-            if self.offload_model is not None:
-                self._create_model_shard_on_device(shard_type)
-            self.accumulator.run_input_embeddings(
-                gpt_model=gpt_model_on_device,
-                input_ids=self._input_ids,
-                get_head_gradients_slice=get_head_gradients_slice,
+        if self.offload_device is not None:
+            shard_on_device = clone_model_shard_via_flat_vectors(
+                model=self.gpt_model,
+                device=self.offload_device,
+                shard_type="wte",
+                lm_head=self.head_model.needs_logits(),
             )
-            if self.offload_model is not None:
-                module_pairs = [
-                    (
-                        self.offload_model.transformer.wte,
-                        self.gpt_model.transformer.wte,
-                    )
-                ]
-                if self._debug_gpt_model is not None:
-                    debug_modules = [self._debug_gpt_model.transformer.wte]
-                else:
-                    debug_modules = None
-                accumulate_gradients(module_pairs, debug_modules)
-        finally:
-            self._remove_params_offload_model(shard_type)
+        else:
+            shard_on_device = self.gpt_model
+        self.accumulator.run_input_embeddings(
+            gpt_model=shard_on_device,
+            input_ids=self._input_ids,
+            get_head_gradients_slice=get_head_gradients_slice,
+        )
+        if self.offload_device is not None:
+            module_pairs = [
+                (
+                    shard_on_device.transformer.wte,
+                    self.gpt_model.transformer.wte,
+                )
+            ]
+            if self._debug_gpt_model is not None:
+                debug_modules = [self._debug_gpt_model.transformer.wte]
+            else:
+                debug_modules = None
+            accumulate_gradients(module_pairs, debug_modules)
+            del shard_on_device
 
         self._deallocate_buffers()
-        gc.collect()
-        torch.cuda.empty_cache()
         if self._record_gpu_memory_kind in (0, 2):
             self._record_gpu_memory_snapshots.store_current_snapshot()
             if self._record_gpu_memory_kind == 2:
                 self._record_gpu_memory_snapshots.stop_recording()
-
-    def _create_model_shard_on_device(
-        self, shard_type: Optional[str],
-    ) -> DefaultCellBlocks:
-        assert self.offload_model is not None
-        return create_model_shard_on_device(
-            gpt_model=self.gpt_model,
-            gpt_model_copy=self.offload_model,
-            target_device=self._offload_device,
-            shard_type=shard_type,
-            use_lm_head=self.head_model.needs_logits(),
-        )
-
-    def _remove_params_offload_model(self, shard_type: Optional[str]):
-        if self.offload_model is not None:
-            ModelFromFlatVectorsFactory.remove_params_of_model(
-                self.offload_model,
-                shard_type=shard_type,
-                use_lm_head=self.head_model.needs_logits(),
-            )
 
 
 class NaiveGPTAndHeadModel(GPTAndHeadModel):
@@ -1283,46 +1136,3 @@ class NaiveGPTAndHeadModel(GPTAndHeadModel):
         model_outputs = self.gpt_model(input_ids)
         loss_value = self.head_model(model_outputs, targets, input_pos=0) * scale_factor
         return loss_value
-
-
-class InferenceWithOffloadModel(LongContextInferenceModel):
-    """
-    Helper class for :meth:`LongContextGradientModel.copy_model_for_evaluation`.
-    We implement :meth:`__del__` here to ensure that `gpt_model` is put back
-    into its original state, after having been used during evaluation.
-
-    """
-    def __init__(
-        self,
-        gpt_model: GPT,
-        head_model: HeadModel,
-        chunk_size: int = 16,
-        randomize_chunk_sizes: bool = False,
-        chunks_per_cell_multiplier: float = 1.0,
-        single_tokens_for_targets: bool = False,
-        verbose: VerbosityLevels = VerbosityLevels.SOME,
-        tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
-        debug_single_cell_per_row: bool = False,
-        debug_store_intermediates: bool = False,
-    ):
-        super().__init__(
-            gpt_model,
-            head_model,
-            chunk_size,
-            randomize_chunk_sizes,
-            chunks_per_cell_multiplier,
-            single_tokens_for_targets,
-            verbose,
-            tmp_array_limit_gb,
-            debug_single_cell_per_row,
-            debug_store_intermediates,
-        )
-
-    def __del__(self):
-        self.clear_offload_model()
-
-    def clear_offload_model(self):
-        deallocate_kv_cache_buffers_of_model(self.gpt_model)
-        ModelFromFlatVectorsFactory.remove_params_of_model(
-            self.gpt_model, shard_type=None,
-        )

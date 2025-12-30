@@ -54,7 +54,7 @@ from keys_values.kvcache.test_utils import (
     create_kv_cache,
 )
 from keys_values.model import GPT, CausalSelfAttention
-from keys_values.optimize.clone_model import clone_model_via_flat_vectors
+from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
 from keys_values.pos_encoding import LinearPositionEncoding
 from keys_values.utils import repeat_interleave
 
@@ -827,9 +827,10 @@ def test_mha_is_passed_on(device):
     _compare_mhas(
         orig_caches, gpt_model_clone.get_kv_caches(), prefix="GPT.clone: ",
     )
-    gpt_model_clone = clone_model_via_flat_vectors(
+    gpt_model_clone = clone_model_shard_via_flat_vectors(
         model=gpt_model,
         device=device,
+        shard_type=None,
     )
     _compare_mhas(
         orig_caches, gpt_model_clone.get_kv_caches(), prefix="GPT.clone: ",

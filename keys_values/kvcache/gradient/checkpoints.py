@@ -564,9 +564,7 @@ def create_layers_and_buffers_for_model(
     lnums_and_device = dict()
     for l_ix in layer_numbers:
         params = model.get_kv_cache_params(min(l_ix, n_layer - 1))
-        device = params.device
-        if device is None:
-            device = default_device
+        device = params.device if default_device is None else default_device
         lnums = lnums_and_device.get(device)
         if lnums is None:
             lnums_and_device[device] = [l_ix]

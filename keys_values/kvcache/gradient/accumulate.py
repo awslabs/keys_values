@@ -724,7 +724,6 @@ class GradientAccumulator:
         # End of gradient accumulation on a batch: Clear internals
         self._clear_internal()
 
-    # TODO: Support having the model part only
     def run_head_model(
         self,
         gpt_model: GPT,
@@ -745,7 +744,8 @@ class GradientAccumulator:
         is read before it is written to.
 
         Args:
-            gpt_model: GPT model
+            gpt_model: GPT model (or just a shard, see
+                :class:`keys_values.optimize.GPTShardOfBlocks`)
             head_model: Head model and loss function
             replay_logs: KV cache replay logs recorded during the initial
                 forward pass. Needed in calls of :meth:`run`, stored as
@@ -770,11 +770,7 @@ class GradientAccumulator:
         assert targets.ndim == 2
         num_output_tokens = targets.shape[1]
         # Initialize members which are needed for processing this batch
-        batch_size = targets.shape[0]
-        max_batch_size = gpt_model.get_kv_cache_params(0).max_batch_size
-        if not (1 <= batch_size <= max_batch_size):
-            raise ValueError(f"targets.shape[0] = {batch_size}, must be in [1, {max_batch_size}]")
-        self._batch_size = batch_size
+        self._batch_size = targets.shape[0]
         weights_dtype = replay_logs[0].dtype
         if weights_dtype is None:
             weights_dtype = torch.bfloat16
@@ -785,8 +781,6 @@ class GradientAccumulator:
             head_model_needs_logits=head_model.needs_logits(),
         )
         # Ensure that model supports the sequence length
-        if gpt_model.max_seq_length < self.seq_length:
-            gpt_model.max_seq_length = self.seq_length
         if not (1 <= num_output_tokens <= self.seq_length):
             raise ValueError(f"targets.shape[1] = {num_output_tokens} must in [1, seq_length = {self.seq_length}]")
         if head_model.needs_logits():
