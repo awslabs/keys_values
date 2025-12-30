@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import Dict, List, Optional, Union, Tuple
+from typing import Dict, List, Optional, Union, Tuple, Iterable, Any
 
 import torch
 import torch.nn as nn
@@ -25,6 +25,7 @@ from litgpt.lora import (
 )
 
 from keys_values.attention import MultiHeadSelfAttention
+from keys_values.kvcache.stack_layers import CellBlocks
 from keys_values.lora import GPT as GPTLoRA, Block as BlockLoRA
 from keys_values.model import GPT as GPTFull, Block as BlockFull
 from keys_values.optimize.module_wrapper import (
@@ -297,16 +298,12 @@ class GPTLoRAWrapper(GPTLoRA):
         return get_weights_as_flat_vectors(self, lm_head, device)
 
 
-# TODO:
-# Needed if removing parameters from a full model does not work.
-# ==> Must be updated to represent current model!
-# - Why subclass of GPTFull?
-# - Relation to stack_layers?
 class GPTStackBlocks(GPTFull):
     def __init__(
         self,
         config: ConfigFull,
         components: Union[List[BlockFull], List[BlockLoRA]],
+        first_layer_idx: int,
         mha: Optional[MultiHeadSelfAttention] = None,
         **mha_kwargs,
     ):
@@ -315,7 +312,6 @@ class GPTStackBlocks(GPTFull):
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(h=nn.ModuleList(components)))
-        self.lm_head = None
         if mha is None:
             self.mha = MultiHeadSelfAttention(
                 config, **transform_mha_kwargs(mha_kwargs, config),
@@ -324,6 +320,7 @@ class GPTStackBlocks(GPTFull):
             self.mha = mha
         self.max_seq_length = config.block_size
         self._default_kv_cache = False
+        self.first_layer_idx = first_layer_idx
 
     def forward(
         self,
@@ -367,18 +364,81 @@ class GPTStackBlocks(GPTFull):
                     raise ValueError(
                         f"Batch size {batch_size} is too large for KV cache layer {block_idx} (batch size {attn.kv_cache.max_batch_size}). Use 'assign_kv_caches' or `set_kv_caches'"
                     )
-            x = block(x, idx, self.mha, input_pos)
+            x = block(x, token_idx=idx, mha=self.mha, input_pos=input_pos)
 
         return x
 
     def get_gradients_as_flat(
-            self,
-            first_block_idx: int,
-            device: Optional[torch.device] = None,
+        self, device: Optional[torch.device] = None,
     ) -> Dict[str, FlatVectors]:
         return {
-            f"layer{first_block_idx + i}": AccessWeightsGradients(block).get_gradients(device=device)
+            BlockComponentName.h(
+                self.first_layer_idx + i
+            ): AccessWeightsGradients(block).get_gradients(device=device)
             for i, block in enumerate(self.transformer.h)
+        }
+
+
+class GPTStackCellBlocks(CellBlocks):
+    def __init__(self, gpt_blocks: GPTStackBlocks):
+        super().__init__(gpt_blocks.config)
+        self._gpt_blocks = gpt_blocks
+
+    @property
+    def max_seq_length(self) -> int:
+        return self._gpt_blocks.max_seq_length
+
+    @property
+    def first_layer_idx(self) -> int:
+        return self._gpt_blocks.first_layer_idx
+
+    @property
+    def num_layers(self) -> int:
+        return len(self._gpt_blocks.transformer.h)
+
+    def blocks_with_kwargs(self) -> Iterable[Tuple[int, BlockFull, Dict[str, Any]]]:
+        """
+        Returns:
+            Sequence of `(block_idx, block, block_kwargs)` of model blocks,
+            in increasing order. We call
+            `x = block(x, token_idx, input_pos, **block_kwargs)`.
+
+        """
+        kwargs = dict(mha=self._gpt_blocks.mha)
+        return [
+            (
+                self.first_layer_idx + i,
+                block,
+                kwargs,
+            )
+            for i, block in enumerate(self._gpt_blocks.transformer.h)
+        ]
+
+
+class GPTBottomModule(nn.Module):
+    def __init__(
+        self,
+        config: ConfigFull,
+        wte: nn.Embedding,
+    ):
+        super().__init__()
+        assert config.padded_vocab_size is not None
+        self.config = config
+        self.wte = wte
+
+    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+        x = self.wte(idx)
+        if self.config.scale_embeddings:
+            x = x * torch.tensor(self.config.n_embd**0.5, dtype=x.dtype)
+        return x
+
+    def get_gradients_as_flat(
+        self, device: Optional[torch.device] = None,
+    ) -> Dict[str, FlatVectors]:
+        return {
+            BlockComponentName.wte(): AccessWeightsGradients(
+                self.wte
+            ).get_gradients(device=device)
         }
 
 

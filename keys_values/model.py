@@ -369,10 +369,10 @@ class GPT(nn.Module):
             x = x * torch.tensor(self.config.n_embd**0.5, dtype=x.dtype)
 
         hook = self._start_of_layer_hook
+        batch_size = x.shape[0]
         for block_idx, block in enumerate(self.transformer.h):
             if for_prefill:
                 # Complain if batch size of cache is too small
-                batch_size = x.shape[0]
                 attn = block.attn
                 if attn.kv_cache.max_batch_size < batch_size:
                     raise ValueError(
