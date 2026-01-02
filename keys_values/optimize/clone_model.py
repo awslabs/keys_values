@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Dict, Union, Callable, Optional
+from typing import Union, Callable, Optional
 
 import torch
 
@@ -20,10 +20,12 @@ from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.lora import GPT as GPTLoRA
 from keys_values.model import GPT as GPTFull
 from keys_values.optimize.model_factory import (
+    BlockComponentName,
     GPTFullWrapper,
     GPTLoRAWrapper,
+    GPTShardOfBlocks,
     ModelFromFlatVectorsFactory,
-    BlockComponentName,
+    names_and_modules_for_shard,
 )
 from keys_values.optimize.module_wrapper import (
     FlatVectors,
@@ -44,15 +46,17 @@ def copy_flat_vectors_to(
 CopyFlatVectorFunction = Callable[[FlatVectors, torch.device], FlatVectors]
 
 
-def clone_model_via_flat_vectors(
+def clone_model_shard_via_flat_vectors(
     model: GPTFull,
     device: torch.device,
+    shard_type: Optional[str],
     copy_function: Optional[CopyFlatVectorFunction] = None,
     lm_head: bool = True,
-) -> Union[GPTFullWrapper, GPTLoRAWrapper]:
+) -> Union[GPTFullWrapper, GPTLoRAWrapper, GPTShardOfBlocks]:
     """
-    Creates copy of `model` on device `device`. Different to
-    `model.clone(device)`, this is done by creating flat vectors, copying them
+    Creates copy of shard `shard_type` from `model` on device `device`. If
+    `shard_type is None`, the whole model is copied.
+    Different to `model.clone(device)`, this is done by creating flat vectors, copying them
     to the device, and creating the model there from the flat vectors.
 
     This function loops over submodules, copying flat vectors for each. This
@@ -64,6 +68,17 @@ def clone_model_via_flat_vectors(
     is_lora = isinstance(model, GPTLoRA)
     if isinstance(model, GPTAdapter):
         raise NotImplementedError("model must not be GPTAdapter: Not implemented")
+    names_and_modules, ret2 = names_and_modules_for_shard(
+        gpt_model=model,
+        shard_type=shard_type,
+        use_lm_head=lm_head,
+    )
+    if ret2 is None:
+        if shard_type is None:
+            ret2 = (0, len(model.transformer.h))
+        else:
+            ret2 = (None, None)
+    start, end = ret2
     kv_caches = []
     try:
         # Remove KV caches before copy is created
@@ -75,10 +90,9 @@ def clone_model_via_flat_vectors(
             block.attn.kv_cache = None
 
         # Loop to create components on the target device
-        source_components = BlockComponentName.components(model, lm_head)
         components = dict()
         choices = ModelFromFlatVectorsFactory.CHOICES_LORA if is_lora else ModelFromFlatVectorsFactory.CHOICES_FULL
-        for comp_name, src_module in source_components:
+        for comp_name, src_module in names_and_modules:
             flat_vecs_src = AccessWeightsGradients(src_module).get_weights()
             flat_vecs_trg = copy_function(flat_vecs_src, device)
             creator = choices.get(comp_name)
@@ -91,7 +105,11 @@ def clone_model_via_flat_vectors(
                 block_idx = BlockComponentName.is_h(comp_name)
                 if block_idx is None:
                     raise ValueError(f"Entry '{comp_name}' in model is not valid")
-                components[comp_name] = ModelFromFlatVectorsFactory.create_full_block(
+                if is_lora:
+                    _creator = ModelFromFlatVectorsFactory.create_lora_block
+                else:
+                    _creator = ModelFromFlatVectorsFactory.create_full_block
+                components[comp_name] = _creator(
                     config=model.config,
                     block_idx=block_idx,
                     weights_vecs=flat_vecs_trg,
@@ -100,27 +118,37 @@ def clone_model_via_flat_vectors(
         for kv_cache, block in zip(kv_caches, model.transformer.h):
             block.attn.kv_cache = kv_cache
 
-    if not is_lora:
-        model_copy = GPTFullWrapper(
-            config=model.config,
-            components=components,
-            mha=model.mha,
-        )
+    if shard_type is None:
+        if not is_lora:
+            _target_class = GPTFullWrapper
+        else:
+            _target_class = GPTLoRAWrapper
     else:
-        model_copy = GPTLoRAWrapper(
-            config=model.config,
-            components=components,
-            mha=model.mha,
-        )
+        _target_class = GPTShardOfBlocks
+    model_copy = _target_class(
+        config=model.config,
+        components=components,
+        mha=model.mha,
+    )
     _transfer_requires_grad(model, model_copy)
+    model_copy.max_seq_length = model.max_seq_length
     # Deal with KV caches. Default device for buffers should be `device`.
-    for kv_cache, block in zip(kv_caches, model_copy.transformer.h):
-        if kv_cache is not None:
-            block.attn.kv_cache = kv_cache.clone(device=device)
-    return model_copy
+    if start is not None:
+        # Sanity check
+        assert len(model_copy.transformer.h) == end - start
+        for kv_cache, block in zip(
+            kv_caches[start:end],
+            model_copy.transformer.h
+        ):
+            if kv_cache is not None:
+                block.attn.kv_cache = kv_cache.clone(device=device)
+        return model_copy
 
 
-def _transfer_requires_grad(model_from: GPTFull, model_to: GPTFull):
+def _transfer_requires_grad(
+    model_from: torch.nn.Module,
+    model_to: torch.nn.Module
+):
     for name, param_to in model_to.named_parameters():
         param_from = model_from.get_parameter(name)
         param_to.requires_grad_(param_from.requires_grad)

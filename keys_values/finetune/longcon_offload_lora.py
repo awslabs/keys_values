@@ -72,7 +72,7 @@ from keys_values.finetune.utils import (
     HEAD_MODEL_FNAME,
     LIT_MODEL_FNAME,
 )
-from keys_values.head_model import CrossEntropyOnLogits, HeadModel
+from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.gradient.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.utils import (
@@ -237,11 +237,9 @@ def setup(
     if head_model_kwargs is None:
         head_model_kwargs = dict()
     device = int(device)
-    if device < 0:
-        raise ValueError("device must be non-negative integer")
     if not torch.cuda.is_available():
         raise ValueError("CUDA not available")
-    if device >= torch.cuda.device_count():
+    if not (0 <= device < torch.cuda.device_count()):
         raise ValueError(f"device = {device}, must be in [0, {torch.cuda.device_count() - 1}]")
     if optimizer is None:
         optimizer = OptimizerArgs(name="AdamW")
@@ -400,7 +398,6 @@ def main(
         profile_grad_times=profile_grad_times > 0,
         cpu_offload_device=device,
     )
-    offload_model = model.offload_model
     mark_only_lora_as_trainable(model.gpt_model)
     # DEBUG
     for name, param in model.named_parameters():
