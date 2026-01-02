@@ -37,6 +37,11 @@ from keys_values.use_eager_kernel import transform_mha_kwargs
 
 
 class BlockComponentName:
+    """
+    Represents parameter name prefixes. Must be kept in sync with
+    :class:`keys_values.model.GPT`.
+
+    """
     @staticmethod
     def wte() -> str:
         return "transformer.wte"
@@ -199,6 +204,11 @@ def names_and_modules_for_shard(
 
 
 class GPTFullWrapper(GPTFull):
+    """
+    Represents :class:`keys_values.model.GPT`, but based on components
+    passed at construction.
+
+    """
     def __init__(
         self,
         config: ConfigFull,
@@ -248,6 +258,11 @@ class GPTFullWrapper(GPTFull):
 
 
 class GPTLoRAWrapper(GPTLoRA):
+    """
+    Represents :class:`keys_values.lora.GPT`, but based on components
+    passed at construction.
+
+    """
     def __init__(
         self,
         config: ConfigLoRA,
@@ -299,6 +314,14 @@ class GPTLoRAWrapper(GPTLoRA):
 
 
 class GPTShardOfBlocks(GPTFull):
+    """
+    Represents a shard of a model of type :class:`keys_values.model.GPT` or
+    :class:`keys_values.lora.GPT`. Different to :class:`GPTFullWrapper` or
+    :class:`GPTLoRAWrapper`, not all model components are present. Objects of
+    this class cannot be used in the normal way, but only with methods of
+    :class:`keys_values.kvcache.gradient.accumulate.GradientAccumulator`.
+`
+    """
     def __init__(
         self,
         config: ConfigFull,
@@ -330,8 +353,8 @@ class GPTShardOfBlocks(GPTFull):
         if h_modules:
             idxs, mods = zip(*h_modules)
             first_layer_idx = idxs[0]
-            if idxs != list(range(first_layer_idx, first_layer_idx + len(idxs))):
-                raise ValueError(f"Layer components have idxs {idxs}, must be contiguous")
+            if idxs != tuple(range(first_layer_idx, first_layer_idx + len(idxs))):
+                raise ValueError(f"Layer components have idxs {idxs}, must be {list(range(first_layer_idx, first_layer_idx + len(idxs)))}")
             modules["h"] = nn.ModuleList(mods)
         else:
             first_layer_idx = None
@@ -346,8 +369,27 @@ class GPTShardOfBlocks(GPTFull):
             )
         else:
             self.mha = mha
-        self.max_seq_length = config.block_size
-        self._default_kv_cache = False
+        if self._has_layers():
+            self.max_seq_length = config.block_size
+
+    def _has_layers(self) -> bool:
+        return self.transformer is not None and hasattr(self.transformer,"h")
+
+    @property
+    def max_seq_length(self) -> int:
+        if self._has_layers():
+            return self._max_seq_length
+        else:
+            raise NotImplementedError("Cannot be used for this model shard")
+
+    @max_seq_length.setter
+    def max_seq_length(self, value: int) -> None:
+        if self._has_layers():
+            # See https://gist.github.com/Susensio/979259559e2bebcd0273f1a95d7c1e79
+            # Would be best to get rid of the setter!
+            super(GPTShardOfBlocks, type(self)).max_seq_length.fset(self, value)
+        else:
+            raise NotImplementedError("Cannot be used for this model shard")
 
     def forward(
         self,
@@ -386,6 +428,12 @@ class GPTShardOfBlocks(GPTFull):
 
 
 class GPTShardCellBlock(CellBlocks):
+    """
+    Wraps shard of type :class:`GPTShardOfBlocks` into
+    :class:`keys_values.kvcache.stack_layers.CellBlocks`, to be used with
+    :class:`keys_values.kvcache.gradient.accumulate.GradientAccumulator`.
+
+    """
     def __init__(self, shard: GPTShardOfBlocks):
         super().__init__(shard.config)
         if shard.first_layer_idx is None:
@@ -685,6 +733,7 @@ class ModelFromFlatVectorsFactory:
             **mha_kwargs,
         )
 
+    # TODO: Not needed anymore?
     @staticmethod
     def remove_params_of_model(
         gpt_model: Union[GPTFull, GPTLoRA],
@@ -718,6 +767,7 @@ class ModelFromFlatVectorsFactory:
                 parent, pname = parent_of_parameter(gpt_model, name)
                 delattr(parent, pname)
 
+    # TODO: Not needed anymore?
     @staticmethod
     def restore_params_of_model(
         model: Union[GPTFull, GPTLoRA],

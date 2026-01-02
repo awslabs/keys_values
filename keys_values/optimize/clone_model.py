@@ -131,9 +131,10 @@ def clone_model_shard_via_flat_vectors(
         mha=model.mha,
     )
     _transfer_requires_grad(model, model_copy)
-    model_copy.max_seq_length = model.max_seq_length
     # Deal with KV caches. Default device for buffers should be `device`.
     if start is not None:
+        # Only if shard contains any layers:
+        model_copy.max_seq_length = model.max_seq_length
         # Sanity check
         assert len(model_copy.transformer.h) == end - start
         for kv_cache, block in zip(
@@ -142,7 +143,8 @@ def clone_model_shard_via_flat_vectors(
         ):
             if kv_cache is not None:
                 block.attn.kv_cache = kv_cache.clone(device=device)
-        return model_copy
+
+    return model_copy
 
 
 def _transfer_requires_grad(

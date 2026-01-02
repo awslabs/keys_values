@@ -56,11 +56,7 @@ from keys_values.optimize.clone_model import (
     clone_model_shard_via_flat_vectors,
     copy_flat_vectors_to,
 )
-from keys_values.optimize.model_factory import (
-    GPTShardCellBlock,
-    ModelFromFlatVectorsFactory,
-    names_and_modules_for_shard,
-)
+from keys_values.optimize.model_factory import GPTShardCellBlock
 from keys_values.optimize.module_wrapper import AccessWeightsGradients
 
 
@@ -126,65 +122,6 @@ def check_model_is_on_device(
     for name, param in model.named_parameters():
         if param.device != device:
             raise ValueError(f"Model {model_name} must be on {device}, but device['{name}'] = {param.device}")
-
-
-# TODO: Not needed anymore!?
-def create_model_shard_on_device(
-    gpt_model: GPT,
-    gpt_model_copy: GPT,
-    target_device: torch.device,
-    shard_type: Optional[str],
-    use_lm_head: bool = True,
-) -> Optional[DefaultCellBlocks]:
-    """
-    Copies parameter values from `gpt_model` to `gpt_model_copy`, the latter
-    on device `target_device`. Only for transformer blocks numbered
-    `range(first_layer_idx, first_layer_idx + num_layers)`. Parameters may not
-    exist in `gpt_model_copy`, they are created there.
-
-    Args:
-        gpt_model (GPT): Source GPT model
-        gpt_model_copy (GPT): Target GPT model, with parameters removed
-        target_device (torch.device): Device for target parameters
-        shard_type (str): Shard type, can be "wte", "lm_head", or
-            "h{start}:{end}". If `None`, uses the union of all shards.
-        use_lm_head: If `False`, the `lm_head` module is not included
-
-    Returns:
-        :class:`DefaultCellBlocks` object wrapping the layers in
-        `gpt_model_copy`.
-
-    """
-    # Read out flat vectors from `gpt_model` and copy to device
-    names_and_modules, ret2 = names_and_modules_for_shard(
-        gpt_model, shard_type, use_lm_head,
-    )
-    if ret2 is not None:
-        start, end = ret2
-    else:
-        start = end = None
-    param_structures = dict()
-    weights_vecs = dict()
-    for name, module in names_and_modules:
-        access = AccessWeightsGradients(module)
-        weights_vecs[name] = copy_flat_vectors_to(
-            access.get_weights(), device=target_device,
-        )
-        param_structures[name] = access.param_structure()
-    # Restore parameters
-    ModelFromFlatVectorsFactory.restore_params_of_model(
-        model=gpt_model_copy,
-        param_structures=param_structures,
-        weights_vecs=weights_vecs,
-    )
-    if start is not None:
-        return DefaultCellBlocks(
-            model=gpt_model_copy,
-            first_layer_idx=start,
-            num_layers=end - start,
-        )
-    else:
-        return None
 
 
 def accumulate_gradients(
@@ -1024,49 +961,46 @@ class LongContextGradientModel(LongContextInferenceModel):
         if self.verbose is VerbosityLevels.SOME:
             num_rows = len(self.layer_checkpoints.layer_numbers) - 2
             print(f"\nRunning backward pass over {num_rows} rows of cells, {self.config.n_layer} layers, using activation checkpointing")
-        try:
-            if self.offload_device is not None:
-                shard_on_device = clone_model_shard_via_flat_vectors(
-                    model=self.gpt_model,
-                    device=self.offload_device,
-                    shard_type="lm_head",
-                    lm_head=self.head_model.needs_logits(),
-                )
-                target_device = self.offload_device
-            else:
-                shard_on_device = self.gpt_model
-                target_device = device_for_layer(self.gpt_model, -1)
-            self._targets = self._targets.to(device=target_device)
-            self.accumulator.run_head_model(
-                gpt_model=shard_on_device,
-                head_model=self.head_model,
-                replay_logs=self._replay_logs,
-                chunks_per_cell=self.chunks_per_cell,
-                get_inputs_slice=partial(get_inputs_slice, layer_idx=self.config.n_layer),
-                write_head_gradients_slice=write_head_gradients_slice,
-                targets=self._targets,
+        if self.offload_device is not None:
+            shard_on_device = clone_model_shard_via_flat_vectors(
+                model=self.gpt_model,
+                device=self.offload_device,
+                shard_type="lm_head",
+                lm_head=self.head_model.needs_logits(),
             )
-            if self.offload_device is not None:
-                module_pairs = [
-                    (
-                        shard_on_device.transformer.ln_f,
-                        self.gpt_model.transformer.ln_f,
-                    )
-                ]
+            target_device = self.offload_device
+        else:
+            shard_on_device = self.gpt_model
+            target_device = device_for_layer(self.gpt_model, -1)
+        self._targets = self._targets.to(device=target_device)
+        self.accumulator.run_head_model(
+            gpt_model=shard_on_device,
+            head_model=self.head_model,
+            replay_logs=self._replay_logs,
+            chunks_per_cell=self.chunks_per_cell,
+            get_inputs_slice=partial(get_inputs_slice, layer_idx=self.config.n_layer),
+            write_head_gradients_slice=write_head_gradients_slice,
+            targets=self._targets,
+        )
+        if self.offload_device is not None:
+            module_pairs = [
+                (
+                    shard_on_device.transformer.ln_f,
+                    self.gpt_model.transformer.ln_f,
+                )
+            ]
+            if self.head_model.needs_logits():
+                module_pairs.append(
+                    (shard_on_device.lm_head, self.gpt_model.lm_head)
+                )
+            if self._debug_gpt_model is not None:
+                debug_modules = [self._debug_gpt_model.transformer.ln_f]
                 if self.head_model.needs_logits():
-                    module_pairs.append(
-                        (shard_on_device.lm_head, self.gpt_model.lm_head)
-                    )
-                if self._debug_gpt_model is not None:
-                    debug_modules = [self._debug_gpt_model.transformer.ln_f]
-                    if self.head_model.needs_logits():
-                        debug_modules.append(self._debug_gpt_model.lm_head)
-                else:
-                    debug_modules = None
-                accumulate_gradients(module_pairs, debug_modules)
-        finally:
-            if self.offload_device is not None:
-                del shard_on_device
+                    debug_modules.append(self._debug_gpt_model.lm_head)
+            else:
+                debug_modules = None
+            accumulate_gradients(module_pairs, debug_modules)
+            del shard_on_device
 
         if self._record_gpu_memory_kind == 1:
             # End of recording for initial snapshot (everything before the
@@ -1087,64 +1021,61 @@ class LongContextGradientModel(LongContextInferenceModel):
             if self._use_arrays_cleanup and self.autograd_hooks is not None:
                 self.autograd_hooks.arrays_cleanup.reset()
             num_layers = end_layer_idx - first_layer_idx
-            try:
-                if self.offload_device is None:
-                    shard_on_device = None
-                    model_part = DefaultCellBlocks(
-                        model=self.gpt_model,
-                        first_layer_idx=first_layer_idx,
-                        num_layers=num_layers,
-                    )
-                else:
-                    shard_on_device = clone_model_shard_via_flat_vectors(
-                        model=self.gpt_model,
-                        device=self.offload_device,
-                        shard_type=f"h{first_layer_idx}:{end_layer_idx}",
-                        lm_head=self.head_model.needs_logits(),
-                    )
-                    model_part = GPTShardCellBlock(shard_on_device)
-                # Does gradient accumulation for all weights in layers covered
-                # by `model_part`. Also,
-                # `head_gradients` is overwritten by the "bottom gradients", which
-                # are head gradients for the row of cells below.
-                record_path = None if self._record_gpu_memory_snapshots is None else self._record_gpu_memory_snapshots.path
-                if record_path is not None and self._record_gpu_memory_kind == 1:
-                    # Change path for storage
-                    record_path = str(Path(record_path).parent / f"snapshot_layer{first_layer_idx}.pickle")
-                    snapshots = RecordGPUMemory(
-                        path=record_path,
-                        max_entries=self._record_gpu_memory_snapshots.max_entries,
-                    )
-                elif self._record_gpu_memory_kind is None:
-                    snapshots = self._record_gpu_memory_snapshots
-                else:
-                    snapshots = None
-                self.accumulator.run(
-                    model_part=model_part,
-                    get_inputs_slice=partial(get_inputs_slice, layer_idx=first_layer_idx),
-                    get_head_gradients_slice=get_head_gradients_slice,
-                    write_head_gradients_slice=write_head_gradients_slice,
-                    record_gpu_memory_snapshots=snapshots,
+            if self.offload_device is None:
+                shard_on_device = None
+                model_part = DefaultCellBlocks(
+                    model=self.gpt_model,
+                    first_layer_idx=first_layer_idx,
+                    num_layers=num_layers,
                 )
-                if self.offload_device is not None:
-                    module_pairs = [
-                        (
-                            shard_on_device.transformer.h[i - first_layer_idx],
-                            self.gpt_model.transformer.h[i],
-                        )
+            else:
+                shard_on_device = clone_model_shard_via_flat_vectors(
+                    model=self.gpt_model,
+                    device=self.offload_device,
+                    shard_type=f"h{first_layer_idx}:{end_layer_idx}",
+                    lm_head=self.head_model.needs_logits(),
+                )
+                model_part = GPTShardCellBlock(shard_on_device)
+            # Does gradient accumulation for all weights in layers covered
+            # by `model_part`. Also,
+            # `head_gradients` is overwritten by the "bottom gradients", which
+            # are head gradients for the row of cells below.
+            record_path = None if self._record_gpu_memory_snapshots is None else self._record_gpu_memory_snapshots.path
+            if record_path is not None and self._record_gpu_memory_kind == 1:
+                # Change path for storage
+                record_path = str(Path(record_path).parent / f"snapshot_layer{first_layer_idx}.pickle")
+                snapshots = RecordGPUMemory(
+                    path=record_path,
+                    max_entries=self._record_gpu_memory_snapshots.max_entries,
+                )
+            elif self._record_gpu_memory_kind is None:
+                snapshots = self._record_gpu_memory_snapshots
+            else:
+                snapshots = None
+            self.accumulator.run(
+                model_part=model_part,
+                get_inputs_slice=partial(get_inputs_slice, layer_idx=first_layer_idx),
+                get_head_gradients_slice=get_head_gradients_slice,
+                write_head_gradients_slice=write_head_gradients_slice,
+                record_gpu_memory_snapshots=snapshots,
+            )
+            if self.offload_device is not None:
+                module_pairs = [
+                    (
+                        shard_on_device.transformer.h[i - first_layer_idx],
+                        self.gpt_model.transformer.h[i],
+                    )
+                    for i in range(first_layer_idx, end_layer_idx)
+                ]
+                if self._debug_gpt_model is not None:
+                    debug_modules = [
+                        self._debug_gpt_model.transformer.h[i]
                         for i in range(first_layer_idx, end_layer_idx)
                     ]
-                    if self._debug_gpt_model is not None:
-                        debug_modules = [
-                            self._debug_gpt_model.transformer.h[i]
-                            for i in range(first_layer_idx, end_layer_idx)
-                        ]
-                    else:
-                        debug_modules = None
-                    accumulate_gradients(module_pairs, debug_modules)
-            finally:
-                if self.offload_device is not None:
-                    del shard_on_device
+                else:
+                    debug_modules = None
+                accumulate_gradients(module_pairs, debug_modules)
+                del shard_on_device
 
             for first_chunk_idx, annot_log in self.accumulator.annotation_usage_logs().items():
                 self._annotation_usage_logs[
@@ -1160,36 +1091,33 @@ class LongContextGradientModel(LongContextInferenceModel):
             record_path = Path(self._record_gpu_memory_snapshots.path)
             self._record_gpu_memory_snapshots.path = str(record_path.parent / "snapshot_final.pickle")
             self._record_gpu_memory_snapshots.start_recording()
-        try:
-            if self.offload_device is not None:
-                shard_on_device = clone_model_shard_via_flat_vectors(
-                    model=self.gpt_model,
-                    device=self.offload_device,
-                    shard_type="wte",
-                    lm_head=self.head_model.needs_logits(),
-                )
-            else:
-                shard_on_device = self.gpt_model
-            self.accumulator.run_input_embeddings(
-                gpt_model=shard_on_device,
-                input_ids=self._input_ids,
-                get_head_gradients_slice=get_head_gradients_slice,
+        if self.offload_device is not None:
+            shard_on_device = clone_model_shard_via_flat_vectors(
+                model=self.gpt_model,
+                device=self.offload_device,
+                shard_type="wte",
+                lm_head=self.head_model.needs_logits(),
             )
-            if self.offload_device is not None:
-                module_pairs = [
-                    (
-                        shard_on_device.transformer.wte,
-                        self.gpt_model.transformer.wte,
-                    )
-                ]
-                if self._debug_gpt_model is not None:
-                    debug_modules = [self._debug_gpt_model.transformer.wte]
-                else:
-                    debug_modules = None
-                accumulate_gradients(module_pairs, debug_modules)
-        finally:
-            if self.offload_device is not None:
-                del shard_on_device
+        else:
+            shard_on_device = self.gpt_model
+        self.accumulator.run_input_embeddings(
+            gpt_model=shard_on_device,
+            input_ids=self._input_ids,
+            get_head_gradients_slice=get_head_gradients_slice,
+        )
+        if self.offload_device is not None:
+            module_pairs = [
+                (
+                    shard_on_device.transformer.wte,
+                    self.gpt_model.transformer.wte,
+                )
+            ]
+            if self._debug_gpt_model is not None:
+                debug_modules = [self._debug_gpt_model.transformer.wte]
+            else:
+                debug_modules = None
+            accumulate_gradients(module_pairs, debug_modules)
+            del shard_on_device
 
         self._deallocate_buffers()
         gc.collect()
