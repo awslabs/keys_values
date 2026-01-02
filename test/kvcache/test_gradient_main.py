@@ -302,5 +302,10 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
 
 
 if __name__ == "__main__":
-    args = args_complete_gradient_computation()[1]
-    test_complete_gradient_computation(*args)
+    test_complete_gradient_computation(
+        cache_name="h2o",
+        cache_kwargs={"grace_period": 10, "replay_log_blocksize": 64},
+        cache_lengths=[128, 128],
+        use_new_cache=False,
+        device=torch.device("cuda", 0),
+    )

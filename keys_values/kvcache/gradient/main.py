@@ -755,12 +755,6 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
             print("\n".join(lines))
 
-        if self._record_gpu_memory_kind == 2:
-            self._record_gpu_memory_snapshots.set_path(
-                self._record_gpu_memory_snapshots.path.parent / "snapshot_forward.pickle"
-            )
-            self._record_gpu_memory_snapshots.start_recording()
-
         if self.offload_device is not None:
             # Clone `gpt_model` to `offload_device`
             gpt_model = clone_model_shard_via_flat_vectors(
@@ -939,9 +933,6 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         # Sanity check:
         assert self.layer_checkpoints.layer_numbers[-1] == self.gpt_model.config.n_layer + 1
-        gc.collect()
-        torch.cuda.empty_cache()
-
         if self._record_gpu_memory_kind in (0, 2):
             self._record_gpu_memory_snapshots.store_current_snapshot()
             if self._record_gpu_memory_kind == 2:
@@ -1075,6 +1066,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 else:
                     debug_modules = None
                 accumulate_gradients(module_pairs, debug_modules)
+                del model_part
                 del shard_on_device
 
             for first_chunk_idx, annot_log in self.accumulator.annotation_usage_logs().items():
@@ -1120,8 +1112,6 @@ class LongContextGradientModel(LongContextInferenceModel):
             del shard_on_device
 
         self._deallocate_buffers()
-        gc.collect()
-        torch.cuda.empty_cache()
         if self._record_gpu_memory_kind in (0, 2):
             self._record_gpu_memory_snapshots.store_current_snapshot()
             if self._record_gpu_memory_kind == 2:

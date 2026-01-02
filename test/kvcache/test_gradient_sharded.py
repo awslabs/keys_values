@@ -384,3 +384,14 @@ def test_gradient_sharded_simple():
             raise IndexError(f"name = {name} is in gradients[0], but not in gradients[1]")
         print(f"Comparing gradient for {name}")
         torch.testing.assert_close(value, value_comp)
+
+
+if __name__ == "__main__":
+    test_gradient_sharded(
+        cache_name="h2o-torch-quantized8",
+        cache_kwargs={"grace_period": 10, "replay_log_blocksize": 64},
+        cache_length=128,
+        chunk_size=32,
+        seq_length=128 + 2 * 32 + 15,
+        layers_per_cell=1,
+    )

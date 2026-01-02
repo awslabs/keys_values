@@ -74,6 +74,7 @@ from keys_values.finetune.utils import (
 )
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
+from keys_values.kvcache.factory import deallocate_kv_cache_buffers_of_model
 from keys_values.kvcache.gradient.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.utils import (
     VerbosityLevels,
@@ -515,6 +516,7 @@ def main(
         print_message(
             f"Final evaluation | val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}"
         )
+        deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
         del valid_model
         flush_io_streams()
 
@@ -613,6 +615,7 @@ def fit(
                 dataclasses.replace(eval, max_iters=1),
                 batch_transform,
             )  # sanity check
+    deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
     del valid_model
 
     if record_gpu_memory_kind == 3:
@@ -663,8 +666,7 @@ def fit(
                 max_entries=record_gpu_memory_snapshots.max_entries,
                 verbose=verbose,
             )
-            if record_gpu_memory_kind != 2:
-                record_gpu_memory_snapshots.start_recording()
+            record_gpu_memory_snapshots.start_recording()
 
         is_accumulating = state["iter_num"] % train.gradient_accumulation_iters(1, 1) != 0
         print_with_rank_and_timestamp("Starting gradient computation.", 0)
@@ -789,6 +791,8 @@ def fit(
             print_message(
                 f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}"
             )
+            deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
+            del valid_model
 
         if train.save_interval is not None and not is_accumulating and state["step_count"] % train.save_interval == 0:
             interval_dir = out_dir / f"step-{state['step_count']:06d}"

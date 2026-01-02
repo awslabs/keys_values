@@ -98,7 +98,7 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
     def debug_label(self) -> Optional[str]:
         return self._debug_label
 
-    def deallocate(self, device: Optional[torch.device] = None):
+    def _deallocate(self, device: Optional[torch.device] = None):
         self.quantizer_k.deallocate(device)
         self.quantizer_v.deallocate(device)
 
