@@ -618,15 +618,13 @@ def create_quantized_buffers_for_layer_checkpoints(
     default_device: Optional[torch.device] = None,
 ) -> Dict[torch.device, QuantizedKVCacheBuffers]:
     """
-    Creates a dictionary from device to list of :class:`QuantizedKVCacheBuffers`
+    Creates a dictionary from device to :class:`QuantizedKVCacheBuffers`
     for the layer range given by `model_part`. This is used to create checkpointing
     objects per layer, for layer input checkpointing, see also
     :class:`LayerInputQuantizedCheckpoints`.
 
-    The list entries have `cache_length` equal to `chunk_size` (the last one
-    has `cache_length <= chunk_size`), and cache lengths sum up to
-    `model_part.max_seq_length`. The entries share their dequantization
-    buffers.
+    The :class:`QuantizedKVCacheBuffers` objects have `cache_length` equal to
+    `chunk_size`.
 
     """
     assert chunk_size > 0
@@ -650,17 +648,15 @@ def create_quantized_buffers_for_layer_checkpoints(
 
     quant_buffers = dict()
     for device, cache_length in length_for_device.items():
-        # HIER!!
-        _cache_length = layer_act_cache_length if layer_activations else cache_length
         dequant_buffers = DequantizedKVCacheBuffers(
             params=replace(buffer_params, device=device),
-            cache_length=_cache_length,
+            cache_length=chunk_size,
             **dequant_kwargs,
         )
         _cache_params = replace(
             cache_params,
             device=device,
-            cache_length=_cache_length,
+            cache_length=chunk_size,
         )
         quant_kwargs, quantizer_type, cache_kwargs = KVCacheFactory.get_quant_kwargs(
             _cache_params, qname, cache_kwargs,

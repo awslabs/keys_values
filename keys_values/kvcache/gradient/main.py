@@ -256,6 +256,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         use_arrays_cleanup: bool = True,
         profile_steps: bool = False,
         offload_device: Optional[torch.device] = None,
+        layer_checkpoint_chunk_size: Optional[int] = None,
         debug_gpt_model: Optional[GPT] = None,
         debug_store_intermediates: bool = False,
     ):
@@ -307,6 +308,10 @@ class LongContextGradientModel(LongContextInferenceModel):
             profile_steps: We measure times of different parts of a gradient
                 computation.
             offload_device: See above.
+            layer_checkpoint_chunk_size: If `qname != "default"`, layer input
+                checkpoints are quantized. Quantization is done in chunks of
+                this length. Determines GPU memory requirements. A value close
+                to the cache length is recommended.
 
         """
         super().__init__(
@@ -368,6 +373,9 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._timer_start = None
         self.offload_device = offload_device
         self._init_cpu_offloading()
+        if qname != "default" and layer_checkpoint_chunk_size is None:
+            raise ValueError("layer_checkpoint_chunk_size must be given if qname != 'default'")
+        self._layer_checkpoint_chunk_size = layer_checkpoint_chunk_size
         self._debug_gpt_model = debug_gpt_model
         if debug_store_intermediates:
             self._train_cache_kwargs = dict(
@@ -568,7 +576,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             self.layer_checkpoints = LayerInputDefaultCheckpoints(
                 layer_numbers=layer_numbers,
                 batch_size=self.batch_size,
-                max_sequence_length=self.gpt_model.max_seq_length,
+                max_seq_length=self.gpt_model.max_seq_length,
                 n_embd=self.config.n_embd,
                 dtype=dtype,
             )
@@ -578,6 +586,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 model=self.gpt_model,
                 layer_numbers=layer_numbers,
                 batch_size=self.batch_size,
+                chunk_size=self._layer_checkpoint_chunk_size,
                 qname=self.qname,
                 cache_kwargs=dict(
                     self.cache_kwargs,
@@ -587,6 +596,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
             self.layer_checkpoints = LayerInputQuantizedCheckpoints(
                 layers_and_buffers=layers_and_buffers,
+                max_seq_length=self.gpt_model.max_seq_length,
             )
 
     def _create_layer_numbers(self) -> List[int]:
