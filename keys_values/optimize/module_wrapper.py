@@ -217,7 +217,7 @@ class AccessWeightsGradients:
                     if param.grad is None:
                         param.grad = torch.nn.Parameter(src_arg)
                     else:
-                        param.grad.data.add_(src_arg.to(param.data.device))
+                        param.grad.data.add_(src_arg)
                 else:
                     param.data.copy_(src_arg)
 

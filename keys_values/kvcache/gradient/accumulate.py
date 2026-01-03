@@ -30,7 +30,7 @@ from keys_values.kvcache.buffers import (
 )
 from keys_values.kvcache.factory import (
     SUPPORTED_QUANTIZERS,
-    create_quantized_kv_buffers_for_checkpoints,
+    create_quantized_buffers_for_kv_cache_checkpoints,
     deallocate_kv_cache_buffers,
 )
 from keys_values.kvcache.gradient.autograd_hooks import (
@@ -280,10 +280,9 @@ class GradientAccumulator:
             dequant_kwargs = dict(
                 max_num_ranges=self.cache_kwargs.get("max_num_ranges"),
             )
-            quant_buffers = create_quantized_kv_buffers_for_checkpoints(
+            quant_buffers = create_quantized_buffers_for_kv_cache_checkpoints(
                 model_part=model_part,
                 qname=self.qname,
-                batch_size=self._batch_size,
                 cache_kwargs=self.cache_kwargs,
                 dequant_kwargs=dequant_kwargs,
             )

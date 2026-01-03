@@ -126,7 +126,7 @@ class InferenceAttnWeightsReplayCache(
         if replay_log is None or len(replay_log) == 0:
             raise ValueError("replay_log must not be empty")
         if self.device != replay_log.device:
-            raise ValueError(f"self.device = {self.device}, replay_log.device = {self.replay_log.device}: must be the same")
+            raise ValueError(f"self.device = {self.device}, replay_log.device = {replay_log.device}: must be the same")
         self.replay_log = replay_log
 
     @property

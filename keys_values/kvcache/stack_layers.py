@@ -47,19 +47,29 @@ class CellBlocks:
             raise ValueError(f"idx.shape = {idx.shape}, must be {(batch_size, chunk_len)}")
         if chunk_len > self.max_seq_length:
             raise ValueError(f"Cannot forward chunk of length {chunk_len}, max seq length is only {self.max_seq_length}")
+        devices = set()
         for block_idx, block in self.blocks():
             self._check_kv_cache(
                 block.attn.kv_cache, input_pos, block_idx, batch_size, chunk_len,
             )
+            if block.attn.device is not None:
+                devices.add(block.attn.device)
+        multi_devices = len(devices) > 1
         # Loop over blocks
-        for block_idx, block, block_kwargs in self.blocks_with_kwargs():
-            try:
-                device = block.attn.device
-                x = x.to(device=device)
-                idx = idx.to(device=device)
-            except AttributeError:
-                pass
-            x = block(x, token_idx=idx, input_pos=input_pos, **block_kwargs)
+        if not multi_devices:
+            if devices:
+                x = x.to(device=next(iter(devices)))
+            for block_idx, block, block_kwargs in self.blocks_with_kwargs():
+                x = block(x, token_idx=idx, input_pos=input_pos, **block_kwargs)
+        else:
+            for block_idx, block, block_kwargs in self.blocks_with_kwargs():
+                try:
+                    device = block.attn.device
+                    x = x.to(device=device)
+                    idx = idx.to(device=device)
+                except AttributeError:
+                    pass
+                x = block(x, token_idx=idx, input_pos=input_pos, **block_kwargs)
 
         return x
 

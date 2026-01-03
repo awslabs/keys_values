@@ -508,12 +508,12 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         init_length = min(init_length, self.cache_length)
         self._allocate_buffers(device=keys.device)
         self.current_length = init_length
-        self.k[:self.batch_size, :, :init_length, :] = keys.to(
+        self.k[:self.batch_size, :, :init_length, :] = keys[:, :, :init_length, :].to(
             device=self.device, dtype=self.dtype,
-        )[:, :, :init_length, :]
-        values = k_and_v.values().to(
+        )
+        values = k_and_v.values()[:, :, :init_length, :].to(
             device=self.device, dtype=self.dtype,
-        )[:, :, :init_length, :]
+        )
         self.v[:self.batch_size, :, :init_length, :] = values
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:

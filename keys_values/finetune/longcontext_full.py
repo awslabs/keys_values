@@ -155,6 +155,7 @@ def setup(
         attention_backward_temp_size_gb=2,
         use_new_cache=False,
         max_match_trials_pack_arg=8,
+        layer_checkpoint_chunk_size=None,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
@@ -598,6 +599,18 @@ def wrap_gpt_model(
             autograd_hooks_kwargs = None
         if cpu_offload_device is not None:
             common_kwargs["head_model"] = head_model.to(device=cpu_offload_device)
+        layer_checkpoint_chunk_size = kv_cache.layer_checkpoint_chunk_size
+        if layer_checkpoint_chunk_size is None:
+            # Default value for chunk size if not given
+            layer_checkpoint_chunk_size = kv_cache.cache_length
+            add_msg = " (default)"
+        else:
+            add_msg = ""
+        if kv_cache.qname != "default":
+            print_message(
+                f"Using layer_checkpoint_chunk_size = {layer_checkpoint_chunk_size}" + add_msg,
+                fabric,
+            )
         model = LongContextGradientModel(
             **common_kwargs,
             layers_per_cell=kv_cache.layers_per_cell,
@@ -608,6 +621,7 @@ def wrap_gpt_model(
             autograd_hooks_kwargs=autograd_hooks_kwargs,
             profile_steps=profile_grad_times,
             offload_device=cpu_offload_device,
+            layer_checkpoint_chunk_size=layer_checkpoint_chunk_size,
         )
     else:
         model = LongContextInferenceModel(**common_kwargs)

@@ -43,6 +43,9 @@ HEAD_OR_INITIAL_TENSORS_MAX_BYTES = 2 ** 31
 CLOSEBY_THRESHOLD = 4
 
 
+# TODO:
+# Too many parameters are collected here. Should only contain parameters
+# related to KV caches, not related to gradient computation.
 @dataclass(frozen=True)
 class KVCacheArgs:
     name: str  # TODO: Different per layer
@@ -59,6 +62,7 @@ class KVCacheArgs:
     attention_backward_temp_size_gb: Optional[float] = None
     use_new_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
+    layer_checkpoint_chunk_size: Optional[int] = None
 
     def __post_init__(self):
         supported_names = KVCacheFactory.supported_names()

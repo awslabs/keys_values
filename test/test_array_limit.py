@@ -108,6 +108,7 @@ def test_tmp_array_limit_object():
         qname=kv_cache_args.qname,
         cache_kwargs=cache_kwargs,
         train_cache_kwargs=train_cache_kwargs,
+        layer_checkpoint_chunk_size=kv_cache_args.cache_length,
     )
     seq_length = 2 * kv_cache_args.cache_length
     token_ids = torch.randint(
