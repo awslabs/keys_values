@@ -562,11 +562,9 @@ def _get_length_for_device(
     return length_for_device
 
 
-def create_quantized_kv_buffers_for_checkpoints(
+def create_quantized_buffers_for_kv_cache_checkpoints(
     model_part: CellBlocks,
     qname: str,
-    batch_size: int,
-    layer_activations: bool = False,
     cache_kwargs: Optional[Dict[str, Any]] = None,
     dequant_kwargs: Optional[Dict[str, Any]] = None,
     default_device: Optional[torch.device] = None,
@@ -574,31 +572,14 @@ def create_quantized_kv_buffers_for_checkpoints(
     """
     Creates a dictionary from device to :class:`QuantizedKVCacheBuffers` for
     the layer range given by `model_part`. This is used to create checkpointing
-    objects per layer.
-
-    One use case is for KV cache checkpoints for inference replay, see also
-    :class:`KVCacheBufferQuantizedCheckpoints`. Another use case is for layer
-    activation checkpoints, see also :class:`LayerInputQuantizedCheckpoints`.
-    For the latter, use `layer_activations=True`.
+    objects per layer, for KV cache checkpoints for inference replay, see also
+    :class:`KVCacheBufferQuantizedCheckpoints`.
 
     """
     _, first_block = next(iter(model_part.blocks()))
     cache_params = first_block.attn.kv_cache.get_params()
     if cache_params.dtype is None:
         raise ValueError("KV caches assigned to each block must have `dtype` assigned")
-    if layer_activations:
-        # Layer activations have a different shape than KV caches. And their
-        # `cache_length` dimension is constant.
-        cache_params = replace(
-            cache_params,
-            max_batch_size=batch_size,
-            n_query_groups=1,
-            head_size=model_part.config.n_embd // 2,
-            n_head=1,
-        )
-        layer_act_cache_length = model_part.max_seq_length
-    else:
-        layer_act_cache_length = None
     buffer_params = KVCacheBuffersParams.from_params(cache_params)
     length_for_device = _get_length_for_device(model_part, default_device)
     if dequant_kwargs is None:
@@ -606,6 +587,70 @@ def create_quantized_kv_buffers_for_checkpoints(
 
     quant_buffers = dict()
     for device, cache_length in length_for_device.items():
+        dequant_buffers = DequantizedKVCacheBuffers(
+            params=replace(buffer_params, device=device),
+            cache_length=cache_length,
+            **dequant_kwargs,
+        )
+        _cache_params = replace(
+            cache_params,
+            device=device,
+            cache_length=cache_length,
+        )
+        quant_kwargs, quantizer_type, cache_kwargs = KVCacheFactory.get_quant_kwargs(
+            _cache_params, qname, cache_kwargs,
+        )
+        quant_buffers[device] = QuantizedKVCacheBuffers(
+            quantizer_k=quantizer_type(**quant_kwargs),
+            quantizer_v=quantizer_type(**quant_kwargs),
+            dequant_buffers=dequant_buffers,
+        )
+    return quant_buffers
+
+
+def create_quantized_buffers_for_layer_checkpoints(
+    model_part: CellBlocks,
+    qname: str,
+    batch_size: int,
+    chunk_size: int,
+    cache_kwargs: Optional[Dict[str, Any]] = None,
+    dequant_kwargs: Optional[Dict[str, Any]] = None,
+    default_device: Optional[torch.device] = None,
+) -> Dict[torch.device, QuantizedKVCacheBuffers]:
+    """
+    Creates a dictionary from device to list of :class:`QuantizedKVCacheBuffers`
+    for the layer range given by `model_part`. This is used to create checkpointing
+    objects per layer, for layer input checkpointing, see also
+    :class:`LayerInputQuantizedCheckpoints`.
+
+    The list entries have `cache_length` equal to `chunk_size` (the last one
+    has `cache_length <= chunk_size`), and cache lengths sum up to
+    `model_part.max_seq_length`. The entries share their dequantization
+    buffers.
+
+    """
+    assert chunk_size > 0
+    max_seq_length = model_part.max_seq_length
+    chunk_size = min(chunk_size, max_seq_length)
+    _, first_block = next(iter(model_part.blocks()))
+    cache_params = first_block.attn.kv_cache.get_params()
+    if cache_params.dtype is None:
+        raise ValueError("KV caches assigned to each block must have `dtype` assigned")
+    cache_params = replace(
+        cache_params,
+        max_batch_size=batch_size,
+        n_query_groups=1,
+        head_size=model_part.config.n_embd // 2,
+        n_head=1,
+    )
+    buffer_params = KVCacheBuffersParams.from_params(cache_params)
+    length_for_device = _get_length_for_device(model_part, default_device)
+    if dequant_kwargs is None:
+        dequant_kwargs = dict()
+
+    quant_buffers = dict()
+    for device, cache_length in length_for_device.items():
+        # HIER!!
         _cache_length = layer_act_cache_length if layer_activations else cache_length
         dequant_buffers = DequantizedKVCacheBuffers(
             params=replace(buffer_params, device=device),
