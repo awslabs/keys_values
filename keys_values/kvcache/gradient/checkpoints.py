@@ -559,6 +559,8 @@ def create_layers_and_buffers_for_model(
     cache_kwargs: Optional[Dict[str, Any]] = None,
     default_device: Optional[torch.device] = None,
 ) -> List[Tuple[List[int], QuantizedKVCacheBuffers]]:
+    if cache_kwargs is None:
+        cache_kwargs = dict()
     # Determine the devices
     # Note: For entries `>= n_layer` in `layer_numbers`, we use the device
     # of the final layer `n_layer - 1`
