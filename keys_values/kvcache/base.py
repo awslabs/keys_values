@@ -40,7 +40,6 @@ class KVCacheParams:
     cache_length: int
     head_size: int
     n_head: int
-    device: Optional[torch.device]
     dtype: Optional[torch.dtype]
 
     @staticmethod
@@ -48,7 +47,6 @@ class KVCacheParams:
         config: Config,
         max_batch_size: int,
         cache_length: int,
-        device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         head_size: Optional[int] = None,
     ) -> "KVCacheParams":
@@ -60,7 +58,6 @@ class KVCacheParams:
             cache_length=cache_length,
             head_size=head_size,
             n_head=config.n_head,
-            device=device,
             dtype=dtype,
         )
 
@@ -130,10 +127,16 @@ class KVCache(torch.nn.Module):
         self._work_around_hf_bug = config.rope_n_elem == 1
 
     @property
-    def device(self) -> torch.device:
+    def device(self) -> Optional[torch.device]:
         """
+        A KV cache is created without association to a device. Its device
+        is set based on the arguments of the first :meth:`forward` call. It
+        cannot be changed afterwards.
+
         Returns:
-            Device the KV cache buffers are kept on
+            Device the KV cache buffers are kept on, and which arguments
+            to :meth:`forward` need to be on. Returns `None` as long as the
+            device is not fixed (upon first :meth:`forward` call).
 
         """
         raise NotImplementedError
@@ -258,7 +261,6 @@ class KVCache(torch.nn.Module):
             cache_length=self.cache_length,
             head_size=self.head_size,
             n_head=self.n_head,
-            device=self.device,
             dtype=self.dtype,
         )
 
@@ -312,11 +314,11 @@ class KVCache(torch.nn.Module):
         Args:
             device: Device on which the copy is created. If the cache has
                 buffers, they must be deallocated. Their default `device` is
-                set to this value. If not given, the device of the copy remains
-                the same.
+                set to this value. If not given, the device of the copy is
+                not determined (see :meth:`device`).
 
         Returns:
-            Shallow copy of this object on device `device`
+            Shallow copy of this object
 
         """
         raise NotImplementedError()
@@ -353,6 +355,11 @@ class DefaultKVCache(KVCache):
             )
         else:
             self.mha = mha
+        self._device = None  # Unassigned so far
+
+    @property
+    def device(self) -> Optional[torch.device]:
+        return self._device
 
     @property
     def batch_size(self) -> Optional[int]:
@@ -366,6 +373,13 @@ class DefaultKVCache(KVCache):
         token_idx: torch.Tensor,
         input_pos: int,
     ):
+        """
+        Apart from checking shapes of arguments, we also deal with `device`.
+        If `_device is None`, it is set to `query.device`, and existing
+        parameters are moved (if any). Otherwise, `query.device` must be
+        equal to `_device`. Arguments are not moved if on the wrong device.
+
+        """
         for_prefill = input_pos == 0
         if query.ndim != 4:
             raise ValueError("query, key, value must be 4D tensors")
@@ -391,6 +405,41 @@ class DefaultKVCache(KVCache):
         t_shape = (batch_size, num)
         if token_idx.shape != t_shape:
             raise ValueError(f"token_idx.shape = {token_idx.shape}, must be {t_shape}")
+        # Deal with device
+        # If `_device is None`, we set it here to `query.device`. Parameters
+        # which have already been created, are moved to the new device if needed.
+        new_device = query.device
+        for x in (key, value, token_idx):
+            if x.device != new_device:
+                raise ValueError("query, key, value, token_idx must be on same device")
+        self._convert_or_check_device(new_device)
+        if self._device is None:
+            # Fix device of cache
+            self._device = new_device
+
+    def _convert_or_check_device(
+        self,
+        new_device: torch.device,
+    ):
+        if self._device is None:
+            for name in self._parameter_names():
+                x = getattr(self, name, None)
+                if x is not None:
+                    if not isinstance(x, torch.Tensor):
+                        raise AssertionError(f"Internal error in _convert_or_check_device: {name} must be of type torch.Tensor")
+                    if x.device != new_device:
+                        setattr(self, name, x.to(new_device))
+        elif new_device != self._device:
+            raise ValueError(f"Arguments on device {new_device}, must be on {self._device}")
+
+    def _parameter_names(self) -> List[str]:
+        """
+        Returns:
+            Names of `torch.Tensor` parameters which need to be checked for
+            device or converted.
+
+        """
+        return []
 
     def forward(
         self,

@@ -91,10 +91,8 @@ class KVCacheWithBuffers(DefaultKVCache):
         self._chunk_idx = None
         if buffers.current_length is not None and buffers.current_length > 0:
             print(f"WARNING: buffers.current_length = {buffers.current_length} > 0")
-
-    @property
-    def device(self) -> torch.device:
-        return self.kv_buffers.device
+        # If `buffers.device` already determined, this fixes the device of the cache
+        self._device = buffers.device
 
     @property
     def current_length(self) -> int:
@@ -143,8 +141,12 @@ class KVCacheWithBuffers(DefaultKVCache):
         needs lots of device memory, in order to share the device memory between
         the two.
 
+        Another use case is if a model is moved to a different device, including
+        its KV caches. This works only if KV cache buffers are deallocated.
+
         """
         self.kv_buffers.deallocate()
+        self._device = None
 
     @property
     def buffers_are_allocated(self) -> bool:
@@ -385,16 +387,16 @@ class DenseKVCache(KVCacheWithBuffers):
         return self._replay_log
 
     def clone(self, device: Optional[torch.device] = None) -> KVCache:
-        if device is not None and device != self.device:
-            if self.kv_buffers.buffers_are_allocated:
-                raise ValueError(f"Can only change device of buffers to {device} if buffers are deallocated")
-            self.kv_buffers.deallocate(device)
-        return DenseKVCache(
+        if self.kv_buffers.buffers_are_allocated:
+            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
+        result = DenseKVCache(
             config=self.config,
             buffers=self.kv_buffers,
             block_idx=self.block_idx,
             **self._base_kwargs_for_clone(),
         )
+        result._device = device
+        return result
 
 
 class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
@@ -463,9 +465,12 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             buffers: KV cache buffers to be used
         """
         super().__init__(config, buffers, block_idx, **base_kwargs)
+        device = buffers.device
+        if device is None:
+            device = torch.get_default_device()
         self.register_buffer(
             "token_pos",
-            torch.zeros(buffers.cache_length, device=buffers.device, dtype=torch.int),
+            torch.zeros(buffers.cache_length, device=device, dtype=torch.int),
             persistent=False,
         )
         self.next_position = None
@@ -505,6 +510,9 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         return LastRecentlyInsertedKVCache(
             config, buffers, block_idx, **base_kwargs,
         )
+
+    def _parameter_names(self) -> List[str]:
+        return ["token_pos"]
 
     @property
     def next_token_pos(self) -> Optional[int]:
@@ -633,13 +641,13 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         return self._replay_log
 
     def clone(self, device: Optional[torch.device] = None) -> KVCache:
-        if device is not None and device != self.device:
-            if self.kv_buffers.buffers_are_allocated:
-                raise ValueError(f"Can only change device of buffers to {device} if buffers are deallocated")
-            self.kv_buffers.deallocate(device)
-        return LastRecentlyInsertedKVCache(
+        if self.kv_buffers.buffers_are_allocated:
+            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
+        result = LastRecentlyInsertedKVCache(
             config=self.config,
             buffers=self.kv_buffers,
             block_idx=self.block_idx,
             **self._base_kwargs_for_clone(),
         )
+        result._device = device
+        return result
