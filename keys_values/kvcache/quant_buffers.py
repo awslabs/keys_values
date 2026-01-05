@@ -87,7 +87,7 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
         self._debug_label = debug_label
 
     @property
-    def device(self) -> torch.device:
+    def device(self) -> Optional[torch.device]:
         return self.quantizer_k.device
 
     @property
@@ -98,18 +98,31 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
     def debug_label(self) -> Optional[str]:
         return self._debug_label
 
-    def _deallocate(self, device: Optional[torch.device] = None):
-        self.quantizer_k.deallocate(device)
-        self.quantizer_v.deallocate(device)
+    def _deallocate(self):
+        self.quantizer_k.deallocate()
+        self.quantizer_v.deallocate()
 
-    def _allocate_buffers(self, device: Optional[torch.device] = None):
+    def _allocate_buffers(
+        self, device: Optional[torch.device] = None,
+    ):
+        """
+        Args:
+            device: If given, the buffer must be on this device. It is
+                reallocated if not.
+
+        """
+        if device is None:
+            if self.buffers_are_allocated:
+                device = self.device
+            else:
+                device = torch.get_default_device()
         batch_size = self.batch_size
         if not self.buffers_are_allocated:
             if batch_size is None:
                 batch_size = self.max_batch_size
         elif batch_size is not None:
-            if self.quantizer_k.batch_size == batch_size:
-                # No need to adjust buffer size
+            if self.quantizer_k.batch_size == batch_size and device == self.device:
+                # No need to reallocate
                 batch_size = None
             elif self.quantizer_k.batch_size < batch_size:
                 print(f"Batch size increased from {self.quantizer_k.batch_size} to {batch_size}: Re-allocating buffers")
@@ -151,6 +164,13 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
             raise ValueError(
                 f"quantizer_k.blocks_over_heads = {quantizer_k.blocks_over_heads}, "
                 f"quantizer_v.blocks_over_heads = {quantizer_v.blocks_over_heads}, "
+                "must be the same"
+            )
+        if quantizer_v.device != self.device or dequant_buffers.device != self.device:
+            raise ValueError(
+                f"quantizer_k.device = {quantizer_k.device}, "
+                f"quantizer_v.device = {quantizer_v.device}, "
+                f"dequant_buffers.device = {dequant_buffers.device}, "
                 "must be the same"
             )
 
@@ -223,9 +243,13 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
         return self.dequant_buffers.get_keys_values()
 
     def _prefill(self, key: torch.Tensor, value: torch.Tensor):
+        if self.buffers_are_allocated and key.device != self.device:
+            raise ValueError(f"key.device = {key.device}, must be {self.device}")
         self._allocate_buffers(device=key.device)
         self.dequant_buffers.set_quantized_cache(self)
-        return self.dequant_buffers.prefill(key, value)
+        return self.dequant_buffers.prefill(
+            key.to(dtype=self.dtype), value.to(dtype=self.dtype),
+        )
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         self._assert_buffers_allocated()
@@ -310,6 +334,11 @@ MAX_SIZE_POSITIONS_TO_CHECK = 32
 DEFAULT_MAX_NUM_RANGES = 4
 
 
+# TODO:
+# Buffers are allocated on device params.device (and with params.dtype) at
+# construction, this cannot be changed. Does this go together with cloning
+# KV caches to a different device? Or with not setting dtype, but getting
+# it from first usage?
 class DequantizedKVCacheBuffers:
     """
     Special implementation just for use in :class:`QuantizedKVCacheBuffers`.
@@ -355,13 +384,13 @@ class DequantizedKVCacheBuffers:
         params: KVCacheBuffersParams,
         cache_length: int,
         max_num_ranges: Optional[int] = None,
+        debug_device_warning: bool = False,
     ):
         # Copied from `KVCacheBuffers.__init__`:
         self.max_batch_size = params.max_batch_size
         self.n_query_groups = params.n_query_groups
         self.cache_length = cache_length
         self.head_size = params.head_size
-        self._device = params.device
         self.dtype = params.dtype
         self.current_length = None
         self.k_buff = None
@@ -372,25 +401,31 @@ class DequantizedKVCacheBuffers:
         self._slots_to_write_back = None
         # Do not track more than this many slots
         self._max_slots_tracked = int(cache_length * MAX_SLOTS_TRACKED_FRACTION)
-        self._allocate_buffers()
+        self._allocate_buffers(params.device, params.dtype)
         self.debug_events = None
+        self._debug_device_warning = debug_device_warning
 
     @property
     def device(self) -> torch.device:
-        if self.k_buff is not None:
-            self._device = self.k_buff.device
-        return self._device
+        return self.k_buff.device
 
     def start_debug_event_protocol(self):
         self.debug_events = []
 
-    def _allocate_buffers(self, device: Optional[torch.device] = None):
+    def _allocate_buffers(
+        self,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
         if device is None:
-            device = self._device
+            device = self.device
+            if device is None:
+                device = torch.get_default_device()
+        if self.dtype is None:
+            self.dtype = dtype
         shape = (self.max_batch_size, self.n_query_groups, self.cache_length, self.head_size)
-        kwargs = dict(device=device, dtype=self.dtype)
-        self.k_buff = torch.zeros(shape, **kwargs)
-        self.v_buff = torch.zeros(shape, **kwargs)
+        self.k_buff = torch.zeros(shape, device=device, dtype=self.dtype)
+        self.v_buff = torch.zeros(shape, device=device, dtype=self.dtype)
 
     def set_quantized_cache(self, cache: Optional[QuantizedKVCacheBuffers]):
         """
@@ -411,9 +446,8 @@ class DequantizedKVCacheBuffers:
         self._quantized_cache = cache  # Change association
         if cache is not None:
             # Buffers here must be on same device as `_quantized_cache`
-            self._device = self._quantized_cache.device
-            if self.k_buff is not None and self._device != self.k_buff.device:
-                self._allocate_buffers()
+            if self.device != cache.device:
+                raise ValueError(f"cache.device = {cache.device}, must be equal to {self.device}")
             self._dequantize()  # Dequantize and copy
 
     def write_back(self):
@@ -505,6 +539,8 @@ class DequantizedKVCacheBuffers:
         value: torch.Tensor,
     ):
         self._check_quantized_cache()
+        if self._debug_device_warning and key.device != self.device:
+            print(f"WARNING DequantizedKVCacheBuffers.set_slots: {key.device} -> {self.device}")
         key = key.to(device=self.device, dtype=self.dtype)
         value = value.to(device=self.device, dtype=self.dtype)
         positions = self._check_positions(positions)

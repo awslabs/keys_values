@@ -71,9 +71,10 @@ class H2OKVCache(AttnWeightsKVCache):
         )
         self.normalize_scores = normalize_scores
         shape = (buffers.max_batch_size, self.n_query_groups, buffers.cache_length)
+        device = self._default_device_for_new_params()
         self.register_buffer(
             "scores",
-            torch.zeros(shape, device=buffers.device, dtype=torch.float32),
+            torch.zeros(shape, device=device, dtype=torch.float32),
             persistent=False,
         )
 
@@ -108,6 +109,10 @@ class H2OKVCache(AttnWeightsKVCache):
             normalize_scores,
             **base_kwargs,
         )
+
+    @classmethod
+    def _parameter_names(cls) -> List[str]:
+        return super()._parameter_names() + cls._score_buffer_names()
 
     def _score_buffers(self) -> List[Tuple[torch.Tensor, str]]:
         return [(self.scores, "scores")]
@@ -205,16 +210,16 @@ class H2OKVCache(AttnWeightsKVCache):
         return sz_total + sz_sc, dict(dct_sz, scores=sz_sc)
 
     def clone(self, device: Optional[torch.device] = None) -> KVCache:
-        if device is not None and device != self.device:
-            if self.kv_buffers.buffers_are_allocated:
-                raise ValueError(f"Can only change device of buffers to {device} if buffers are deallocated")
-            self.kv_buffers.deallocate(device)
-        return H2OKVCache(
+        if self.kv_buffers.buffers_are_allocated:
+            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
+        result = H2OKVCache(
             config=self.config,
             buffers=self.kv_buffers,
             block_idx=self.block_idx,
             **self._base_kwargs_for_clone(),
         )
+        result._device = device
+        return result
 
     def _base_kwargs_for_clone(self) -> Dict[str, Any]:
         base_kwargs = super()._base_kwargs_for_clone()
@@ -321,9 +326,10 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
             **base_kwargs,
         )
         shape = (buffers.max_batch_size, self.n_query_groups, buffers.cache_length)
+        device = self._default_device_for_new_params()
         self.register_buffer(
             self.get_name_v_norm(),
-            torch.zeros(shape, device=buffers.device, dtype=torch.float32),
+            torch.zeros(shape, device=device, dtype=torch.float32),
             persistent=False,
         )
 
@@ -370,6 +376,10 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
     def _score_buffer_names(cls) -> List[str]:
         return super()._score_buffer_names() + [cls.get_name_v_norm()]
 
+    @classmethod
+    def _parameter_names(cls) -> List[str]:
+        return super()._parameter_names() + [cls.get_name_v_norm()]
+
     def _instantaneous_score(
         self,
         attn_weights: torch.Tensor,
@@ -401,16 +411,16 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         return self.kv_buffers
 
     def clone(self, device: Optional[torch.device] = None) -> KVCache:
-        if device is not None and device != self.device:
-            if self.kv_buffers.buffers_are_allocated:
-                raise ValueError(f"Can only change device of buffers to {device} if buffers are deallocated")
-            self.kv_buffers.deallocate(device)
-        return VLengthH2OKVCache(
+        if self.kv_buffers.buffers_are_allocated:
+            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
+        result = VLengthH2OKVCache(
             config=self.config,
             buffers=self.kv_buffers,
             block_idx=self.block_idx,
             **self._base_kwargs_for_clone(),
         )
+        result._device = device
+        return result
 
 
 class H2OOriginalKVCache(AttnWeightsKVCache):
@@ -445,9 +455,10 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
         # This is because all score buffers in :class:`AttnWeightsKVCache` have
         # the same shape, which has a batch dimension.
         shape = (self.max_batch_size, self.n_query_groups, buffers.cache_length)
+        device = self._default_device_for_new_params()
         self.register_buffer(
             "scores",
-            torch.zeros(shape, device=buffers.device, dtype=torch.float32),
+            torch.zeros(shape, device=device, dtype=torch.float32),
             persistent=False,
         )
 
@@ -517,14 +528,18 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
     def _score_buffer_names(cls) -> List[str]:
         return ["scores"]
 
+    @classmethod
+    def _parameter_names(cls) -> List[str]:
+        return super()._parameter_names() + ["scores"]
+
     def clone(self, device: Optional[torch.device] = None) -> KVCache:
-        if device is not None and device != self.device:
-            if self.kv_buffers.buffers_are_allocated:
-                raise ValueError(f"Can only change device of buffers to {device} if buffers are deallocated")
-            self.kv_buffers.deallocate(device)
-        return H2OOriginalKVCache(
+        if self.kv_buffers.buffers_are_allocated:
+            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
+        result = H2OOriginalKVCache(
             config=self.config,
             buffers=self.kv_buffers,
             block_idx=self.block_idx,
             **self._base_kwargs_for_clone(),
         )
+        result._device = device
+        return result

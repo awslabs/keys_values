@@ -51,9 +51,9 @@ class BitsAndBytesQuantizer(Quantizer):
         shape: Tuple[int, int, int, int],
         source_dtype: torch.dtype,
         num_bits: int,
-        device: Optional[torch.device] = None,
         blocks_over_heads: bool = False,
         allocate_buffers: bool = False,
+        device: Optional[torch.device] = None,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
     ):
         """
@@ -87,16 +87,19 @@ class BitsAndBytesQuantizer(Quantizer):
             raise ValueError(f"head_size {head_size}, must be even")
         bits_per_entry = num_bits + 2 * bits_for_torch_dtype(torch.float32)
         self._bytes_per_entry = (batch_size * n_query_groups * head_size / 8) * bits_per_entry
-        self._device = device
         self._init_blocksize_quant_shape()
         # Allocate buffers (optional)
         self.quant_buffer = None
         self.quant_absmax = None
         self._batch_size = None
         if allocate_buffers:
-            self.allocate_buffers(batch_size)
+            self.allocate_buffers(batch_size, device)
         self._quant_code = None
         self._initialize()
+
+    @property
+    def device(self) -> Optional[torch.device]:
+        return self.quant_buffer.device if self.quant_buffer is not None else None
 
     @property
     def batch_size(self) -> Optional[int]:
@@ -124,12 +127,6 @@ class BitsAndBytesQuantizer(Quantizer):
                 print(f"blocksize = {self.blocksize} not supported. Trying with blocks_over_heads=True.")
                 blocks_over_heads = True
 
-    @property
-    def device(self) -> torch.device:
-        if self.quant_buffer is not None:
-            self._device = self.quant_buffer.device
-        return self._device
-
     def _determine_blocksize(self) -> Tuple[int, int]:
         result = determine_blocksize(self.shape)
         if result is None:
@@ -149,7 +146,10 @@ class BitsAndBytesQuantizer(Quantizer):
         if not (0 < batch_size <= self.max_batch_size):
             raise ValueError(f"batch_size = {batch_size} must be in (0, {self.max_batch_size}]")
         if device is None:
-            device = self.device
+            if self.buffers_are_allocated:
+                device = self.device
+            else:
+                device = torch.get_default_device()
         if not self.buffers_are_allocated or batch_size > self.shape[0] or device != self.device:
             if device is None:
                 raise ValueError("device is not set. Use device argument")
@@ -170,15 +170,13 @@ class BitsAndBytesQuantizer(Quantizer):
         _, quant_state = quant_func(x)
         self._quant_code = quant_state.code
 
-    def deallocate(self, device: Optional[torch.device] = None):
+    def deallocate(self):
         if self.buffers_are_allocated:
             del self.quant_buffer
             self.quant_buffer = None
             del self.quant_absmax
             self.quant_absmax = None
             self._batch_size = None
-        if device is not None:
-            self._device = device
 
     @property
     def buffers_are_allocated(self) -> bool:

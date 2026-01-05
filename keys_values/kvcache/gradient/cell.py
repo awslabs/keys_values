@@ -25,10 +25,10 @@ from keys_values.kvcache.base import KVCacheReplayLog, DefaultKVCache
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.train_attn_weights_replay import (
     TrainingAttnWeightsReplayCache,
-    for_debug,
 )
 from keys_values.kvcache.gradient.train_attn_weights_replay_new import TrainingAttnWeightsReplayCacheNew
 from keys_values.kvcache.stack_layers import CellBlocks
+from keys_values.kvcache.utils import for_debug
 
 
 GetInputSlice = Callable[[int, int], torch.Tensor]

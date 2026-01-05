@@ -32,10 +32,10 @@ class KVCacheBuffersParams:
     """
     Note that `device` need not be set. As long as a buffer remains not
     allocated, its device can be unspecified. It is then determined upon
-    allocated, based on input arguments to the KV cache call.
+    allocation, based on input arguments to the first KV cache call.
 
     `dtype` need not be set either. In this case, the buffer dtype is
-    determined from input arguments to the KV cache call. This dtype
+    determined from input arguments to the first KV cache call. This dtype
     cannot be changed later.
 
     """
@@ -433,7 +433,7 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
             if self.k.shape[0] >= batch_size and device == self.device:
                 # Buffer exists and is large enough: No need to reallocate
                 batch_size = None
-            else:
+            elif self.k.shape[0] < batch_size:
                 print(f"Batch size increased from {self.k.shape[0]} to {batch_size}: Re-allocating buffers")
         if batch_size is not None:
             shape = (batch_size, self.n_query_groups, self.cache_length, self.head_size)

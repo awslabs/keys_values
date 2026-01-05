@@ -38,9 +38,9 @@ class TorchAOQuantizer(TorchBasicQuantizer):
         shape: Tuple[int, int, int, int],
         source_dtype: torch.dtype,
         num_bits: int,
-        device: Optional[torch.device] = None,
         blocks_over_heads: bool = False,
         allocate_buffers: bool = False,
+        device: Optional[torch.device] = None,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
     ):
         if source_dtype not in self.supported_source_dtypes():
@@ -53,9 +53,9 @@ class TorchAOQuantizer(TorchBasicQuantizer):
             shape,
             source_dtype,
             target_dtype,
-            device,
             blocks_over_heads,
             allocate_buffers,
+            device,
             tmp_array_limit_gb,
         )
         batch_size, n_query_groups, _, head_size = shape

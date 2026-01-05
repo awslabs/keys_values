@@ -250,6 +250,17 @@ class KVCacheWithBuffers(DefaultKVCache):
         """
         raise NotImplementedError
 
+    def _default_device_for_new_params(self) -> torch.device:
+        """
+        Returns:
+            Device on which new parameters should be created first.
+
+        """
+        device = self.kv_buffers.device
+        if device is None:
+            device = torch.get_default_device()
+        return device
+
 
 class DenseKVCache(KVCacheWithBuffers):
     """
@@ -347,7 +358,6 @@ class DenseKVCache(KVCacheWithBuffers):
                 token_chunks=[token_idx],
                 cache_length=self.cache_length,
                 max_prefill_length=self.max_prefill_length,
-                dtype=self.dtype,
             )
 
     def token_positions(self) -> torch.Tensor:
@@ -411,14 +421,12 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
         cache_length: int,
         batch_size: int,
         n_query_groups: int,
-        dtype: Optional[torch.dtype] = None,
     ):
         super().__init__(
             token_chunks,
             cache_length,
             max_prefill_length=None,
             grace_period=0,
-            dtype=dtype,
         )
         self._shape = (batch_size, n_query_groups)
 
@@ -433,7 +441,7 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
             raise ValueError(f"token_pos = {token_pos}, num = {num}, seq_length = {seq_length}: Out of range")
         if token_pos < self.cache_length:
             raise ValueError(f"token_pos = {token_pos} must be >= {self.cache_length} = cache_length")
-        device = kwargs.get("device", self.device)
+        device = kwargs.get("device", torch.get_default_device())
         return positions_wrap_around(
             num=num,
             current=token_pos % self.cache_length,
@@ -465,9 +473,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             buffers: KV cache buffers to be used
         """
         super().__init__(config, buffers, block_idx, **base_kwargs)
-        device = buffers.device
-        if device is None:
-            device = torch.get_default_device()
+        device = self._default_device_for_new_params()
         self.register_buffer(
             "token_pos",
             torch.zeros(buffers.cache_length, device=device, dtype=torch.int),
@@ -511,8 +517,9 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             config, buffers, block_idx, **base_kwargs,
         )
 
-    def _parameter_names(self) -> List[str]:
-        return ["token_pos"]
+    @classmethod
+    def _parameter_names(cls) -> List[str]:
+        return super()._parameter_names() + ["token_pos"]
 
     @property
     def next_token_pos(self) -> Optional[int]:
@@ -597,7 +604,6 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 cache_length=self.cache_length,
                 batch_size=self.batch_size,
                 n_query_groups=self.n_query_groups,
-                dtype=self.dtype,
             )
 
     def token_positions(self) -> torch.Tensor:

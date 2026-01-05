@@ -37,12 +37,8 @@ from keys_values.kvcache.gradient.sdpa_op import (
     KVCacheCatUpdateAndSDPAFunction,
     KVCacheScatterUpdateAndSDPAFunction,
 )
-from keys_values.kvcache.utils import shape_to_tuple
+from keys_values.kvcache.utils import shape_to_tuple, for_debug
 from keys_values.utils import expand_index
-
-
-def for_debug(x: torch.Tensor) -> torch.Tensor:
-    return x.detach().clone().to(device=torch.device("cpu"))
 
 
 class TrainingAttnWeightsReplayCache(DefaultKVCache):
@@ -107,7 +103,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         start_token_pos: int,
         layer_idx: int,
         num_chunks: int,
-        device: torch.device,
         node_annotations: Optional[Annotations] = None,
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
         debug_print_annotations: bool = False,
@@ -126,11 +121,12 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             max_batch_size=batch_size,
             cache_length=cache_length,
             block_idx=layer_idx,
-            dtype=None,
             **base_kwargs,
         )
+        if len(replay_log) == 0:
+            raise ValueError("replay_log must not be empty")
+        self._device = replay_log.device
         self.replay_log = replay_log
-        self._device = device
         self._batch_size = batch_size
         self.kv_buffers = None
         self.layer_idx = layer_idx
@@ -144,7 +140,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         self._end_token_chunk_pos = None
         shape = (batch_size, config.n_query_groups, cache_length)
         self._token_positions = torch.zeros(
-            shape, dtype=torch.int, device=device,
+            shape, dtype=torch.int, device=self._device,
         )
         self.current_length = 0
         self._initialize_replay()
@@ -162,10 +158,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
     @property
     def batch_size(self) -> Optional[int]:
         return self._batch_size
-
-    @property
-    def device(self) -> torch.device:
-        return self._device
 
     def _initialize_replay(self):
         # Initialize `_token_chunk_pos`, `_next_token_pos`, and
@@ -419,24 +411,19 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         if self.debug_print_annotations:
             print(f"Create {str(annotation)}")
 
-    def _random_index(
-        self, num: int, device: torch.device,
-    ) -> torch.Tensor:
+    def _random_index(self, num: int) -> torch.Tensor:
         shape = (self.batch_size, self.n_query_groups, num, self.head_size)
         return create_random_index(
             shape=shape,
             length=self.current_length,
-            device=device,
+            device=self._device,
             dtype=torch.int32,
         )
 
     def _append_random_index(self, index: torch.Tensor) -> torch.Tensor:
-        index_len = index.shape[2]
-        if index_len < MAX_DELTA_TRANS_LENGTH:
-            index2 = self._random_index(
-                num=MAX_DELTA_TRANS_LENGTH - index_len,
-                device=index.device,
-            )
+        num = MAX_DELTA_TRANS_LENGTH - index.shape[2]
+        if num > 0:
+            index2 = self._random_index(num)
             index = torch.cat((index, index2), dim=2)
         return index
 
@@ -444,21 +431,17 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         self,
         kind: str,
         index: Optional[torch.Tensor],
-        device: torch.device,
     ) -> Tuple[torch.Tensor, Optional[Dict[str, Any]]]:
         if NodeAnnotation.kind_is_scatter(kind):
             assert index is not None
             assert index.ndim == 4  # Sanity check
-            index = index.detach().to(device)
+            index = index.detach()
             # If index is too small, we extend it by random entries. This
             # lowers the probability of false matches
             extra_info = {"index_len": index.shape[2]}
             index = self._append_random_index(index)
         else:
-            index = self._random_index(
-                num=MAX_DELTA_TRANS_LENGTH,
-                device=device,
-            )
+            index = self._random_index(MAX_DELTA_TRANS_LENGTH)
             extra_info = None
         return index, extra_info
 
@@ -474,14 +457,10 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             is_keys = NodeAnnotation.kind_is_keys(kind)
             x = self.kv_buffers.keys() if is_keys else self.kv_buffers.values()
             x = x.detach()[:, :, :self.current_length, :]
-            index, extra_info = self._index_for_before(
-                kind=kind,
-                index=index,
-                device=x.device,
-            )
+            index, extra_info = self._index_for_before(kind, index)
             delta = x.gather(2, index)
             if positions is not None:
-                positions = positions.detach().to(x.device)
+                positions = positions.detach().to(self._device)
             annotation = NodeAnnotation(
                 kind=kind,
                 layer_idx=self.layer_idx,
@@ -502,9 +481,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             self._append_annotation(annotation)
 
     def _create_node_after_creator(
-        self,
-        x: torch.Tensor,
-        kind: str,
+        self, x: torch.Tensor, kind: str,
     ):
         chunk_idx = self._token_chunk_pos - 1  # Counter has already been advanced
         x = x.detach()
@@ -586,7 +563,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
 
         """
         other = self.replay_log.token_chunks[self._token_chunk_pos]
-        if not token_idx.to(device=other.device).equal(other):
+        if not token_idx.equal(other):
             raise ValueError(f"token_idx:\n{token_idx}\nreplay_log.token_chunks[{self._token_chunk_pos}]:\n{other}\nShould be the same!")
         self._token_chunk_pos += 1
         num = token_idx.shape[-1]

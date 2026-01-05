@@ -115,8 +115,8 @@ class KVCacheFactory:
         max_batch_size: int,
         cache_length: int,
         block_idx: int,
-        device: torch.device,
-        dtype: torch.dtype,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> KVCache:
         """
@@ -127,8 +127,10 @@ class KVCacheFactory:
             max_batch_size: Maximum batch size for caches
             cache_length: Number of slots in caches
             block_idx: Index of block (or layer) in model
-            device: Device for cache objects
-            dtype: Data type for cache buffers (de-quantized)
+            device: Device for cache objects. If not given, this is determined
+                with first usage
+            dtype: Data type for cache buffers (de-quantized). If not given,
+                this is determined with first usage
             cache_kwargs: Additional keyword arguments for cache creation
 
         Returns:
@@ -141,7 +143,6 @@ class KVCacheFactory:
             cache_length=cache_length,
             head_size=config.head_size,
             n_head=config.n_head,
-            device=device,
             dtype=dtype,
         )
         if cache_kwargs is None:
@@ -166,6 +167,8 @@ class KVCacheFactory:
                 result = cache_type.from_config(**from_config_kwargs)
             else:
                 cache_params = KVCacheBuffersParams.from_params(params)
+                if device is not None:
+                    cache_params = replace(cache_params, device=device)
                 allocate_buffers = cache_kwargs.get("allocate_buffers")
                 if allocate_buffers is not None:
                     cache_kwargs.pop("allocate_buffers")
@@ -180,6 +183,7 @@ class KVCacheFactory:
                     params, qname, cache_kwargs,
                 )
                 quant_kwargs["allocate_buffers"] = allocate_buffers
+                quant_kwargs["device"] = device
                 result = cache_type(
                     config=config,
                     buffers=QuantizedKVCacheBuffers(
@@ -203,10 +207,10 @@ class KVCacheFactory:
         gpt_model: GPT,
         name: str,
         max_batch_size: int,
-        dtype: torch.dtype,
         cache_length: Union[int, List[int]],
         start: int = 0,
         end: Optional[int] = None,
+        dtype: Optional[torch.dtype] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> List[KVCache]:
         """
@@ -219,11 +223,12 @@ class KVCacheFactory:
             name: Determines cache and buffers type, must be in
                 :const:`SUPPORTED_CACHES`
             max_batch_size: Maximum batch size for caches
-            dtype: Data type for cache buffers (de-quantized)
             cache_length: Number of slots in caches. Can be different for
                 different caches
             start: Caches are created for layers in `range(start, end)`
             end: Caches are created for layers in `range(start, end)`
+            dtype: Data type for cache buffers (de-quantized). If not given,
+                this is determined with first usage
             cache_kwargs: Additional keyword arguments for cache creation
 
         Returns:
@@ -265,7 +270,6 @@ class KVCacheFactory:
                         **from_config_kwargs,
                         cache_length=c_len,
                         block_idx=i + start,
-                        device=block.attn.device,
                     )
                     for i, (block, c_len) in enumerate(
                         zip(
@@ -275,7 +279,6 @@ class KVCacheFactory:
                     )
                 ]
             else:
-                device = next(block_iterator(gpt_model, 0, 1)).attn.device
                 cache_params = KVCacheParams(
                     max_batch_size=max_batch_size,
                     n_query_groups=config.n_query_groups,
@@ -283,7 +286,6 @@ class KVCacheFactory:
                     head_size=config.head_size,
                     n_head=config.n_head,
                     dtype=dtype,
-                    device=device,
                 )
                 allocate_buffers = cache_kwargs.get("allocate_buffers")
                 if allocate_buffers is not None:
@@ -360,17 +362,17 @@ class KVCacheFactory:
         config: Config,
         max_batch_size: int,
         cache_length: int,
-        device: torch.device,
         dtype: torch.dtype,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[int, Dict[str, int]]:
+        if dtype is None:
+            raise ValueError("dtype must be specified")
         params = KVCacheParams(
             max_batch_size=max_batch_size,
             n_query_groups=config.n_query_groups,
             cache_length=cache_length,
             head_size=config.head_size,
             n_head=config.n_head,
-            device=device,
             dtype=dtype,
         )
         n_layers = config.n_layer
@@ -454,7 +456,6 @@ class KVCacheFactory:
         quant_kwargs = {
             "shape": shape,
             "source_dtype": params.dtype,
-            "device": params.device,
             "blocks_over_heads": blocks_over_heads,
             "tmp_array_limit_gb": cache_kwargs.get("tmp_array_limit_gb"),
         }

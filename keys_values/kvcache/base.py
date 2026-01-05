@@ -34,6 +34,9 @@ class KVCacheParams:
     run (i.e., different chunks). However, the batch size must never exceed
     `max_batch_size`.
 
+    If `dtype` is not specified, it is chosen with the first :meth:`forward`
+    call, based on the input arguments.
+
     """
     max_batch_size: int
     n_query_groups: int
@@ -105,7 +108,8 @@ class KVCache(torch.nn.Module):
             cache_length: Number of slots in cache
             block_idx: Index of model block (or layer). Multi-head attention
                 needs to know this.
-            dtype: Data type for buffers
+            dtype: Data type for buffers. If not given, it is set with the
+                first :meth:`forward` call, based on the input arguments.
             head_size: Size of final dimension of buffers. Defaults to head
                 size of model
         """
@@ -416,6 +420,8 @@ class DefaultKVCache(KVCache):
         if self._device is None:
             # Fix device of cache
             self._device = new_device
+        if self._dtype is None:
+            self._dtype = query.dtype
 
     def _convert_or_check_device(
         self,
@@ -432,7 +438,8 @@ class DefaultKVCache(KVCache):
         elif new_device != self._device:
             raise ValueError(f"Arguments on device {new_device}, must be on {self._device}")
 
-    def _parameter_names(self) -> List[str]:
+    @classmethod
+    def _parameter_names(cls) -> List[str]:
         """
         Returns:
             Names of `torch.Tensor` parameters which need to be checked for
@@ -639,18 +646,17 @@ class KVCacheReplayLog:
         raise NotImplementedError
 
     @property
-    def dtype(self) -> Optional[torch.dtype]:
+    def device(self) -> Optional[torch.device]:
         """
         Returns:
-            Data type of buffers of the cache
+            Device of token chunks and slot positions maintained, or `None`
+            as long as the log is empty
 
         """
-        raise NotImplementedError
-
-    @property
-    def device(self) -> Optional[torch.device]:
-        chunks = self.token_chunks
-        return chunks[0].device if chunks else None
+        if self.token_chunks:
+            return self.token_chunks[0].device
+        else:
+            return None
 
     def extract_index(
         self,
@@ -686,13 +692,15 @@ class DefaultKVCacheReplayLog(KVCacheReplayLog):
         cache_length: int,
         max_prefill_length: Optional[int] = None,
         grace_period: int = 0,
-        dtype: Optional[torch.dtype] = None,
     ):
+        if token_chunks:
+            device = token_chunks[0].device
+            if any(c.device != device for c in token_chunks):
+                raise ValueError("All token_chunks entries must be on same device")
         self._token_chunks = token_chunks
         self._cache_length = cache_length
         self._grace_period = grace_period
         self._max_prefill_length = max_prefill_length
-        self._dtype = dtype
 
     @property
     def token_chunks(self) -> List[torch.Tensor]:
@@ -709,10 +717,6 @@ class DefaultKVCacheReplayLog(KVCacheReplayLog):
     @property
     def grace_period(self) -> int:
         return self._grace_period
-
-    @property
-    def dtype(self) -> Optional[torch.dtype]:
-        return self._dtype
 
     def append_token_chunk(self, chunk: torch.Tensor):
         if self.token_chunks:
