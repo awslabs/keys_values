@@ -187,7 +187,6 @@ def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
         config=config,
         max_batch_size=batch_size,
         cache_length=cache_length,
-        device=device,
         dtype=dtype,
     )
     kwargs = dict(

@@ -31,7 +31,6 @@ from keys_values.model import GPT as GPTFull, Block as BlockFull
 from keys_values.optimize.module_wrapper import (
     AccessWeightsGradients,
     FlatVectors,
-    ParameterStructure,
 )
 from keys_values.use_eager_kernel import transform_mha_kwargs
 
@@ -127,7 +126,7 @@ def device_of_flat_vectors(
         devices = {
             vec.device for vecs in flat_vectors.values() for vec in vecs.values()
         }
-    if len(devices) > 2:
+    if len(devices) > 1:
         raise ValueError(f"flat_vectors contains vectors on more than one device: {devices}")
     return next(iter(devices))
 
@@ -732,78 +731,3 @@ class ModelFromFlatVectorsFactory:
             components=components,
             **mha_kwargs,
         )
-
-    # TODO: Not needed anymore?
-    @staticmethod
-    def remove_params_of_model(
-        gpt_model: Union[GPTFull, GPTLoRA],
-        shard_type: Optional[str],
-        use_lm_head: bool = True,
-    ):
-        """
-        Removes named parameters for certain blocks from `gpt_model`. The shard
-        is determined by `shard_type`, see :func:`names_and_modules_for_shard`.
-        If `shard_type is None`, parameters for all shards are removed.
-
-        Args:
-            gpt_model: Module to remove named parameters of blocks from
-            shard_type: Selects blocks for which parameters are removed. See
-                :func:`names_and_modules_for_shard`. If `None`, parameters
-                for all shards are removed.
-            use_lm_head: If `False`, the `lm_head` module is not included
-
-        """
-        names_and_modules, _ = names_and_modules_for_shard(
-            gpt_model, shard_type, use_lm_head,
-        )
-        for prefix_name, module in names_and_modules:
-            param_structure = AccessWeightsGradients(module).param_structure()
-            for _name in [
-                pspec.name
-                for struct in param_structure.values()
-                for pspec in struct.entries
-            ]:
-                name = ".".join([prefix_name, _name])
-                parent, pname = parent_of_parameter(gpt_model, name)
-                delattr(parent, pname)
-
-    # TODO: Not needed anymore?
-    @staticmethod
-    def restore_params_of_model(
-        model: Union[GPTFull, GPTLoRA],
-        param_structures: Dict[str, Dict[str, ParameterStructure]],
-        weights_vecs: Dict[str, FlatVectors],
-    ):
-        """
-        Given a model `model` whose parameters have been removed by
-        :meth:`remove_params_of_model`, restore these parameters from
-        the flat vectors in `weights_vecs`.
-
-        Note: Do not call this method on a model whose parameters are
-        referred to from elsewhere, e.g. from an optimizer.
-
-        Args:
-            model: Module to restore named parameters
-            param_structures: Dictionary of parameter structures, returned
-                by :meth:`remove_params_of_model`
-            weights_vecs: Flat vectors the parameters are restored from.
-                Entries are deleted as model parameters are restored.
-
-        """
-        # Loop over model compenents, and data types
-        for comp_name, param_structure in param_structures.items():
-            for dtype, structure in param_structure.items():
-                weight_vec = weights_vecs[comp_name][dtype]
-                if weight_vec.numel() != structure.size:
-                    raise ValueError(f"comp_name={comp_name}, dtype={dtype}: weights_vecs[comp_name][dtype].numel()={weight_vec.numel()}, param_structures[comp_name][dtype].size={structure.size}. Must be the same")
-                for pspec in structure.entries:
-                    start, end = pspec.range
-                    src_arg = weight_vec[start:end].view(*pspec.shape)
-                    name = ".".join([comp_name, pspec.name])
-                    parent, pname = parent_of_parameter(model, name)
-                    parent.register_parameter(
-                        pname,
-                        nn.Parameter(src_arg, requires_grad=pspec.requires_grad),
-                    )
-                del weights_vecs[comp_name][dtype]
-            del weights_vecs[comp_name]

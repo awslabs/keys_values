@@ -124,7 +124,6 @@ def test_gradient_sharded(
             config=config,
             max_batch_size=batch_size,
             cache_length=cache_length,
-            device=_device,
             dtype=dtype,
         )
         gpt_model.assign_kv_caches(

@@ -161,11 +161,7 @@ class GPT(nn.Module):
         dtype = kv_caches[0].dtype
         for cache, block in zip(kv_caches, self.transformer.h):
             self._check_kv_cache(self.config, cache, batch_size, dtype)
-            device = block.attn.device
-            if device is not None:
-                block.attn.kv_cache = cache.to(device=device)
-            else:
-                block.attn.kv_cache = cache
+            block.attn.kv_cache = cache
 
     def set_kv_caches(
         self,
@@ -197,21 +193,17 @@ class GPT(nn.Module):
             max_seq_length = self.max_seq_length
         for block in self.transformer.h:
             attn = block.attn
-            device = attn.device
             kv_cache = attn.kv_cache
             if (
                 kv_cache is None
                 or kv_cache.max_batch_size != batch_size
                 or kv_cache.cache_length != max_seq_length
-                or kv_cache.device != device
                 or kv_cache.dtype != dtype
             ):
                 if kv_cache is not None:
-                    device = kv_cache.device if device is None else device
                     dtype = kv_cache.dtype if dtype is None else dtype
                 attn.create_default_kv_cache(
                     batch_size=batch_size,
-                    device=device,
                     dtype=dtype,
                     max_sequence_length=max_seq_length,
                 )
@@ -501,7 +493,7 @@ class GPT(nn.Module):
         # Deal with KV caches
         for kv_cache, block in zip(kv_caches, model_copy.transformer.h):
             if kv_cache is not None:
-                block.attn.kv_cache = kv_cache.clone(device=device)
+                block.attn.kv_cache = kv_cache.clone()
         return model_copy
 
 
@@ -614,13 +606,6 @@ class CausalSelfAttention(nn.Module):
 
         self.config = config
         self.block_idx = block_idx
-
-    @property
-    def device(self) -> Optional[torch.device]:
-        if not hasattr(self.qkv, "weight"):
-            return None
-        w = self.qkv.weight
-        return None if w is None else w.device
 
     def forward(
         self,
@@ -774,7 +759,6 @@ class CausalSelfAttention(nn.Module):
     def create_default_kv_cache(
         self,
         batch_size: int,
-        device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         max_sequence_length: Optional[int] = None,
     ):
@@ -787,7 +771,6 @@ class CausalSelfAttention(nn.Module):
             max_batch_size=batch_size,
             cache_length=max_sequence_length,
             block_idx=self.block_idx,
-            device=device,
             dtype=dtype,
         )
 
@@ -812,14 +795,3 @@ def block_iterator(
         end = model.config.n_layer
     for block in model.transformer.h[start:end]:
         yield block
-
-
-def device_for_layer(
-    model: GPT,
-    layer_idx: int,
-) -> torch.device:
-    if layer_idx < 0:
-        layer_idx = model.config.n_layer + layer_idx
-    if not (0 <= layer_idx < model.config.n_layer):
-        raise IndexError(f"Layer {layer_idx} out of range, must be in [0, {model.config.n_layer})")
-    return model.transformer.h[layer_idx].attn.device

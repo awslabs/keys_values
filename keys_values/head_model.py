@@ -103,7 +103,7 @@ class HeadModel(torch.nn.Module):
             raise ValueError(f"model_outputs.length = {model_outputs.shape[-2]}, must not be smaller than targets.length = {targets.shape[-1]}")
         return diff
 
-    def _empty_clone(self) -> "HeadModel":
+    def _empty_clone(self, device: Optional[torch.device] = None) -> "HeadModel":
         """
         Creates copy of this object on the same device. Parameters are not
         copied.
@@ -124,9 +124,7 @@ class HeadModel(torch.nn.Module):
 
         """
         # Create empty copy
-        model_copy = self._empty_clone()
-        if device is not None:
-            model_copy = model_copy.to(device=device)
+        model_copy = self._empty_clone(device)
         copy_parameters(self, model_copy)
         return model_copy
 
@@ -206,10 +204,19 @@ class CrossEntropyOnLogits(HeadModel):
             targets.ne(self._ignore_index).sum().item()
         )
 
-    def _empty_clone(self) -> "HeadModel":
+    def _empty_clone(self, device: Optional[torch.device] = None) -> "HeadModel":
         config = Config()
         config.padded_vocab_size = self._vocab_size
-        return CrossEntropyOnLogits(config, ignore_index=self._ignore_index)
+        if device is None:
+            model_copy = CrossEntropyOnLogits(
+                config, ignore_index=self._ignore_index,
+            )
+        else:
+            with torch.device(device):
+                model_copy = CrossEntropyOnLogits(
+                    config, ignore_index=self._ignore_index,
+                )
+        return model_copy
 
 
 class SequenceClassificationOnLogits(HeadModel):
@@ -282,12 +289,19 @@ class SequenceClassificationOnLogits(HeadModel):
     ) -> Optional[int]:
         return None
 
-    def _empty_clone(self) -> "HeadModel":
+    def _empty_clone(self, device: Optional[torch.device] = None) -> "HeadModel":
         config = Config()
         config.padded_vocab_size = self._vocab_size
-        return SequenceClassificationOnLogits(
-            config, class_label_tokens=list(self.class_label_tokens),
-        )
+        if device is None:
+            model_copy = SequenceClassificationOnLogits(
+                config, class_label_tokens=list(self.class_label_tokens),
+            )
+        else:
+            with torch.device(device):
+                model_copy = SequenceClassificationOnLogits(
+                    config, class_label_tokens=list(self.class_label_tokens),
+                )
+        return model_copy
 
 
 SUPPORTED_POOL_TYPES = ("last", "mean")
@@ -371,9 +385,16 @@ class SequenceClassification(HeadModel):
     ) -> Optional[int]:
         return None
 
-    def _empty_clone(self) -> "HeadModel":
+    def _empty_clone(self, device: Optional[torch.device] = None) -> "HeadModel":
         config = Config()
         config.n_embd = self.n_embd
-        return SequenceClassification(
-            config, num_classes=self.num_classes, pool_type=self.pool_type,
-        )
+        if device is None:
+            model_copy = SequenceClassification(
+                config, num_classes=self.num_classes, pool_type=self.pool_type,
+            )
+        else:
+            with torch.device(device):
+                model_copy = SequenceClassification(
+                    config, num_classes=self.num_classes, pool_type=self.pool_type,
+                )
+        return model_copy

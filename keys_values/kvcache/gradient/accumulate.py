@@ -14,7 +14,6 @@
 from typing import List, Optional, Dict, Any, Tuple
 from itertools import accumulate
 from functools import partial
-from dataclasses import replace
 
 import torch
 
@@ -30,8 +29,7 @@ from keys_values.kvcache.buffers import (
 )
 from keys_values.kvcache.factory import (
     SUPPORTED_QUANTIZERS,
-    create_quantized_buffers_for_kv_cache_checkpoints,
-    deallocate_kv_cache_buffers,
+    deallocate_kv_cache_buffers, create_quantized_kv_buffers,
 )
 from keys_values.kvcache.gradient.autograd_hooks import (
     AutogradHooks,
@@ -52,10 +50,7 @@ from keys_values.kvcache.gradient.checkpoints import (
 from keys_values.kvcache.gradient.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.gradient.inference_replay import inference_replay_cache_factory
 from keys_values.kvcache.stack_layers import CellBlocks
-from keys_values.kvcache.utils import (
-    VerbosityLevels,
-    bytes_for_torch_dtype,
-)
+from keys_values.kvcache.utils import VerbosityLevels
 from keys_values.long_context import (
     get_chunks_for_cells,
     get_chunk_of_targets,
@@ -167,7 +162,6 @@ class GradientAccumulator:
         self,
         replay_logs: List[KVCacheReplayLog],
         chunks_per_cell: List[int],
-        weights_dtype: torch.dtype,
         head_model_needs_logits: bool = True,
     ):
         if self._batch_size is None:
@@ -201,14 +195,12 @@ class GradientAccumulator:
             # Sanity check
             assert self.inputs_ranges == [(0, self.seq_length)]
         # Ranges to be used in `run_head_model` and `run_input_embeddings`
-        self._initialize_top_bottom_ranges(weights_dtype, head_model_needs_logits)
+        self._initialize_top_bottom_ranges(head_model_needs_logits)
         # Reset
         self._annotation_usage_logs: Dict[int, AnnotationUsageLog] = dict()
 
     def _initialize_top_bottom_ranges(
-        self,
-        weights_dtype: torch.dtype,
-        head_model_needs_logits: bool,
+        self, head_model_needs_logits: bool,
     ):
         """
         These ranges are used for chunking in :meth:`run_head_model` and
@@ -217,9 +209,14 @@ class GradientAccumulator:
         `(batch_size, chunk_size, config.padded_vocab_size)`, who are to be
         kept below :const:`HEAD_OR_INITIAL_TENSORS_MAX_BYTES` bytes.
 
+        Note: This assumption relies on using a 16-bit dtype for weights. If
+        32-bit weights are used, up to 2x this number of bytes could be used.
+
+        TODO: Could make this precise by knowing the dtype of weights
         """
+        bytes_per_weight = 2  # Works for 16-bit weights
         dim = self.config.padded_vocab_size if head_model_needs_logits else self.config.n_embd
-        bytes_per_token = self._batch_size * dim * bytes_for_torch_dtype(weights_dtype)
+        bytes_per_token = self._batch_size * dim * bytes_per_weight
         chunk_size = min(
             max(HEAD_OR_INITIAL_TENSORS_MAX_BYTES // bytes_per_token, 1),
             self.seq_length,
@@ -245,57 +242,56 @@ class GradientAccumulator:
         # only done when storing and retrieving the checkpoints.
         cache_buffers = []
         buffer_params = None
+        cache_params = None
+        cache_lengths = []
         for _, block in model_part.blocks():
             kv_cache = block.attn.kv_cache
             if buffer_params is None:
-                buffer_params = KVCacheBuffersParams.from_params(kv_cache.get_params())
+                cache_params = kv_cache.get_params()
+                buffer_params = KVCacheBuffersParams.from_params(cache_params)
+            cache_length = kv_cache.cache_length
             cache_buffers.append(
                 DefaultKVCacheBuffers(
-                    params=replace(buffer_params, device=block.attn.device),
-                    cache_length=kv_cache.cache_length,
+                    params=buffer_params,
+                    cache_length=cache_length,
                 )
             )
+            cache_lengths.append(cache_length)
         # Checkpointing objects, which may include quantizers and dequantization
         # buffers
         chunk_numbers = list(accumulate(self.chunks_per_cell))[:-1]
-        checkpoints = []
         if self.qname == "default":
-            for _, block in model_part.blocks():
-                cache_length = block.attn.kv_cache.cache_length
-                if self.qname == "default":
-                    # Checkpoints are not quantized
-                    checkpoints.append(
-                        KVCacheBufferDefaultCheckpoints(
-                            chunk_numbers=chunk_numbers,
-                            params=replace(
-                                buffer_params,
-                                device=block.attn.device,
-                            ),
-                            cache_length=cache_length,
-                            batch_size=self._batch_size,
-                        )
-                    )
+            checkpoints = [
+                KVCacheBufferDefaultCheckpoints(
+                    chunk_numbers=chunk_numbers,
+                    params=buffer_params,
+                    cache_length=cache_length,
+                    batch_size=self._batch_size,
+                )
+                for cache_length in cache_lengths
+            ]
         else:
             # Checkpoints are quantized
             dequant_kwargs = dict(
                 max_num_ranges=self.cache_kwargs.get("max_num_ranges"),
             )
-            quant_buffers = create_quantized_buffers_for_kv_cache_checkpoints(
-                model_part=model_part,
+            max_cache_length = max(cache_lengths)
+            quant_buffers = create_quantized_kv_buffers(
                 qname=self.qname,
+                cache_lengths=[max_cache_length],
+                cache_params=cache_params,
                 cache_kwargs=self.cache_kwargs,
                 dequant_kwargs=dequant_kwargs,
-            )
-            for _, block in model_part.blocks():
-                device = block.attn.device
-                cache_length = block.attn.kv_cache.cache_length
-                checkpoints.append(
-                    KVCacheBufferQuantizedCheckpoints(
-                        chunk_numbers=chunk_numbers,
-                        quant_buffers=quant_buffers[device],
-                        cache_length=cache_length,
-                    )
+                first_block_idx=model_part.first_layer_idx,
+            )[0]
+            checkpoints = [
+                KVCacheBufferQuantizedCheckpoints(
+                    chunk_numbers=chunk_numbers,
+                    quant_buffers=quant_buffers,
+                    cache_length=cache_length,
                 )
+                for cache_length in cache_lengths
+            ]
 
         return cache_buffers, checkpoints
 
@@ -435,13 +431,6 @@ class GradientAccumulator:
                 **self._train_cache_kwargs,
                 debug_intermediates=debug_intermediates,
             )
-            first_layer_device = None
-            last_layer_device = None
-            for block_idx, block in model_part.blocks():
-                if block_idx == first_layer_idx:
-                    first_layer_device = block.attn.device
-                elif block_idx == first_layer_idx + num_layers - 1:
-                    last_layer_device = block.attn.device
             head_gradients_k = None
             head_gradients_v = None
             chunk_idxs = [0]
@@ -462,12 +451,8 @@ class GradientAccumulator:
                 # - Inputs left:     k_buffers, v_buffers
                 # - Gradients top:   head_gradients_top
                 # - Gradients right: head_gradients_k, head_gradients_v
-                cell_inputs = copy_requires_grad(
-                    get_inputs_slice(start, end).to(device=first_layer_device)
-                )
-                head_gradients_top = get_head_gradients_slice(start, end).to(
-                    device=last_layer_device
-                )
+                cell_inputs = copy_requires_grad(get_inputs_slice(start, end))
+                head_gradients_top = get_head_gradients_slice(start, end)
                 if col_idx == 0:
                     k_buffers = None
                     v_buffers = None
@@ -478,7 +463,6 @@ class GradientAccumulator:
                     k_buffers, v_buffers = self._get_checkpoints(
                         infer_replay_caches,
                         chunk_idx=chunk_idxs[col_idx],
-                        model_part=model_part,
                     )
                     k_buffers = [copy_requires_grad(x) for x in k_buffers]
                     v_buffers = [copy_requires_grad(x) for x in v_buffers]
@@ -650,17 +634,10 @@ class GradientAccumulator:
         self,
         infer_replay_caches: List[KVCacheWithBuffers],
         chunk_idx: int,
-        model_part: CellBlocks,
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-        """
-        `gpt_model` and `first_layer_idx` are used for sanity checks that
-        buffers are on the right device.
-
-        """
         k_buffers = []
         v_buffers = []
-        for (block_idx, block), kv_cache, checkpoints in zip(
-            model_part.blocks(),
+        for kv_cache, checkpoints in zip(
             infer_replay_caches,
             self._kv_cache_checkpoints,
         ):
@@ -669,18 +646,10 @@ class GradientAccumulator:
             checkpoints.get_checkpoint(chunk_idx=chunk_idx, out=buffers)
             # Dequantize
             k_and_v = buffers.get_keys_values()
-            device = block.attn.device
-            keys = k_and_v.keys().clone()
-            if keys.device != device:
-                raise IndexError(f"Internal error _get_checkpoint, l_ix={block_idx}: attn.device={device}, keys.device={keys.device}, must be the same")
-            k_buffers.append(keys)
-            values = k_and_v.values().clone()
-            if values.device != device:
-                raise IndexError(f"Internal error _get_checkpoint, l_ix={block_idx}: attn.device={device}, values.device={values.device}, must be the same")
-            v_buffers.append(values)
+            k_buffers.append(k_and_v.keys().clone())
+            v_buffers.append(k_and_v.values().clone())
         return k_buffers, v_buffers
 
-    # TODO: Support having the model part only
     def run_input_embeddings(
         self,
         gpt_model: GPT,
@@ -691,7 +660,8 @@ class GradientAccumulator:
         Runs gradient accumulation for the initial embeddings of the model.
 
         Args:
-            gpt_model: GPT model
+            gpt_model: GPT model (or just a shard, see
+                :class:`keys_values.optimize.GPTShardOfBlocks`)
             input_ids: Tensor of input token IDs
             get_head_gradients_slice: Function `f(start, end)` which returns a
                 slice `range(start, end)` of the head gradients for inputs to
@@ -707,14 +677,11 @@ class GradientAccumulator:
         if wte.weight.requires_grad:
             # Only run this if embedding weights are to be updated
             alpha = self.config.n_embd ** 0.5
-            wte_device = wte.weight.device
             if self._verbose_more:
                 print("\nGradient accumulation for input embeddings")
             for start, end in self.top_bottom_ranges:
-                head_grads_part = get_head_gradients_slice(start, end).to(
-                    device=wte_device
-                )
-                embed_part = wte(input_ids[:, start:end].to(device=wte_device))
+                head_grads_part = get_head_gradients_slice(start, end)
+                embed_part = wte(input_ids[:, start:end])
                 scalar_output = (head_grads_part * embed_part).sum()
                 if self.config.scale_embeddings:
                     scalar_output = scalar_output * alpha
@@ -770,13 +737,9 @@ class GradientAccumulator:
         num_output_tokens = targets.shape[1]
         # Initialize members which are needed for processing this batch
         self._batch_size = targets.shape[0]
-        weights_dtype = replay_logs[0].dtype
-        if weights_dtype is None:
-            weights_dtype = torch.bfloat16
         self._initialize_internal(
             replay_logs,
             chunks_per_cell,
-            weights_dtype=weights_dtype,
             head_model_needs_logits=head_model.needs_logits(),
         )
         # Ensure that model supports the sequence length

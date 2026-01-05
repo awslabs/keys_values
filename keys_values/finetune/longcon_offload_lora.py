@@ -719,13 +719,6 @@ def fit(
             gpu_scheduler.step()
         print_message("Optimizer update done.")
         state["step_count"] += 1
-        # Copy parameters: Not really necessary, but ensures that all params
-        # of `gpt_model` are up-to-date
-        copy_remaining_parameters(
-            source_model=model.offload_model,
-            target_model=model.gpt_model,
-            needs_logits=model.head_model.needs_logits(),
-        )
         del loss
         gc.collect()
         torch.cuda.empty_cache()

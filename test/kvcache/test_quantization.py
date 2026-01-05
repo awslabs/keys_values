@@ -85,7 +85,6 @@ def test_quantization_error(dtype, blocks_over_heads, name, device):
                 cache_length=32,
                 head_size=head_size,
                 n_head=4,
-                device=device,
                 dtype=dtype,
             )
             for i, head_size in enumerate(head_sizes)
@@ -158,7 +157,6 @@ def test_concatenation(dtype, blocks_over_heads, name, device):
         cache_length=32,
         head_size=64,
         n_head=4,
-        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length
@@ -192,7 +190,6 @@ def test_quantizer_states(dtype, blocks_over_heads, name, device):
         cache_length=32,
         head_size=64,
         n_head=4,
-        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length
@@ -205,8 +202,8 @@ def test_quantizer_states(dtype, blocks_over_heads, name, device):
     quantizer_k = kv_buffers.quantizer_k
     quantizer_v = kv_buffers.quantizer_v
     checkpoint = (
-        quantizer_k.create_quantizer_state(device=params.device),
-        quantizer_v.create_quantizer_state(device=params.device),
+        quantizer_k.create_quantizer_state(device=device),
+        quantizer_v.create_quantizer_state(device=device),
     )
     for _ in range(50):
         k_and_v = kv_buffers.get_keys_values()
@@ -275,7 +272,6 @@ def test_explore_bitsandbytes():
             cache_length=random.randint(16, 64),
             head_size=blocksize,
             n_head=n_query_groups,
-            device=device,
             dtype=dtype,
         )
         num_channels = params.max_batch_size * n_query_groups * params.cache_length
@@ -385,7 +381,6 @@ def test_bitsandbytes_with_blocks_over_heads(
         cache_length=32,
         head_size=head_size,
         n_head=n_query_groups * 2,
-        device=device,
         dtype=torch.float32,
     )
     if is_valid:
@@ -488,7 +483,6 @@ def test_quantized_buffers_write_back(dtype, name, device):
         cache_length=cache_length,
         head_size=config.head_size,
         n_head=config.n_head,
-        device=device,
         dtype=dtype,
     )
     with torch.device(device):

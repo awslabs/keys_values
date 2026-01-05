@@ -11,9 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from cProfile import Profile
 from functools import partial
 import gc
+from io import StringIO
 from pathlib import Path
+from pstats import SortKey, Stats
 import time
 from typing import Optional, Dict, Any, Tuple, Union, List
 
@@ -35,7 +38,6 @@ from keys_values.kvcache.gradient.autograd_hooks import (
 from keys_values.kvcache.gradient.checkpoints import (
     LayerInputQuantizedCheckpoints,
     LayerInputDefaultCheckpoints,
-    create_layers_and_buffers_for_model,
 )
 from keys_values.kvcache.gradient.cleanup import (
     ArraysForCleanup,
@@ -51,7 +53,7 @@ from keys_values.kvcache.utils import (
 from keys_values.long_context import (
     LongContextInferenceModel, GPTAndHeadModel, oom_exception_action,
 )
-from keys_values.model import GPT, block_iterator, device_for_layer
+from keys_values.model import GPT, block_iterator
 from keys_values.optimize.clone_model import (
     clone_model_shard_via_flat_vectors,
     copy_flat_vectors_to,
@@ -376,6 +378,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         if qname != "default" and layer_checkpoint_chunk_size is None:
             raise ValueError("layer_checkpoint_chunk_size must be given if qname != 'default'")
         self._layer_checkpoint_chunk_size = layer_checkpoint_chunk_size
+        self._work_device = None
         self._debug_gpt_model = debug_gpt_model
         if debug_store_intermediates:
             self._train_cache_kwargs = dict(
@@ -421,6 +424,12 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         """
         self._check_status("init")
+        if self.training and self.offload_device is not None:
+            self._work_device = self.offload_device
+        else:
+            self._work_device = self.gpt_model.transformer.wte.weight.device
+        input_ids = input_ids.to(self._work_device)
+        targets = targets.to(self._work_device)
         self._init_members_from_tokens(input_ids, targets)
         if not isinstance(self.gpt_model.mha, MultiHeadSelfAttention):
             raise ValueError(f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention")
@@ -582,7 +591,13 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         else:
             # Checkpoints are quantized
-            layers_and_buffers = create_layers_and_buffers_for_model(
+            if self.offload_device is not None:
+                kwargs = dict(
+                    allocate_buffers=True, device=self.offload_device,
+                )
+            else:
+                kwargs = dict(allocate_buffers=False)
+            self.layer_checkpoints = LayerInputQuantizedCheckpoints(
                 model=self.gpt_model,
                 layer_numbers=layer_numbers,
                 batch_size=self.batch_size,
@@ -592,11 +607,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                     self.cache_kwargs,
                     tmp_array_limit_gb=self._tmp_array_limit_gb,
                 ),
-                default_device=self.offload_device,
-            )
-            self.layer_checkpoints = LayerInputQuantizedCheckpoints(
-                layers_and_buffers=layers_and_buffers,
-                max_seq_length=self.gpt_model.max_seq_length,
+                **kwargs,
             )
 
     def _create_layer_numbers(self) -> List[int]:
@@ -604,8 +615,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         These are layer numbers so that cells run over layers
         `range(layer_numbers[i], layer_numbers[i + 1])`, and
         `layer_numbers[-2] == self.config.n_layer`. They are chosen based
-        on `self.layers_per_cell`, but with the constraint that cells do not
-        range over several devices.
+        on `self.layers_per_cell`.
 
         The slot corresponding to `layer_numbers[-1] ==
         self.config.n_layer + 1` is used to store head gradients during the
@@ -617,65 +627,6 @@ class LongContextGradientModel(LongContextInferenceModel):
         # Don't want slim final row of cells
         if self.layers_per_cell > 1 and layer_numbers[-1] == n_layer - 1:
             layer_numbers = layer_numbers[:-1]
-        device_points = []
-        start = 0
-        prev_device = device_for_layer(self.gpt_model, 0)
-        for pos in range(1, n_layer):
-            device = device_for_layer(self.gpt_model, pos)
-            if device != prev_device:
-                device_points.append(start)
-                start = pos
-                prev_device = device
-        device_points.append(start)
-        if len(device_points) > 1:
-            if len(device_points) >= len(layer_numbers):
-                # Just use the partitioning dictated by the devices
-                layer_numbers = device_points
-            else:
-                # Consolidate
-                consolidated = [0]
-                assert device_points.pop(0) == 0
-                device_point = device_points.pop(0)
-                device_points.append(self.config.n_layer + 1)
-                prev_is_device = True  # Is `prev_point` a device point?
-                for point in layer_numbers[1:]:
-                    prev_point = consolidated[-1]
-                    if prev_point == device_point:
-                        prev_is_device = True
-                    # We have: `prev_point <= device_point`
-                    do_pop = True
-                    if point <= device_point:
-                        # Accept original segment
-                        consolidated.append(point)
-                        do_pop = point == device_point
-                        prev_is_device = do_pop
-                    else:
-                        # Original segment needs to be split:
-                        # `prev_point <= device_point < point`
-                        # Fuse smaller piece, create new segment for larger
-                        left = device_point - prev_point
-                        right = point - device_point
-                        if left <= right:
-                            # Fuse left part with previous
-                            if not prev_is_device or left == 0:
-                                consolidated[-1] = device_point
-                            else:
-                                # Cannot fuse, so create segment
-                                consolidated.append(device_point)
-                            # Right part becomes new segment
-                            consolidated.append(point)
-                            prev_is_device = False
-                        else:
-                            # New segment for left part
-                            consolidated.append(device_point)
-                            # Try to fuse
-                            prev_is_device = True
-                    if do_pop:
-                        device_point = device_points.pop(0)
-                if consolidated[-1] < device_point < n_layer:
-                    consolidated.append(device_point)
-                layer_numbers = consolidated
-
         return layer_numbers + [n_layer, n_layer + 1]
 
     def _deallocate_buffers(self):
@@ -686,7 +637,9 @@ class LongContextGradientModel(LongContextInferenceModel):
     def _create_members_for_backward(self):
         if self._use_arrays_cleanup:
             arrays_cleanup = ArraysForCleanup(
-                protected_ids=protect_named_params_buffers_of_model(self.gpt_model, map_names=True)
+                protected_ids=protect_named_params_buffers_of_model(
+                    self.gpt_model, map_names=True,
+                )
             )
         else:
             arrays_cleanup = None
@@ -765,6 +718,10 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
             print("\n".join(lines))
 
+        profiler = Profile()
+        print("START PROFILING")
+        profiler.enable()
+
         if self.offload_device is not None:
             # Clone `gpt_model` to `offload_device`
             gpt_model = clone_model_shard_via_flat_vectors(
@@ -787,9 +744,8 @@ class LongContextGradientModel(LongContextInferenceModel):
             # Ensure that all KV caches record replay logs
             for block in block_iterator(self.gpt_model):
                 block.attn.kv_cache.switch_replay_logging(True)
-
-            # Run inference forward pass. Layer inputs are checkpointed. Mean
-            # reduction over batch dimension.
+            # Run inference forward pass. Layer inputs are checkpointed.
+            # Mean reduction over batch dimension.
             loss_full = self._forward_internal(
                 input_ids, targets, scale_factor,
             ).mean()
@@ -810,6 +766,16 @@ class LongContextGradientModel(LongContextInferenceModel):
             del gpt_model
         gc.collect()
         torch.cuda.empty_cache()
+
+        profiler.disable()
+        print("STOPPED PROFILING")
+        s = StringIO()
+        ps = Stats(profiler, stream=s).sort_stats(SortKey.CUMULATIVE)
+        ps.print_stats()
+        print(s.getvalue())
+        print("\nTERMINATING HERE")
+        exit(0)
+
         if self.offload_device is not None and self.verbose is not VerbosityLevels.NONE:
             print(
                 f"\nDeallocated weights of model on device {self.offload_device}:\n"
@@ -903,15 +869,6 @@ class LongContextGradientModel(LongContextInferenceModel):
         OOM error.
 
         """
-        def device_for_slice(layer_idx):
-            if self.offload_device is not None:
-                return self.offload_device
-            else:
-                return device_for_layer(
-                    self.gpt_model,
-                    min(layer_idx, self.gpt_model.config.n_layer - 1),
-                )
-
         def get_inputs_slice(
             start: int, end: int, layer_idx: int,
         ) -> torch.Tensor:
@@ -919,7 +876,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 layer_idx=layer_idx,
                 input_pos=start,
                 num=end - start,
-                device=device_for_slice(layer_idx),
+                device=self._work_device,
             )
 
         def get_head_gradients_slice(start: int, end: int) -> torch.Tensor:
@@ -928,7 +885,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 layer_idx=n_layer + 1,
                 input_pos=start,
                 num=end - start,
-                device=device_for_slice(n_layer - 1),
+                device=self._work_device,
             )
 
         def write_head_gradients_slice(
@@ -969,11 +926,8 @@ class LongContextGradientModel(LongContextInferenceModel):
                 shard_type="lm_head",
                 lm_head=self.head_model.needs_logits(),
             )
-            target_device = self.offload_device
         else:
             shard_on_device = self.gpt_model
-            target_device = device_for_layer(self.gpt_model, -1)
-        self._targets = self._targets.to(device=target_device)
         self.accumulator.run_head_model(
             gpt_model=shard_on_device,
             head_model=self.head_model,
@@ -1086,10 +1040,6 @@ class LongContextGradientModel(LongContextInferenceModel):
             if self._record_gpu_memory_kind in (0, 2):
                 # Store results up to now
                 self._record_gpu_memory_snapshots.store_current_snapshot()
-            # DEBUG:
-            print("Done backward for one row of cells: STOP HERE")
-            exit(0)
-            # END DEBUG
 
         # Accumulate gradients for input embeddings
         if self._record_gpu_memory_kind == 1:

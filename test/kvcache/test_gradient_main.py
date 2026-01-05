@@ -92,12 +92,11 @@ def test_complete_gradient_computation(
         config=config,
         max_batch_size=max(batch_sizes),
         cache_length=cache_lengths[0],
-        device=device,
         dtype=dtype,
     )
     with torch.device(device):
         gpt_model = GPT(config)
-    gpt_model.apply(gpt_model._init_weights)  # Initialization
+        gpt_model.apply(gpt_model._init_weights)  # Initialization
     gpt_model.assign_kv_caches(
         [
             create_kv_cache(
@@ -239,7 +238,6 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
         config=config,
         max_batch_size=batch_size,
         cache_length=cache_lengths[0],
-        device=device,
         dtype=dtype,
     )
     gpt_model = GPT(config)
@@ -256,7 +254,7 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
     )
     for l_ix, block in enumerate(block_iterator(gpt_model)):
         kv_cache = block.attn.kv_cache
-        assert kv_cache.device == device, (l_ix, kv_cache.device, device)
+        assert kv_cache.device in (device, None), (l_ix, kv_cache.device, device)
     with torch.device(cpu_offload_device):
         head_model = HeadModelFactory.create(name=head_model_name, config=config)
     model = LongContextGradientModel(
@@ -289,6 +287,8 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
     diff = set(copy_names).difference(names)
     assert len(diff) == 0, f"Entries in copy but not in original:\n{diff}"
     # All KV caches exist
+    assert model.gpt_model.transformer.wte.weight.device == device
+    assert model_copy.gpt_model.transformer.wte.weight.device == cpu_offload_device
     for l_ix, (block, block_copy) in enumerate(
         zip(block_iterator(model.gpt_model), block_iterator(model_copy.gpt_model))
     ):
@@ -296,9 +296,7 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
         kv_cache_copy = block_copy.attn.kv_cache
         assert kv_cache is not None and kv_cache_copy is not None, (l_ix, kv_cache, kv_cache_copy)
         assert type(kv_cache) == type(kv_cache_copy), (l_ix, type(kv_cache), type(kv_cache_copy))
-        assert block.attn.device == device, (l_ix, block.attn.device, device)
-        assert block_copy.attn.device == cpu_offload_device, (l_ix, block_copy.attn.device, cpu_offload_device)
-        assert kv_cache_copy.device == cpu_offload_device, (l_ix, kv_cache_copy.device, cpu_offload_device)
+        assert kv_cache_copy.device in (cpu_offload_device, None), (l_ix, kv_cache_copy.device, cpu_offload_device)
 
 
 if __name__ == "__main__":

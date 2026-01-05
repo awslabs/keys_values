@@ -55,7 +55,6 @@ def main(
         head_size=config.head_size,
         n_head=config.n_head,
         dtype=dtype,
-        device=device,
     )
     cache_kwargs = {
         "tmp_array_limit_gb": TemporaryArrayLimit(

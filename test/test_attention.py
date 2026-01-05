@@ -787,7 +787,6 @@ def test_mha_is_passed_on(device):
         config=config,
         max_batch_size=batch_size,
         cache_length=cache_lengths[0],
-        device=device,
         dtype=dtype,
     )
     with torch.device(device):

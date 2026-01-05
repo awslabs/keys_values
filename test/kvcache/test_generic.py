@@ -60,7 +60,6 @@ def test_store_retrieve(device, name, kwargs):
         cache_length=32,
         head_size=8,
         n_head=4,
-        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length
@@ -139,7 +138,6 @@ def test_prefill(name, device):
         cache_length=32,
         head_size=64,
         n_head=2,
-        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length
@@ -261,7 +259,6 @@ def test_size_estimate(
         cache_length=cache_length,
         head_size=head_size,
         n_head=n_head,
-        device=device,
         dtype=dtype,
     )
     config = Config(
@@ -314,7 +311,6 @@ def test_size_estimate(
             config=config,
             max_batch_size=batch_size,
             cache_length=cache_length,
-            device=device,
             dtype=dtype,
             cache_kwargs=cache_kwargs,
         )

@@ -54,28 +54,39 @@ class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
         max_prefill_length: Optional[int],
         blocksize: int,
         grace_period: int = 0,
-        dtype: Optional[torch.dtype] = None,
     ):
         super().__init__(
             token_chunks,
             cache_length=cache_length,
             max_prefill_length=max_prefill_length,
             grace_period=grace_period,
-            dtype=dtype,
         )
         if slot_positions:
-            shapes = set(block.shape[:-1] for block in slot_positions)
-            assert len(shapes) == 1, f"Blocks in slot_positions have incompatible shapes: {shapes}"
-            batch_size = next(iter(shapes))[0]
-            batch_sizes = set(chunk.shape[0] for chunk in self.token_chunks)
-            assert len(batch_sizes) == 1 and next(iter(
-                batch_sizes)) == batch_size, f"slot_positions has batch size {batch_size}, but token_chunks has {batch_sizes}"
+            if not self.token_chunks:
+                raise ValueError("Cannot have empty token_chunks, non-empty slot_positions")
+            self._slot_positions = None
+            device = self.device
+            if any(b.device != device for b in slot_positions):
+                raise ValueError(f"All token_chunks and slot_position entries must be on same device {device}")
+            shape = slot_positions[0].shape[:-1]
+            if not all(b.shape[:-1] == shape for b in slot_positions):
+                raise ValueError("Blocks in slot_positions have incompatible shapes")
+            batch_size = shape[0]
+            if any(c.shape[0] != batch_size for c in self.token_chunks):
+                raise ValueError(f"slot_positions has batch size {batch_size}, but some token_chunks entries differ")
         self._slot_positions = slot_positions
         self.blocksize = blocksize
 
     @property
     def slot_positions(self) -> List[torch.Tensor]:
         return self._slot_positions
+
+    @property
+    def device(self) -> Optional[torch.device]:
+        if self.slot_positions:
+            return self.slot_positions[0].device
+        else:
+            return super().device
 
     def finalize(
         self,
@@ -97,40 +108,35 @@ class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
             max_prefill_length=self.max_prefill_length,
             blocksize=self.blocksize,
             grace_period=self.grace_period,
-            dtype=self.dtype,
         )
-
-    def _replay_kwargs(self) -> Dict[str, Any]:
-        device = self.device if self.token_chunks else torch.device("cpu")
-        return {
-            "dtype": torch.uint32,
-            "device": device,
-        }
 
     def append_position_index(
         self, index: torch.Tensor, next_token_pos: int,
     ):
+        if self.device is not None and index.device != self.device:
+            raise ValueError(f"index.device = {index.device}, must be{self.device}")
+        kwargs = dict(dtype=torch.uint32)
         shape = index.shape[:2] + (self.blocksize,)
         bstart = (next_token_pos - self.cache_length) % self.blocksize
         if bstart == 0:
-            self._append_new_pos_log_block(shape)
+            self._append_new_pos_log_block(shape, index.device)
         block = self._slot_positions[-1]
         num = index.shape[2]
         bend = min(bstart + num, self.blocksize)
         istart = 0
         iend = bend - bstart
-        block[:, :, bstart:bend] = index[:, :, istart:iend].to(**self._replay_kwargs())
+        block[:, :, bstart:bend] = index[:, :, istart:iend].to(**kwargs)
         while iend < num:
             istart = iend
-            block = self._append_new_pos_log_block(shape)
+            block = self._append_new_pos_log_block(shape, index.device)
             bend = min(num - istart, self.blocksize)
             iend = istart + bend
-            block[:, :, :bend] = index[:, :, istart:iend].to(**self._replay_kwargs())
+            block[:, :, :bend] = index[:, :, istart:iend].to(**kwargs)
 
     def _append_new_pos_log_block(
-        self, shape: Tuple[int, ...],
+        self, shape: Tuple[int, ...], device: torch.device,
     ):
-        new_block = torch.zeros(shape, **self._replay_kwargs())
+        new_block = torch.zeros(shape, device=device, dtype=torch.uint32)
         self._slot_positions.append(new_block)
         return new_block
 
@@ -375,9 +381,10 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         self.replay_log_blocksize = replay_log_blocksize
         self._detach_attn_weights = detach_attn_weights
         shape = (buffers.max_batch_size, self.n_query_groups, buffers.cache_length)
+        device = self._default_device_for_new_params()
         self.register_buffer(
             "token_pos",
-            torch.zeros(shape, device=buffers.device, dtype=torch.int),
+            torch.zeros(shape, device=device, dtype=torch.int),
             persistent=False,
         )
         # Slot positions where :meth:`forward` writes new key, value tensors.
@@ -387,13 +394,17 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         # Next token position :meth:`forward` is called for
         self._next_token_pos = None
         self.next_grace_pos = None
-        self.prefill_length = None  # TODO: Still needed?
+        self.prefill_length = None
         # Signals :meth:`forward` to use the initial rule instead of
         # `_next_positions`. This happens for the first call after the cache
         # has been filled.
         self._use_initial_rule = None
         # For replay log
         self._replay_log = None
+
+    @classmethod
+    def _parameter_names(cls) -> List[str]:
+        return super()._parameter_names() + ["token_pos"]
 
     def next_positions(self, num: int) -> Optional[torch.Tensor]:
         """
@@ -596,7 +607,6 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                 max_prefill_length=self.max_prefill_length,
                 blocksize=self.replay_log_blocksize,
                 grace_period=self.grace_period,
-                dtype=self.dtype,
             )
         self._replay_log.append_token_chunk(token_idx)
 

@@ -632,6 +632,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self._init_members_from_tokens(input_ids, targets)
         if not isinstance(self.gpt_model.mha, MultiHeadSelfAttention):
             raise ValueError(f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention")
+        device = self.gpt_model.transformer.wte.weight.device
+        input_ids = input_ids.to(device)
+        targets = targets.to(device)
         return self._forward_only(input_ids, targets, scale_factor)
 
     def set_record_gpu_memory(
@@ -826,7 +829,6 @@ class LongContextInferenceModel(GPTAndHeadModel):
         ]
         wte = self.gpt_model.transformer.wte
         alpha = self.config.n_embd ** 0.5
-        wte_device = wte.weight.device
         with torch.no_grad():
             # Outermost loop over cells (group of chunks)
             for chunks_for_cell in wrap_tqdm_if_verbose(
@@ -834,7 +836,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
             ):
                 start, end = chunks_for_cell.input_range
                 # Input embeddings
-                embeddings = wte(input_ids[:, start:end].to(device=wte_device))
+                embeddings = wte(input_ids[:, start:end])
                 if self.config.scale_embeddings:
                     embeddings = embeddings * alpha
                 if self.debug_intermediates is not None:

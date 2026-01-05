@@ -259,7 +259,6 @@ def main(
             head_size=config.head_size,
             n_head=config.n_head,
             dtype=dtype,
-            device=device,
         )
         root = find_chunk_size(
             params=params,

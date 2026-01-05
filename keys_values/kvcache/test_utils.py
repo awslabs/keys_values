@@ -55,7 +55,6 @@ def create_kv_cache(
         max_batch_size=params.max_batch_size,
         cache_length=params.cache_length,
         block_idx=block_idx,
-        device=params.device,
         dtype=params.dtype,
         cache_kwargs=kwargs,
     )
@@ -73,6 +72,7 @@ def random_tensor(
     num: Optional[int] = None,
     is_query: bool = False,
     batch_size: Optional[int] = None,
+    device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     if batch_size is None:
         batch_size = params.max_batch_size
@@ -80,14 +80,16 @@ def random_tensor(
         num = params.cache_length
     dim1 = params.n_head if is_query else params.n_query_groups
     shape = (batch_size, dim1, num, params.head_size)
-    return torch.randn(*shape, device=params.device, dtype=params.dtype)
+    return torch.randn(*shape, device=device, dtype=params.dtype)
 
 
 def random_keys_values(
-    params: KVCacheParams, num: Optional[int] = None,
+    params: KVCacheParams,
+    num: Optional[int] = None,
+    device: Optional[torch.device] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    keys = random_tensor(params, num)
-    values= random_tensor(params, num)
+    keys = random_tensor(params, num, device=device)
+    values= random_tensor(params, num, device=device)
     return keys, values
 
 
@@ -97,6 +99,7 @@ def random_index(
     end: int,
     num: Optional[int] = None,
     batch_size: Optional[int] = None,
+    device: Optional[torch.device] = None,
 ):
     if batch_size is None:
         batch_size = params.max_batch_size
@@ -105,7 +108,7 @@ def random_index(
     diff = end - start
     if diff < num:
         raise ValueError(f"end - start = {diff}, must be >= num = {num}")
-    index_kwargs = dict(dtype=torch.int64, device=params.device)
+    index_kwargs = dict(dtype=torch.int64, device=device)
     result = torch.empty(
         (batch_size, params.n_query_groups, num), **index_kwargs,
     )
@@ -189,11 +192,15 @@ class KVCacheBufferTestingCheckpoints(KVCacheBufferCheckpoints):
     def __init__(
         self,
         chunk_numbers: List[int],
+        device: Optional[torch.device] = None,
     ):
         super().__init__(chunk_numbers)
         self._checkpoints: List[
             Optional[DefaultKeysAndValues]
         ] = [None] * len(chunk_numbers)
+        if device is None:
+            device = torch.get_default_device()
+        self.device = device
 
     def _set_checkpoint(
         self,
@@ -201,10 +208,9 @@ class KVCacheBufferTestingCheckpoints(KVCacheBufferCheckpoints):
         buffers: DefaultKVCacheBuffers,
     ) -> int:
         k_and_v = buffers.get_keys_values()
-        device = torch.device("cpu")
         self._checkpoints[pos] = DefaultKeysAndValues(
-            keys=k_and_v.keys().to(device=device, copy=True),
-            values=k_and_v.values().to(device=device, copy=True),
+            keys=k_and_v.keys().to(device=self.device, copy=True),
+            values=k_and_v.values().to(device=self.device, copy=True),
         )
         return pos
 
@@ -229,7 +235,10 @@ def copy_gradients(
     }
 
 
-def exchange_kv_cache_checkpoints(accumulator: GradientAccumulator):
+def exchange_kv_cache_checkpoints(
+    accumulator: GradientAccumulator,
+    device: Optional[torch.device] = None,
+):
     """
     Ensures that `accumulator._kv_cache_checkpoints` are of testing type
     :class:`KVCacheBufferTestingCheckpoints`. These do not quantize checkpoints,
@@ -243,7 +252,9 @@ def exchange_kv_cache_checkpoints(accumulator: GradientAccumulator):
         # Need to replace checkpoints
         chunk_numbers = checkpoints[0].chunk_numbers
         checkpoints = [
-            KVCacheBufferTestingCheckpoints(chunk_numbers=chunk_numbers)
+            KVCacheBufferTestingCheckpoints(
+                chunk_numbers=chunk_numbers, device=device,
+            )
             for _ in range(len(checkpoints))
         ]
         return cache_buffers, checkpoints
@@ -322,14 +333,18 @@ def product_with_devices(
 
 
 def random_args_cache_forward(
-    params: KVCacheParams, num: int, vocab_size: int,
+    params: KVCacheParams,
+    num: int,
+    vocab_size: int,
+    device: Optional[torch.device] = None,
 ) -> Dict[str, torch.Tensor]:
-    query = random_tensor(params, num=num, is_query=True)
-    kv = random_keys_values(params, num=num)
+    query = random_tensor(params, num=num, is_query=True, device=device)
+    kv = random_keys_values(params, num=num, device=device)
     idx = torch.randint(
         low=0,
         high=vocab_size,
         size=(params.max_batch_size, num),
+        device=device,
     )
     return {
         "query": query,

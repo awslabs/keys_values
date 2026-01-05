@@ -20,7 +20,7 @@ from litgpt.config import Config
 from keys_values.kvcache.attn_weights import (
     AttnWeightsKVCache, AttnWeightsReplayLog,
 )
-from keys_values.kvcache.base import DefaultKVCacheReplayLog, KVCacheReplayLog
+from keys_values.kvcache.base import DefaultKVCacheReplayLog, KVCacheReplayLog, DefaultKVCache
 from keys_values.kvcache.basics import (
     DenseKVCache,
     LastRecentlyInsertedKVCache,
@@ -65,7 +65,7 @@ class InferenceReplayCacheMixin:
         raise NotImplementedError
 
     @property
-    def device(self) -> torch.device:
+    def device(self) -> Optional[torch.device]:
         raise NotImplementedError
 
     @property
@@ -103,6 +103,24 @@ class InferenceReplayCacheMixin:
         self.token_chunk_pos += 1
 
 
+def check_replay_log(
+    cache: DefaultKVCache,
+    replay_log: DefaultKVCacheReplayLog,
+):
+    for name in (
+        "cache_length",
+        "max_prefill_length",
+        "grace_period",
+    ):
+        try:
+            val_c = getattr(cache, name)
+            val_r = getattr(replay_log, name)
+            if val_c != val_r:
+                raise ValueError(f"{name}: {val_c} (cache) != {val_r} (replay_log)")
+        except AttributeError:
+            pass
+
+
 class InferenceAttnWeightsReplayCache(
     AttnWeightsKVCache, InferenceReplayCacheMixin
 ):
@@ -123,10 +141,9 @@ class InferenceAttnWeightsReplayCache(
             **base_kwargs,
         )
         InferenceReplayCacheMixin.__init__(self)
-        if replay_log is None or len(replay_log) == 0:
-            raise ValueError("replay_log must not be empty")
-        if self.device != replay_log.device:
-            raise ValueError(f"self.device = {self.device}, replay_log.device = {replay_log.device}: must be the same")
+        if replay_log is None or len(replay_log) == 0 or not isinstance(replay_log, AttnWeightsReplayLog):
+            raise ValueError("replay_log is empty or has wrong type")
+        check_replay_log(self, replay_log)
         self.replay_log = replay_log
 
     @property
@@ -142,7 +159,7 @@ class InferenceAttnWeightsReplayCache(
         return super().cache_length
 
     @property
-    def device(self) -> torch.device:
+    def device(self) -> Optional[torch.device]:
         return super().device
 
     @property
@@ -206,10 +223,9 @@ class InferenceDenseReplayCache(
             **base_kwargs,
         )
         InferenceReplayCacheMixin.__init__(self)
-        if len(replay_log) == 0:
-            raise ValueError("replay_log must not be empty")
-        if self.device != self.replay_log.device:
-            raise ValueError(f"self.device = {self.device}, replay_log.device = {self.replay_log.device}: must be the same")
+        if replay_log is None or len(replay_log) == 0 or not isinstance(replay_log, DefaultKVCacheReplayLog):
+            raise ValueError("replay_log is empty or has wrong type")
+        check_replay_log(self, replay_log)
         self.replay_log = replay_log
 
     @property
@@ -225,7 +241,7 @@ class InferenceDenseReplayCache(
         return super().cache_length
 
     @property
-    def device(self) -> torch.device:
+    def device(self) -> Optional[torch.device]:
         return super().device
 
     @property
@@ -262,10 +278,9 @@ class InferenceLastRecentlyInsertedReplayCache(
             **base_kwargs,
         )
         InferenceReplayCacheMixin.__init__(self)
-        if len(replay_log) == 0:
-            raise ValueError("replay_log must not be empty")
-        if self.device != replay_log.device:
-            raise ValueError(f"self.device = {self.device}, replay_log.device = {self.replay_log.device}: must be the same")
+        if replay_log is None or len(replay_log) == 0 or not isinstance(replay_log, LastRecentlyInsertedKVCacheReplayLog):
+            raise ValueError("replay_log is empty or has wrong type")
+        check_replay_log(self, replay_log)
         self.replay_log = replay_log
 
     @property
@@ -281,7 +296,7 @@ class InferenceLastRecentlyInsertedReplayCache(
         return super().cache_length
 
     @property
-    def device(self) -> torch.device:
+    def device(self) -> Optional[torch.device]:
         return super().device
 
     @property
@@ -307,7 +322,7 @@ def inference_replay_cache_factory(
     block_idx: int,
     replay_log: KVCacheReplayLog,
     **base_kwargs,
-) -> Optional[KVCacheWithBuffers]:
+) -> KVCacheWithBuffers:
     kwargs = dict(
         base_kwargs,
         config=config,
@@ -322,7 +337,10 @@ def inference_replay_cache_factory(
     elif isinstance(kv_cache, AttnWeightsKVCache):
         return InferenceAttnWeightsReplayCache(**kwargs)
     else:
-        return None
+        raise TypeError(
+            f"type(kv_cache) = {type(kv_cache)}, does not have corresponding "
+            "inference replay cache type"
+        )
 
 
 def get_replay_logs(model: GPT) -> List[KVCacheReplayLog]:

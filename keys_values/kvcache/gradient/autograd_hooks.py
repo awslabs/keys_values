@@ -1341,12 +1341,10 @@ def debug_compute_ratio(a: torch.Tensor, b: torch.Tensor):
 def create_random_index(
     shape: Tuple[int, int, int, int],
     length: int,
-    device: Optional[torch.device] = None,
+    device: torch.device,
     dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     assert len(shape) == 4
-    if device is None:
-        device = torch.device("cpu")
     if dtype is None:
         dtype = torch.int64
     index_kwargs = dict(dtype=dtype, device=device)

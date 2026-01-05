@@ -34,13 +34,15 @@ class KVCacheParams:
     run (i.e., different chunks). However, the batch size must never exceed
     `max_batch_size`.
 
+    If `dtype` is not specified, it is chosen with the first :meth:`forward`
+    call, based on the input arguments.
+
     """
     max_batch_size: int
     n_query_groups: int
     cache_length: int
     head_size: int
     n_head: int
-    device: Optional[torch.device]
     dtype: Optional[torch.dtype]
 
     @staticmethod
@@ -48,7 +50,6 @@ class KVCacheParams:
         config: Config,
         max_batch_size: int,
         cache_length: int,
-        device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         head_size: Optional[int] = None,
     ) -> "KVCacheParams":
@@ -60,7 +61,6 @@ class KVCacheParams:
             cache_length=cache_length,
             head_size=head_size,
             n_head=config.n_head,
-            device=device,
             dtype=dtype,
         )
 
@@ -108,7 +108,8 @@ class KVCache(torch.nn.Module):
             cache_length: Number of slots in cache
             block_idx: Index of model block (or layer). Multi-head attention
                 needs to know this.
-            dtype: Data type for buffers
+            dtype: Data type for buffers. If not given, it is set with the
+                first :meth:`forward` call, based on the input arguments.
             head_size: Size of final dimension of buffers. Defaults to head
                 size of model
         """
@@ -130,10 +131,16 @@ class KVCache(torch.nn.Module):
         self._work_around_hf_bug = config.rope_n_elem == 1
 
     @property
-    def device(self) -> torch.device:
+    def device(self) -> Optional[torch.device]:
         """
+        A KV cache is created without association to a device. Its device
+        is set based on the arguments of the first :meth:`forward` call. It
+        cannot be changed afterwards.
+
         Returns:
-            Device the KV cache buffers are kept on
+            Device the KV cache buffers are kept on, and which arguments
+            to :meth:`forward` need to be on. Returns `None` as long as the
+            device is not fixed (upon first :meth:`forward` call).
 
         """
         raise NotImplementedError
@@ -258,7 +265,6 @@ class KVCache(torch.nn.Module):
             cache_length=self.cache_length,
             head_size=self.head_size,
             n_head=self.n_head,
-            device=self.device,
             dtype=self.dtype,
         )
 
@@ -304,19 +310,13 @@ class KVCache(torch.nn.Module):
     def reset_parameters(self) -> None:
         pass
 
-    def clone(self, device: Optional[torch.device] = None) -> "KVCache":
+    def clone(self) -> "KVCache":
         """
         Creates and returns a shallow copy of this object. If the cache has
         buffers (see :class:`KVCacheBuffers`), these are not copied.
 
-        Args:
-            device: Device on which the copy is created. If the cache has
-                buffers, they must be deallocated. Their default `device` is
-                set to this value. If not given, the device of the copy remains
-                the same.
-
         Returns:
-            Shallow copy of this object on device `device`
+            Shallow copy of this object
 
         """
         raise NotImplementedError()
@@ -353,6 +353,11 @@ class DefaultKVCache(KVCache):
             )
         else:
             self.mha = mha
+        self._device = None  # Unassigned so far
+
+    @property
+    def device(self) -> Optional[torch.device]:
+        return self._device
 
     @property
     def batch_size(self) -> Optional[int]:
@@ -366,6 +371,13 @@ class DefaultKVCache(KVCache):
         token_idx: torch.Tensor,
         input_pos: int,
     ):
+        """
+        Apart from checking shapes of arguments, we also deal with `device`.
+        If `_device is None`, it is set to `query.device`, and existing
+        parameters are moved (if any). Otherwise, `query.device` must be
+        equal to `_device`. Arguments are not moved if on the wrong device.
+
+        """
         for_prefill = input_pos == 0
         if query.ndim != 4:
             raise ValueError("query, key, value must be 4D tensors")
@@ -391,6 +403,45 @@ class DefaultKVCache(KVCache):
         t_shape = (batch_size, num)
         if token_idx.shape != t_shape:
             raise ValueError(f"token_idx.shape = {token_idx.shape}, must be {t_shape}")
+        # Deal with device
+        # If `_device is None`, we set it here to `query.device`. Parameters
+        # which have already been created, are moved to the new device if needed.
+        new_device = query.device
+        for x in (key, value, token_idx):
+            if x.device != new_device:
+                raise ValueError("query, key, value, token_idx must be on same device")
+        self._convert_or_check_device(new_device)
+        if self._device is None:
+            # Fix device of cache
+            self._device = new_device
+        if self._dtype is None:
+            self._dtype = query.dtype
+
+    def _convert_or_check_device(
+        self,
+        new_device: torch.device,
+    ):
+        if self._device is None:
+            for name in self._parameter_names():
+                x = getattr(self, name, None)
+                if x is not None:
+                    if not isinstance(x, torch.Tensor):
+                        raise AssertionError(f"Internal error in _convert_or_check_device: {name} must be of type torch.Tensor")
+                    if x.device != new_device:
+                        setattr(self, name, x.to(new_device))
+
+        elif new_device != self._device:
+            raise ValueError(f"Arguments on device {new_device}, must be on {self._device}")
+
+    @classmethod
+    def _parameter_names(cls) -> List[str]:
+        """
+        Returns:
+            Names of `torch.Tensor` parameters which need to be checked for
+            device or converted.
+
+        """
+        return []
 
     def forward(
         self,
@@ -590,18 +641,17 @@ class KVCacheReplayLog:
         raise NotImplementedError
 
     @property
-    def dtype(self) -> Optional[torch.dtype]:
+    def device(self) -> Optional[torch.device]:
         """
         Returns:
-            Data type of buffers of the cache
+            Device of token chunks and slot positions maintained, or `None`
+            as long as the log is empty
 
         """
-        raise NotImplementedError
-
-    @property
-    def device(self) -> Optional[torch.device]:
-        chunks = self.token_chunks
-        return chunks[0].device if chunks else None
+        if self.token_chunks:
+            return self.token_chunks[0].device
+        else:
+            return None
 
     def extract_index(
         self,
@@ -637,13 +687,15 @@ class DefaultKVCacheReplayLog(KVCacheReplayLog):
         cache_length: int,
         max_prefill_length: Optional[int] = None,
         grace_period: int = 0,
-        dtype: Optional[torch.dtype] = None,
     ):
+        if token_chunks:
+            device = token_chunks[0].device
+            if any(c.device != device for c in token_chunks):
+                raise ValueError("All token_chunks entries must be on same device")
         self._token_chunks = token_chunks
         self._cache_length = cache_length
         self._grace_period = grace_period
         self._max_prefill_length = max_prefill_length
-        self._dtype = dtype
 
     @property
     def token_chunks(self) -> List[torch.Tensor]:
@@ -660,10 +712,6 @@ class DefaultKVCacheReplayLog(KVCacheReplayLog):
     @property
     def grace_period(self) -> int:
         return self._grace_period
-
-    @property
-    def dtype(self) -> Optional[torch.dtype]:
-        return self._dtype
 
     def append_token_chunk(self, chunk: torch.Tensor):
         if self.token_chunks:

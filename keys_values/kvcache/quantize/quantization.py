@@ -44,6 +44,9 @@ class Quantizer(torch.nn.Module):
     allocation or reallocation needs to be done by calling
     :meth:`_allocate_buffers` explicitly. It is not automatically done.
 
+    As with :class:`DefaultKVCacheBuffers`, the device for buffers is undefined
+    as long as they are not allocated, and can change with the next allocation.
+
     """
     def __init__(
         self,
@@ -59,6 +62,10 @@ class Quantizer(torch.nn.Module):
         self.source_dtype = source_dtype
         self.blocks_over_heads = blocks_over_heads
         self._tmp_array_limit_gb = tmp_array_limit_gb
+
+    @property
+    def device(self) -> Optional[torch.device]:
+        raise NotImplementedError
 
     @property
     def tmp_array_limit_gb(self) -> Optional[TemporaryArrayLimit]:
@@ -135,14 +142,11 @@ class Quantizer(torch.nn.Module):
     ) -> torch.Tensor:
        raise NotImplementedError
 
-    def deallocate(self, device: Optional[torch.device] = None):
+    def deallocate(self):
         """
         Deallocates the buffers. They are automatically reallocated with the
         next :meth:`prefill` call. Use this method only if device memory is
         scarce and is needed by other operations in between inference calls.
-
-        Args:
-            device: If given, the default device is set to this value.
 
         """
         raise NotImplementedError

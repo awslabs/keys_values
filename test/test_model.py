@@ -19,7 +19,6 @@ import pytest
 import torch
 from lightning import Fabric
 from lightning.fabric.utilities.imports import _IS_WINDOWS
-from lightning.fabric.utilities.init import _materialize_meta_tensors
 from torch._dynamo.backends import debugging
 from torch.backends.cuda import (
     SDPAParams,
