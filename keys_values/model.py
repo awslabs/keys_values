@@ -161,11 +161,7 @@ class GPT(nn.Module):
         dtype = kv_caches[0].dtype
         for cache, block in zip(kv_caches, self.transformer.h):
             self._check_kv_cache(self.config, cache, batch_size, dtype)
-            device = block.attn.device
-            if device is not None:
-                block.attn.kv_cache = cache.to(device=device)
-            else:
-                block.attn.kv_cache = cache
+            block.attn.kv_cache = cache
 
     def set_kv_caches(
         self,
@@ -197,21 +193,17 @@ class GPT(nn.Module):
             max_seq_length = self.max_seq_length
         for block in self.transformer.h:
             attn = block.attn
-            device = attn.device
             kv_cache = attn.kv_cache
             if (
                 kv_cache is None
                 or kv_cache.max_batch_size != batch_size
                 or kv_cache.cache_length != max_seq_length
-                or kv_cache.device != device
                 or kv_cache.dtype != dtype
             ):
                 if kv_cache is not None:
-                    device = kv_cache.device if device is None else device
                     dtype = kv_cache.dtype if dtype is None else dtype
                 attn.create_default_kv_cache(
                     batch_size=batch_size,
-                    device=device,
                     dtype=dtype,
                     max_sequence_length=max_seq_length,
                 )
@@ -774,7 +766,6 @@ class CausalSelfAttention(nn.Module):
     def create_default_kv_cache(
         self,
         batch_size: int,
-        device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         max_sequence_length: Optional[int] = None,
     ):
@@ -787,7 +778,6 @@ class CausalSelfAttention(nn.Module):
             max_batch_size=batch_size,
             cache_length=max_sequence_length,
             block_idx=self.block_idx,
-            device=device,
             dtype=dtype,
         )
 

@@ -17,7 +17,7 @@ import torch
 from torch.nn.attention import SDPBackend
 
 from keys_values.attention_utils import pytorch_scaled_dot_product_attention
-from keys_values.sdpa_wrapper import _extend_index
+from keys_values.utils import expand_index
 
 
 def _reorder(
@@ -37,10 +37,10 @@ def _reorder(
     """
     q_len = index_gat.shape[-1]
     _, _, kv_len, head_size = x.shape
-    x_new = x.gather(2, _extend_index(index_gat, head_size))
+    x_new = x.gather(2, expand_index(index_gat, head_size))
     x_right = x[:, :, (-q_len):, :]
     if not do_single_step:
-        x = x.scatter(2, _extend_index(index_scat, head_size), x_right.clone())
+        x = x.scatter(2, expand_index(index_scat, head_size), x_right.clone())
         x = torch.cat((x[:, :, :(-q_len), :], x_new), dim=2)
     else:
         # Note: `index_scat`, `index_right` can overlap, in which case the

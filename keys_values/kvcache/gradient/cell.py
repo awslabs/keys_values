@@ -171,7 +171,6 @@ class CellComputation(nn.Module):
             self._train_cache_kwargs.append(
                 dict(
                     kwargs,
-                    device=block.attn.device,
                     cache_length=kv_cache.cache_length,
                     mha=mha,
                     **extra_kwargs,
@@ -204,19 +203,12 @@ class CellComputation(nn.Module):
                 xa.equal(xb) for xa, xb in zip(a, b)
             )
 
-        dtype = replay_logs[0].dtype
         for i, log in enumerate(replay_logs):
             if not chunks_equal(log.token_chunks, replay_logs[0].token_chunks):
                 raise ValueError(
                     "All replay_logs must have the same chunk sequence:\n"
                     f"0: {replay_logs[0].token_chunks}\n"
                     f"{i}: {log.token_chunks}"
-                )
-            if log.dtype != dtype:
-                raise ValueError(
-                    "All replay_logs must have the dtype:\n"
-                    f"0: {dtype}\n"
-                    f"{i}: {log.dtype}"
                 )
 
     def _create_train_replay_caches(
@@ -328,12 +320,8 @@ class CellComputation(nn.Module):
             v_buffers,
         ):
             attn = block.attn
-            device = attn.device
             kv_caches_copy.append(attn.kv_cache)
             if first_chunk_idx > 0:
-                # Sanity check
-                if keys.device != device or values.device != device:
-                    raise IndexError(f"Layer {block_idx}: keys.device={keys.device}, values.device={values.device}, attn.device={device}: Must all be the same")
                 buffers = DefaultKeysAndValues(keys=keys, values=values)
                 replay_cache.initialize_buffers(buffers)
             cache_lengths.append(attn.kv_cache.cache_length)
