@@ -334,11 +334,6 @@ MAX_SIZE_POSITIONS_TO_CHECK = 32
 DEFAULT_MAX_NUM_RANGES = 4
 
 
-# TODO:
-# Buffers are allocated on device params.device (and with params.dtype) at
-# construction, this cannot be changed. Does this go together with cloning
-# KV caches to a different device? Or with not setting dtype, but getting
-# it from first usage?
 class DequantizedKVCacheBuffers:
     """
     Special implementation just for use in :class:`QuantizedKVCacheBuffers`.
@@ -372,19 +367,13 @@ class DequantizedKVCacheBuffers:
     in :meth:``__init__`, but only in :meth:`set_quantized_cache`, but even
     this leads to registration and infinite loops.
 
-    This class also does not take part in buffer allocation on demand or
-    buffer deallocation. Its buffers are allocated at construction, using
-    `params.max_batch_size`. This is reasonable, since in general, several
-    :class:`QuantizedKVCacheBuffers` use a shared object of this class
-    here.
-
     """
     def __init__(
         self,
         params: KVCacheBuffersParams,
         cache_length: int,
         max_num_ranges: Optional[int] = None,
-        debug_device_warning: bool = False,
+        allocate_buffers: bool = False,
     ):
         # Copied from `KVCacheBuffers.__init__`:
         self.max_batch_size = params.max_batch_size
@@ -401,13 +390,13 @@ class DequantizedKVCacheBuffers:
         self._slots_to_write_back = None
         # Do not track more than this many slots
         self._max_slots_tracked = int(cache_length * MAX_SLOTS_TRACKED_FRACTION)
-        self._allocate_buffers(params.device, params.dtype)
+        if allocate_buffers:
+            self._allocate_buffers(params.device, params.dtype)
         self.debug_events = None
-        self._debug_device_warning = debug_device_warning
 
     @property
     def device(self) -> torch.device:
-        return self.k_buff.device
+        return None if self.k_buff is None else self.k_buff.device
 
     def start_debug_event_protocol(self):
         self.debug_events = []
@@ -423,9 +412,29 @@ class DequantizedKVCacheBuffers:
                 device = torch.get_default_device()
         if self.dtype is None:
             self.dtype = dtype
-        shape = (self.max_batch_size, self.n_query_groups, self.cache_length, self.head_size)
-        self.k_buff = torch.zeros(shape, device=device, dtype=self.dtype)
-        self.v_buff = torch.zeros(shape, device=device, dtype=self.dtype)
+        if not self.buffers_are_allocated or device != self.device:
+            shape = (self.max_batch_size, self.n_query_groups, self.cache_length, self.head_size)
+            self.k_buff = torch.zeros(shape, device=device, dtype=self.dtype)
+            self.v_buff = torch.zeros(shape, device=device, dtype=self.dtype)
+
+    def deallocate(self):
+        """
+        Deallocates buffers if they are allocated.
+        Note that this method is not called automatically by
+        :class:`QuantizedKVCacheBuffers` objects which link to this one, but
+        needs to be called explicitly. This is because multiple KV cache
+        objects can refer to this object here.
+
+        """
+        if self.k_buff is not None:
+            del self.k_buff
+            self.k_buff = None
+            del self.v_buff
+            self.v_buff = None
+
+    @property
+    def buffers_are_allocated(self) -> bool:
+        return self.k_buff is not None
 
     def set_quantized_cache(self, cache: Optional[QuantizedKVCacheBuffers]):
         """
@@ -496,6 +505,8 @@ class DequantizedKVCacheBuffers:
         self,
         positions: PositionsType,
     )  -> Tuple[torch.Tensor, torch.Tensor]:
+        if not self.buffers_are_allocated:
+            raise IndexError("Buffers are not allocated. Call 'prefill' first")
         self._check_quantized_cache()
         positions = self._check_positions(positions)
         if isinstance(positions, torch.Tensor):
@@ -538,11 +549,11 @@ class DequantizedKVCacheBuffers:
         key: torch.Tensor,
         value: torch.Tensor,
     ):
+        if not self.buffers_are_allocated:
+            raise IndexError("Buffers are not allocated. Call 'prefill' first")
+        if self.device != key.device:
+            raise ValueError(f"key.device = {key.device}, must be equal to {self.device}")
         self._check_quantized_cache()
-        if self._debug_device_warning and key.device != self.device:
-            print(f"WARNING DequantizedKVCacheBuffers.set_slots: {key.device} -> {self.device}")
-        key = key.to(device=self.device, dtype=self.dtype)
-        value = value.to(device=self.device, dtype=self.dtype)
         positions = self._check_positions(positions)
         self._track_slots(positions)
         if isinstance(positions, torch.Tensor):
@@ -583,6 +594,8 @@ class DequantizedKVCacheBuffers:
 
     # Copied from `KVCacheBuffers.prefill`:
     def prefill(self, key: torch.Tensor, value: torch.Tensor):
+        # Ensure that buffers are allocated:
+        self._allocate_buffers(key.device, key.dtype)
         self._check_quantized_cache()
         self.current_length = self._check_prefill(key, value)
         self._prefill(key, value)
@@ -658,6 +671,7 @@ class DequantizedKVCacheBuffers:
         assert cache is not None
         assert self.batch_size is not None
         assert self._needs_write_back
+        assert self.buffers_are_allocated
         if self._slots_to_write_back is None:
             # Write back everything
             ranges = [(0, self.eff_cache_length)]
@@ -689,6 +703,7 @@ class DequantizedKVCacheBuffers:
         cache = self._quantized_cache
         assert cache is not None
         assert self.batch_size is not None
+        assert self.buffers_are_allocated
         ecl = self.eff_cache_length
         cache.quantizer_k.dequantize(
             start=0,
@@ -727,6 +742,8 @@ class DequantizedBufferKeysAndValues(KeysAndValues):
         batch_size = self._buffers.batch_size
         if batch_size is None:
             raise IndexError("Associated buffer still has undefined batch size")
+        if not self._buffers.buffers_are_allocated:
+            raise IndexError("Associated buffer is not allocated")
         return self._buffers.k_buff[:batch_size, :, :current_length, :]
 
     def values(self) -> torch.Tensor:
@@ -736,4 +753,6 @@ class DequantizedBufferKeysAndValues(KeysAndValues):
         batch_size = self._buffers.batch_size
         if batch_size is None:
             raise IndexError("Associated buffer still has undefined batch size")
+        if not self._buffers.buffers_are_allocated:
+            raise IndexError("Associated buffer is not allocated")
         return self._buffers.v_buff[:batch_size, :, :current_length, :]

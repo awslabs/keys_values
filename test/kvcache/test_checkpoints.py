@@ -22,10 +22,7 @@ from litgpt.config import Config
 
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.factory import split_name
-from keys_values.kvcache.gradient.checkpoints import (
-    create_layers_and_buffers_for_model,
-    LayerInputQuantizedCheckpoints,
-)
+from keys_values.kvcache.gradient.checkpoints import LayerInputQuantizedCheckpoints
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     cache_names_and_devices,
@@ -101,18 +98,8 @@ def test_layer_input_quantized_checkpoints(
     )
     checkpoints = []
     for csize in (chunk_size, max_seq_length):
-        layers_and_buffers = create_layers_and_buffers_for_model(
-            chunk_size=csize, **kwargs,
-        )
-        assert len(layers_and_buffers) == 1
-        assert layers_and_buffers[0][0] == [0]
-        buffers = layers_and_buffers[0][1]
-        assert buffers.cache_length == csize
         checkpoints.append(
-            LayerInputQuantizedCheckpoints(
-                layers_and_buffers=layers_and_buffers,
-                max_seq_length=max_seq_length,
-            )
+            LayerInputQuantizedCheckpoints(chunk_size=csize, **kwargs),
         )
 
     # Comparison loop

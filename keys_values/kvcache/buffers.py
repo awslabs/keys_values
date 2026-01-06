@@ -444,7 +444,6 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         if self.k is not None:
             del self.k
             self.k = None
-        if self.v is not None:
             del self.v
             self.v = None
 

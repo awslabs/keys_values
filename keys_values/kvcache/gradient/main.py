@@ -35,7 +35,6 @@ from keys_values.kvcache.gradient.autograd_hooks import (
 from keys_values.kvcache.gradient.checkpoints import (
     LayerInputQuantizedCheckpoints,
     LayerInputDefaultCheckpoints,
-    create_layers_and_buffers_for_model,
 )
 from keys_values.kvcache.gradient.cleanup import (
     ArraysForCleanup,
@@ -582,7 +581,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         else:
             # Checkpoints are quantized
-            layers_and_buffers = create_layers_and_buffers_for_model(
+            self.layer_checkpoints = LayerInputQuantizedCheckpoints(
                 model=self.gpt_model,
                 layer_numbers=layer_numbers,
                 batch_size=self.batch_size,
@@ -592,11 +591,8 @@ class LongContextGradientModel(LongContextInferenceModel):
                     self.cache_kwargs,
                     tmp_array_limit_gb=self._tmp_array_limit_gb,
                 ),
-                default_device=self.offload_device,
-            )
-            self.layer_checkpoints = LayerInputQuantizedCheckpoints(
-                layers_and_buffers=layers_and_buffers,
-                max_seq_length=self.gpt_model.max_seq_length,
+                allocate_buffers=True,
+                device=self.offload_device,
             )
 
     def _create_layer_numbers(self) -> List[int]:

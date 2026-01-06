@@ -397,6 +397,14 @@ class DenseKVCache(KVCacheWithBuffers):
         return self._replay_log
 
     def clone(self, device: Optional[torch.device] = None) -> KVCache:
+        """
+        Cloning a cache only works if its buffers are deallocated. The copy is
+        shallow, so that this object and the returned clone share the same
+        buffers. Ensure to only use one or the other. The typical use case is
+        to clone caches along with a model, use the cloned model for computations
+        and remove it before returning to the original.
+
+        """
         if self.kv_buffers.buffers_are_allocated:
             raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
         result = DenseKVCache(
