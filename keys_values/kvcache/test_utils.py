@@ -192,11 +192,15 @@ class KVCacheBufferTestingCheckpoints(KVCacheBufferCheckpoints):
     def __init__(
         self,
         chunk_numbers: List[int],
+        device: Optional[torch.device] = None,
     ):
         super().__init__(chunk_numbers)
         self._checkpoints: List[
             Optional[DefaultKeysAndValues]
         ] = [None] * len(chunk_numbers)
+        if device is None:
+            device = torch.get_default_device()
+        self.device = device
 
     def _set_checkpoint(
         self,
@@ -204,10 +208,9 @@ class KVCacheBufferTestingCheckpoints(KVCacheBufferCheckpoints):
         buffers: DefaultKVCacheBuffers,
     ) -> int:
         k_and_v = buffers.get_keys_values()
-        device = torch.device("cpu")
         self._checkpoints[pos] = DefaultKeysAndValues(
-            keys=k_and_v.keys().to(device=device, copy=True),
-            values=k_and_v.values().to(device=device, copy=True),
+            keys=k_and_v.keys().to(device=self.device, copy=True),
+            values=k_and_v.values().to(device=self.device, copy=True),
         )
         return pos
 
@@ -232,7 +235,10 @@ def copy_gradients(
     }
 
 
-def exchange_kv_cache_checkpoints(accumulator: GradientAccumulator):
+def exchange_kv_cache_checkpoints(
+    accumulator: GradientAccumulator,
+    device: Optional[torch.device] = None,
+):
     """
     Ensures that `accumulator._kv_cache_checkpoints` are of testing type
     :class:`KVCacheBufferTestingCheckpoints`. These do not quantize checkpoints,
@@ -246,7 +252,9 @@ def exchange_kv_cache_checkpoints(accumulator: GradientAccumulator):
         # Need to replace checkpoints
         chunk_numbers = checkpoints[0].chunk_numbers
         checkpoints = [
-            KVCacheBufferTestingCheckpoints(chunk_numbers=chunk_numbers)
+            KVCacheBufferTestingCheckpoints(
+                chunk_numbers=chunk_numbers, device=device,
+            )
             for _ in range(len(checkpoints))
         ]
         return cache_buffers, checkpoints
@@ -336,6 +344,7 @@ def random_args_cache_forward(
         low=0,
         high=vocab_size,
         size=(params.max_batch_size, num),
+        device=device,
     )
     return {
         "query": query,

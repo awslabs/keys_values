@@ -299,6 +299,7 @@ class KVCacheFactory:
                     dequant_kwargs=dequant_kwargs,
                     allocate_buffers=allocate_buffers,
                     device=device,
+                    first_block_idx=start,
                 )
                 kv_caches = [
                     cache_type(
@@ -465,6 +466,7 @@ def create_quantized_kv_buffers(
     dequant_kwargs: Optional[Dict[str, Any]] = None,
     allocate_buffers: bool = False,
     device: Optional[torch.device] = None,
+    first_block_idx: Optional[int] = None,
 ) -> List[QuantizedKVCacheBuffers]:
     """
     Creates a list of :class:`QuantizedKVCacheBuffers` for cache lenghts in
@@ -486,7 +488,7 @@ def create_quantized_kv_buffers(
         **dequant_kwargs,
     )
     quant_buffers = []
-    for cache_length in cache_lengths:
+    for i, cache_length in enumerate(cache_lengths):
         _cache_params = replace(
             cache_params,
             cache_length=cache_length,
@@ -496,11 +498,16 @@ def create_quantized_kv_buffers(
         )
         quant_kwargs["allocate_buffers"] = allocate_buffers
         quant_kwargs["device"] = device
+        if first_block_idx is not None:
+            kwargs = dict(debug_label=f"block{first_block_idx + i}")
+        else:
+            kwargs = dict()
         quant_buffers.append(
             QuantizedKVCacheBuffers(
                 quantizer_k=quantizer_type(**quant_kwargs),
                 quantizer_v=quantizer_type(**quant_kwargs),
                 dequant_buffers=dequant_buffers,
+                **kwargs,
             )
         )
     return quant_buffers

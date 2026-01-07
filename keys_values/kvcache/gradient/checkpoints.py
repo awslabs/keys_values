@@ -427,10 +427,13 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         pos: int,
         out: DefaultKVCacheBuffers,
     ):
-        out.prefill(
-            key=self.k[pos][:, ...],
-            value=self.v[pos][:, ...],
-        )
+        key = self.k[pos][:, ...]
+        value = self.v[pos][:, ...]
+        device = out.device
+        if device is not None:
+            key = key.to(device)
+            value = value.to(device)
+        out.prefill(key=key, value=value)
         out.current_length = self._checkpoint_lengths[pos]
 
     def set_checkpoint_slice(
@@ -474,7 +477,7 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         if not (0 <= input_pos and num > 0 and input_pos + num <= current_length):
             raise ValueError(f"input_pos = {input_pos}, num = {num}, does not fit into [0, {current_length}]")
         if device is None:
-            device = torch.device("cpu")
+            device = torch.get_default_device()
         return DefaultKeysAndValues(
             keys=self.k[pos][:, :, input_pos:(input_pos + num), :].to(device=device),
             values=self.v[pos][:, :, input_pos:(input_pos + num), :].to(device=device),

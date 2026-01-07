@@ -107,7 +107,9 @@ def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
         num_prefill = max_prefill_length
     num_insert = max_prefill_length if max_prefill_length is not None else cache_length
 
-    data = random_args_cache_forward(params, num_insert, vocab_size)
+    data = random_args_cache_forward(
+        params, num_insert, vocab_size, device=device,
+    )
     # Compute MHA in a single shot
     y_sshot = kv_cache(**data, input_pos=0)
     should_be = torch.arange(

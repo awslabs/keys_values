@@ -46,11 +46,15 @@ def test_extract_delta(device, dtype):
 
     index_kwargs = dict(dtype=torch.int64, device=device)
     for _ in range(num_repeats):
-        keys = random_tensor(params)
+        keys = random_tensor(params, device=device)
         chunk_size = random.randint(1, cache_length // 2)
         input_pos = cache_length + 16
-        token_positions = random_index(params, 0, cache_length)
-        delta_index = random_index(params, 0, cache_length, num=chunk_size)
+        token_positions = random_index(
+            params, 0, cache_length, device=device,
+        )
+        delta_index = random_index(
+            params, 0, cache_length, num=chunk_size, device=device,
+        )
         token_positions.scatter_(
             -1,
             delta_index,

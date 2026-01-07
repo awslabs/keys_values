@@ -282,6 +282,7 @@ class GradientAccumulator:
                 cache_params=cache_params,
                 cache_kwargs=self.cache_kwargs,
                 dequant_kwargs=dequant_kwargs,
+                first_block_idx=model_part.first_layer_idx,
             )[0]
             checkpoints = [
                 KVCacheBufferQuantizedCheckpoints(
@@ -462,7 +463,6 @@ class GradientAccumulator:
                     k_buffers, v_buffers = self._get_checkpoints(
                         infer_replay_caches,
                         chunk_idx=chunk_idxs[col_idx],
-                        model_part=model_part,
                     )
                     k_buffers = [copy_requires_grad(x) for x in k_buffers]
                     v_buffers = [copy_requires_grad(x) for x in v_buffers]
@@ -634,12 +634,10 @@ class GradientAccumulator:
         self,
         infer_replay_caches: List[KVCacheWithBuffers],
         chunk_idx: int,
-        model_part: CellBlocks,
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         k_buffers = []
         v_buffers = []
-        for (block_idx, block), kv_cache, checkpoints in zip(
-            model_part.blocks(),
+        for kv_cache, checkpoints in zip(
             infer_replay_caches,
             self._kv_cache_checkpoints,
         ):

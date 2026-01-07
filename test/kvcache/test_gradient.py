@@ -184,7 +184,7 @@ def test_gradient_row_of_cells(
     )
     with torch.device(device):
         gpt_model = GPT(config)
-    gpt_model.apply(gpt_model._init_weights)  # Initialization
+        gpt_model.apply(gpt_model._init_weights)  # Initialization
     gpt_model.set_start_of_layer_hook(start_of_layer_hook)
     token_idxs = torch.randint(
         low=0,
@@ -220,6 +220,7 @@ def test_gradient_row_of_cells(
             input_pos += num
         y = torch.cat(y_parts, dim=1)
 
+    assert y.device == device
     gpt_model.set_start_of_layer_hook(None)   # Do not record layer inputs from now on
     replay_logs = get_replay_logs(gpt_model)
     assert len(replay_logs) == n_layer
@@ -233,6 +234,7 @@ def test_gradient_row_of_cells(
     shape = (batch_size, seq_len, config.n_embd)
     for x in layer_inputs.values():
         assert x.shape == shape
+        assert x.device == device
 
     # Setup gradient accumulator
     if use_autograd_hooks:
@@ -265,14 +267,14 @@ def test_gradient_row_of_cells(
     if do_gradient_testing:
         # Replace KV cache checkpoint objects by such which do not quantize
         # the checkpoints. This allows for simple gradient testing
-        exchange_kv_cache_checkpoints(accumulator)
+        exchange_kv_cache_checkpoints(accumulator, device=device)
 
     # Run gradient accumulation
     gpt_model.zero_grad()  # Reset gradients to 0
     inputs = layer_inputs[0]
     # We could compute real head gradients from the outputs
     head_gradients = torch.randn(
-        *inputs.shape, device=inputs.device, dtype=inputs.dtype
+        *inputs.shape, device=device, dtype=inputs.dtype,
     )
     below_gradients = torch.zeros_like(head_gradients)
     print(f"\nGradient accumulation with activation checkpointing: {chunks_per_cell}")
