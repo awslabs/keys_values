@@ -48,7 +48,6 @@ def test_last_recent(device, name):
         cache_length=32,
         head_size=8,
         n_head=4,
-        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length
@@ -98,7 +97,6 @@ def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
         cache_length=128,
         head_size=8,
         n_head=4,
-        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length

@@ -55,7 +55,6 @@ def create_kv_cache(
         max_batch_size=params.max_batch_size,
         cache_length=params.cache_length,
         block_idx=block_idx,
-        device=params.device,
         dtype=params.dtype,
         cache_kwargs=kwargs,
     )
@@ -73,6 +72,7 @@ def random_tensor(
     num: Optional[int] = None,
     is_query: bool = False,
     batch_size: Optional[int] = None,
+    device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     if batch_size is None:
         batch_size = params.max_batch_size
@@ -80,14 +80,16 @@ def random_tensor(
         num = params.cache_length
     dim1 = params.n_head if is_query else params.n_query_groups
     shape = (batch_size, dim1, num, params.head_size)
-    return torch.randn(*shape, device=params.device, dtype=params.dtype)
+    return torch.randn(*shape, device=device, dtype=params.dtype)
 
 
 def random_keys_values(
-    params: KVCacheParams, num: Optional[int] = None,
+    params: KVCacheParams,
+    num: Optional[int] = None,
+    device: Optional[torch.device] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    keys = random_tensor(params, num)
-    values= random_tensor(params, num)
+    keys = random_tensor(params, num, device=device)
+    values= random_tensor(params, num, device=device)
     return keys, values
 
 
@@ -97,6 +99,7 @@ def random_index(
     end: int,
     num: Optional[int] = None,
     batch_size: Optional[int] = None,
+    device: Optional[torch.device] = None,
 ):
     if batch_size is None:
         batch_size = params.max_batch_size
@@ -105,7 +108,7 @@ def random_index(
     diff = end - start
     if diff < num:
         raise ValueError(f"end - start = {diff}, must be >= num = {num}")
-    index_kwargs = dict(dtype=torch.int64, device=params.device)
+    index_kwargs = dict(dtype=torch.int64, device=device)
     result = torch.empty(
         (batch_size, params.n_query_groups, num), **index_kwargs,
     )
@@ -322,10 +325,13 @@ def product_with_devices(
 
 
 def random_args_cache_forward(
-    params: KVCacheParams, num: int, vocab_size: int,
+    params: KVCacheParams,
+    num: int,
+    vocab_size: int,
+    device: Optional[torch.device] = None,
 ) -> Dict[str, torch.Tensor]:
-    query = random_tensor(params, num=num, is_query=True)
-    kv = random_keys_values(params, num=num)
+    query = random_tensor(params, num=num, is_query=True, device=device)
+    kv = random_keys_values(params, num=num, device=device)
     idx = torch.randint(
         low=0,
         high=vocab_size,

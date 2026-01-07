@@ -52,7 +52,6 @@ def test_grace_period(device, name):
         cache_length=64,
         head_size=8,
         n_head=4,
-        device=device,
         dtype=torch.bfloat16,
     )
     cache_length = params.cache_length
@@ -147,7 +146,6 @@ def test_h2o_scores(device, name, dtype):
         cache_length=64,
         head_size=8,
         n_head=4,
-        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length
@@ -222,7 +220,6 @@ def test_token_pos_and_pos_log(device, dtype):
         cache_length=64,
         head_size=8,
         n_head=4,
-        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length

@@ -180,7 +180,6 @@ def test_gradient_row_of_cells(
         config=config,
         max_batch_size=batch_size,
         cache_length=cache_lengths[0],
-        device=device,
         dtype=dtype,
     )
     with torch.device(device):
@@ -262,9 +261,7 @@ def test_gradient_row_of_cells(
         )
     )
     accumulator._batch_size = batch_size
-    accumulator._initialize_internal(
-        replay_logs, chunks_per_cell, weights_dtype=params.dtype,
-    )
+    accumulator._initialize_internal(replay_logs, chunks_per_cell)
     if do_gradient_testing:
         # Replace KV cache checkpoint objects by such which do not quantize
         # the checkpoints. This allows for simple gradient testing
@@ -311,7 +308,7 @@ def test_gradient_row_of_cells(
     )
     accumulator_comp._batch_size = batch_size
     accumulator_comp._initialize_internal(
-        replay_logs, chunks_per_cell=[num_chunks], weights_dtype=params.dtype,
+        replay_logs, chunks_per_cell=[num_chunks],
     )
     gpt_model.zero_grad()
     below_gradients_comp = torch.zeros_like(head_gradients)

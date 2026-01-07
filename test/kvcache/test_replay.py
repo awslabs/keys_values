@@ -128,10 +128,10 @@ def test_inference_replay(cache_name, device, cache_kwargs):
         config=config,
         max_batch_size=batch_size,
         cache_length=cache_length,
-        device=device,
         dtype=dtype,
     )
-    model = GPT(config).to(device=device)
+    with torch.device(device):
+        model = GPT(config)
     kv_cache = create_kv_cache(
         name=cache_name,
         params=params,
@@ -286,10 +286,10 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_new_c
         config=config,
         max_batch_size=batch_size,
         cache_length=cache_length,
-        device=device,
         dtype=dtype,
     )
-    model = GPT(config).to(device=device)
+    with torch.device(device):
+        model = GPT(config)
     kv_cache = create_kv_cache(
         name=cache_name,
         params=params,
@@ -325,7 +325,6 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_new_c
                 start_token_pos=0,
                 layer_idx=0,
                 num_chunks=len(tokens_per_chunk),
-                device=device,
                 node_annotations=None,
             )
             model.transformer.h[0].attn.kv_cache = tr_cache

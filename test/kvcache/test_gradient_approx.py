@@ -155,9 +155,8 @@ def test_compare_gradient_to_approximations(cache_name, cache_kwargs):
     # Parameters for KV caches
     cache_params = KVCacheParams.from_config(
         config=config,
-        batch_size=batch_size,
+        max_batch_size=batch_size,
         cache_length=cache_length,
-        device=device,
         dtype=dtype,
     )
 

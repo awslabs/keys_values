@@ -607,7 +607,10 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             head_size=model.config.n_embd // 2,
             cache_length=chunk_size,
         )
-        dequant_kwargs = dict(max_num_ranges=cache_kwargs.get("max_num_ranges"))
+        if cache_kwargs is not None:
+            dequant_kwargs = dict(max_num_ranges=cache_kwargs.get("max_num_ranges"))
+        else:
+            dequant_kwargs = None
         quant_buffers = create_quantized_kv_buffers(
             qname=qname,
             cache_lengths=[chunk_size],

@@ -1018,10 +1018,6 @@ class LongContextGradientModel(LongContextInferenceModel):
             if self._record_gpu_memory_kind in (0, 2):
                 # Store results up to now
                 self._record_gpu_memory_snapshots.store_current_snapshot()
-            # DEBUG:
-            print("Done backward for one row of cells: STOP HERE")
-            exit(0)
-            # END DEBUG
 
         # Accumulate gradients for input embeddings
         if self._record_gpu_memory_kind == 1:

@@ -58,7 +58,6 @@ def main(
         head_size=config.head_size,
         n_head=config.n_head,
         dtype=dtype,
-        device=device,
     )
     input_pos = 2 * cache_length
     scale_factor = 1.0 / math.sqrt(config.head_size)

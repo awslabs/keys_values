@@ -112,10 +112,13 @@ def check_replay_log(
         "max_prefill_length",
         "grace_period",
     ):
-        val_c = getattr(cache, name)
-        val_r = getattr(replay_log, name)
-        if val_c != val_r:
-            raise ValueError(f"{name}: {val_c} (cache) != {val_r} (replay_log)")
+        try:
+            val_c = getattr(cache, name)
+            val_r = getattr(replay_log, name)
+            if val_c != val_r:
+                raise ValueError(f"{name}: {val_c} (cache) != {val_r} (replay_log)")
+        except AttributeError:
+            pass
 
 
 class InferenceAttnWeightsReplayCache(

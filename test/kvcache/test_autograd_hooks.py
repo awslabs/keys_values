@@ -41,7 +41,6 @@ def test_extract_delta(device, dtype):
         head_size=head_size,
         n_head=n_head,
         dtype=dtype,
-        device=device,
     )
     num_repeats = 16
 

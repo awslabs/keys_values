@@ -64,6 +64,7 @@ class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
         if slot_positions:
             if not self.token_chunks:
                 raise ValueError("Cannot have empty token_chunks, non-empty slot_positions")
+            self._slot_positions = None
             device = self.device
             if any(b.device != device for b in slot_positions):
                 raise ValueError(f"All token_chunks and slot_position entries must be on same device {device}")

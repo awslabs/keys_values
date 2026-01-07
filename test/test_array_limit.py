@@ -28,6 +28,8 @@ from keys_values.model import GPT, block_iterator
 
 
 def test_tmp_array_limit_object():
+    dtype = torch.bfloat16
+    torch.set_default_dtype(dtype)  # Set default dtype
     # Step 1: Forward limit
     # Create model and KV caches as in `longcontext_*` scripts
     config = Config.from_name(
@@ -63,7 +65,7 @@ def test_tmp_array_limit_object():
         gpt_model=gpt_model,
         name=kv_cache_args.name,
         max_batch_size=batch_size,
-        dtype=torch.bfloat16,
+        dtype=dtype,
         cache_length=kv_cache_args.cache_length,
         cache_kwargs=cache_kwargs,
     )

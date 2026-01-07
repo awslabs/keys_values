@@ -76,7 +76,6 @@ def test_layer_input_quantized_checkpoints(
         config=config,
         max_batch_size=batch_size,
         cache_length=chunk_size,
-        device=device,
         dtype=dtype,
     )
     with torch.device(device):

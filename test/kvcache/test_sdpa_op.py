@@ -437,7 +437,6 @@ def test_gradient_new_and_old_spda(
         config=config,
         max_batch_size=batch_size,
         cache_length=cache_length,
-        device=device,
         dtype=dtype,
     )
     with torch.device(device):

@@ -607,13 +607,6 @@ class CausalSelfAttention(nn.Module):
         self.config = config
         self.block_idx = block_idx
 
-    @property
-    def device(self) -> Optional[torch.device]:
-        if not hasattr(self.qkv, "weight"):
-            return None
-        w = self.qkv.weight
-        return None if w is None else w.device
-
     def forward(
         self,
         x: torch.Tensor,
@@ -802,14 +795,3 @@ def block_iterator(
         end = model.config.n_layer
     for block in model.transformer.h[start:end]:
         yield block
-
-
-def device_for_layer(
-    model: GPT,
-    layer_idx: int,
-) -> torch.device:
-    if layer_idx < 0:
-        layer_idx = model.config.n_layer + layer_idx
-    if not (0 <= layer_idx < model.config.n_layer):
-        raise IndexError(f"Layer {layer_idx} out of range, must be in [0, {model.config.n_layer})")
-    return model.transformer.h[layer_idx].attn.device

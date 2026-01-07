@@ -166,9 +166,10 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
                 f"quantizer_v.blocks_over_heads = {quantizer_v.blocks_over_heads}, "
                 "must be the same"
             )
-        if quantizer_v.device != self.device or dequant_buffers.device != self.device:
+        device = quantizer_k.device
+        if quantizer_v.device != device or dequant_buffers.device != device:
             raise ValueError(
-                f"quantizer_k.device = {quantizer_k.device}, "
+                f"quantizer_k.device = {device}, "
                 f"quantizer_v.device = {quantizer_v.device}, "
                 f"dequant_buffers.device = {dequant_buffers.device}, "
                 "must be the same"
@@ -454,9 +455,12 @@ class DequantizedKVCacheBuffers:
         self.write_back()
         self._quantized_cache = cache  # Change association
         if cache is not None:
+            if not cache.buffers_are_allocated:
+                raise ValueError("Cannot call set_quantized_cache from a non-allocated cache")
             # Buffers here must be on same device as `_quantized_cache`
-            if self.device != cache.device:
+            if self.buffers_are_allocated and self.device != cache.device:
                 raise ValueError(f"cache.device = {cache.device}, must be equal to {self.device}")
+            self._allocate_buffers(cache.device, cache.dtype)
             self._dequantize()  # Dequantize and copy
 
     def write_back(self):
