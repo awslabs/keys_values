@@ -296,7 +296,7 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
         kv_cache_copy = block_copy.attn.kv_cache
         assert kv_cache is not None and kv_cache_copy is not None, (l_ix, kv_cache, kv_cache_copy)
         assert type(kv_cache) == type(kv_cache_copy), (l_ix, type(kv_cache), type(kv_cache_copy))
-        assert kv_cache_copy.device == cpu_offload_device, (l_ix, kv_cache_copy.device, cpu_offload_device)
+        assert kv_cache_copy.device in (cpu_offload_device, None), (l_ix, kv_cache_copy.device, cpu_offload_device)
 
 
 if __name__ == "__main__":

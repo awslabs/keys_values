@@ -204,17 +204,15 @@ class QuantizedH2OKVCache(H2OKVCache):
         _scores = (_scores - _min) / _denom
         return _scores.view(*scores.shape)
 
-    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+    def clone(self) -> KVCache:
         if self.kv_buffers.buffers_are_allocated:
             raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        result = QuantizedH2OKVCache(
+        return QuantizedH2OKVCache(
             config=self.config,
             buffers=self.kv_buffers,
             block_idx=self.block_idx,
             **self._base_kwargs_for_clone(),
         )
-        result._device = device
-        return result
 
     def _base_kwargs_for_clone(self) -> Dict[str, Any]:
         base_kwargs = super()._base_kwargs_for_clone()
@@ -294,14 +292,12 @@ class QuantizedVLengthH2OKVCache(QuantizedH2OKVCache, VLengthInstantScoreMixin):
     def get_kv_buffers(self) -> KVCacheBuffers:
         return self.kv_buffers
 
-    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+    def clone(self) -> KVCache:
         if self.kv_buffers.buffers_are_allocated:
             raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        result = QuantizedVLengthH2OKVCache(
+        return QuantizedVLengthH2OKVCache(
             config=self.config,
             buffers=self.kv_buffers,
             block_idx=self.block_idx,
             **self._base_kwargs_for_clone(),
         )
-        result._device = device
-        return result

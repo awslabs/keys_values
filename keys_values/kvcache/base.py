@@ -310,16 +310,10 @@ class KVCache(torch.nn.Module):
     def reset_parameters(self) -> None:
         pass
 
-    def clone(self, device: Optional[torch.device] = None) -> "KVCache":
+    def clone(self) -> "KVCache":
         """
         Creates and returns a shallow copy of this object. If the cache has
         buffers (see :class:`KVCacheBuffers`), these are not copied.
-
-        Args:
-            device: Device on which the copy is created. If the cache has
-                buffers, they must be deallocated. Their default `device` is
-                set to this value. If not given, the device of the copy is
-                not determined (see :meth:`device`).
 
         Returns:
             Shallow copy of this object
@@ -435,6 +429,7 @@ class DefaultKVCache(KVCache):
                         raise AssertionError(f"Internal error in _convert_or_check_device: {name} must be of type torch.Tensor")
                     if x.device != new_device:
                         setattr(self, name, x.to(new_device))
+
         elif new_device != self._device:
             raise ValueError(f"Arguments on device {new_device}, must be on {self._device}")
 

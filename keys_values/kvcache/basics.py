@@ -396,7 +396,7 @@ class DenseKVCache(KVCacheWithBuffers):
     def get_replay_log(self) -> Optional[KVCacheReplayLog]:
         return self._replay_log
 
-    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+    def clone(self) -> KVCache:
         """
         Cloning a cache only works if its buffers are deallocated. The copy is
         shallow, so that this object and the returned clone share the same
@@ -407,14 +407,12 @@ class DenseKVCache(KVCacheWithBuffers):
         """
         if self.kv_buffers.buffers_are_allocated:
             raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        result = DenseKVCache(
+        return DenseKVCache(
             config=self.config,
             buffers=self.kv_buffers,
             block_idx=self.block_idx,
             **self._base_kwargs_for_clone(),
         )
-        result._device = device
-        return result
 
 
 class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
@@ -654,14 +652,12 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     def get_replay_log(self) -> Optional[KVCacheReplayLog]:
         return self._replay_log
 
-    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+    def clone(self) -> KVCache:
         if self.kv_buffers.buffers_are_allocated:
             raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        result = LastRecentlyInsertedKVCache(
+        return LastRecentlyInsertedKVCache(
             config=self.config,
             buffers=self.kv_buffers,
             block_idx=self.block_idx,
             **self._base_kwargs_for_clone(),
         )
-        result._device = device
-        return result

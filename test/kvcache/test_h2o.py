@@ -228,7 +228,9 @@ def test_token_pos_and_pos_log(device, dtype):
     kv_cache.switch_replay_logging(True)
     num_insert = cache_length + 5
     num_prefill = cache_length - 2
-    data = random_args_cache_forward(params, num=num_insert, vocab_size=vocab_size)
+    data = random_args_cache_forward(
+        params, num=num_insert, vocab_size=vocab_size, device=device,
+    )
     token_chunks = []
     # Prefill up to cache_length - 2
     data_part = range_from_args(data, 0, num_prefill)

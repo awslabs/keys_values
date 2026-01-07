@@ -493,7 +493,7 @@ class GPT(nn.Module):
         # Deal with KV caches
         for kv_cache, block in zip(kv_caches, model_copy.transformer.h):
             if kv_cache is not None:
-                block.attn.kv_cache = kv_cache.clone(device=device)
+                block.attn.kv_cache = kv_cache.clone()
         return model_copy
 
 

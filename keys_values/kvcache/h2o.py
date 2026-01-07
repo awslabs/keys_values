@@ -209,17 +209,15 @@ class H2OKVCache(AttnWeightsKVCache):
             sz_sc += sz
         return sz_total + sz_sc, dict(dct_sz, scores=sz_sc)
 
-    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+    def clone(self) -> KVCache:
         if self.kv_buffers.buffers_are_allocated:
             raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        result = H2OKVCache(
+        return H2OKVCache(
             config=self.config,
             buffers=self.kv_buffers,
             block_idx=self.block_idx,
             **self._base_kwargs_for_clone(),
         )
-        result._device = device
-        return result
 
     def _base_kwargs_for_clone(self) -> Dict[str, Any]:
         base_kwargs = super()._base_kwargs_for_clone()
@@ -410,17 +408,15 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
     def get_kv_buffers(self) -> KVCacheBuffers:
         return self.kv_buffers
 
-    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+    def clone(self) -> KVCache:
         if self.kv_buffers.buffers_are_allocated:
             raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        result = VLengthH2OKVCache(
+        return VLengthH2OKVCache(
             config=self.config,
             buffers=self.kv_buffers,
             block_idx=self.block_idx,
             **self._base_kwargs_for_clone(),
         )
-        result._device = device
-        return result
 
 
 class H2OOriginalKVCache(AttnWeightsKVCache):
@@ -532,14 +528,12 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
     def _parameter_names(cls) -> List[str]:
         return super()._parameter_names() + ["scores"]
 
-    def clone(self, device: Optional[torch.device] = None) -> KVCache:
+    def clone(self) -> KVCache:
         if self.kv_buffers.buffers_are_allocated:
             raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        result = H2OOriginalKVCache(
+        return H2OOriginalKVCache(
             config=self.config,
             buffers=self.kv_buffers,
             block_idx=self.block_idx,
             **self._base_kwargs_for_clone(),
         )
-        result._device = device
-        return result

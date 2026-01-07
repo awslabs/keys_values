@@ -142,7 +142,7 @@ def clone_model_shard_via_flat_vectors(
             model_copy.transformer.h
         ):
             if kv_cache is not None:
-                block.attn.kv_cache = kv_cache.clone(device=device)
+                block.attn.kv_cache = kv_cache.clone()
 
     return model_copy
 
