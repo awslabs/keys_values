@@ -11,9 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from cProfile import Profile
 from functools import partial
 import gc
+from io import StringIO
 from pathlib import Path
+from pstats import SortKey, Stats
 import time
 from typing import Optional, Dict, Any, Tuple, Union, List
 
@@ -588,6 +591,12 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         else:
             # Checkpoints are quantized
+            if self.offload_device is not None:
+                kwargs = dict(
+                    allocate_buffers=True, device=self.offload_device,
+                )
+            else:
+                kwargs = dict(allocate_buffers=False)
             self.layer_checkpoints = LayerInputQuantizedCheckpoints(
                 model=self.gpt_model,
                 layer_numbers=layer_numbers,
@@ -598,8 +607,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                     self.cache_kwargs,
                     tmp_array_limit_gb=self._tmp_array_limit_gb,
                 ),
-                allocate_buffers=True,
-                device=self.offload_device,
+                **kwargs,
             )
 
     def _create_layer_numbers(self) -> List[int]:
@@ -710,6 +718,10 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
             print("\n".join(lines))
 
+        profiler = Profile()
+        print("START PROFILING")
+        profiler.enable()
+
         if self.offload_device is not None:
             # Clone `gpt_model` to `offload_device`
             gpt_model = clone_model_shard_via_flat_vectors(
@@ -754,6 +766,16 @@ class LongContextGradientModel(LongContextInferenceModel):
             del gpt_model
         gc.collect()
         torch.cuda.empty_cache()
+
+        profiler.disable()
+        print("STOPPED PROFILING")
+        s = StringIO()
+        ps = Stats(profiler, stream=s).sort_stats(SortKey.CUMULATIVE)
+        ps.print_stats()
+        print(s.getvalue())
+        print("\nTERMINATING HERE")
+        exit(0)
+
         if self.offload_device is not None and self.verbose is not VerbosityLevels.NONE:
             print(
                 f"\nDeallocated weights of model on device {self.offload_device}:\n"
