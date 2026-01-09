@@ -43,7 +43,7 @@ from keys_values.kvcache.gradient.cleanup import (
     ArraysForCleanup,
     protect_named_params_buffers_of_model,
 )
-from keys_values.kvcache.gradient.gpu_memory import RecordGPUMemory
+from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
 from keys_values.kvcache.utils import (
     wrap_tqdm_if_verbose,
@@ -261,6 +261,8 @@ class LongContextGradientModel(LongContextInferenceModel):
         layer_checkpoint_chunk_size: Optional[int] = None,
         debug_gpt_model: Optional[GPT] = None,
         debug_store_intermediates: bool = False,
+        debug_profile_forward: bool = False,
+        debug_profile_backward: bool = False,
     ):
         """
         Args:
@@ -385,6 +387,8 @@ class LongContextGradientModel(LongContextInferenceModel):
                 self._train_cache_kwargs,
                 debug_intermediates=self.debug_intermediates,
             )
+        self._debug_profile_forward = debug_profile_forward
+        self._debug_profile_backward = debug_profile_backward
 
     @property
     def status(self) -> str:
@@ -718,9 +722,12 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
             print("\n".join(lines))
 
-        profiler = Profile()
-        print("START PROFILING")
-        profiler.enable()
+        if self._debug_profile_forward:
+            profiler = Profile()
+            print("START PROFILING")
+            profiler.enable()
+        else:
+            profiler = None
 
         if self.offload_device is not None:
             # Clone `gpt_model` to `offload_device`
@@ -767,14 +774,15 @@ class LongContextGradientModel(LongContextInferenceModel):
         gc.collect()
         torch.cuda.empty_cache()
 
-        profiler.disable()
-        print("STOPPED PROFILING")
-        s = StringIO()
-        ps = Stats(profiler, stream=s).sort_stats(SortKey.CUMULATIVE)
-        ps.print_stats()
-        print(s.getvalue())
-        print("\nTERMINATING HERE")
-        exit(0)
+        if self._debug_profile_forward:
+            profiler.disable()
+            print("STOPPED PROFILING")
+            s = StringIO()
+            ps = Stats(profiler, stream=s).sort_stats(SortKey.CUMULATIVE)
+            ps.print_stats()
+            print(s.getvalue())
+            print("\nTERMINATING HERE")
+            exit(0)
 
         if self.offload_device is not None and self.verbose is not VerbosityLevels.NONE:
             print(
@@ -908,6 +916,13 @@ class LongContextGradientModel(LongContextInferenceModel):
                     self._record_gpu_memory_snapshots.path.parent / f"snapshot_backward{count}.pickle"
                 )
                 self._record_gpu_memory_snapshots.start_recording()
+
+        if self._debug_profile_backward:
+            profiler = Profile()
+            print("START PROFILING")
+            profiler.enable()
+        else:
+            profiler = None
 
         # Allocate members needed for backward computations
         self._create_members_for_backward()
@@ -1074,6 +1089,16 @@ class LongContextGradientModel(LongContextInferenceModel):
                 debug_modules = None
             accumulate_gradients(module_pairs, debug_modules)
             del shard_on_device
+
+        if self._debug_profile_backward:
+            profiler.disable()
+            print("STOPPED PROFILING")
+            s = StringIO()
+            ps = Stats(profiler, stream=s).sort_stats(SortKey.CUMULATIVE)
+            ps.print_stats()
+            print(s.getvalue())
+            print("\nTERMINATING HERE")
+            exit(0)
 
         self._deallocate_buffers()
         if self._record_gpu_memory_kind in (0, 2):

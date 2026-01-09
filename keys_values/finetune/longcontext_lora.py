@@ -86,7 +86,7 @@ from keys_values.finetune.utils import (
 )
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
-from keys_values.kvcache.gradient.gpu_memory import RecordGPUMemory
+from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.utils import (
     VerbosityLevels,
     message_memory_all_devices,
@@ -171,6 +171,7 @@ def setup(
     debug_check_updates: bool = False,
     generate_with_eval: bool = False,
     profile_grad_times: int = 0,
+    profile_parts: Optional[str] = None,
 ) -> None:
     """Finetune a model using the LoRA method.
 
@@ -237,6 +238,11 @@ def setup(
             directory `f"iteration{step % record_gpu_memory_period}"`.
             If this is 0, files are not overwritten, we use `f"iteration{step}"`.
             Defaults to 0.
+        profile_grad_times: If given, we profile complete gradient computation
+            for this many steps, then stop. Results are written to CSV file.
+        profile_parts: If given, we use `cProfile` to profile the first forward
+            (if "forward") or first backward (if "backward") pass. Results are
+            printed, then the program stops.
 
     """
     checkpoint_dir = auto_download_checkpoint(model_name=checkpoint_dir, access_token=access_token)
@@ -259,6 +265,8 @@ def setup(
         print("Choosing optimizer AdamW with default learning rate. We highly recommend to at least tune optimizer.learning_rate")
     else:
         print(str(optimizer))
+    if profile_parts is not None and profile_parts not in ("forward", "backward"):
+        raise ValueError("profile_parts: Must be 'forward' or 'backward'")
 
     check_kv_cache(kv_cache)
     check_valid_checkpoint_dir(checkpoint_dir)
@@ -363,6 +371,7 @@ def setup(
         debug_check_updates=debug_check_updates,
         generate_with_eval=generate_with_eval,
         profile_grad_times=profile_grad_times,
+        profile_parts=profile_parts,
     )
 
 
@@ -388,6 +397,7 @@ def main(
     debug_check_updates: bool,
     generate_with_eval: bool,
     profile_grad_times: int,
+    profile_parts: Optional[str],
 ) -> None:
     validate_args(train, eval)
 
@@ -471,6 +481,7 @@ def main(
             max_batch_size=batch_size,
             dtype=fabric_precision_to_dtype(fabric._precision.precision),
             profile_grad_times=profile_grad_times > 0,
+            profile_parts=profile_parts,
             fabric=fabric,
         )
     mark_only_lora_as_trainable(model.gpt_model)

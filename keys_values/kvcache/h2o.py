@@ -57,6 +57,8 @@ class H2OKVCache(AttnWeightsKVCache):
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
         detach_attn_weights: bool = False,
+        keep_initial_fraction: Optional[float] = None,
+        max_chunk_size: Optional[int] = None,
         normalize_scores: bool = False,
         **base_kwargs,
     ):
@@ -67,6 +69,8 @@ class H2OKVCache(AttnWeightsKVCache):
             grace_period=grace_period,
             replay_log_blocksize=replay_log_blocksize,
             detach_attn_weights=detach_attn_weights,
+            keep_initial_fraction=keep_initial_fraction,
+            max_chunk_size=max_chunk_size,
             **base_kwargs,
         )
         self.normalize_scores = normalize_scores
@@ -88,6 +92,9 @@ class H2OKVCache(AttnWeightsKVCache):
         dtype: Optional[torch.dtype] = None,
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
+        detach_attn_weights: bool = False,
+        keep_initial_fraction: Optional[float] = None,
+        max_chunk_size: Optional[int] = None,
         normalize_scores: bool = False,
         **base_kwargs,
     ) -> "H2OKVCache":
@@ -106,6 +113,9 @@ class H2OKVCache(AttnWeightsKVCache):
             block_idx,
             grace_period,
             replay_log_blocksize,
+            detach_attn_weights,
+            keep_initial_fraction,
+            max_chunk_size,
             normalize_scores,
             **base_kwargs,
         )
@@ -310,6 +320,8 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
         detach_attn_weights: bool = False,
+        keep_initial_fraction: Optional[float] = None,
+        max_chunk_size: Optional[int] = None,
         normalize_scores: bool = False,
         **base_kwargs,
     ):
@@ -320,6 +332,8 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
             grace_period,
             replay_log_blocksize,
             detach_attn_weights,
+            keep_initial_fraction,
+            max_chunk_size,
             normalize_scores,
             **base_kwargs,
         )
@@ -341,6 +355,9 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         dtype: Optional[torch.dtype] = None,
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
+        detach_attn_weights: bool = False,
+        keep_initial_fraction: Optional[float] = None,
+        max_chunk_size: Optional[int] = None,
         normalize_scores: bool = False,
         **base_kwargs,
     ) -> "VLengthH2OKVCache":
@@ -359,6 +376,9 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
             block_idx,
             grace_period,
             replay_log_blocksize,
+            detach_attn_weights,
+            keep_initial_fraction,
+            max_chunk_size,
             normalize_scores,
             **base_kwargs,
         )

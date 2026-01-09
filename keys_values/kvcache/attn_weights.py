@@ -337,6 +337,12 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
     `keep_fraction == 0`, this one-time rule corresponds to what a
     :class:`LastRecentlyInsertedKVCache` would do.
 
+    Debugging/testing with `debug_next_positions`:
+
+    If this is set, it must be a list. Then, `index` used in
+    :meth:`_forward_internal` are appended there. In this case, we sort the
+    index in :meth:`_update` if `max_chunk_size` is given.
+
     """
     def __init__(
         self,
@@ -347,6 +353,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         replay_log_blocksize: Optional[int] = None,
         detach_attn_weights: bool = False,
         keep_initial_fraction: Optional[float] = None,
+        max_chunk_size: Optional[int] = None,
         **base_kwargs,
     ):
         """
@@ -363,6 +370,11 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             detach_attn_weights: If `True`, `attn_weights` are not detached before
                 passing it into score computations. This can create a very
                 complex computation graph. Defaults to `False`.
+            keep_initial_fraction: See above. Defaults to
+                :const:`DEFAULT_KEEP_INITIAL_FRACTION`.
+            max_chunk_size: If given, any :meth:`forward` call with
+                `input_pos > 0`, argument lengths must be `<= max_chunk_size`.
+                This is used to speed up :meth:`_update`.
 
         """
         super().__init__(config, buffers, block_idx=block_idx, **base_kwargs)
@@ -380,7 +392,15 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         self.grace_period = grace_period
         self.replay_log_blocksize = replay_log_blocksize
         self._detach_attn_weights = detach_attn_weights
-        shape = (buffers.max_batch_size, self.n_query_groups, buffers.cache_length)
+        cache_length = buffers.cache_length
+        if max_chunk_size is not None:
+            if not (0 < max_chunk_size <= cache_length):
+                raise ValueError(f"max_chunk_size = {max_chunk_size}, must be in (0, {cache_length}]")
+            if max_chunk_size > cache_length // 2:
+                print(f"max_chunk_size = {max_chunk_size} too large to provide savings. Switching it off.")
+                max_chunk_size = None
+        self._max_chunk_size = max_chunk_size
+        shape = (buffers.max_batch_size, self.n_query_groups, cache_length)
         device = self._default_device_for_new_params()
         self.register_buffer(
             "token_pos",
@@ -401,6 +421,8 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         self._use_initial_rule = None
         # For replay log
         self._replay_log = None
+        # For debugging/testing
+        self.debug_next_positions = None
 
     @classmethod
     def _parameter_names(cls) -> List[str]:
@@ -450,6 +472,8 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             not self._use_initial_rule and self.next_positions(num=1) is None
         ):
             raise IndexError("Cache needs to be initialized with 'prefill' before being used")
+        if self._max_chunk_size is not None and num > self._max_chunk_size:
+            raise ValueError(f"key.shape[2] = {num}, must be <= max_chunk_size = {self._max_chunk_size}")
         diff = self.cache_length - self.current_length
         if not 1 <= num <= self.max_tokens_forward:
             if 0 < diff < num:
@@ -479,6 +503,8 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         # Positions (from last recent `update`) where new content is to be
         # written to:
         index = self.next_positions(num)
+        if self.debug_next_positions is not None:
+            self.debug_next_positions.append(index.detach().clone().cpu())
         # Update `token_pos`
         update_result = update_token_positions(
             token_positions=self.token_pos,
@@ -685,8 +711,17 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         scores = self._compute_scores(attn_weights, query_length)
         if self.current_length < self.cache_length:
             self._set_next_positions_to_free_slots()
-        else:
+        elif self._max_chunk_size is None:
             self._next_positions = scores.argsort(dim=-1)
+        else:
+            # If `debug_next_positions`, we use `sorted=True` to be able
+            # to compare against not using `max_chunk_size`
+            self._next_positions = scores.topk(
+                k=self._max_chunk_size,
+                dim=-1,
+                largest=False,
+                sorted=self.debug_next_positions is not None,
+            )[1]
 
     def _compute_scores(
         self,
@@ -898,6 +933,8 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                 grace_period=self.grace_period,
                 replay_log_blocksize=self.replay_log_blocksize,
                 detach_attn_weights=self._detach_attn_weights,
+                keep_initial_fraction=self._keep_initial_fraction,
+                max_chunk_size=self._max_chunk_size,
             )
         )
         return base_kwargs

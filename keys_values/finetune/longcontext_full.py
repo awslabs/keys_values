@@ -73,7 +73,7 @@ from keys_values.kvcache.factory import (
     cleanup_cache_kwargs,
     split_name,
 )
-from keys_values.kvcache.gradient.gpu_memory import RecordGPUMemory
+from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.gradient.main import (
     LongContextGradientModel,
     NaiveGPTAndHeadModel,
@@ -165,6 +165,7 @@ def setup(
     record_gpu_memory_period: int = 0,
     debug_check_updates: bool = False,
     profile_grad_times: int = 0,
+    profile_parts: Optional[str] = None,
 ) -> None:
     """Finetune a model.
 
@@ -220,6 +221,11 @@ def setup(
             directory `f"iteration{step % record_gpu_memory_period}"`.
             If this is 0, files are not overwritten, we use `f"iteration{step}"`.
             Defaults to 0.
+        profile_grad_times: If given, we profile complete gradient computation
+            for this many steps, then stop. Results are written to CSV file.
+        profile_parts: If given, we use `cProfile` to profile the first forward
+            (if "forward") or first backward (if "backward") pass. Results are
+            printed, then the program stops.
 
     """
     checkpoint_dir = auto_download_checkpoint(model_name=checkpoint_dir, access_token=access_token)
@@ -242,6 +248,8 @@ def setup(
         print("Choosing optimizer AdamW with default learning rate. We highly recommend to at least tune optimizer.learning_rate")
     else:
         print(str(optimizer))
+    if profile_parts is not None and profile_parts not in ("forward", "backward"):
+        raise ValueError("profile_parts: Must be 'forward' or 'backward'")
 
     check_kv_cache(kv_cache)
     check_valid_checkpoint_dir(checkpoint_dir)
@@ -318,6 +326,7 @@ def setup(
         record_gpu_memory_period=record_gpu_memory_period,
         debug_check_updates=debug_check_updates,
         profile_grad_times=profile_grad_times,
+        profile_parts=profile_parts,
     )
 
 
@@ -343,6 +352,7 @@ def main(
     record_gpu_memory_period: int,
     debug_check_updates: bool,
     profile_grad_times: int,
+    profile_parts: Optional[str],
 ) -> None:
     validate_args(train, eval)
 
@@ -415,6 +425,7 @@ def main(
             max_batch_size=batch_size,
             dtype=fabric_precision_to_dtype(fabric._precision.precision),
             profile_grad_times=profile_grad_times > 0,
+            profile_parts=profile_parts,
             fabric=fabric,
         )
 
@@ -536,6 +547,7 @@ def wrap_gpt_model(
     dtype: torch.dtype,
     model_for_training: bool = True,
     profile_grad_times: bool = False,
+    profile_parts: Optional[str] = None,
     cpu_offload_device: Optional[torch.device] = None,
     fabric: Optional[L.Fabric] = None,
 ) -> LongContextGradientModel:
@@ -547,8 +559,12 @@ def wrap_gpt_model(
         fabric,
     )
     gpt_model.clear_kv_caches()
+    cache_kwargs = dict() if kv_cache.cache_kwargs is None else kv_cache.cache_kwargs
+    cache_kwargs = dict(
+        cache_kwargs, max_chunk_size=kv_cache.maximum_chunk_size(),
+    )
     cache_kwargs = cleanup_cache_kwargs(
-        split_name(kv_cache.name)[0], kv_cache.cache_kwargs,
+        split_name(kv_cache.name)[0], cache_kwargs,
     )
     tmp_array_limit_gb = cache_kwargs.get("tmp_array_limit_gb")
     if tmp_array_limit_gb is not None:
@@ -622,6 +638,8 @@ def wrap_gpt_model(
             profile_steps=profile_grad_times,
             offload_device=cpu_offload_device,
             layer_checkpoint_chunk_size=layer_checkpoint_chunk_size,
+            debug_profile_forward=profile_parts == "forward",
+            debug_profile_backward=profile_parts == "backward",
         )
     else:
         model = LongContextInferenceModel(**common_kwargs)

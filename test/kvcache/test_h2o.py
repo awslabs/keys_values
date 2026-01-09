@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from dataclasses import replace
 from itertools import product
 import random
 
@@ -18,7 +19,12 @@ import torch
 from torch.linalg import vector_norm
 import pytest
 
+from keys_values.long_context import LongContextInferenceModel
+from litgpt.config import Config
+
 from keys_values.attention import DefaultKeysAndValues
+from keys_values.head_model import CrossEntropyOnLogits
+from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.test_utils import (
     compute_attn_weights,
@@ -30,7 +36,8 @@ from keys_values.kvcache.test_utils import (
     random_args_cache_forward,
     range_from_args,
 )
-from keys_values.utils import expand_index
+from keys_values.model import GPT
+from keys_values.utils import expand_index, copy_parameters
 
 
 @pytest.mark.parametrize(
@@ -301,3 +308,102 @@ def test_token_pos_and_pos_log(device, dtype):
     torch.testing.assert_close(
         replay_log.slot_positions[0].to(device=device), block,
     )
+
+
+def test_max_chunk_size():
+    seed = 31415927
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+
+    dtype = torch.bfloat16
+    torch.set_default_dtype(dtype)  # Set default dtype
+
+    cache_name = "h2o-default"
+    batch_size = 3
+    n_head = 8
+    n_query_groups = 4
+    head_size = 64
+    vocab_size = 48
+    num_repeats = 15
+    _config = Config(
+        n_layer=1,
+        n_head=n_head,
+        n_query_groups=n_query_groups,
+        n_embd=n_head * head_size,
+        block_size=128,
+        vocab_size=vocab_size,
+        rotary_percentage=1,
+    )
+
+    for repeat in range(num_repeats):
+        cache_length = random.randint(128, 256)
+        chunk_size = random.randint(8, cache_length // 2)
+        num_chunks = random.randint(2, 8)
+        seq_length = cache_length + (num_chunks - 2) * chunk_size + random.randint(1, chunk_size)
+        max_chunk_size = chunk_size
+        print(f"\nrepeat {repeat}: cache_length = {cache_length}, chunk_size = {chunk_size}, seq_length = {seq_length}, num_chunks = {num_chunks}")
+        # Create model and KV cache
+        config = replace(_config, block_size=seq_length)
+        params = KVCacheParams.from_config(
+            config=config,
+            max_batch_size=batch_size,
+            cache_length=cache_length,
+            dtype=dtype,
+        )
+        gpt_models = []
+        for _ in range(2):
+            gpt_model = GPT(config)
+            if not gpt_models:
+                gpt_model.apply(gpt_model._init_weights)  # Initialization
+                cache_kwargs = dict()
+            else:
+                copy_parameters(gpt_models[0], gpt_model)
+                cache_kwargs = dict(max_chunk_size=max_chunk_size)
+            kv_cache = create_kv_cache(
+                name=cache_name,
+                params=params,
+                block_idx=0,
+                **cache_kwargs,
+            )
+            kv_cache.debug_next_positions = []
+            gpt_model.assign_kv_caches([kv_cache])
+            gpt_models.append(gpt_model)
+        head_model_name = CrossEntropyOnLogits.NAME
+        head_model = HeadModelFactory.create(
+            name=head_model_name, config=config,
+        )
+        models = [
+            # Do not deallocate KV cache buffers after forward
+            LongContextInferenceModel(
+                gpt_model=gpt_model,
+                head_model=head_model,
+                chunk_size=chunk_size,
+                debug_no_deallocate_buffers=True,
+            )
+            for gpt_model in gpt_models
+        ]
+        # Create data
+        token_ids = torch.randint(
+            low=0,
+            high=config.vocab_size,
+            size=(batch_size, seq_length),
+        )
+        input_ids = token_ids[:, :-1]
+        targets = token_ids[:, 1:]
+
+        # Compute forward for both, compare
+        loss_values = [model(input_ids, targets) for model in models]
+        print("Loss values")
+        torch.testing.assert_close(loss_values[0], loss_values[1])
+        print("next_positions used per chunk")
+        kv_caches = [model.gpt_model.get_kv_caches()[0] for model in models]
+        next_pos = [c.debug_next_positions for c in kv_caches]
+        assert(len(next_pos[0]) == len(next_pos[1]))
+        for i, (np0, np1) in enumerate(zip(next_pos[0], next_pos[1])):
+            print(f"Chunk {i}")
+            assert(np0.shape == np1.shape)
+            torch.testing.assert_close(np0, np1)
+        print("Cache buffer contents")
+        k_and_vs = [c.kv_buffers.get_keys_values() for c in kv_caches]
+        torch.testing.assert_close(k_and_vs[0].keys(), k_and_vs[1].keys())
+        torch.testing.assert_close(k_and_vs[0].values(), k_and_vs[1].values())

@@ -28,7 +28,7 @@ from keys_values.kvcache.factory import (
     split_name,
     deallocate_kv_cache_buffers_of_model,
 )
-from keys_values.kvcache.gradient.gpu_memory import RecordGPUMemory
+from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
 from keys_values.kvcache.utils import (
     wrap_tqdm_if_verbose,
@@ -80,6 +80,13 @@ class KVCacheArgs:
     @property
     def qname(self) -> str:
         return split_name(self.name)[1]
+
+    def maximum_chunk_size(self) -> int:
+        if not self.randomize_chunk_sizes:
+            return self.chunk_size
+        else:
+            step = self.chunk_size // 2
+            return self.chunk_size + step
 
 
 def create_chunk_sizes(
@@ -509,6 +516,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
         debug_single_cell_per_row: bool = False,
         debug_store_intermediates: bool = False,
+        debug_no_deallocate_buffers: bool = False,
     ):
         """
         If `tmp_array_limit_gb` is given, it maintains a limit on
@@ -578,6 +586,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
             self.debug_intermediates = dict()
         else:
             self.debug_intermediates = None
+        self._debug_no_deallocate_buffers = debug_no_deallocate_buffers
 
     def _check_args(
         self,
@@ -913,9 +922,10 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         self.debug_intermediates[name] = loss_part.detach().clone().to(device=torch.device("cpu"))
 
         write_back_cache_buffers(self.gpt_model)  # Just to be safe
-        if self.verbose is not VerbosityLevels.NONE:
-            print("\nDeallocate KV cache buffers")
-        deallocate_kv_cache_buffers_of_model(self.gpt_model)
+        if not self._debug_no_deallocate_buffers:
+            if self.verbose is not VerbosityLevels.NONE:
+                print("\nDeallocate KV cache buffers")
+            deallocate_kv_cache_buffers_of_model(self.gpt_model)
         return loss_full
 
     def _forward_only(
@@ -930,5 +940,6 @@ class LongContextInferenceModel(GPTAndHeadModel):
         if self.verbose is not VerbosityLevels.NONE:
             print(f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode)")
         loss_full = self._forward_internal(input_ids, targets, scale_factor)
-        self.clear()
+        if not self._debug_no_deallocate_buffers:
+            self.clear()
         return loss_full

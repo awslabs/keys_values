@@ -545,8 +545,8 @@ def deallocate_kv_cache_buffers_of_model(model: GPT):
 
 
 REMOVE_KEYS = {
-    "dense": ("replay_log_blocksize", "grace_period", "detach_attn_weights", "keep_initial_fraction", "normalize_scores", "combination_constant", "scratch_blocksize"),
-    "lastrec": ("replay_log_blocksize", "grace_period", "detach_attn_weights", "keep_initial_fraction", "normalize_scores" "combination_constant", "scratch_blocksize"),
+    "dense": ("replay_log_blocksize", "grace_period", "detach_attn_weights", "keep_initial_fraction", "normalize_scores", "combination_constant", "scratch_blocksize", "max_chunk_size"),
+    "lastrec": ("replay_log_blocksize", "grace_period", "detach_attn_weights", "keep_initial_fraction", "normalize_scores" "combination_constant", "scratch_blocksize", "max_chunk_size"),
     "h2o": ("combination_constant", "scratch_blocksize"),
     "h2o-vlen": ("combination_constant", "scratch_blocksize"),
     "qh2o": (),
@@ -556,7 +556,9 @@ REMOVE_KEYS = {
 
 
 def cleanup_cache_kwargs(
-    cname: str, cache_kwargs: Dict[str, Any]
+    cname: str, cache_kwargs: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    if cache_kwargs is None:
+        return dict()
     rem_keys = REMOVE_KEYS[cname]
     return {k: v for k, v in cache_kwargs.items() if k not in rem_keys}
