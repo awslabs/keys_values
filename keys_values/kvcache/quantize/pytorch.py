@@ -15,6 +15,10 @@ from typing import Tuple, Optional, Dict
 
 import torch
 from torch.linalg import vector_norm
+from torch.ao.quantization.observer import (
+    PerChannelMinMaxObserver,
+    ObserverBase,
+)
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.kvcache.buffers import KVCacheBuffersParams
@@ -32,6 +36,86 @@ ALLOWED_TARGET_DTYPES = (torch.int8, torch.uint8)
 MIN_BLOCKSIZE = 16
 
 
+# Adapted from PyTorch: torch/ao/quantization/observer.py
+class MyPerChannelMinMaxObserver(PerChannelMinMaxObserver):
+    """
+    Computing quantization statistics with the original
+    :class:`PerChannelMinMaxObserver` are very slow. This is because
+    computations are done on CPU, due to registered buffers being allocated
+    there. The version here does not allow calling :meth:`_forward` more
+    than once, which is all we need. We also overwrite the constructor not
+    to create any registered buffers.
+
+    """
+    def __init__(
+        self,
+        dtype: torch.dtype,
+        quant_min: int,
+        quant_max: int,
+    ) -> None:
+        """
+        We do not call the superclass constructor. They create registered
+        buffers on CPU, which we want to avoid here. Instead, we initialize
+        members from `base_observer`.
+
+        Args:
+            base_observer: We initialize members from this one, except for
+                `eps`
+
+        """
+        # We do not call the superclass constructor. They create
+        # registered buffers on CPU, which we want to avoid here.
+        ObserverBase.__init__(
+            self, dtype=dtype, is_dynamic=False,
+        )
+        self.qscheme = torch.per_channel_affine
+        self.reduce_range = False
+        self.has_customized_qrange = False
+        self.quant_min = quant_min
+        self.quant_max = quant_max
+        self.eps = torch.finfo(torch.float32).eps
+        self.ch_axis = 0
+        self._target_dtype = torch.float32
+        self.min_val = None
+        self.max_val = None
+
+    def _forward(self, x_orig):
+        if x_orig.numel() == 0:
+            return x_orig
+        if self.min_val is not None:
+            raise IndexError("Cannot call more than once")
+        x = x_orig.detach()  # avoid keeping autograd tape
+        # Don't need permute, since ch_axis == 0
+        y = torch.flatten(x, start_dim=1)
+        min_val, max_val = torch.aminmax(y, dim=1)
+        # dtype casting only here, not on `y`
+        self.min_val = min_val.to(dtype=self._target_dtype)
+        self.max_val = max_val.to(dtype=self._target_dtype)
+        return x_orig
+
+    # Modified from PyTorch: torch/ao/quantization/observer.py:
+    # - Strip out checks (which somehow make this slow)
+    # - Only default case
+    @torch.jit.export
+    def _calculate_qparams(
+        self, min_val: torch.Tensor, max_val: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        quant_min, quant_max = self.quant_min, self.quant_max
+        assert len(min_val.shape) > 0
+        min_val_neg = torch.clamp(min_val, max=0)
+        max_val_pos = torch.clamp(max_val, min=0)
+        scale = torch.clamp(
+            (max_val_pos - min_val_neg) / float(quant_max - quant_min),
+            min=self.eps,
+        )
+        zero_point = torch.clamp(
+            quant_min - torch.round(min_val_neg / scale).to(torch.int),
+            quant_min,
+            quant_max,
+        )
+        return scale, zero_point
+
+
 class TorchBasicQuantizer(Quantizer):
     """
     The quantized content is represented internally as `quant_buffer`, along
@@ -47,7 +131,18 @@ class TorchBasicQuantizer(Quantizer):
     `tmp_array_limit_gb` provides access to the maximum size of temporary
     buffers which can be used here.
 
+    Details for :meth:`_quantization_states`:
+
+    It turns out that using the `torch.ao.quantization.observer` observers
+    with tensors on GPU is very slow. This seems because they use registered
+    buffers created on the CPU (default), and then all computations are done
+    on CPU. It is a bit tricky to get around these shortcomings, see also
+    :class:`MyPerChannelMinMaxObserver`. We must avoid creating any
+    registered buffers per :meth:`_quantization_states` call.
+
     """
+    quant_minmax_for_observer: Optional[Tuple[int, int]] = None
+
     def __init__(
         self,
         shape: Tuple[int, int, int, int],
@@ -233,13 +328,20 @@ class TorchBasicQuantizer(Quantizer):
     def _quantization_states(
         self, values: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        from torch.quantization.observer import MovingAveragePerChannelMinMaxObserver
-
         assert (
             values.ndim == 2 and values.shape[1] == self.blocksize
         ), f"values.shape = {values.shape}, blocksize = {self.blocksize}"
-        obs = MovingAveragePerChannelMinMaxObserver(
-            ch_axis=0, dtype=self._quant_dtype,
+        if TorchBasicQuantizer.quant_minmax_for_observer is None:
+            base_observer = PerChannelMinMaxObserver(
+                ch_axis=0, dtype=self._quant_dtype,
+            )
+            TorchBasicQuantizer.quant_minmax_for_observer = (
+                base_observer.quant_min, base_observer.quant_max,
+            )
+        obs = MyPerChannelMinMaxObserver(
+            dtype=self._quant_dtype,
+            quant_min=TorchBasicQuantizer.quant_minmax_for_observer[0],
+            quant_max=TorchBasicQuantizer.quant_minmax_for_observer[1],
         )
         obs(values)
         scales, zero_points = obs.calculate_qparams()
