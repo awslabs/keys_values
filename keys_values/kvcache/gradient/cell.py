@@ -30,7 +30,6 @@ from keys_values.kvcache.gradient.train_attn_weights_replay_new import TrainingA
 from keys_values.kvcache.stack_layers import CellBlocks
 from keys_values.kvcache.utils import for_debug
 
-
 GetInputSlice = Callable[[int, int], torch.Tensor]
 
 WriteOutputsSlice = Callable[[int, torch.Tensor], None]
@@ -64,11 +63,7 @@ def cell_computation(
         if debug_intermediates is not None:
             name = name_prefix + f"_inputpos{input_pos}_input"
             debug_intermediates[name] = for_debug(x)
-        x = model_part.forward(
-            x=x,
-            idx=token_idx,
-            input_pos=input_pos,
-        )
+        x = model_part.forward(x=x, idx=token_idx)
         if debug_intermediates is not None:
             name = name_prefix + f"_inputpos{input_pos}_output"
             debug_intermediates[name] = for_debug(x)
@@ -81,10 +76,10 @@ class CellComputation(nn.Module):
     """
     A long context forward pass for a :class:`GPT` model can be seen as 2D
     lattice, with layers as rows and token chunks as columns. Here, token
-    chunks are the units for which :meth:`GPT.forward` is called for (the
-    `idx` and `input_pos` arguments). The first token chunk (`input_pos=0`)
-    is usually much larger than subsequent ones. This lattice consists of
-    blocks, indexed by `(l, s)`, `l` the layer index, `s` the chunk index.
+    chunks are the units for which :meth:`GPT.forward` is called for. The first
+    token chunk (`input_pos == 0`) is usually much larger than subsequent ones.
+    This lattice consists of blocks, indexed by `(l, s)`, `l` the layer index,
+    `s` the chunk index.
 
     For activation checkpointing, we form cells as rectangular groups of
     blocks. Forward-backward computations to accumulate gradients are done
@@ -156,8 +151,7 @@ class CellComputation(nn.Module):
             kwargs["node_annotations"] = autograd_hooks.node_annotations
         self._train_cache_kwargs = []
         extra_kwargs = dict()
-        for i, block in model_part.blocks():
-            kv_cache = block.attn.kv_cache
+        for block_idx, kv_cache in model_part.get_kv_caches():
             # Use the same MHA object as in primary cache. Ensures that
             # position encoding is the same
             mha = kv_cache.mha if isinstance(kv_cache, DefaultKVCache) else None
@@ -165,7 +159,7 @@ class CellComputation(nn.Module):
                 extra_kwargs = dict(
                     debug_intermediates=(
                         self._debug_intermediates,
-                        self._name_prefix + f"_part{i}",
+                        self._name_prefix + f"_part{block_idx}",
                     )
                 )
             self._train_cache_kwargs.append(
@@ -218,7 +212,7 @@ class CellComputation(nn.Module):
     ) -> List[TrainingAttnWeightsReplayCache]:
         first_layer_idx = self.model_part.first_layer_idx
         more_kwargs = dict(
-            start_token_pos=self._token_pos_per_chunk[first_chunk_idx],
+            start_input_pos=self._token_pos_per_chunk[first_chunk_idx],
             num_chunks=num_chunks,
             debug_tensors=self._debug_tensors,
         )
@@ -289,12 +283,10 @@ class CellComputation(nn.Module):
                 0,
                 self.config.head_size,
             ]
-            for (block_idx, block), k_buffer, v_buffer in zip(
-                self.model_part.blocks(),
-                k_buffers,
-                v_buffers,
+            for (block_idx, kv_cache), k_buffer, v_buffer in zip(
+                self.model_part.get_kv_caches(), k_buffers, v_buffers,
             ):
-                cache_length = block.attn.kv_cache.cache_length
+                cache_length = kv_cache.cache_length
                 k_size = k_buffer.shape[2]
                 if k_size > cache_length:
                     raise ValueError(f"layer_idx={block_idx}: k_buffers.shape = {k_buffer.shape}, cache_length = {cache_length}. Invalid!")
@@ -311,21 +303,16 @@ class CellComputation(nn.Module):
         train_replay_caches = self._create_train_replay_caches(
             first_chunk_idx, num_chunks,
         )
-        kv_caches_copy = []
-        cache_lengths = []
-        for (block_idx, block), replay_cache, keys, values in zip(
-            self.model_part.blocks(),
-            train_replay_caches,
-            k_buffers,
-            v_buffers,
-        ):
-            attn = block.attn
-            kv_caches_copy.append(attn.kv_cache)
-            if first_chunk_idx > 0:
-                buffers = DefaultKeysAndValues(keys=keys, values=values)
-                replay_cache.initialize_buffers(buffers)
-            cache_lengths.append(attn.kv_cache.cache_length)
-            attn.kv_cache = replay_cache
+        kv_caches_copy = self.model_part.get_kv_caches()
+        cache_lengths = [c.cache_length for _, c in kv_caches_copy]
+        if first_chunk_idx > 0:
+            for rc, keys, values in zip(
+                train_replay_caches, k_buffers, v_buffers,
+            ):
+                rc.initialize_buffers(
+                    DefaultKeysAndValues(keys=keys, values=values)
+                )
+        self.model_part.assign_kv_caches(train_replay_caches)
 
         try:
             # Initialize autograd hooks
@@ -364,11 +351,6 @@ class CellComputation(nn.Module):
                 v_buffers.append(buffers.values())
         finally:
             # Reassign original caches
-            for (_, block), old_cache in zip(
-                self.model_part.blocks(), kv_caches_copy,
-            ):
-                block.attn.kv_cache = old_cache
-            for kv_cache in train_replay_caches:
-                kv_cache.deallocate_buffers()
+            self.model_part.assign_kv_caches(kv_caches_copy)
 
         return outputs, k_buffers, v_buffers

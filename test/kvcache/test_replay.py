@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from functools import partial, cache
+from functools import partial
 from itertools import product
 import random
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
 import torch
 import pytest
@@ -102,17 +102,12 @@ def test_inference_replay(cache_name, device, cache_kwargs):
 
     layer_outputs = dict()
 
-    def start_of_layer_hook(
-        x: torch.Tensor, l_ix: int, input_pos: Optional[int], tag: str,
-    ):
+    def start_of_layer_hook(x: torch.Tensor, l_ix: int, tag: str):
         if l_ix == 1:
-            assert input_pos is not None
             current = layer_outputs.get(tag)
             if current is None:
-                assert input_pos == 0
                 layer_outputs[tag] = x
             else:
-                assert input_pos == current.shape[1]
                 layer_outputs[tag] = torch.cat([current, x], dim=1)
 
     config = Config(
@@ -180,10 +175,7 @@ def test_inference_replay(cache_name, device, cache_kwargs):
             y_parts = []
             for num in tokens_per_chunk:
                 y_parts.append(
-                    model(
-                        token_idxs[:, input_pos:(input_pos + num)],
-                        input_pos=input_pos,
-                    )
+                    model(token_idxs[:, input_pos:(input_pos + num)])
                 )
                 input_pos += num
             y = torch.cat(y_parts, dim=1)
@@ -260,17 +252,12 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_new_c
         replay_class = TrainingAttnWeightsReplayCache
     layer_outputs = dict()
 
-    def start_of_layer_hook(
-        x: torch.Tensor, l_ix: int, input_pos: Optional[int], tag: str,
-    ):
+    def start_of_layer_hook(x: torch.Tensor, l_ix: int, tag: str):
         if l_ix == 1:
-            assert input_pos is not None
             current = layer_outputs.get(tag)
             if current is None:
-                assert input_pos == 0
                 layer_outputs[tag] = x
             else:
-                assert input_pos == current.shape[1]
                 layer_outputs[tag] = torch.cat([current, x], dim=1)
 
     config = Config(
@@ -322,7 +309,7 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_new_c
                 batch_size=batch_size,
                 cache_length=cache_length,
                 replay_log=replay_log,
-                start_token_pos=0,
+                start_input_pos=0,
                 layer_idx=0,
                 num_chunks=len(tokens_per_chunk),
                 node_annotations=None,
@@ -335,10 +322,7 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_new_c
             y_parts = []
             for num in tokens_per_chunk:
                 y_parts.append(
-                    model(
-                        token_idxs[:, input_pos:(input_pos + num)],
-                        input_pos=input_pos,
-                    )
+                    model(token_idxs[:, input_pos:(input_pos + num)])
                 )
                 input_pos += num
             y = torch.cat(y_parts, dim=1)

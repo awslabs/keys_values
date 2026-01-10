@@ -23,7 +23,7 @@ from torch.backends.cuda import (
 from torch.nn import functional as F
 from torch.nn.attention import SDPAParams, SDPBackend, sdpa_kernel
 
-from keys_values.utils import repeat_interleave
+from keys_values.utils import repeat_interleave, index_to_3d
 
 
 def filter_sdpa_kernels(
@@ -392,9 +392,11 @@ def sdpa_attention_weights(
     )
     # Attention masking
     if token_positions is None:
-        _token_positions = torch.arange(
-            kv_len, device=query.device, dtype=torch.int64,
-        ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
+        _token_positions = index_to_3d(
+            torch.arange(kv_len, device=query.device, dtype=torch.int64),
+            batch_size,
+            n_query_groups,
+        )
     else:
         _token_positions = token_positions
     bool_mask = mask_slice_bool(
@@ -404,7 +406,7 @@ def sdpa_attention_weights(
         n_head=n_head,
         sliding_window_size=sliding_window_size,
     )
-    assert bool_mask.shape == tmp_array.shape
+    assert bool_mask.shape == tmp_array.shape, (bool_mask.shape, tmp_array.shape)
     tmp_array[bool_mask] = minus_infinity(dtype=tmp_array.dtype)  # S
     # This creates an extra copy, but is much faster than `softmax_in_place`
     return tmp_array.softmax(dim=-1)  # f(S)

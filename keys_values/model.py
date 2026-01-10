@@ -18,7 +18,7 @@
 Based on the nanoGPT implementation: https://github.com/karpathy/nanoGPT and
 https://github.com/EleutherAI/gpt-neox/tree/main/megatron/model.
 """
-from typing import Any, List, Optional, Union, Callable, Iterator
+from typing import Any, List, Optional, Union, Callable
 from typing_extensions import Self
 
 import torch
@@ -39,10 +39,10 @@ from keys_values.utils import copy_parameters
 
 
 # See `GPT.set_start_of_layer_hook`. A start of layer hook is called just before
-# a layer is computed. The call is `hook(x, block_idx, input_pos)`, where
-# `x` is the layer input, `block_idx` the number of the layer, and `input_pos`
-# the position in the sequence (see :meth:`GPT.forward`).
-StartOfLayerHook = Callable[[Any, int, Optional[int]], None]
+# a layer is computed. The call is `hook(x, block_idx)`, where `x` is the layer
+# input, `block_idx` the number of the layer. The position in the sequence
+# is not passed, it must be tracked by the caller of the hook.
+StartOfLayerHook = Callable[[Any, int], None]
 
 
 class GPT(nn.Module):
@@ -116,9 +116,7 @@ class GPT(nn.Module):
         # KV caches and sequence length.
         # We do not change them here, but output a warning if default caches are
         # too small
-        for l_ix, block in enumerate(self.transformer.h):
-            attn = block.attn
-            kv_cache = attn.kv_cache
+        for l_ix, kv_cache in enumerate(self.get_kv_caches()):
             if kv_cache is not None:
                 if isinstance(kv_cache, DenseKVCache) and kv_cache.cache_length < value:
                     print(
@@ -133,34 +131,38 @@ class GPT(nn.Module):
         self.mha.set_seq_length(value)
 
     def are_kv_caches_assigned(self) -> bool:
-        status = [block.attn.kv_cache is not None for block in self.transformer.h]
+        status = [kv_cache is not None for kv_cache in self.get_kv_caches()]
         result = any(status)
         if result and not all(status):
             raise IndexError("Some layers have KV caches assigned, but not all")
         return result
 
+    def _num_layers(self) -> int:
+        has_no_layers = self.transformer is None or not hasattr(self.transformer,"h")
+        return 0 if has_no_layers else len(self.transformer.h)
+
     def assign_kv_caches(self, kv_caches: List[KVCache]):
         """
         Assigns specific KV caches to the multi-head attention blocks
-        of each layer. This can only be done if no caches have been
-        assigned or created (see :meth:`set_kv_caches`) before.
-
-        KV caches are required for inference (i.e., calling :meth:`forward` with
-        `input_pos` argument). If no KV caches are assigned, inference calls
-        fail.
+        of each layer. KV caches are required for inference. If no KV caches
+        are assigned, inference calls fail.
 
         Args:
             kv_caches: KV caches, one for each layer of the model
 
         """
-        if self.are_kv_caches_assigned():
-            raise ValueError("Model has KV caches assigned already")
-        if len(kv_caches) != self.config.n_layer:
-            raise ValueError(f"kv_caches must have one entry per layer, so {self.config.n_layer} entries")
-        batch_size = kv_caches[0].max_batch_size
-        dtype = kv_caches[0].dtype
+        num_layers = self._num_layers()
+        if len(kv_caches) != num_layers:
+            raise ValueError(f"len(kv_caches) = {len(kv_caches)}, must be {num_layers}")
+        num_none = sum(c is None for c in kv_caches)
+        if num_none == 0:
+            batch_size = kv_caches[0].max_batch_size
+            dtype = kv_caches[0].dtype
+            for cache in kv_caches:
+                self._check_kv_cache(self.config, cache, batch_size, dtype)
+        elif num_none != num_layers:
+            raise ValueError(f"kv_caches must not contain None or all be None")
         for cache, block in zip(kv_caches, self.transformer.h):
-            self._check_kv_cache(self.config, cache, batch_size, dtype)
             block.attn.kv_cache = cache
 
     def set_kv_caches(
@@ -176,9 +178,8 @@ class GPT(nn.Module):
         issue, consider :meth:`assign_kv_caches` with KV caches of restricted
         size.
 
-        KV caches are required for inference (i.e., calling :meth:`forward` with
-        `input_pos` argument). If no KV caches are assigned, inference calls
-        fail.
+        KV caches are required for inference. If no KV caches are assigned,
+        inference calls fail.
 
         Args:
             batch_size: Inference batch size
@@ -210,13 +211,19 @@ class GPT(nn.Module):
         self._default_kv_cache = True
 
     def get_kv_caches(self) -> List[KVCache]:
-        return [
-            block.attn.kv_cache for block in self.transformer.h
-        ]
+        return [block.attn.kv_cache for block in self.transformer.h]
 
-    def reset_parameters(self) -> None:
+    def reset(self) -> None:
+        """
+        Should be called before a new batch of sequences is processed. Passes
+        `max_seq_length` to `mha`, and resets all KV caches (if any).
+
+        """
         # Trigger resetting the rope-cache
         self.mha.set_seq_length(self.max_seq_length)
+        for cache in self.get_kv_caches():
+            if cache is not None:
+                cache.reset()
 
     @property
     def start_of_layer_hook(self) -> Optional[StartOfLayerHook]:
@@ -227,11 +234,10 @@ class GPT(nn.Module):
         hook: Optional[StartOfLayerHook],
     ):
         """
-        Sets a function `hook(x, block_idx, input_pos)`, which is called
-        in :meth:`forward` at the start of each layer. Here, `x` is the
-        layer input, `block_idx` the number of the layer, and `input_pos`
-        the position in the sequence. The hook is called with the output
-        of the final layer (input of head model), where
+        Sets a function `hook(x, block_idx)`, which is called in
+        :meth:`forward` at the start of each layer. Here, `x` is the layer
+        input, `block_idx` the number of the layer. The hook is also called
+        with the output of the final layer (input of head model), where
         `block_idx=self.config.n_layer`.
 
         The default start of layer hook is `self.config.start_of_layer_hook`.
@@ -281,107 +287,60 @@ class GPT(nn.Module):
     def forward(
         self,
         idx: torch.Tensor,
-        input_pos: Optional[int] = None,
         skip_lm_head: bool = False,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
         """
         There are two different contexts in which this method is called:
 
-        - Training: `input_pos` not given. KV cache is not needed.
-        - Inference, `input_pos` is given. There are two cases: `input_pos=0`
-          (prefill) and `input_pos > 0` (generation). For prefill, KV caches
-          must have been assigned (:meth:`assign_kv_caches` or
-          :meth:`set_kv_caches`). We must have
-          `T <= model.kv_cache_max_prefill_length()`.
-        - For generation, KV caches must have been assigned
-          (:meth:`assign_kv_caches` or :meth:`set_kv_caches`). We check that
-          `input_pos == kv_cache.next_token_pos`. Note that `T > 1` is
-          permitted here as well.
-
-        Note: If this method is called with `input_pos=0` (prefill) after
-        generation calls, a new inference sequence is started. The batch
-        size for the new sequence can be different.
-
-        Token generation (`input_pos > 0`) and `T > 1`:
-
-        This situation is non-standard, since `idx` needs to provide tokens at
-        positions `input_pos:(input_pos + T)`, whereas the logits are for
-        generating tokens at `(input_pos + 1):(input_pos + T + 1)`, so only the
-        last position is needed to generate a new token. Use cases:
-        - Updating KV caches sequentially if prompt size is larger than max
-          prefill length of cache
-        - Speculative decoding. Here, `idx` comes from the cheaper proposal
-          model, and the logits are needed for the accept/reject probabilities.
+        - Training: No KV caches assigned.
+        - Inference and generation: KV caches must be assigned. In this case,
+          a long batch of token sequences is processed by multiple
+          :meth:`forward` calls. The number of tokens processed so far is
+          tracked by `input_pos` in the KV caches. Internally, they treat
+          the case `input_pos == 0` (prefill) different from `input_pos > 0`.
+          Note that :meth:`reset` must be called before a new batch of
+          sequences is processed.
 
         Args:
-            idx: Token indices of input sequences, shape `(B, T)`, where `B`
-                is batch size.
-            input_pos: See above. Defaults to `None`
+            idx: Token indices of input sequences, shape `(batch_size, num)`
             skip_lm_head: If `True`, we do not apply the final LM head
                 `self.lm_head`.
 
         Returns:
-            Logit outputs, shape `(B, T, config.padded_vocab_size)`.
+            Logit outputs, shape `(batch_size, num, config.padded_vocab_size)`.
             If `skip_lm_head` is `True`, we return the final layer outputs,
-            shape `(B, T, config.n_embd)`.
+            shape `(batch_size, num, config.n_embd)`.
 
         """
         if idx.ndim == 1:
             idx = idx.unsqueeze(0)
         elif idx.ndim != 2:
             raise ValueError(f"idx must be 1D or 2D tensor, but idx.shape = {idx.shape}")
-        T = idx.size(1)
-        if self.max_seq_length < T:
-            raise ValueError(f"Cannot forward sequence of length {T}, max seq length is only {self.max_seq_length}.")
-        for_prefill = False
-        if input_pos is not None:
-            # Few tokens generation. This needs a KV cache. If none is assigned,
-            # the call fails
-            if not self.are_kv_caches_assigned():
-                raise ValueError(
-                    "KV caches are not assigned. Assign KV caches with 'assign_kv_caches' or create default caches with 'set_kv_caches'"
-                )
-            for_prefill = input_pos == 0
-            if not for_prefill:
-                for block_idx, block in enumerate(self.transformer.h):
-                    kv_cache = block.attn.kv_cache
-                    if kv_cache.next_token_pos is None:
-                        raise ValueError("Inference calls need to start with pre-fill, i.e. 'input_pos=0'")
-                    if kv_cache.next_token_pos != input_pos:
-                        raise ValueError(
-                            f"KV cache for layer {block_idx}: input_pos = {input_pos} != {kv_cache.next_token_pos} = kv_cache.next_token_pos"
-                        )
-                    if kv_cache.max_tokens_forward < T:
-                        raise ValueError(
-                            f"KV cache for layer {block_idx}: T = {T}, must be <= max_tokens_forward = {kv_cache.max_tokens_forward}"
-                        )
+        num = idx.size(1)
+        if self.max_seq_length < num:
+            raise ValueError(f"Cannot forward sequence of length {num}, max seq length is only {self.max_seq_length}.")
 
-        x = self.transformer.wte(idx)  # token embeddings of shape (B, T, n_embd)
+        x = self.transformer.wte(idx)  # (batch_size, num, n_embd)
         if self.config.scale_embeddings:
-            x = x * torch.tensor(self.config.n_embd**0.5, dtype=x.dtype)
+            x = x * (self.config.n_embd**0.5)
 
         hook = self._start_of_layer_hook
-        batch_size = x.shape[0]
         for block_idx, block in enumerate(self.transformer.h):
-            if for_prefill:
-                # Complain if batch size of cache is too small
-                attn = block.attn
-                if attn.kv_cache.max_batch_size < batch_size:
-                    raise ValueError(
-                        f"Batch size {batch_size} is too large for KV cache layer {block_idx} (batch size {attn.kv_cache.max_batch_size}). Use 'assign_kv_caches' or `set_kv_caches'"
-                    )
             if hook is not None:
                 # Call start of layer hook, passing detached layer input
-                hook(x.detach(), block_idx, input_pos)
-            x = block(x, idx, self.mha, input_pos)
+                hook(x.detach(), block_idx)
+            x = block(x, idx, self.mha)
 
         if hook is not None:
             # Hook is also called for the input to the head block
-            hook(x.detach(), self.config.n_layer, input_pos)
+            hook(x.detach(), self.config.n_layer)
         x = self.transformer.ln_f(x)
         if skip_lm_head:
             return x
-        return do_softcapping(self.lm_head(x), thresh=self.config.final_logit_softcapping)
+        return do_softcapping(
+            self.lm_head(x),
+            thresh=self.config.final_logit_softcapping,
+        )
 
     @classmethod
     def from_name(cls, name: str, **kwargs: Any) -> Self:
@@ -392,19 +351,20 @@ class GPT(nn.Module):
             block.attn.kv_cache = None
         self._default_kv_cache = False
 
-    def get_kv_cache_params(self, layer_idx: int) -> Optional[KVCacheParams]:
+    def get_kv_cache_params(self, block_idx: int) -> Optional[KVCacheParams]:
         """
         Args:
-            layer_idx: Layer for which KV cache params are requested
+            block_idx: Layer for which KV cache params are requested
 
         Returns:
             Parameters for KV caches (see above), or `None` if KV caches are
             not assigned.
 
         """
-        if not (0 <= layer_idx < self.config.n_layer):
-            raise IndexError(f"layer_idx={layer_idx}, must be in [0, {self.config.n_layer})")
-        kv_cache = self.transformer.h[layer_idx].attn.kv_cache
+        num_layers = self._num_layers()
+        if not (0 <= block_idx < num_layers):
+            raise IndexError(f"block_idx={block_idx}, must be in [0, {num_layers}])")
+        kv_cache = self.transformer.h[block_idx].attn.kv_cache
         return None if kv_cache is None else kv_cache.get_params()
 
     def kv_cache_max_tokens_forward(self) -> Optional[int]:
@@ -414,34 +374,31 @@ class GPT(nn.Module):
             caches are not assigned.
 
         """
-        caches = [layer.attn.kv_cache for layer in self.transformer.h]
-        if any(cache is None for cache in caches):
+        if not self.are_kv_caches_assigned():
             return None
         else:
-            return min(kvc.max_tokens_forward for kvc in caches)
+            return min(kvc.max_tokens_forward for kvc in self.get_kv_caches())
 
     def kv_cache_max_prefill_length(self) -> Optional[int]:
         """
         Returns:
             Smallest `max_prefill_length` over all KV caches, or `None` if KV
-            caches are not assigned or if `max_prefill_length is None` for all
-            KV caches.
+            caches are not assigned.
 
         """
-        caches = [layer.attn.kv_cache for layer in self.transformer.h]
-        if any(cache is None for cache in caches):
+        if not self.are_kv_caches_assigned():
             return None
         else:
-            mlps = [kvc.max_prefill_length for kvc in caches]
-            if all(mlp is None for mlp in mlps):
-                return None
-            else:
-                return min(mlp for mlp in mlps if mlp is not None)
+            return min(c.max_prefill_length for c in self.get_kv_caches())
 
     def _empty_clone(self, device: Optional[torch.device] = None) -> "GPT":
         """
-        Creates copy of this object on the same device. Parameters are not
-        copied.
+        Creates empty clone of this object. Parameters are not copied. The
+        clone uses the same `mha`.
+
+        Args:
+            device: Device to create clone on. If not given, the default
+                device is used.
 
         """
         if device is None:
@@ -463,16 +420,15 @@ class GPT(nn.Module):
           to a different device. For this to work, all buffers must be
           deallocated.
 
-        For this reason, you are discouraged from using the copy and the
-        original at the same time. A typical use case is to create a copy of
-        the model on a device, run computations there, and delete the copy
-        afterwards, before using the original model again.
+        Do not use the copy and the original at the same time! A typical use
+        case is to create a copy of the model on a device, run computations
+        there, and delete the copy before using the original model again.
 
         Args:
             device: Device on which the copy is created.
 
         Returns:
-            Copy of this object on device `device`
+            Copy of this object on device `device` (or the default device).
 
         """
         kv_caches = []
@@ -488,12 +444,11 @@ class GPT(nn.Module):
             model_copy = self._empty_clone(device)
             copy_parameters(self, model_copy)
         finally:
-            for kv_cache, block in zip(kv_caches, self.transformer.h):
-                block.attn.kv_cache = kv_cache
+            self.assign_kv_caches(kv_caches)
         # Deal with KV caches
-        for kv_cache, block in zip(kv_caches, model_copy.transformer.h):
-            if kv_cache is not None:
-                block.attn.kv_cache = kv_cache.clone()
+        model_copy.assign_kv_caches(
+            [None if c is None else c.clone() for c in kv_caches]
+        )
         return model_copy
 
 
@@ -532,7 +487,6 @@ class Block(nn.Module):
         x: torch.Tensor,
         token_idx: torch.Tensor,
         mha: MultiHeadSelfAttention,
-        input_pos: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Non-parallel residual       Parallel residual
@@ -556,14 +510,9 @@ class Block(nn.Module):
         """
 
         x_normed = self.norm_1(x)
-        attention_output = self.attn(
-            x_normed,
-            token_idx=token_idx,
-            mha=mha,
-            input_pos=input_pos,
+        attention_output = self.post_attention_norm(
+            self.attn(x_normed, token_idx=token_idx, mha=mha)
         )
-        attention_output = self.post_attention_norm(attention_output)
-
         if self.config.parallel_residual:
             if not self.config.shared_attention_norm:
                 x_normed = self.norm_2(x)
@@ -571,7 +520,6 @@ class Block(nn.Module):
         else:
             x = attention_output + x
             x_normed = self.norm_2(x)
-
         return self.post_mlp_norm(self.mlp(x_normed)) + x
 
 
@@ -612,17 +560,16 @@ class CausalSelfAttention(nn.Module):
         x: torch.Tensor,
         token_idx: torch.Tensor,
         mha: MultiHeadSelfAttention,
-        input_pos: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Args:
             x: Input tensor
             token_idx: Token indexes corresponding to `x`
             mha: Multi-head self-attention code
-            input_pos: See :meth:`GPT.forward`
 
         Returns:
             Output tensor
+
         """
         # Notation:
         # - B          | batch size
@@ -653,58 +600,39 @@ class CausalSelfAttention(nn.Module):
         n_head = self.config.n_head
         n_query_groups = self.config.n_query_groups
         rope_n_elem = self.config.rope_n_elem
-        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
-        if input_pos is not None:
-            for_prefill = input_pos == 0
-            if self.kv_cache is None:
-                raise ValueError(
-                    "KV caches are not assigned. Assign KV caches with 'assign_kv_caches' or create default caches with 'set_kv_caches'"
-                )
-            if not for_prefill:
-                if self.kv_cache.next_token_pos is None:
-                    raise ValueError("Inference calls need to start with pre-fill, i.e. 'input_pos=0'")
-                if self.kv_cache.next_token_pos != input_pos:
-                    raise ValueError(
-                        f"KV cache: input_pos = {input_pos} != {self.kv_cache.next_token_pos} = kv_cache.next_token_pos"
-                    )
-                if self.kv_cache.max_tokens_forward < T:
-                    raise ValueError(
-                        f"KV cache: T = {T}, must be <= max_tokens_forward = {self.kv_cache.max_tokens_forward}"
-                    )
+        batch_size, num, _ = x.size()
+        input_pos = None if self.kv_cache is None else self.kv_cache.input_pos
 
         # Perform a single multiplication operation using a combined QKV matrix to calculate `query`, `key`, and `value`
         # instead of individually multiplying the input `x` with the respective weight matrices.
-        qkv = self.qkv(x)  # (B, T, 3xC*)
+        qkv = self.qkv(x)
 
         # Define query, key and value sizes.
         # If grouped/multi query is enabled, these sizes are not equal (see the diagram above).
         query_size = n_head * head_size
-        key_size = value_size = n_query_groups * head_size
+        key_size = n_query_groups * head_size
         # Split qkv into query, key and value matrices.
-        q, k, v = qkv.split((query_size, key_size, value_size), dim=-1)  # 3x(B, T, C*)
+        q, k, v = qkv.split((query_size, key_size, key_size), dim=-1)
 
         if self.config.norm_qk and self.config.norm_qk_type == "olmo2":
             q = self.norm_q(q)
             k = self.norm_k(k)
 
-        # To place the num_heads (nh) dimension right after the batch (B) dimension, the first step is to decouple the
-        # embedding size (C) into num_heads (nh) and head_size (hs).
-
         # The original GQA paper is followed here and the term query groups is used.
         # alternative notation: Query groups are also referred to as KV groups.
-        q = q.view(B, T, n_head, head_size)  # (B, T, nh_q, hs)
-        k = k.view(B, T, n_query_groups, head_size)  # (B, T, nh_k, hs)
-        v = v.view(B, T, n_query_groups, head_size)  # (B, T, nh_k, hs)
+        q = q.view(batch_size, num, n_head, head_size)
+        k = k.view(batch_size, num, n_query_groups, head_size)
+        v = v.view(batch_size, num, n_query_groups, head_size)
 
         # The tensors `query`, `key`, and `value` are now accurately structured: within each batch element (B), there are
-        # multiple heads (nh_q), and within each head, there is a sequence of elements (T), each represented by a vector
+        # multiple heads (n_head), and within each head, there is a sequence of elements (T), each represented by a vector
         # of size `hs`.
-        # Note that `nh_k` can be smaller than `nh_q` (but the latter must be a
+        # Note that `n_query_groups` can be smaller than `n_head` (but the latter must be a
         # multiple of the former). This works with the
         # `scaled_dot_product_attention` implementations below.
-        q = q.transpose(1, 2)  # (B, nh_q, T, hs)
-        k = k.transpose(1, 2)  # (B, nh_k, T, hs)
-        v = v.transpose(1, 2)  # (B, nh_k, T, hs)
+        q = q.transpose(1, 2)  # (batch_size, n_head, num, hs)
+        k = k.transpose(1, 2)  # (batch_size, n_query_groups, num, hs)
+        v = v.transpose(1, 2)  # (batch_size, n_query_groups, num, hs)
 
         if self.config.norm_qk and self.config.norm_qk_type == "default":
             q = self.norm_q(q)
@@ -723,11 +651,11 @@ class CausalSelfAttention(nn.Module):
                 input_pos=_input_pos,
                 block_idx=self.block_idx,
             )
-            q = torch.cat((q_roped, q[..., rope_n_elem:]), dim=-1)  # (B, nh_q, T, hs)
-            k = torch.cat((k_roped, k[..., rope_n_elem:]), dim=-1)  # (B, nh_k, T, hs)
+            q = torch.cat((q_roped, q[..., rope_n_elem:]), dim=-1)
+            k = torch.cat((k_roped, k[..., rope_n_elem:]), dim=-1)
 
         # Inner part of multi-head self-attention computation
-        if input_pos is None:
+        if self.kv_cache is None:
             # Default causal self-attention
             y, _ = mha(
                 query=q,
@@ -741,12 +669,11 @@ class CausalSelfAttention(nn.Module):
                 key=k,
                 value=v,
                 token_idx=token_idx,
-                input_pos=input_pos,
             )
 
         # Output projection
         y = self._transform_output(y, query=q, mha=mha)
-        return self.proj(y)  # (B, T, C)
+        return self.proj(y)  # (batch_size, num, n_embd)
 
     def _transform_output(
         self,
@@ -784,14 +711,3 @@ class CausalSelfAttention(nn.Module):
                 state_dict[current_key] = qkv_reassemble(state_dict.pop(legacy_key), self.config)
 
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
-
-
-def block_iterator(
-    model: GPT,
-    start: int = 0,
-    end: Optional[int] = None,
-) -> Iterator[Block]:
-    if end is None:
-        end = model.config.n_layer
-    for block in model.transformer.h[start:end]:
-        yield block

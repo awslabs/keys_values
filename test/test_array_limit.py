@@ -24,7 +24,7 @@ from keys_values.kvcache.factory import KVCacheFactory, split_name
 from keys_values.kvcache.gradient.main import LongContextGradientModel
 from keys_values.kvcache.utils import VerbosityLevels
 from keys_values.long_context import KVCacheArgs
-from keys_values.model import GPT, block_iterator
+from keys_values.model import GPT
 
 
 def test_tmp_array_limit_object():
@@ -76,8 +76,7 @@ def test_tmp_array_limit_object():
         raise ValueError("tmp_array_limit_gb is set, but model.mha.tmp_array_limit_gb is not")
     if not (mha.tmp_array_limit_gb is tmp_array_limit_forward_gb):
         raise ValueError("tmp_array_limit_gb and model.mha.tmp_array_limit_gb must be the same object")
-    for block_idx, block in enumerate(block_iterator(gpt_model)):
-        kv_cache = block.attn.kv_cache
+    for block_idx, kv_cache in enumerate(gpt_model.get_kv_caches()):
         prefix = f"Block {block_idx} of model: "
         for obj, name in (
             (kv_cache.mha, "mha"),

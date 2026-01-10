@@ -30,7 +30,7 @@ from keys_values.kvcache.test_utils import (
     available_backends,
     cache_names_and_devices,
 )
-from keys_values.model import GPT, block_iterator
+from keys_values.model import GPT
 
 
 def args_complete_gradient_computation():
@@ -252,8 +252,7 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
             for block_idx, cache_length in enumerate(cache_lengths)
         ]
     )
-    for l_ix, block in enumerate(block_iterator(gpt_model)):
-        kv_cache = block.attn.kv_cache
+    for l_ix, kv_cache in enumerate(gpt_model.get_kv_caches()):
         assert kv_cache.device in (device, None), (l_ix, kv_cache.device, device)
     with torch.device(cpu_offload_device):
         head_model = HeadModelFactory.create(name=head_model_name, config=config)
@@ -289,11 +288,12 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
     # All KV caches exist
     assert model.gpt_model.transformer.wte.weight.device == device
     assert model_copy.gpt_model.transformer.wte.weight.device == cpu_offload_device
-    for l_ix, (block, block_copy) in enumerate(
-        zip(block_iterator(model.gpt_model), block_iterator(model_copy.gpt_model))
+    for l_ix, (kv_cache, kv_cache_copy) in enumerate(
+        zip(
+            model.gpt_model.get_kv_caches(),
+            model_copy.gpt_model.get_kv_caches(),
+        )
     ):
-        kv_cache = block.attn.kv_cache
-        kv_cache_copy = block_copy.attn.kv_cache
         assert kv_cache is not None and kv_cache_copy is not None, (l_ix, kv_cache, kv_cache_copy)
         assert type(kv_cache) == type(kv_cache_copy), (l_ix, type(kv_cache), type(kv_cache_copy))
         assert kv_cache_copy.device in (cpu_offload_device, None), (l_ix, kv_cache_copy.device, cpu_offload_device)

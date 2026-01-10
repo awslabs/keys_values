@@ -15,7 +15,6 @@ from dataclasses import replace
 from itertools import product
 import math
 import random
-from typing import Optional
 
 import torch
 import pytest
@@ -155,15 +154,12 @@ def test_gradient_row_of_cells(
 
     layer_inputs = dict()
 
-    def start_of_layer_hook(x: torch.Tensor, l_ix: int, input_pos: Optional[int]):
+    def start_of_layer_hook(x: torch.Tensor, l_ix: int):
         if l_ix in (0, n_layer):
-            assert input_pos is not None
             current = layer_inputs.get(l_ix)
             if current is None:
-                assert input_pos == 0
                 layer_inputs[l_ix] = x
             else:
-                assert input_pos == current.shape[1]
                 layer_inputs[l_ix] = torch.cat([current, x], dim=1)
 
     # Create model and data
@@ -176,6 +172,7 @@ def test_gradient_row_of_cells(
         vocab_size=vocab_size,
         rotary_percentage=1,
     )
+    print(f"config.block_size={config.block_size}")
     params = KVCacheParams.from_config(
         config=config,
         max_batch_size=batch_size,
@@ -212,23 +209,22 @@ def test_gradient_row_of_cells(
         y_parts = []
         for num in tokens_per_chunk:
             y_parts.append(
-                gpt_model(
-                    token_idxs[:, input_pos:(input_pos + num)],
-                    input_pos=input_pos,
-                )
+                gpt_model(token_idxs[:, input_pos:(input_pos + num)])
             )
             input_pos += num
         y = torch.cat(y_parts, dim=1)
 
     assert y.device == device
     gpt_model.set_start_of_layer_hook(None)   # Do not record layer inputs from now on
+    seq_len = sum(tokens_per_chunk)
     replay_logs = get_replay_logs(gpt_model)
     assert len(replay_logs) == n_layer
     # Checks on replay logs
-    seq_len = sum(tokens_per_chunk)
     for replay_log in replay_logs:
         assert len(replay_log) == seq_len
         assert len(replay_log.token_chunks) == num_chunks
+    for kv_cache in kv_caches:
+        kv_cache.switch_replay_logging(False)
     # Check on layer inputs
     assert set(layer_inputs.keys()) == {0, n_layer}
     shape = (batch_size, seq_len, config.n_embd)
@@ -271,6 +267,7 @@ def test_gradient_row_of_cells(
 
     # Run gradient accumulation
     gpt_model.zero_grad()  # Reset gradients to 0
+    gpt_model.reset()
     inputs = layer_inputs[0]
     # We could compute real head gradients from the outputs
     head_gradients = torch.randn(
@@ -313,6 +310,7 @@ def test_gradient_row_of_cells(
         replay_logs, chunks_per_cell=[num_chunks],
     )
     gpt_model.zero_grad()
+    gpt_model.reset()
     below_gradients_comp = torch.zeros_like(head_gradients)
     print("\nGradient accumulation without activation checkpointing")
     accumulator_comp.run(
@@ -388,5 +386,5 @@ def test_gradient_row_of_cells(
 
 
 if __name__ == "__main__":
-    args = args_gradient_row_of_cells()[1]
+    args = args_gradient_row_of_cells()[0]
     test_gradient_row_of_cells(*args)

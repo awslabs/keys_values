@@ -53,7 +53,7 @@ from keys_values.kvcache.utils import (
 from keys_values.long_context import (
     LongContextInferenceModel, GPTAndHeadModel, oom_exception_action,
 )
-from keys_values.model import GPT, block_iterator
+from keys_values.model import GPT
 from keys_values.optimize.clone_model import (
     clone_model_shard_via_flat_vectors,
     copy_flat_vectors_to,
@@ -366,6 +366,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         # Status is "init" or "forward_done"
         self._status = "init"
         self.layer_checkpoints = None
+        self._layer_cp_input_pos = None
         self.autograd_hooks = None
         self.accumulator = None
         self._input_ids = None
@@ -435,6 +436,8 @@ class LongContextGradientModel(LongContextInferenceModel):
         input_ids = input_ids.to(self._work_device)
         targets = targets.to(self._work_device)
         self._init_members_from_tokens(input_ids, targets)
+        # Reset KV caches
+        self.gpt_model.reset()
         if not isinstance(self.gpt_model.mha, MultiHeadSelfAttention):
             raise ValueError(f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention")
         if self._record_gpu_memory_snapshots is None:
@@ -533,20 +536,13 @@ class LongContextGradientModel(LongContextInferenceModel):
         """
         if self.offload_device is None:
             raise IndexError("Only to be used if `offload_device` is set")
-        do_timing = self.verbose is not VerbosityLevels.NONE
-        timer_start = None
-        if self.verbose is not VerbosityLevels.NONE:
-            print(f"Copy parameters to {self.offload_device}")
-            if torch.cuda.is_available():
-                torch.cuda.current_stream().synchronize()
-            timer_start = time.perf_counter()
         gpt_model_copy = clone_model_shard_via_flat_vectors(
             model=self.gpt_model,
             device=self.offload_device,
             shard_type=None,
             lm_head=True,
         )
-        model_copy = LongContextInferenceModel(
+        return LongContextInferenceModel(
             gpt_model=gpt_model_copy,
             head_model=self.head_model,
             chunk_size=self.chunk_size,
@@ -558,12 +554,6 @@ class LongContextGradientModel(LongContextInferenceModel):
             debug_single_cell_per_row=self._debug_single_cell_per_row,
             debug_store_intermediates=self.debug_intermediates is not None,
         )
-        if do_timing:
-            if torch.cuda.is_available():
-                torch.cuda.current_stream().synchronize()
-            time_in_secs = time.perf_counter() - timer_start
-            print(f"Done in {time_in_secs:.2f} seconds")
-        return model_copy
 
     def _init_members_from_tokens(
         self, input_ids: torch.Tensor, targets: torch.Tensor,
@@ -613,6 +603,8 @@ class LongContextGradientModel(LongContextInferenceModel):
                 ),
                 **kwargs,
             )
+        # Need to track `input_pos` across calls of :meth:`_checkpoint_layer_input`
+        self._layer_cp_input_pos = {layer_idx: 0 for layer_idx in layer_numbers}
 
     def _create_layer_numbers(self) -> List[int]:
         """
@@ -681,14 +673,19 @@ class LongContextGradientModel(LongContextInferenceModel):
         self,
         x: torch.Tensor,
         layer_idx: int,
-        input_pos: int,
     ):
         if self.training:
+            input_pos = self._layer_cp_input_pos.get(layer_idx)
             self.layer_checkpoints.set_checkpoint(
                 layer_idx=layer_idx,
                 buffers=x,
-                input_pos=input_pos,
+                input_pos=0 if input_pos is None else input_pos,
             )
+            # Need to track `input_pos` separately for each `layer_idx` for which
+            # a checkpoint is stored. This works because checkpoints during the
+            # forward pass are written left to right.
+            if input_pos is not None:
+                self._layer_cp_input_pos[layer_idx] += x.shape[1]
 
     def _inference_forward_pass(
         self,
@@ -703,8 +700,8 @@ class LongContextGradientModel(LongContextInferenceModel):
             ]
             # Caches can have different lengths
             cache_lengths = [
-                (l_ix, block.attn.kv_cache.cache_length)
-                for l_ix, block in enumerate(block_iterator(self.gpt_model))
+                (l_ix, kv_cache.cache_length)
+                for l_ix, kv_cache in enumerate(self.gpt_model.get_kv_caches())
             ]
             cache_length = cache_lengths[0][1]
             if all (x[1] == cache_length for x in cache_lengths):
@@ -749,8 +746,8 @@ class LongContextGradientModel(LongContextInferenceModel):
         try:
             self.gpt_model = gpt_model
             # Ensure that all KV caches record replay logs
-            for block in block_iterator(self.gpt_model):
-                block.attn.kv_cache.switch_replay_logging(True)
+            for kv_cache in self.gpt_model.get_kv_caches():
+                kv_cache.switch_replay_logging(True)
             # Run inference forward pass. Layer inputs are checkpointed.
             # Mean reduction over batch dimension.
             loss_full = self._forward_internal(
@@ -763,10 +760,9 @@ class LongContextGradientModel(LongContextInferenceModel):
         # Replay logs from KV caches are required in
         # :meth:`_backward_accumulate_gradients`.
         self._replay_logs = []
-        for block in block_iterator(gpt_model):
-            cache = block.attn.kv_cache
-            self._replay_logs.append(cache.get_replay_log())
-            cache.switch_replay_logging(False)
+        for kv_cache in gpt_model.get_kv_caches():
+            self._replay_logs.append(kv_cache.get_replay_log())
+            kv_cache.switch_replay_logging(False)
 
         deallocate_kv_cache_buffers_of_model(gpt_model)
         if self.offload_device is not None:

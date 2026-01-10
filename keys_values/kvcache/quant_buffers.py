@@ -102,6 +102,10 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
         self.quantizer_k.deallocate()
         self.quantizer_v.deallocate()
 
+    def reset(self):
+        super().reset()
+        self.dequant_buffers.reset()
+
     def _allocate_buffers(
         self, device: Optional[torch.device] = None,
     ):
@@ -418,6 +422,9 @@ class DequantizedKVCacheBuffers:
             self.k_buff = torch.zeros(shape, device=device, dtype=self.dtype)
             self.v_buff = torch.zeros(shape, device=device, dtype=self.dtype)
 
+    def reset(self):
+        self.current_length = 0
+
     def deallocate(self):
         """
         Deallocates buffers if they are allocated.
@@ -432,6 +439,7 @@ class DequantizedKVCacheBuffers:
             self.k_buff = None
             del self.v_buff
             self.v_buff = None
+        self.reset()
 
     @property
     def buffers_are_allocated(self) -> bool:

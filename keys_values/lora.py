@@ -282,11 +282,6 @@ class CausalSelfAttention(BaseCausalSelfAttention):
             use_r=config.lora_projection,
         )
 
-    @property
-    def device(self) -> Optional[torch.device]:
-        w = self.qkv.linear.weight
-        return None if w is None else w.device
-
     def _load_from_state_dict(self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any) -> None:
         """For compatibility with base and/or legacy checkpoints."""
         mapping = {

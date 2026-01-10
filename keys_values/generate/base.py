@@ -45,10 +45,9 @@ from keys_values.model import GPT
 def next_token(
     model: GPT,
     x: torch.Tensor,
-    input_pos: Optional[int],
     **sample_kwargs: Dict[str, Any],
 ) -> torch.Tensor:
-    logits = model(x, input_pos=input_pos)
+    logits = model(x)
     _next = sample(logits, **sample_kwargs).to(dtype=torch.int64)
     return _next
 
@@ -70,36 +69,22 @@ def batched_sample(
 def batched_next_token(
     model: GPT,
     x: torch.Tensor,
-    input_pos: Optional[int],
     kwargs: Union[dict, list[dict]],
 ) -> torch.Tensor:
     """
 
     Args:
-        model: GPT model. If `input_pos` is not `None`, its KV caches must be
-            assigned
+        model: GPT model
         x: Context tokens to be used as input, shape `(batch_size, num)`. When
-            used to sample new tokens, we have `num == 1`.
-        input_pos: Position of `x` in the full sequence. See
-            :meth:`GPT.forward`
+            used to sample new tokens, we have `num == 1`
         kwargs: Sampling parameters (can be different for each batch dimension)
 
     Returns:
         New samples corresponding to inputs `x`
 
     """
-    # In the future, we would like `input_pos` to be a list of size `batch_size`.
-    # That way, we can support prompts of different sizes.
-    # This means making the rope cache and kvcache forward() work with batches. Currently, they do not.
-    # This is relatively complicated, given the current implementation. It will require some rewriting.
-    # Relevant thread: https://discuss.pytorch.org/t/batched-index-select/9115
-    # We will also need the same with tensor.index_copy_(). These do not work for batches, and the replacement
-    # is somewhat nontrivial. Until then, we can only accept prompts that are all the same length.
-    # After this problem is resolved, there will be another problem. That being, continuous batched prefill.
-    # If you have any ideas on this, let me know. I don't think that padding input_pos is viable.
-
     # Run the model on the batch.
-    logits_stack = model(x, input_pos=input_pos)
+    logits_stack = model(x)
 
     # Return the next token for each sample in the batch.
     return batched_sample(logits_stack, kwargs=kwargs)
@@ -161,16 +146,14 @@ def generate_fn(
     # is processed with a prefill. If the prompt is larger than the KV
     # cache length, we need to use sequential processing after that.
     max_prefill_length = model.kv_cache_max_prefill_length()
-    if max_prefill_length is None:
-        end = prompt_size
-    else:
-        end = min(prompt_size, max_prefill_length)
+    end = min(prompt_size, max_prefill_length)
+    model.reset()  # Reset KV caches
     input_pos = 0
     all_logits = None
     while input_pos < prompt_size:
         inputs = prompt[input_pos:end].view(1, -1)
         # We may need the last time slice of `all_logits` below:
-        all_logits = model(inputs, input_pos=input_pos)
+        all_logits = model(inputs)
         input_pos = end
         # Note that `max_tokens_forward` can change during the course of
         # prompt processing:
@@ -191,12 +174,8 @@ def generate_fn(
             all_logits = None
         else:
             token = next_token(
-                model=model,
-                x=token.view(1, -1),
-                input_pos=input_pos,
-                **sample_kwargs,
+                model=model, x=token.view(1, -1), **sample_kwargs,
             )
-            input_pos += 1
         tokens.append(token)
         int_token = token.item()
 
@@ -295,16 +274,14 @@ def batched_generate_fn(
     # is processed with a prefill. If the prompt is larger than the KV
     # cache length, we need to use sequential processing after that.
     max_prefill_length = model.kv_cache_max_prefill_length()
-    if max_prefill_length is None:
-        end = max_prompt_size
-    else:
-        end = min(max_prompt_size, max_prefill_length)
+    end = min(max_prompt_size, max_prefill_length)
+    model.reset()  # Reset KV caches
     input_pos = 0
     all_logits = None
     while input_pos < max_prompt_size:
         inputs = prompts[:, input_pos:end]
         # We may need the last time slice of `all_logits` below:
-        all_logits = model(inputs, input_pos=input_pos)
+        all_logits = model(inputs)
         input_pos = end
         # Note that `max_tokens_forward` can change during the course of
         # prompt processing:
@@ -323,12 +300,8 @@ def batched_generate_fn(
             tokens = batched_sample(all_logits[:, -1:], kwargs=sample_args)
         else:
             tokens = batched_next_token(
-                model=model,
-                x=tokens,
-                input_pos=input_pos,
-                kwargs=sample_args,
+                model=model, x=tokens, kwargs=sample_args,
             )
-            input_pos += 1
         for i in range(batch_size):
             token_lists[i].append(tokens[i])
         int_tokens = [token.item() for token in tokens]
@@ -574,8 +547,7 @@ def main(
             eos_id=tokenizer.eos_id,
         )
         t = time.perf_counter() - t0
-        for block in model.transformer.h:
-            block.attn.kv_cache.reset_parameters()
+        model.reset()
         fabric.print(tokenizer.decode(y))
         tokens_generated = y.size(0) - prompt_length
         fabric.print(

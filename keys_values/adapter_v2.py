@@ -116,16 +116,21 @@ class CausalSelfAttention(BaseCausalSelfAttention):
         super().__init__(config, block_idx, kv_cache)
         # key, query, value projections for all heads, but in a batch
         shape = (config.n_head + 2 * config.n_query_groups) * config.head_size
-        self.qkv = AdapterV2Linear(in_features=config.n_embd, out_features=shape, bias=config.bias or config.attn_bias)
+        self.qkv = AdapterV2Linear(
+            in_features=config.n_embd,
+            out_features=shape,
+            bias=config.bias or config.attn_bias,
+        )
         # output projection
-        self.proj = AdapterV2Linear(config.head_size * config.n_head, config.n_embd, bias=config.bias)
+        self.proj = AdapterV2Linear(
+            config.head_size * config.n_head,
+            config.n_embd,
+            bias=config.bias,
+        )
 
-    @property
-    def device(self) -> Optional[torch.device]:
-        w = self.qkv.linear.weight
-        return None if w is None else w.device
-
-    def _load_from_state_dict(self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any) -> None:
+    def _load_from_state_dict(
+        self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any,
+    ) -> None:
         """For compatibility with base and/or legacy checkpoints."""
         mapping = {
             "qkv.weight": "qkv.linear.weight",

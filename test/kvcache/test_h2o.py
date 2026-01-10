@@ -79,7 +79,6 @@ def test_grace_period(device, name):
         key=keys[:, :, :num_prefill, :],
         value=values[:, :, :num_prefill, :],
         token_idx=token_idx[:, :num_prefill],
-        input_pos=0,
     )
     for pos in range(num_prefill, num_insert):
         kv_cache(
@@ -87,7 +86,6 @@ def test_grace_period(device, name):
             key=keys[:, :, pos:(pos + 1), :],
             value=values[:, :, pos:(pos + 1), :],
             token_idx=token_idx[:, pos:(pos + 1)],
-            input_pos=pos,
         )
         if pos >= cache_length:
             prefix = cache_length - grace_period
@@ -175,7 +173,6 @@ def test_h2o_scores(device, name, dtype):
         key=keys[:, :, :num_prefill, :],
         value=values[:, :, :num_prefill, :],
         token_idx=token_idx[:, :num_prefill],
-        input_pos=0,
     )
     print(f"test_positions: {test_positions}\nnum_prefill = {num_prefill}, v_length={v_length}, cache_length={cache_length}")
     for pos in range(num_prefill, cache_length - 1):
@@ -184,7 +181,6 @@ def test_h2o_scores(device, name, dtype):
             key=keys[:, :, pos:(pos + 1), :],
             value=values[:, :, pos:(pos + 1), :],
             token_idx=token_idx[:, pos:(pos + 1)],
-            input_pos=pos,
         )
         # Note: `kv_cache.scores` are normalized only once the cache is full!
         if pos in test_positions:
@@ -241,10 +237,10 @@ def test_token_pos_and_pos_log(device, dtype):
     token_chunks = []
     # Prefill up to cache_length - 2
     data_part = range_from_args(data, 0, num_prefill)
-    kv_cache(**data_part, input_pos=0)
+    kv_cache(**data_part)
     token_chunks.append(data_part["token_idx"])
     # Checks
-    assert kv_cache.next_token_pos == num_prefill
+    assert kv_cache.input_pos == num_prefill
     other = torch.arange(
         0, num_prefill, dtype=torch.int, device=device,
     ).view(1, 1, -1).expand(*shape, -1)
@@ -254,17 +250,17 @@ def test_token_pos_and_pos_log(device, dtype):
     pos = num_prefill
     num = cache_length - num_prefill + 1
     with pytest.raises(ValueError):
-        kv_cache(**range_from_args(data, pos, pos + num), input_pos=pos)
+        kv_cache(**range_from_args(data, pos, pos + num))
     # Insert to fill up the cache
     num = cache_length - num_prefill
     assert kv_cache.max_tokens_forward == num
     data_part = range_from_args(data, pos, pos + num)
-    kv_cache(**data_part, input_pos=pos)
+    kv_cache(**data_part)
     k_and_v = kv_cache.get_keys_values()
     token_chunks.append(data_part["token_idx"])
     pos = cache_length
     # Checks
-    assert kv_cache.next_token_pos == pos
+    assert kv_cache.input_pos == pos
     other = torch.arange(
         0, pos, dtype=torch.int, device=device,
     ).view(1, 1, -1).expand(*shape, -1)
@@ -284,11 +280,11 @@ def test_token_pos_and_pos_log(device, dtype):
     # Insert chunk and evict due to scores
     num = 4
     data_part = range_from_args(data, pos, pos + num)
-    kv_cache(**data_part, input_pos=pos)
+    kv_cache(**data_part)
     k_and_v = kv_cache.get_keys_values()
     token_chunks.append(data_part["token_idx"])
     # Checks
-    assert kv_cache.next_token_pos == pos + num
+    assert kv_cache.input_pos == pos + num
     keys_expected = data["key"][:, :, :cache_length, :].clone()
     values_expected = data["value"][:, :, :cache_length, :].clone()
     index = expand_index(next_positions[:, :, :num], params.head_size)
@@ -298,7 +294,7 @@ def test_token_pos_and_pos_log(device, dtype):
     torch.testing.assert_close(k_and_v.values(), values_expected)
     # Check slot position log
     replay_log = kv_cache.get_replay_log()
-    assert len(replay_log) == kv_cache.next_token_pos
+    assert len(replay_log) == kv_cache.input_pos
     assert len(replay_log.token_chunks) == len(token_chunks)
     for c1, c2 in zip(token_chunks, replay_log.token_chunks):
         torch.testing.assert_close(c1, c2)

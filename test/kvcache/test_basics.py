@@ -59,9 +59,9 @@ def test_last_recent(device, name):
         num_prefill = max_prefill_length
 
     data = random_args_cache_forward(params, num_insert, vocab_size)
-    kv_cache(**range_from_args(data, 0, num_prefill), input_pos=0)
+    kv_cache(**range_from_args(data, 0, num_prefill))
     for pos in range(num_prefill, num_insert):
-        kv_cache(**range_from_args(data, pos, pos + 1), input_pos=pos)
+        kv_cache(**range_from_args(data, pos, pos + 1))
 
     current_length = min(cache_length, num_insert)
     assert kv_cache.current_length == current_length
@@ -111,20 +111,17 @@ def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
         params, num_insert, vocab_size, device=device,
     )
     # Compute MHA in a single shot
-    y_sshot = kv_cache(**data, input_pos=0)
+    y_sshot = kv_cache(**data)
     should_be = torch.arange(
         num_insert, dtype=kv_cache.token_positions().dtype, device=device,
     ).view(1, 1, -1).expand(params.max_batch_size, params.n_query_groups, -1)
     assert (should_be == kv_cache.token_positions()[:, :, :num_insert]).all().item()
     # Compute MHA in steps
+    kv_cache.reset()
     y_parts = []
-    y_parts.append(
-        kv_cache(**range_from_args(data, 0, num_prefill), input_pos=0)
-    )
+    y_parts.append(kv_cache(**range_from_args(data, 0, num_prefill)))
     for pos in range(num_prefill, num_insert):
-        y_parts.append(
-            kv_cache(**range_from_args(data, pos, pos + 1), input_pos=pos)
-        )
+        y_parts.append(kv_cache(**range_from_args(data, pos, pos + 1)))
 
     assert kv_cache.current_length == num_insert
     assert (should_be == kv_cache.token_positions()[:, :, :num_insert]).all().item()

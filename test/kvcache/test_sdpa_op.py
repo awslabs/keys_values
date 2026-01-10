@@ -302,16 +302,16 @@ class H2OLogInputsKVCache(H2OKVCache, TestLogInputsKVCacheMixin):
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
-        input_pos: int,
     ) -> torch.Tensor:
         _kwargs = dict(
             query=query,
             key=key,
             value=value,
             token_idx=token_idx,
-            input_pos=input_pos,
         )
-        forward_kwargs = self.call_before_forward(**_kwargs)
+        forward_kwargs = self.call_before_forward(
+            **_kwargs, input_pos=self.input_pos,
+        )
         attn_outputs = super().forward(**forward_kwargs)
         self.call_after_forward(attn_outputs)
         return attn_outputs
@@ -349,16 +349,16 @@ class QuantizedH2OLogInputsKVCache(QuantizedH2OKVCache, TestLogInputsKVCacheMixi
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
-        input_pos: int,
     ) -> torch.Tensor:
         _kwargs = dict(
             query=query,
             key=key,
             value=value,
             token_idx=token_idx,
-            input_pos=input_pos,
         )
-        forward_kwargs = self.call_before_forward(**_kwargs)
+        forward_kwargs = self.call_before_forward(
+            **_kwargs, input_pos=self.input_pos,
+        )
         attn_outputs = super().forward(**forward_kwargs)
         self.call_after_forward(attn_outputs)
         return attn_outputs
@@ -484,10 +484,7 @@ def test_gradient_new_and_old_spda(
         y_parts = []
         for num in tokens_per_chunk:
             y_parts.append(
-                gpt_model(
-                    token_idxs[:, input_pos:(input_pos + num)],
-                    input_pos=input_pos,
-                )
+                gpt_model(token_idxs[:, input_pos:(input_pos + num)])
             )
             input_pos += num
         y = torch.cat(y_parts, dim=1)
@@ -572,7 +569,7 @@ def test_gradient_new_and_old_spda(
             # way 2 below
             update_result = update_token_positions(
                 token_positions=token_positions,
-                next_token_pos=next_token_pos,
+                input_pos=next_token_pos,
                 num=num,
                 batch_size=batch_size,
                 index=index,

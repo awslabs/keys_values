@@ -267,7 +267,7 @@ def compute_gradients_on_device(
             shard_type=shard_type, **cmsod_kwargs,
         )
         model_part = GPTShardCellBlock(shard_on_device)
-        output = model_part.forward(x, input_ids, input_pos=None)
+        output = model_part.forward(x, input_ids)
         _loss = (output * head_gradient).sum()
         _loss.backward()
         module_pairs = [

@@ -35,7 +35,7 @@ from keys_values.kvcache.utils import (
     VerbosityLevels,
     bytes_for_torch_dtype,
 )
-from keys_values.model import GPT, block_iterator
+from keys_values.model import GPT
 
 
 HEAD_OR_INITIAL_TENSORS_MAX_BYTES = 2 ** 31
@@ -105,13 +105,7 @@ def create_chunk_sizes(
       so that no cache length falls in the middle of a chunk
 
     """
-    def get_mpl(cache: KVCache) -> int:
-        mlp = cache.max_prefill_length
-        return cache.cache_length if mlp is None else mlp
-
-    mpl = min(
-        get_mpl(block.attn.kv_cache) for block in block_iterator(gpt_model)
-    )
+    mpl = min(c.max_prefill_length for c in gpt_model.get_kv_caches())
     if seq_length <= mpl:
         # Does not need anything special, but should still work. Maybe one
         # of the batches is short
@@ -119,9 +113,9 @@ def create_chunk_sizes(
     else:
         points_to_cover = list(
             set(
-                block.attn.kv_cache.cache_length
-                for block in block_iterator(gpt_model)
-                if block.attn.kv_cache.cache_length <= seq_length
+                cache.cache_length
+                for cache in gpt_model.get_kv_caches()
+                if cache.cache_length <= seq_length
             )
         )
         chunk_sizes = [mpl]  # First chunk (prefill)
@@ -155,7 +149,7 @@ def _assert_chunk_sizes(
     randomize_chunk_sizes: bool,
 ):
     cache_lengths = [
-        block.attn.kv_cache.cache_length for block in block_iterator(gpt_model)
+        cache.cache_length for cache in gpt_model.get_kv_caches()
     ]
     min_cat_length = chunk_sizes[0]
     shape_lengths: Set[int] = set()
@@ -230,10 +224,9 @@ def write_back_cache_buffers(gpt_model: GPT):
     needed anymore at the end of such a loop.
 
     """
-    for block in block_iterator(gpt_model):
-        kv_cache = block.attn.kv_cache
-        if kv_cache is not None:
-            kv_cache.kv_buffers.write_back()
+    for cache in gpt_model.get_kv_caches():
+        if cache is not None:
+            cache.kv_buffers.write_back()
 
 
 @dataclass(frozen=True)
@@ -445,14 +438,14 @@ class GPTAndHeadModel(torch.nn.Module):
 
 class LongContextInferenceModel(GPTAndHeadModel):
     """
-    Wraps a `GPT` model, provides inference computation for long contexts.
-    For the moment, this means that a sequence batch is processed, so that
-    an evaluation score can be computed.
+    Wraps a `GPT` and `HeadModel` model, provides inference computation for
+    long contexts. For the moment, this means that a sequence batch is
+    processed, so that an evaluation score can be computed.
 
     TODO: Fuse this with token generation.
 
     The GPT model `model` must have KV caches assigned to every layer. The
-    caches can be of different type, but must have a fixed `cache_length`.
+    caches can have different `cache_length`, but must be of the same type.
 
     All memory required here is allocated anew for every :meth:`forward` call,
     depending on the sequence length.
@@ -551,6 +544,10 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 information
             tmp_array_limit_gb: See above.
             debug_single_cell_per_row: Internal option, used for unit testing.
+            debug_store_intermediates: For debugging/testing. Intermediates of
+                forward computation are stored.
+            debug_no_deallocate_buffers: For debugging/testing. KV cache
+                buffers are not deallocated at the end of :meth:`forward`.
 
         """
         super().__init__(gpt_model, head_model)
@@ -567,21 +564,15 @@ class LongContextInferenceModel(GPTAndHeadModel):
         cache_params = self.gpt_model.get_kv_cache_params(0)
         self._max_batch_size = cache_params.max_batch_size
         # Set max_prefill_length as minimum over all caches
-        caches = [block.attn.kv_cache for block in block_iterator(gpt_model)]
-        min_cache_length = min(c.cache_length for c in caches)
-        mpl_values = [min_cache_length] + [
-            c.max_prefill_length
-            for c in caches
-            if c.max_prefill_length is not None
-        ]
-        self._max_prefill_length = min(mpl_values)
+        self._max_prefill_length = min(
+            c.max_prefill_length for c in gpt_model.get_kv_caches()
+        )
         self.chunk_sizes = None
         self.chunks_per_cell = None
         self.batch_size = None
         self._tmp_array_limit_gb = tmp_array_limit_gb
         self._record_gpu_memory_snapshots = None
         self._record_gpu_memory_kind = None
-        # DEBUG:
         if debug_store_intermediates:
             self.debug_intermediates = dict()
         else:
@@ -590,21 +581,20 @@ class LongContextInferenceModel(GPTAndHeadModel):
 
     def _check_args(
         self,
-        model: GPT,
+        gpt_model: GPT,
         chunk_size: int,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit],
     ):
         if chunk_size < 1:
             raise ValueError(f"chunk_size = {chunk_size}, must be >= 1")
         if tmp_array_limit_gb is not None:
-            mha = model.mha
+            mha = gpt_model.mha
             if mha.tmp_array_limit_gb is None:
                 mha.set_tmp_array_limit_gb(tmp_array_limit_gb)
             elif not (mha.tmp_array_limit_gb is tmp_array_limit_gb):
                 raise ValueError("tmp_array_limit_gb and gpt_model.mha.tmp_array_limit_gb must be the same object")
 
-        for block_idx, block in enumerate(block_iterator(model)):
-            kv_cache = block.attn.kv_cache
+        for block_idx, kv_cache in enumerate(gpt_model.get_kv_caches()):
             prefix = f"Block {block_idx} of model: "
             if kv_cache is None:
                 raise ValueError(prefix + "No KV cache assigned. Use 'model.assign_kv_caches'")
@@ -644,6 +634,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
         device = self.gpt_model.transformer.wte.weight.device
         input_ids = input_ids.to(device)
         targets = targets.to(device)
+        # Reset all KV caches
+        self.gpt_model.reset()
         return self._forward_only(input_ids, targets, scale_factor)
 
     def set_record_gpu_memory(
@@ -721,8 +713,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
             chunks_per_cell = [len(chunk_sizes)]
         else:
             max_cache_length = max(
-                block.attn.kv_cache.cache_length
-                for block in block_iterator(self.gpt_model)
+                cache.cache_length for cache in self.gpt_model.get_kv_caches()
             )
             max_cell_length = int(
                 max_cache_length * self.chunks_per_cell_multiplier
@@ -748,16 +739,14 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self,
         x: torch.Tensor,
         layer_idx: int,
-        input_pos: int,
     ):
         """
-        Implemented in subclasses which need layer input checkpointing
+        Implemented in subclasses which need layer input checkpointing.
 
         Args:
-            x: Inputs to layer `layer_idx`, starting from `input_pos`.
-                The length is that of the current cell
+            x: Inputs to layer `layer_idx`. If inputs are processed in chunks,
+                the corresponding `input_pos` for layer must be tracked.
             layer_idx: See above
-            input_pos: See above
 
         """
         pass
@@ -853,12 +842,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     self.debug_intermediates[name] = embeddings.detach().clone().to(device=torch.device("cpu"))
                 # Loop over layers
                 for block_idx, block in enumerate(model_blocks):
-                    input_pos = start
                     # Layer input checkpointing
                     self._checkpoint_layer_input(
-                        x=embeddings,
-                        layer_idx=block_idx,
-                        input_pos=input_pos,
+                        x=embeddings, layer_idx=block_idx,
                     )
                     new_embed_parts = []
                     # Innermost loop over chunks per cell
@@ -867,24 +853,16 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         x = embeddings[:, rel_start:rel_end, :]
                         abs_start = start + rel_start
                         idx = input_ids[:, abs_start:(abs_start + ch_size)]
-                        y = block.forward(
-                            x=x,
-                            idx=idx,
-                            input_pos=input_pos,
-                        )
+                        y = block.forward(x=x, idx=idx)
                         if self.debug_intermediates is not None:
                             name = f"forward_block{block_idx}_{start}:{end}_{rel_start}:{rel_end}"
                             self.debug_intermediates[name] = y.detach().clone().to(device=torch.device("cpu"))
                         new_embed_parts.append(y)
-                        input_pos += ch_size
-                    assert input_pos == end  # Sanity check
                     del embeddings
                     embeddings = torch.cat(new_embed_parts, dim=1)
                 # Layer input checkpointing
                 self._checkpoint_layer_input(
-                    x=embeddings,
-                    layer_idx=self.config.n_layer,
-                    input_pos=start,
+                    x=embeddings, layer_idx=self.config.n_layer,
                 )
                 # Head model
                 a = chunks_for_cell.first_chunk_idx
@@ -935,8 +913,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
         scale_factor: float,
     ) -> torch.Tensor:
         # Ensure that all KV caches do not record replay logs
-        for block in block_iterator(self.gpt_model):
-            block.attn.kv_cache.switch_replay_logging(False)
+        for cache in self.gpt_model.get_kv_caches():
+            cache.switch_replay_logging(False)
         if self.verbose is not VerbosityLevels.NONE:
             print(f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode)")
         loss_full = self._forward_internal(input_ids, targets, scale_factor)

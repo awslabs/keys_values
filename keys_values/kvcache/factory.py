@@ -37,7 +37,7 @@ from keys_values.kvcache.quantize import (
     TorchBasicQuantizer,
     BitsAndBytesQuantizer,
 )
-from keys_values.model import GPT, block_iterator
+from keys_values.model import GPT
 
 
 _SUPPORTED_CACHES = (
@@ -412,7 +412,7 @@ class KVCacheFactory:
     @staticmethod
     def _get_caches(model_or_caches: Union[GPT, List[KVCache]]) -> List[KVCache]:
         if isinstance(model_or_caches, GPT):
-            caches = [block.attn.kv_cache for block in model_or_caches.transformer.h]
+            caches = model_or_caches.get_kv_caches()
             if any(cache is None for cache in caches):
                 raise IndexError("Some layers of model do not have a cache. Run 'assign_kv_cache' or 'set_kv_cache' first.")
         else:
@@ -527,12 +527,12 @@ def deallocate_kv_cache_buffers(caches: List[KVCache]):
             buffers.deallocate()
             # Deallocate associated :class:`DequantizedKVCacheBuffers` buffers
             # as well. They may be shared by several entries in `caches`, but
-            # calling :meth:`deallocate` is fine.
+            # calling :meth:`deallocate` multiple times is fine.
             if isinstance(buffers, QuantizedKVCacheBuffers):
                 buffers.dequant_buffers.deallocate()
 
 
-def deallocate_kv_cache_buffers_of_model(model: GPT):
+def deallocate_kv_cache_buffers_of_model(gpt_model: GPT):
     """
     Deallocates buffers of KV caches associated with `model`. Use this to free
     up GPU memory once the caches are not needed for the moment (buffers are
@@ -540,8 +540,7 @@ def deallocate_kv_cache_buffers_of_model(model: GPT):
     on a different device (this works only if buffers are deallocated).
 
     """
-    kv_caches = [block.attn.kv_cache for block in block_iterator(model)]
-    deallocate_kv_cache_buffers(kv_caches)
+    deallocate_kv_cache_buffers(gpt_model.get_kv_caches())
 
 
 REMOVE_KEYS = {

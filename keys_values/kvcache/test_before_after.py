@@ -29,7 +29,6 @@ class ForwardInput:
     key: torch.Tensor
     value: torch.Tensor
     token_idx: torch.Tensor
-    input_pos: int
     next_positions: Optional[torch.Tensor]
     cache_keys: Optional[torch.Tensor]
     cache_values: Optional[torch.Tensor]
@@ -37,6 +36,7 @@ class ForwardInput:
     attn_outputs_shape: Tuple[int, ...]
     cache_keys_after_shape: Tuple[int, ...]
     cache_values_after_shape: Tuple[int, ...]
+    input_pos: int
 
     @staticmethod
     def from_inputs(
@@ -65,11 +65,11 @@ class ForwardInput:
             key=key,
             value=value,
             token_idx=token_idx,
-            input_pos=input_pos,
             next_positions=cache._next_positions,
             attn_outputs_shape=(1,),
             cache_keys_after_shape=(1,),
             cache_values_after_shape=(1,),
+            input_pos=input_pos,
             **kwargs,
         )
 
@@ -81,7 +81,6 @@ class ForwardInputOutput:
     key: torch.Tensor
     value: torch.Tensor
     token_idx: torch.Tensor
-    input_pos: int
     next_positions: torch.Tensor
     # Inputs: State of cache before `forward` call
     cache_keys: torch.Tensor
@@ -105,12 +104,9 @@ class ForwardInputOutput:
     def compare_replace(
         self,
         token_idx: torch.Tensor,
-        input_pos: int,
         next_positions: torch.Tensor,
         prefix: str,
     ) -> Tuple[Dict[str, Any], Optional[torch.Tensor]]:
-        if self.input_pos != input_pos:
-            raise ValueError(prefix + f": input_pos = {input_pos}; stored input_pos = {self.input_pos}")
         if not self.token_idx.equal(token_idx):
             raise ValueError(prefix + f": token_idx = {token_idx}; stored token_idx = {self.token_idx}")
         if next_positions.shape != self.next_positions.shape:
@@ -129,7 +125,6 @@ class ForwardInputOutput:
             key=self.key,
             value=self.value,
             token_idx=token_idx,
-            input_pos=input_pos,
         ), next_positions
 
 
@@ -170,11 +165,10 @@ class TestLogInputsKVCacheMixin:
             key=key,
             value=value,
             token_idx=token_idx,
-            input_pos=input_pos,
         )
         if hasattr(self, "_inputs"):
             self._entry = ForwardInput.from_inputs(
-                **forward_kwargs, cache=self._get_self(),
+                **forward_kwargs, cache=self._get_self(), input_pos=input_pos,
             )
         return forward_kwargs
 
@@ -256,14 +250,12 @@ class TestBeforeAfterKVCacheMixin:
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
-        input_pos: int,
     ) -> Dict[str, Any]:
         forward_kwargs = dict(
             query=query,
             key=key,
             value=value,
             token_idx=token_idx,
-            input_pos=input_pos,
         )
         if self._debug_mode is not None:
             next_positions = self._get_self()._next_positions
@@ -280,7 +272,6 @@ class TestBeforeAfterKVCacheMixin:
                 state = ForwardInputOutput.from_file(debug_path)
                 forward_kwargs, next_positions = state.compare_replace(
                     token_idx=token_idx,
-                    input_pos=input_pos,
                     next_positions=next_positions,
                     prefix=f"Debug step {self._next_ind}",
                 )
@@ -387,16 +378,14 @@ class TestH2OKVCache(H2OKVCache, TestBeforeAfterKVCacheMixin):
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
-        input_pos: int,
     ) -> torch.Tensor:
         _kwargs = dict(
             query=query,
             key=key,
             value=value,
             token_idx=token_idx,
-            input_pos=input_pos,
         )
-        if input_pos > 0:
+        if self.input_pos > 0:
             forward_kwargs = self.call_before_forward(**_kwargs)
             attn_outputs = super().forward(**forward_kwargs)
             self.call_after_forward(attn_outputs)

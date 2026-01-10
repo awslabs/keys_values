@@ -209,14 +209,7 @@ class QuantizedH2OKVCache(H2OKVCache):
         return _scores.view(*scores.shape)
 
     def clone(self) -> KVCache:
-        if self.kv_buffers.buffers_are_allocated:
-            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        return QuantizedH2OKVCache(
-            config=self.config,
-            buffers=self.kv_buffers,
-            block_idx=self.block_idx,
-            **self._base_kwargs_for_clone(),
-        )
+        return QuantizedH2OKVCache(**self._base_kwargs_for_clone())
 
     def _base_kwargs_for_clone(self) -> Dict[str, Any]:
         base_kwargs = super()._base_kwargs_for_clone()
@@ -301,11 +294,4 @@ class QuantizedVLengthH2OKVCache(QuantizedH2OKVCache, VLengthInstantScoreMixin):
         return self.kv_buffers
 
     def clone(self) -> KVCache:
-        if self.kv_buffers.buffers_are_allocated:
-            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        return QuantizedVLengthH2OKVCache(
-            config=self.config,
-            buffers=self.kv_buffers,
-            block_idx=self.block_idx,
-            **self._base_kwargs_for_clone(),
-        )
+        return QuantizedVLengthH2OKVCache(**self._base_kwargs_for_clone())

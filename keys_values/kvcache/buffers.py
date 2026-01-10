@@ -24,7 +24,7 @@ from keys_values.kvcache.utils import (
     bitsize_of,
     bits_for_torch_dtype,
 )
-from keys_values.utils import expand_index
+from keys_values.utils import expand_index, index_to_3d
 
 
 @dataclass(frozen=True)
@@ -107,8 +107,8 @@ def positions_wrap_around(
         from shape `(1, 1, num)`.
 
     """
-    assert start <= current < end
-    assert num <= end - start
+    assert start <= current < end, f"current = {current}, must be in [{start}, {end})"
+    assert num <= end - start, f"num = {num}, must be <= {end - start}"
     num1 = min(num, end - current)
     diff = num - num1
     if diff == 0 and not return_tensor:
@@ -121,7 +121,7 @@ def positions_wrap_around(
         positions = torch.cat(
             (positions, torch.arange(start, start + diff, **kwargs))
         )
-    return positions.view(1, 1, -1).expand(batch_size, n_query_groups, -1)
+    return index_to_3d(positions, batch_size, n_query_groups)
 
 
 class KVCacheBuffers(torch.nn.Module):
@@ -168,7 +168,7 @@ class KVCacheBuffers(torch.nn.Module):
         self.dtype = params.dtype
         self.batch_size = None
         # Number of slots which are occupied. Grows until `cache_length`, then
-        # stays there. Initialized by :meth:`prefill`.
+        # stays there. Initialized by :meth:`prefill` or :meth:`reset`.
         self.current_length = None
 
     @property
@@ -307,7 +307,8 @@ class KVCacheBuffers(torch.nn.Module):
         For caches which support late buffer allocation and deallocation, this
         method needs to do the allocation based on `batch_size` (not
         `max_batch_size`), and also reallocate existing buffers if they do not
-        fit `batch_size`.
+        fit `batch_size`. Note that `current_length` is already increased
+        before.
 
         """
         raise NotImplementedError()
@@ -321,6 +322,15 @@ class KVCacheBuffers(torch.nn.Module):
         """
         pass
 
+    def reset(self):
+        """
+        Called by :meth:`KVCacheWithBuffers.reset`, resets current length to
+        0. Note that :meth:`prefill` can be called even if :meth:`reset` has
+        not been called before.
+
+        """
+        self.current_length = 0
+
     def deallocate(self):
         """
         Deallocates the buffers. They are automatically reallocated with the
@@ -329,7 +339,7 @@ class KVCacheBuffers(torch.nn.Module):
 
         """
         self._deallocate()
-        self.current_length = 0
+        self.reset()
 
     def _deallocate(self):
         raise NotImplementedError()

@@ -515,7 +515,6 @@ def test_quantized_buffers_write_back(dtype, name, device):
     # Prefill
     print(f"name={name}, dtype={dtype}, device={device}")
     print(f"Prefill: {cache_length}")
-    input_pos = 0
     num_prefill = caches_common[0].max_prefill_length
     if num_prefill is None:
         num_prefill = cache_length
@@ -524,13 +523,12 @@ def test_quantized_buffers_write_back(dtype, name, device):
         data = random_args_cache_forward(
             params, num=num_prefill, vocab_size=config.vocab_size,
         )
-        c_comm(**data, input_pos=input_pos)
-        c_sep(**data, input_pos=input_pos)
+        c_comm(**data)
+        c_sep(**data)
     write_back_all(caches_common)
     write_back_all(caches_separate)
     check_same_events(caches_common[0], caches_separate)
     compare_buffers(caches_common, caches_separate)
-    input_pos += num_prefill
     # Several updates
     for n_upd in range(5):
         q_len = min(
@@ -545,10 +543,9 @@ def test_quantized_buffers_write_back(dtype, name, device):
             data = random_args_cache_forward(
                 params, num=q_len, vocab_size=config.vocab_size,
             )
-            c_comm(**data, input_pos=input_pos)
-            c_sep(**data, input_pos=input_pos)
+            c_comm(**data)
+            c_sep(**data)
         write_back_all(caches_common)
         write_back_all(caches_separate)
         check_same_events(caches_common[0], caches_separate)
         compare_buffers(caches_common, caches_separate)
-        input_pos += q_len

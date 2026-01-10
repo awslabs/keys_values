@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple, Iterable, Dict, Any, Optional
+from typing import Tuple, Iterable, Dict, Any, List, Union
 
 import torch
 
@@ -38,7 +38,6 @@ class CellBlocks:
         self,
         x: torch.Tensor,
         idx: torch.Tensor,
-        input_pos: Optional[int],
     ) -> torch.Tensor:
         batch_size, chunk_len, n_embd = x.shape
         if n_embd != self.config.n_embd:
@@ -47,13 +46,11 @@ class CellBlocks:
             raise ValueError(f"idx.shape = {idx.shape}, must be {(batch_size, chunk_len)}")
         if chunk_len > self.max_seq_length:
             raise ValueError(f"Cannot forward chunk of length {chunk_len}, max seq length is only {self.max_seq_length}")
-        for block_idx, block in self.blocks():
-            self._check_kv_cache(
-                block.attn.kv_cache, input_pos, block_idx, batch_size, chunk_len,
-            )
+        for block_idx, cache in self.get_kv_caches():
+            self._check_kv_cache(cache, block_idx, batch_size, chunk_len)
         # Loop over blocks
         for block_idx, block, block_kwargs in self.blocks_with_kwargs():
-            x = block(x, token_idx=idx, input_pos=input_pos, **block_kwargs)
+            x = block(x, token_idx=idx, **block_kwargs)
 
         return x
 
@@ -70,7 +67,7 @@ class CellBlocks:
         Returns:
             Sequence of `(block_idx, block, block_kwargs)` of model blocks,
             in increasing order. We call
-            `x = block(x, token_idx, input_pos, **block_kwargs)`.
+            `x = block(x, token_idx, **block_kwargs)`.
 
         """
         raise NotImplementedError
@@ -78,33 +75,46 @@ class CellBlocks:
     def blocks(self) -> Iterable[Tuple[int, Block]]:
         return [(a, b) for a, b, _ in self.blocks_with_kwargs()]
 
+    def get_kv_caches(self) -> List[Tuple[int, KVCache]]:
+        return [
+            (block_idx, block.attn.kv_cache)
+            for block_idx, block, _ in self.blocks_with_kwargs()
+        ]
+
     def _check_kv_cache(
         self,
         kv_cache: KVCache,
-        input_pos: Optional[int],
         block_idx: int,
         batch_size: int,
         chunk_len: int,
     ):
-        if (kv_cache is None) != (input_pos is None):
-            raise ValueError(f"kv_cache and input_pos: Both or neither must be None")
         if kv_cache is not None:
-            if input_pos == 0:
+            if kv_cache.input_pos == 0:
                 if kv_cache.max_batch_size < batch_size:
                     raise ValueError(
                         f"Batch size {batch_size} is too large for KV cache layer {block_idx} (batch size {kv_cache.max_batch_size}). Use 'assign_kv_caches' or `set_kv_caches'"
                     )
             else:
-                if kv_cache.next_token_pos is None:
-                    raise ValueError("Inference calls need to start with pre-fill, i.e. 'input_pos=0'")
-                if kv_cache.next_token_pos != input_pos:
-                    raise ValueError(
-                        f"KV cache for layer {block_idx}: input_pos = {input_pos} != {kv_cache.next_token_pos} = kv_cache.next_token_pos"
-                    )
                 if kv_cache.max_tokens_forward < chunk_len:
                     raise ValueError(
                         f"KV cache for layer {block_idx}: chunk_len = {chunk_len}, must be <= max_tokens_forward = {kv_cache.max_tokens_forward}"
                     )
+
+    def assign_kv_caches(
+        self, kv_caches: Union[List[KVCache], List[Tuple[int, KVCache]]],
+    ):
+        if len(kv_caches) != self.num_layers:
+            raise ValueError(f"kv_caches must have one entry per layer, so {self.num_layers} entries")
+        if isinstance(kv_caches[0], KVCache):
+            for cache, (_, block) in zip(kv_caches, self.blocks()):
+                block.attn.kv_cache = cache
+        else:
+            for (_, cache), (_, block) in zip(kv_caches, self.blocks()):
+                block.attn.kv_cache = cache
+
+    def clear_kv_caches(self):
+        for _, block in self.blocks():
+            block.attn.kv_cache = None
 
 
 class DefaultCellBlocks(CellBlocks):

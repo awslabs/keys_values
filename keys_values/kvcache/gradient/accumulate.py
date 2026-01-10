@@ -244,8 +244,7 @@ class GradientAccumulator:
         buffer_params = None
         cache_params = None
         cache_lengths = []
-        for _, block in model_part.blocks():
-            kv_cache = block.attn.kv_cache
+        for _, kv_cache in model_part.get_kv_caches():
             if buffer_params is None:
                 cache_params = kv_cache.get_params()
                 buffer_params = KVCacheBuffersParams.from_params(cache_params)
@@ -303,12 +302,9 @@ class GradientAccumulator:
         # For easy reference outside of inference replay caches
         self._kv_cache_checkpoints = checkpoints
         infer_replay_caches = []
-        for (block_idx, block), buffers, checkpoint in zip(
-            model_part.blocks(),
-            cache_buffers,
-            checkpoints,
+        for (block_idx, kv_cache), buffers, checkpoint in zip(
+            model_part.get_kv_caches(), cache_buffers, checkpoints,
         ):
-            kv_cache = block.attn.kv_cache
             # Use the same MHA object. Ensures that properties like position
             # encoding are transferred
             if isinstance(kv_cache, DefaultKVCache):
@@ -595,40 +591,30 @@ class GradientAccumulator:
         get_inputs_slice: GetInputSlice,
     ):
         # Setup KV caches in `gpt_model`. These record the required checkpoints
-        kv_caches_copy = []
         num_layers = len(infer_replay_caches)
-        for (_, block), replay_cache in zip(
-            model_part.blocks(),
-            infer_replay_caches,
-        ):
-            attn = block.attn
-            kv_caches_copy.append(attn.kv_cache)
-            attn.kv_cache = replay_cache
+        kv_caches_copy = model_part.get_kv_caches()
+        model_part.assign_kv_caches(infer_replay_caches)
+        try:
+            # DEBUG
+            if self._debug_tensors is not None:
+                for layer_idx, checkpoints in zip(
+                    range(model_part.first_layer_idx, model_part.first_layer_idx + model_part.num_layers),
+                    self._kv_cache_checkpoints[:num_layers],
+                ):
+                    checkpoints.set_debug_layer_idx(layer_idx)
+            # END DEBUG
 
-        # DEBUG
-        if self._debug_tensors is not None:
-            for layer_idx, checkpoints in zip(
-                range(model_part.first_layer_idx, model_part.first_layer_idx + model_part.num_layers),
-                self._kv_cache_checkpoints[:num_layers],
-            ):
-                checkpoints.set_debug_layer_idx(layer_idx)
-        # END DEBUG
-
-        # Run forward in order to compute checkpoints
-        with torch.no_grad():
-            cell_computation(
-                token_idxs=self.replay_logs[0].token_chunks,
-                model_part=model_part,
-                get_inputs_slice=get_inputs_slice,
-                input_pos=0,
-            )
-
-        # Restore
-        for (_, block), old_cache in zip(
-            model_part.blocks(),
-            kv_caches_copy,
-        ):
-            block.attn.kv_cache = old_cache
+            # Run forward in order to compute checkpoints
+            with torch.no_grad():
+                cell_computation(
+                    token_idxs=self.replay_logs[0].token_chunks,
+                    model_part=model_part,
+                    get_inputs_slice=get_inputs_slice,
+                    input_pos=0,
+                )
+        finally:
+            # Restore
+            model_part.assign_kv_caches(kv_caches_copy)
 
     def _get_checkpoints(
         self,

@@ -129,41 +129,41 @@ class CausalSelfAttention(BaseCausalSelfAttention):
         mha: MultiHeadSelfAttention,
     ) -> torch.Tensor:
         if self._extend_forward:
-            B, T, _ = y.shape
-            y = y.view(B, T, self.config.n_head, self.config.head_size)
-            aT = self.config.adapter_prompt_length
+            batch_size, num, _ = y.shape
+            y = y.view(batch_size, num, self.config.n_head, self.config.head_size)
+            a_num = self.config.adapter_prompt_length
             if self.adapter_kv_cache is not None:
                 # since this uses the wte weights as the prefix and the kv cache is only used during inference, ak and av
                 # are the same every call
                 ak, av = self.adapter_kv_cache
             else:
-                prefix = self.adapter_wte.weight.reshape(1, aT, self.config.n_embd)
+                prefix = self.adapter_wte.weight.reshape(1, a_num, self.config.n_embd)
                 aqkv = self.qkv(prefix)
                 q_per_kv = self.config.n_head // self.config.n_query_groups
-                aqkv = aqkv.view(1, aT, self.config.n_query_groups, q_per_kv + 2, self.config.head_size)
+                aqkv = aqkv.view(1, a_num, self.config.n_query_groups, q_per_kv + 2, self.config.head_size)
                 aqkv = aqkv.permute(0, 2, 3, 1, 4)
                 _, ak, av = aqkv.split((q_per_kv, 1, 1), dim=2)
                 if self.config.n_query_groups != 1:
                     # for MHA this is a no-op
                     ak = ak.repeat_interleave(q_per_kv, dim=2)
                     av = av.repeat_interleave(q_per_kv, dim=2)
-                ak = ak.view(1, -1, aT, self.config.head_size)  # (1, nh_ak, aT, hs)
-                av = av.view(1, -1, aT, self.config.head_size)  # (1, nh_av, aT, hs)
+                ak = ak.view(1, -1, a_num, self.config.head_size)  # (1, nh_ak, aT, hs)
+                av = av.view(1, -1, a_num, self.config.head_size)  # (1, nh_av, aT, hs)
                 self.adapter_kv_cache = (ak, av)
 
-            amask = torch.ones(T, aT, dtype=torch.bool, device=query.device)
+            amask = torch.ones(num, a_num, dtype=torch.bool, device=query.device)
             a_k_and_v = DefaultKeysAndValues(keys=ak, values=av)
             ay, _ = mha.scaled_dot_product_attention(
                 query=query,
                 k_and_v=a_k_and_v,
-                input_pos=0,  # ensures that PyTorch kernel is used
+                input_pos=0,
                 token_positions=None,
                 sdpa_mode=None,
                 sliding_window_size=None,
                 mask=amask,
                 return_attn_weights=False,
             )
-            y = (y + self.gating_factor * ay).view(B, T, -1)
+            y = (y + self.gating_factor * ay).view(batch_size, num, -1)
 
         return y
 

@@ -218,10 +218,7 @@ def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
         parts = []
         for num in tokens_per_chunk:
             parts.append(
-                cache(
-                    **range_from_args(data, input_pos, input_pos + num),
-                    input_pos=input_pos,
-                )
+                cache(**range_from_args(data, input_pos, input_pos + num))
             )
             input_pos += num
         outputs.append(torch.cat(parts, dim=1))

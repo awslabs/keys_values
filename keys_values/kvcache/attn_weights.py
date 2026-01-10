@@ -33,6 +33,7 @@ from keys_values.kvcache.buffers import (
     PositionsType,
 )
 from keys_values.kvcache.utils import bitsize_of, bits_for_torch_dtype
+from keys_values.utils import index_to_3d
 
 
 class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
@@ -51,7 +52,7 @@ class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
         token_chunks: List[torch.Tensor],
         slot_positions: List[torch.Tensor],
         cache_length: int,
-        max_prefill_length: Optional[int],
+        max_prefill_length: int,
         blocksize: int,
         grace_period: int = 0,
     ):
@@ -90,12 +91,12 @@ class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
 
     def finalize(
         self,
-        next_token_pos: int,
+        input_pos: int,
     ) -> "AttnWeightsReplayLog":
-        if next_token_pos <= self.cache_length:
+        if input_pos <= self.cache_length:
             slot_positions = []
         else:
-            end = (next_token_pos - self.cache_length) % self.blocksize
+            end = (input_pos - self.cache_length) % self.blocksize
             if end == 0:
                 slot_positions = self._slot_positions
             else:
@@ -111,13 +112,13 @@ class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
         )
 
     def append_position_index(
-        self, index: torch.Tensor, next_token_pos: int,
+        self, index: torch.Tensor, input_pos: int,
     ):
         if self.device is not None and index.device != self.device:
             raise ValueError(f"index.device = {index.device}, must be{self.device}")
         kwargs = dict(dtype=torch.uint32)
         shape = index.shape[:2] + (self.blocksize,)
-        bstart = (next_token_pos - self.cache_length) % self.blocksize
+        bstart = (input_pos - self.cache_length) % self.blocksize
         if bstart == 0:
             self._append_new_pos_log_block(shape, index.device)
         block = self._slot_positions[-1]
@@ -140,29 +141,30 @@ class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
         self._slot_positions.append(new_block)
         return new_block
 
-    def _position_and_offset(self, token_pos: int) -> Tuple[int, int]:
-        if token_pos < self.cache_length:
-            raise ValueError(f"token_pos = {token_pos} must be >= {self.cache_length} = cache_length")
-        assert token_pos >= self.cache_length
+    def _position_and_offset(self, input_pos: int) -> Tuple[int, int]:
+        if input_pos < self.cache_length:
+            raise ValueError(f"token_pos = {input_pos} must be >= {self.cache_length} = cache_length")
+        assert input_pos >= self.cache_length
         offset = None
         pos = self.cache_length
+        relpos = None
         for relpos, block in enumerate(self._slot_positions):
             block_len = block.shape[-1]
-            if token_pos < pos + block_len:
-                offset = token_pos - pos
+            if input_pos < pos + block_len:
+                offset = input_pos - pos
                 break
             pos += block_len
         if offset is None:
-            raise ValueError(f"token_pos = {token_pos} is too large")
+            raise ValueError(f"token_pos = {input_pos} is too large")
         return relpos, offset
 
     def extract_index(
         self,
-        token_pos: int,
+        input_pos: int,
         num: int,
         **kwargs,
     ) -> torch.Tensor:
-        relpos, bstart = self._position_and_offset(token_pos)
+        relpos, bstart = self._position_and_offset(input_pos)
         parts = []
         block = self._slot_positions[relpos]
         blocksize = block.shape[-1]
@@ -188,7 +190,7 @@ class UpdateTokenPositionsGracePeriod:
 
 def update_token_positions(
     token_positions: torch.Tensor,
-    next_token_pos: int,
+    input_pos: int,
     num: int,
     batch_size: int,
     index: Optional[torch.Tensor],
@@ -199,29 +201,29 @@ def update_token_positions(
     `token_positions` of shape `(batch_size, n_query_groups, cache_length)`
     contains token positions for each slot. If `batch_size < batch_size`,
     only the leading rows are used. It is updated here with new token positions
-    `next_token_pos` to `next_token_pos + num - 1`.
+    `input_pos` to `input_pos + num - 1`.
 
-    If `next_token_pos < cache_length`, must have `next_token_pos + num <=
+    If `input_pos < cache_length`, must have `input_pos + num <=
     cache_length`. In this case, slot positions are just token positions.
     Otherwise, `index` must be given, with semantics as in
-    :class:`AttnWeightsKVCache`. Afterwards, `next_token_pos` should be
+    :class:`AttnWeightsKVCache`. Afterwards, `input_pos` should be
     increased by `num`.
 
     """
     assert token_positions.ndim == 3
     bs, n_query_groups, cache_length = token_positions.shape
     assert 1 <= batch_size <= bs
-    assert num >= 1 and next_token_pos >= 0
+    assert num >= 1 and input_pos >= 0
     assert cache_length >= 1
-    cache_full = next_token_pos >= cache_length
-    assert cache_full or next_token_pos + num <= cache_length
+    cache_full = input_pos >= cache_length
+    assert cache_full or input_pos + num <= cache_length
     assert grace_period >= 0
     device = token_positions.device
     arange_kwargs = dict(dtype=token_positions.dtype, device=device)
     result = None
     if not cache_full:
-        start = next_token_pos
-        end = next_token_pos + num
+        start = input_pos
+        end = input_pos + num
         token_positions[:batch_size, :, start:end] = torch.arange(
             start, end, **arange_kwargs,
         ).view(1, 1, -1)
@@ -249,23 +251,23 @@ def update_token_positions(
             )
             # Update token_pos
             new_pos = torch.arange(
-                next_token_pos + num1, next_token_pos + num, **arange_kwargs,
+                input_pos + num1, input_pos + num, **arange_kwargs,
             ).view(1, 1, -1)
             pos_flat = positions[0, 0, :]
             token_positions[:batch_size, :, pos_flat] = new_pos
-            start_token_pos = next_token_pos - grace_period
+            start_token_pos = input_pos - grace_period
             result = UpdateTokenPositionsGracePeriod(
                 positions=positions,
                 num1=num1,
                 prefix=prefix,
             )
         else:
-            start_token_pos = next_token_pos
+            start_token_pos = input_pos
 
-        new_token_pos = torch.arange(
-            start_token_pos, start_token_pos + num, **arange_kwargs,
-        ).view(1, 1, -1).expand(
-            batch_size, n_query_groups, -1
+        new_token_pos = index_to_3d(
+            torch.arange(start_token_pos, start_token_pos + num, **arange_kwargs),
+            batch_size,
+            n_query_groups,
         )
         token_positions[:batch_size, ...].scatter_(
             -1, index, new_token_pos,
@@ -411,8 +413,6 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         # Integer array of shape `(batch_size, n_query_groups, num)`, where
         # `num <= cache_length`. Initialized by :meth:`prefill`.
         self._next_positions = None
-        # Next token position :meth:`forward` is called for
-        self._next_token_pos = None
         self.next_grace_pos = None
         self.prefill_length = None
         # Signals :meth:`forward` to use the initial rule instead of
@@ -438,11 +438,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         return None if self._next_positions is None else self._next_positions[:, :, :num]
 
     @property
-    def next_token_pos(self) -> Optional[int]:
-        return self._next_token_pos
-
-    @property
-    def max_prefill_length(self) -> Optional[int]:
+    def max_prefill_length(self) -> int:
         """
         Note that :meth:`prefill` must not fill the cache, as we need to
         compute scores in order to make a good eviction decision, and this can
@@ -489,12 +485,17 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                 int(self._keep_initial_fraction * self.cache_length),
                 self.cache_length - num,
             )
-            self._next_positions = torch.arange(
-                num_keep,
-                num_keep + num,
-                dtype=torch.int64,
-                device=self.device
-            ).view(1, 1, -1).expand(self.batch_size, self.n_query_groups, -1)
+            self._next_positions = index_to_3d(
+                torch.arange(
+                    num_keep,
+                    num_keep + num,
+                    dtype=torch.int64,
+                    device=self.device
+                ),
+                self.batch_size,
+                self.n_query_groups,
+            )
+            # Only use once:
             self._use_initial_rule = False
         # We need to know how score buffers are initialized for new content. By
         # default, they are filled with 0. But other initial values for scores
@@ -508,7 +509,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         # Update `token_pos`
         update_result = update_token_positions(
             token_positions=self.token_pos,
-            next_token_pos=self._next_token_pos,
+            input_pos=self.input_pos,
             num=num,
             batch_size=self.batch_size,
             index=index,
@@ -570,11 +571,10 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             if not isinstance(self._replay_log, AttnWeightsReplayLog):
                 raise IndexError("Cannot switch on replay logging in the middle of inference run. Call 'prefill'.")
             self._append_token_idx(token_idx)
-            if self._next_token_pos >= self.cache_length:
+            if self.input_pos >= self.cache_length:
                 self._replay_log.append_position_index(
-                    index=index, next_token_pos=self.next_token_pos,
+                    index=index, input_pos=self.input_pos,
                 )
-        self._next_token_pos += num
         self._next_positions = None  # Set by next :meth:`update` call
         return k_and_v
 
@@ -680,7 +680,6 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             query_length: Size of query axis
 
         """
-
         if len(args) >= 1:
             attn_weights = args[0]
         else:
@@ -784,13 +783,12 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         # Update `token_pos`
         update_token_positions(
             token_positions=self.token_pos,
-            next_token_pos=0,
+            input_pos=0,
             num=init_length,
             batch_size=self.batch_size,
             index=None,
             grace_period=self.grace_period,
         )
-        self._next_token_pos = init_length
         self._use_initial_rule = self.current_length == self.cache_length
         if not self._use_initial_rule:
             self._set_next_positions_to_free_slots()
@@ -879,7 +877,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         Returns list of slot position tensors.
         If we applied `torch.cat(..., dim=-1)` to this, we would get a tensor `res`
         of shape `(batch_size, n_query_groups, T)`, where
-        `T = next_token_pos - cache_length`, so the content for any token
+        `T = input_pos - cache_length`, so the content for any token
         position `t + cache_length` was written to slots `res[:, :, t]`.
 
         Returns:
@@ -890,7 +888,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         if self._replay_log is None:
             return None
         else:
-            return self._replay_log.finalize(self.next_token_pos)
+            return self._replay_log.finalize(self.input_pos)
 
     def _score_buffers(self) -> List[Tuple[torch.Tensor, str]]:
         """
@@ -919,12 +917,16 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         to cover the remaining free slots.
         """
         if self.current_length < self.cache_length:
-            self._next_positions = torch.arange(
-                self.current_length,
-                self.cache_length,
-                dtype=torch.int64,
-                device=self.device
-            ).view(1, 1, -1).expand(self.batch_size, self.n_query_groups, -1)
+            self._next_positions = index_to_3d(
+                torch.arange(
+                    self.current_length,
+                    self.cache_length,
+                    dtype=torch.int64,
+                    device=self.device
+                ),
+                self.batch_size,
+                self.n_query_groups,
+            )
 
     def _base_kwargs_for_clone(self) -> Dict[str, Any]:
         base_kwargs = super()._base_kwargs_for_clone()

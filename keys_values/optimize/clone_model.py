@@ -79,16 +79,15 @@ def clone_model_shard_via_flat_vectors(
         else:
             ret2 = (None, None)
     start, end = ret2
-    kv_caches = []
+    kv_caches = model.get_kv_caches()
+    if any(
+        c is not None and isinstance(c, KVCacheWithBuffers) and c.buffers_are_allocated
+        for c in kv_caches
+    ):
+        raise ValueError("KV caches must have buffers deallocated. Use `deallocate_kv_cache_buffers_of_model`")
     try:
         # Remove KV caches before copy is created
-        for l_ix, block in enumerate(model.transformer.h):
-            kv_cache = block.attn.kv_cache
-            if kv_cache is not None and isinstance(kv_cache, KVCacheWithBuffers) and kv_cache.buffers_are_allocated:
-                raise ValueError(f"KV cache of layer {l_ix} has buffers allocated. Deallocate buffers with `deallocate_kv_cache_buffers_of_model`")
-            kv_caches.append(kv_cache)
-            block.attn.kv_cache = None
-
+        model.clear_kv_caches()
         # Loop to create components on the target device
         components = dict()
         choices = ModelFromFlatVectorsFactory.CHOICES_LORA if is_lora else ModelFromFlatVectorsFactory.CHOICES_FULL
@@ -115,8 +114,7 @@ def clone_model_shard_via_flat_vectors(
                     weights_vecs=flat_vecs_trg,
                 )
     finally:
-        for kv_cache, block in zip(kv_caches, model.transformer.h):
-            block.attn.kv_cache = kv_cache
+        model.assign_kv_caches(kv_caches)
 
     if shard_type is None:
         if not is_lora:
@@ -137,12 +135,9 @@ def clone_model_shard_via_flat_vectors(
         model_copy.max_seq_length = model.max_seq_length
         # Sanity check
         assert len(model_copy.transformer.h) == end - start
-        for kv_cache, block in zip(
-            kv_caches[start:end],
-            model_copy.transformer.h
-        ):
-            if kv_cache is not None:
-                block.attn.kv_cache = kv_cache.clone()
+        model_copy.assign_kv_caches(
+            [None if c is None else c.clone() for c in kv_caches[start:end]]
+        )
 
     return model_copy
 

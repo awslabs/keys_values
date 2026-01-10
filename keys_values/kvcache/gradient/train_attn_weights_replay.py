@@ -100,7 +100,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         batch_size: int,
         cache_length: int,
         replay_log: KVCacheReplayLog,
-        start_token_pos: int,
+        start_input_pos: int,
         layer_idx: int,
         num_chunks: int,
         node_annotations: Optional[Annotations] = None,
@@ -110,8 +110,8 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         debug_intermediates: Optional[Tuple[Dict[str, torch.Tensor], str]] = None,
         **base_kwargs,
     ):
-        if not (0 <= start_token_pos < len(replay_log)):
-            raise ValueError(f"start_token_pos {start_token_pos}, must be in [0, {len(replay_log)})")
+        if not (0 <= start_input_pos < len(replay_log)):
+            raise ValueError(f"start_input_pos {start_input_pos}, must be in [0, {len(replay_log)})")
         if layer_idx < 0:
             raise ValueError(f"layer_idx {layer_idx}, must be nonnegative")
         if num_chunks <= 0:
@@ -134,7 +134,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         self.grace_period = replay_log.grace_period
         self._next_grace_pos = None
         self._node_annotations = node_annotations
-        self._next_token_pos = start_token_pos  # Will be validated
+        self._input_pos = start_input_pos  # Will be validated
         self._token_chunk_pos = None
         self._start_token_chunk_pos = None
         self._end_token_chunk_pos = None
@@ -160,20 +160,21 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         return self._batch_size
 
     def _initialize_replay(self):
-        # Initialize `_token_chunk_pos`, `_next_token_pos`, and
+        # Initialize `_token_chunk_pos`, `_input_pos`, and
         # `_next_grace_pos`.
-        next_token_pos = self._next_token_pos  # target value to reach
-        self._next_token_pos = 0
+        input_pos = self._input_pos  # target value to reach
+        self._input_pos = 0
         self._token_chunk_pos = 0
         self.prefill_length = None
         do_grace_period = self.grace_period > 0
         done = False
         for chunk in self.replay_log.token_chunks:
-            if self._next_token_pos >= next_token_pos:
-                done = self._next_token_pos == next_token_pos
+            if self._input_pos >= input_pos:
+                done = self._input_pos == input_pos
                 break
-            self._process_token_chunk(chunk)
             num = chunk.shape[-1]
+            self._process_token_chunk(chunk)
+            self._input_pos += num
             if do_grace_period:
                 prefix = self.cache_length - self.grace_period
                 if self._next_grace_pos is None:
@@ -191,7 +192,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             if self.prefill_length is None:
                 self.prefill_length = num
         if not done:
-            raise ValueError(f"start_token_pos = {next_token_pos} does not map to start of a token chunk")
+            raise ValueError(f"start_input_pos = {input_pos} does not map to start of a token chunk")
         self._start_token_chunk_pos = self._token_chunk_pos
         self._end_token_chunk_pos = self._token_chunk_pos + self.num_chunks
         if self._end_token_chunk_pos > len(self.replay_log.token_chunks):
@@ -227,10 +228,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         return self._token_positions[:, :, :self.current_length].clone()
 
     @property
-    def next_token_pos(self) -> Optional[int]:
-        return self._next_token_pos
-
-    @property
     def max_tokens_forward(self) -> int:
         diff = self.cache_length - self.current_length
         result = self.cache_length - self.grace_period
@@ -244,21 +241,20 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
-        input_pos: int,
     ) -> torch.Tensor:
-        self._forward_check_args(query, key, value, token_idx, input_pos)
+        self._forward_check_args(query, key, value, token_idx)
         if query.shape[0] != self.batch_size:
             raise ValueError(f"query.shape[0] = {query.shape[0]}, batch_size = {self.batch_size}, must be equal")
         # For prefill, we use the default implementation based on :meth:`_prefill`.
         # If `input_pos > 0`, we use our own special-purpose operators.
+        input_pos = self._input_pos  # Value before update
         if input_pos == 0:
-            attn_outputs = super().forward(
-                query, key, value, token_idx, input_pos,
-            )
+            attn_outputs = super().forward(query, key, value, token_idx)
         else:
-            attn_outputs =  self._forward_if_not_prefill(
-                query, key, value, token_idx, input_pos,
+            attn_outputs = self._forward_if_not_prefill(
+                query, key, value, token_idx,
             )
+            self._input_pos += key.shape[2]
         # DEBUG
         if self._debug_intermediates is not None:
             prefix = self._debug_prefix + f"_inputpos{input_pos}_"
@@ -279,7 +275,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
-        input_pos: int,
     ) -> torch.Tensor:
         """
         If the cache is full, we use the fused operator
@@ -293,10 +288,10 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         the SDPA operators by PyTorch.
 
         """
-        assert input_pos > 0  # Not to be used for prefill
+        assert self.input_pos > 0  # Not to be used for prefill
         num = key.shape[2]
-        # Process token chunk. This also updates `_token_positions` and the
-        # counters
+        # Process token chunk. This also updates `_token_positions`, but not
+        # `_input_pos`
         index, update_result = self._process_token_chunk(token_idx)
         # Cache full: Single scatter. `update_result` is given iff there is
         # a grace period.
@@ -308,7 +303,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             positions = update_result.positions[0, 0, :]
         # DEBUG
         if self._debug_intermediates is not None:
-            prefix = self._debug_prefix + f"_sdpa_inputpos{input_pos}"
+            prefix = self._debug_prefix + f"_sdpa_inputpos{self.input_pos}"
             debug_intermediates = (self._debug_intermediates, prefix)
         else:
             debug_intermediates = None
@@ -339,7 +334,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 self.kv_buffers.values(),
                 index,
                 self.token_positions(),
-                input_pos,
+                self.input_pos,
                 self.mha,
                 positions,
                 self.mha._get_sliding_window_size(self.block_idx),
@@ -501,15 +496,10 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             if name in self._debug_tensors:
                 raise IndexError(f"Entry {name} already in debug_tensor!")
             self._debug_tensors[name] = x.clone()
-
-    def _update(self, *args, **kwargs):
-        pass
-
-    def update_requires_attn_weights(self) -> bool:
-        return False
+        # END DEBUG
 
     @property
-    def max_prefill_length(self) -> Optional[int]:
+    def max_prefill_length(self) -> int:
         return self.replay_log.max_prefill_length
 
     def _prefill(
@@ -518,8 +508,8 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ):
-        if self._next_token_pos != 0:
-            raise IndexError(f"token_pos = {self._next_token_pos}, can only be called if this is 0")
+        if self.input_pos != 0:
+            raise IndexError(f"input_pos = {self.input_pos}, can only be called if this is 0")
         if key.shape[0] != self.batch_size:
             raise ValueError(f"key.shape = {key.shape}, first dimension must be batch_size = {self.batch_size}")
         # Sanity checks
@@ -528,7 +518,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         assert key.shape == value.shape
         init_length = token_idx.shape[-1]
         assert key.shape[2] == init_length
-        assert self.max_prefill_length is None or init_length <= self.max_prefill_length  # Sanity check
         self._process_token_chunk(token_idx)
         self.kv_buffers = DefaultKeysAndValues(keys=key, values=value)
         self.current_length = init_length
@@ -545,14 +534,17 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 if name in self._debug_tensors:
                     raise IndexError(f"Entry {name} already in debug_tensor!")
                 self._debug_tensors[name] = node.detach().clone()
+        # END DEBUG
 
     def _process_token_chunk(
         self, token_idx: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], Optional[UpdateTokenPositionsGracePeriod]]:
         """
         Processes token chunk, comparing `token_idx` against the current chunk
-        in the replay log, and advancing `token_chunk_pos`. We also increase
-        `_next_token_pos` and `_token_positions`.
+        in the replay log, and advancing `token_chunk_pos`. We also update
+        `_token_positions`.
+
+        `_input_pos` is not modified here.
 
         Args:
             token_idx: Token chunk to process
@@ -573,16 +565,18 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             # scatter case
             index_kwargs = {"dtype": torch.int32, "device": self._device}
             index = self.replay_log.extract_index(
-                self._next_token_pos, num, **index_kwargs
+                self.input_pos, num, **index_kwargs
             ).detach()
             update_result = update_token_positions(
                 token_positions=self._token_positions,
-                next_token_pos=self._next_token_pos,
+                input_pos=self.input_pos,
                 num=num,
                 batch_size=self.batch_size,
                 index=index,
                 grace_period=self.grace_period,
                 next_grace_pos=self._next_grace_pos,
             )
-        self._next_token_pos += num
         return index, update_result
+
+    def _reset(self):
+        raise NotImplementedError("This type of cache is not meant to be reset")

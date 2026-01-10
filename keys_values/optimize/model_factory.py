@@ -25,6 +25,7 @@ from litgpt.lora import (
 )
 
 from keys_values.attention import MultiHeadSelfAttention
+from keys_values.kvcache.base import KVCache
 from keys_values.kvcache.stack_layers import CellBlocks
 from keys_values.lora import GPT as GPTLoRA, Block as BlockLoRA
 from keys_values.model import GPT as GPTFull, Block as BlockFull
@@ -390,14 +391,6 @@ class GPTShardOfBlocks(GPTFull):
         else:
             raise NotImplementedError("Cannot be used for this model shard")
 
-    def forward(
-        self,
-        idx: torch.Tensor,
-        input_pos: Optional[int] = None,
-        skip_lm_head: bool = False,
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
-        raise NotImplementedError("Must not call `forward` for this object")
-
     def get_gradients_as_flat(
         self, device: Optional[torch.device] = None,
     ) -> Dict[str, FlatVectors]:
@@ -424,6 +417,22 @@ class GPTShardOfBlocks(GPTFull):
                         getattr(self.transformer, kname)
                     ).get_gradients(device=device)
         return result
+
+    def forward(
+        self, idx: torch.Tensor, skip_lm_head: bool = False,
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        raise NotImplementedError("Must not call `forward` for this object")
+
+    def set_kv_caches(
+        self,
+        batch_size: int,
+        dtype: Optional[torch.dtype] = None,
+        max_seq_length: Optional[int] = None,
+    ):
+        raise NotImplementedError("Must not call `set_kv_caches` for this object")
+
+    def clone(self, device: Optional[torch.device] = None) -> GPTFull:
+        raise NotImplementedError("Must not call `clone` for this object")
 
 
 class GPTShardCellBlock(CellBlocks):

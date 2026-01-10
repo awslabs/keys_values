@@ -71,7 +71,6 @@ def compute_gradients_exact_backprop(
     for num, weight in zip(chunk_sizes, weight_per_chunk):
         output_chunk = gpt_model(
             input_ids[:, input_pos:(input_pos + num)],
-            input_pos=input_pos,
             skip_lm_head=not head_model.needs_logits(),
         )
         loss_part = compute_loss_for_chunk(

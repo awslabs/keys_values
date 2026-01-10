@@ -71,6 +71,11 @@ def expand_index(index: torch.Tensor, head_size: int) -> torch.Tensor:
     return index.unsqueeze(-1).expand(-1, -1, -1, head_size)
 
 
+def index_to_3d(index: torch.Tensor, dim0: int, dim1: int) -> torch.Tensor:
+    assert index.ndim == 1
+    return index.view(1, 1, -1).expand(dim0, dim1, -1)
+
+
 def need_repeat_interleave(n_head: int, n_query_groups: int) -> bool:
     return n_query_groups < n_head and FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA
 

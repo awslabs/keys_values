@@ -1448,7 +1448,7 @@ def test_model_kv_cache_amp():
     encoded = torch.arange(45).view(1, -1)
     model.set_kv_caches(batch_size=1)
     with torch.autocast("cpu", torch.bfloat16):
-        output = model(encoded, input_pos=0)
+        output = model(encoded)
     assert output.dtype is torch.bfloat16
 
 
@@ -1591,19 +1591,20 @@ def test_sdpa_choice_kv_cache(config):
                 sdpa_wrapper, SDPBackend.MATH,
             )
         with torch.backends.cuda.sdp_kernel(enable_mem_efficient=False):
-            model(x, input_pos=0)
+            model(x)
         for cache, reset in reset_meth:
             cache.mha.scaled_dot_product_attention = reset
 
     expected = (
         SDPBackend.EFFICIENT_ATTENTION if config.head_size % 8 == 0 and config.n_query_groups != 1 else SDPBackend.MATH
     )
+    model.reset()
     for cache, _ in reset_meth:
         cache.mha.scaled_dot_product_attention = partial(
             sdpa_wrapper, expected,
         )
     with torch.backends.cuda.sdp_kernel(enable_flash=False):
-        model(x, input_pos=0)
+        model(x)
     for cache, reset in reset_meth:
         cache.mha.scaled_dot_product_attention = reset
 

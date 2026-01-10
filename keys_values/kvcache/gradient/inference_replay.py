@@ -53,7 +53,7 @@ class InferenceReplayCacheMixin:
         self.token_chunk_pos = 0
 
     @property
-    def next_token_pos(self) -> Optional[int]:
+    def input_pos(self) -> int:
         raise NotImplementedError
 
     @property
@@ -76,11 +76,9 @@ class InferenceReplayCacheMixin:
     def n_query_groups(self) -> int:
         raise NotImplementedError
 
-    def next_positions(self, num: int) -> Optional[torch.Tensor]:
+    def next_positions(self, num: int) -> torch.Tensor:
         kwargs = {"dtype": torch.int64, "device": self.device}
-        if self.next_token_pos is None:
-            return None
-        elif self.current_length < self.cache_length:
+        if self.current_length < self.cache_length:
             assert num <= self.cache_length - self.current_length
             return torch.arange(
                 self.current_length,
@@ -88,9 +86,7 @@ class InferenceReplayCacheMixin:
                 **kwargs,
             ).view(1, 1, -1).expand(self.batch_size, self.n_query_groups, -1)
         else:
-            return self.replay_log.extract_index(
-                self.next_token_pos, num, **kwargs,
-            )
+            return self.replay_log.extract_index(self.input_pos, num, **kwargs)
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
         if self.replay_log is None:
@@ -147,8 +143,8 @@ class InferenceAttnWeightsReplayCache(
         self.replay_log = replay_log
 
     @property
-    def next_token_pos(self) -> Optional[int]:
-        return super().next_token_pos
+    def input_pos(self) -> int:
+        return super().input_pos
 
     @property
     def current_length(self) -> int:
@@ -170,7 +166,7 @@ class InferenceAttnWeightsReplayCache(
     def n_query_groups(self) -> int:
         return super().n_query_groups
 
-    def next_positions(self, num: int) -> Optional[torch.Tensor]:
+    def next_positions(self, num: int) -> torch.Tensor:
         return InferenceReplayCacheMixin.next_positions(self, num)
 
     def _update(self, *args, **kwargs):
@@ -229,8 +225,8 @@ class InferenceDenseReplayCache(
         self.replay_log = replay_log
 
     @property
-    def next_token_pos(self) -> Optional[int]:
-        return super().next_token_pos
+    def input_pos(self) -> int:
+        return super().input_pos
 
     @property
     def current_length(self) -> int:
@@ -252,7 +248,7 @@ class InferenceDenseReplayCache(
     def n_query_groups(self) -> int:
         return super().n_query_groups
 
-    def next_positions(self, num: int) -> Optional[torch.Tensor]:
+    def next_positions(self, num: int) -> torch.Tensor:
         return InferenceReplayCacheMixin.next_positions(self, num)
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
@@ -284,8 +280,8 @@ class InferenceLastRecentlyInsertedReplayCache(
         self.replay_log = replay_log
 
     @property
-    def next_token_pos(self) -> Optional[int]:
-        return super().next_token_pos
+    def input_pos(self) -> int:
+        return super().input_pos
 
     @property
     def current_length(self) -> int:
@@ -307,7 +303,7 @@ class InferenceLastRecentlyInsertedReplayCache(
     def n_query_groups(self) -> int:
         return super().n_query_groups
 
-    def next_positions(self, num: int) -> Optional[torch.Tensor]:
+    def next_positions(self, num: int) -> torch.Tensor:
         return InferenceReplayCacheMixin.next_positions(self, num)
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
@@ -343,8 +339,8 @@ def inference_replay_cache_factory(
         )
 
 
-def get_replay_logs(model: GPT) -> List[KVCacheReplayLog]:
-    kv_caches = [block.attn.kv_cache for block in model.transformer.h]
+def get_replay_logs(gpt_model: GPT) -> List[KVCacheReplayLog]:
+    kv_caches = gpt_model.get_kv_caches()
     if any(
         c is None or not isinstance(c, KVCacheWithBuffers)
         for c in kv_caches

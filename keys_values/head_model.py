@@ -58,7 +58,7 @@ class HeadModel(torch.nn.Module):
                 they align with `model_outputs` on the right. If `None`, we
                 just process `model_outputs` and return 0.
             input_pos: Token position of first entry in `model_outputs` along
-                the sequence. If `input_pos=0`, this starts a new loss
+                the sequence. If `input_pos == 0`, this starts a new loss
                 computation.
 
         Returns:

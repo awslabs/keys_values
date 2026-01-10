@@ -100,25 +100,24 @@ def main(
             prefill = None
             insert1 = None
             insert2 = None
+            for cache in caches:
+                cache.reset()
             with torch.no_grad():
                 for name, cache in zip(names, caches):
                     # Prefill (prepare)
-                    input_pos = 0
                     num = cache_length
                     if prefill is None:
                         prefill = random_args_cache_forward(
                             params, num, config.padded_vocab_size,
                         )
-                    cache(**prefill, input_pos=input_pos)
-                    input_pos += num
+                    cache(**prefill)
                     # Insert (prepare)
                     num = next_pos
                     if insert1 is None:
                         insert1 = random_args_cache_forward(
                             params, num, config.padded_vocab_size,
                         )
-                    cache(**insert1, input_pos=input_pos)
-                    input_pos += num
+                    cache(**insert1)
                     # Insert (measure)
                     num = chunk_size
                     if insert2 is None:
@@ -128,7 +127,7 @@ def main(
                     if on_gpu:
                         torch.cuda.current_stream().synchronize()
                     forward_time = time.perf_counter()
-                    y = cache(**insert2, input_pos=input_pos)
+                    y = cache(**insert2)
                     if on_gpu:
                         torch.cuda.current_stream().synchronize()
                     time_in_ms = (time.perf_counter() - forward_time) * 1000

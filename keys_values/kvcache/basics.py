@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 from typing import Optional, Tuple, Dict, Callable, List, Any
 
 import torch
@@ -32,6 +33,7 @@ from keys_values.kvcache.buffers import (
     positions_wrap_around,
 )
 from keys_values.kvcache.utils import bitsize_of, bits_for_torch_dtype
+from keys_values.utils import index_to_3d
 
 
 class KVCacheWithBuffers(DefaultKVCache):
@@ -182,7 +184,7 @@ class KVCacheWithBuffers(DefaultKVCache):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ):
-        raise NotImplementedError
+        raise NotImplementedError()
 
     def _forward(
         self,
@@ -206,7 +208,7 @@ class KVCacheWithBuffers(DefaultKVCache):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
-        raise NotImplementedError
+        raise NotImplementedError()
 
     def get_keys_values(self) -> Optional[KeysAndValues]:
         return self.kv_buffers.get_keys_values()
@@ -261,6 +263,27 @@ class KVCacheWithBuffers(DefaultKVCache):
             device = torch.get_default_device()
         return device
 
+    def _reset(self):
+        self.kv_buffers.reset()
+
+    def _base_kwargs_for_clone(self) -> Dict[str, Any]:
+        """
+        Supports :meth:`clone` implementations in subclasses.
+        Note that the copy created by :meth:`clone` uses the same `self.mha`
+        object (shallow copy).
+
+        Returns:
+            Keyword arguments for calling the constructor in :meth:`clone`
+
+        """
+        if self.kv_buffers.buffers_are_allocated:
+            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
+        result = super()._base_kwargs_for_clone()
+        for name in ("max_batch_size", "cache_length", "dtype"):
+            del result[name]
+        result["buffers"] = self.kv_buffers
+        return result
+
 
 class DenseKVCache(KVCacheWithBuffers):
     """
@@ -281,7 +304,6 @@ class DenseKVCache(KVCacheWithBuffers):
         **base_kwargs,
     ):
         super().__init__(config, buffers, block_idx, **base_kwargs)
-        self.next_position = None
         self._replay_log = None
 
     @staticmethod
@@ -306,15 +328,11 @@ class DenseKVCache(KVCacheWithBuffers):
         return DenseKVCache(config, buffers, block_idx, **base_kwargs)
 
     @property
-    def next_token_pos(self) -> Optional[int]:
-        return self.next_position
-
-    @property
     def max_tokens_forward(self) -> int:
-        return self.cache_length
+        return self.cache_length - self.input_pos
 
     @property
-    def max_prefill_length(self) -> Optional[int]:
+    def max_prefill_length(self) -> int:
         return self.cache_length
 
     def _forward_internal(
@@ -323,26 +341,17 @@ class DenseKVCache(KVCacheWithBuffers):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
-        if self.next_position is None:
-            raise IndexError("Cache needs to be initialized with 'prefill' before being used")
         num = key.shape[2]
-        np = self.next_position
-        if np + num > self.cache_length:
-            raise IndexError(
-                f"Cache has at most {self.cache_length - np} free slots, cannot add {num} entries")
-        self.next_position += num
         if self._replay_log is not None:
             if not isinstance(self._replay_log, DefaultKVCacheReplayLog):
                 raise IndexError("Cannot switch on replay logging in the middle of inference run. Call 'prefill'.")
             self._replay_log.append_token_chunk(token_idx)
+        np = self.input_pos
         return self.kv_buffers.forward(
             positions=(np, np + num),
             key=key,
             value=value,
         )
-
-    def _update(self, *args, **kwargs):
-        pass
 
     def _prefill_internal(
         self,
@@ -351,8 +360,6 @@ class DenseKVCache(KVCacheWithBuffers):
         token_idx: torch.Tensor,
     ):
         self.kv_buffers.prefill(key, value)
-        init_length = key.shape[2]
-        self.next_position = init_length
         if self._replay_log is not None:
             self._replay_log = DefaultKVCacheReplayLog(
                 token_chunks=[token_idx],
@@ -361,9 +368,13 @@ class DenseKVCache(KVCacheWithBuffers):
             )
 
     def token_positions(self) -> torch.Tensor:
-        return torch.arange(self.next_position, device=self.device).reshape(
-            1, 1, -1
-        ).expand(self.batch_size, self.n_query_groups, -1)
+        device = torch.get_default_device() if self.device is None else self.device
+
+        return index_to_3d(
+            torch.arange(self.input_pos, device=device),
+            self.batch_size,
+            self.n_query_groups,
+        )
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         return self.kv_buffers.size_estimate()
@@ -394,7 +405,7 @@ class DenseKVCache(KVCacheWithBuffers):
         return self._replay_log is not None
 
     def get_replay_log(self) -> Optional[KVCacheReplayLog]:
-        return self._replay_log
+        return copy.copy(self._replay_log)
 
     def clone(self) -> KVCache:
         """
@@ -405,14 +416,7 @@ class DenseKVCache(KVCacheWithBuffers):
         and remove it before returning to the original.
 
         """
-        if self.kv_buffers.buffers_are_allocated:
-            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        return DenseKVCache(
-            config=self.config,
-            buffers=self.kv_buffers,
-            block_idx=self.block_idx,
-            **self._base_kwargs_for_clone(),
-        )
+        return DenseKVCache(**self._base_kwargs_for_clone())
 
 
 class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
@@ -431,26 +435,26 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
         super().__init__(
             token_chunks,
             cache_length,
-            max_prefill_length=None,
+            max_prefill_length=cache_length,
             grace_period=0,
         )
         self._shape = (batch_size, n_query_groups)
 
     def extract_index(
         self,
-        token_pos: int,
+        input_pos: int,
         num: int,
         **kwargs,
     ) -> torch.Tensor:
         seq_length = self.__len__()
-        if num <= 0 or token_pos < 0 or token_pos > seq_length - num:
-            raise ValueError(f"token_pos = {token_pos}, num = {num}, seq_length = {seq_length}: Out of range")
-        if token_pos < self.cache_length:
-            raise ValueError(f"token_pos = {token_pos} must be >= {self.cache_length} = cache_length")
+        if num <= 0 or input_pos < 0 or input_pos > seq_length - num:
+            raise ValueError(f"token_pos = {input_pos}, num = {num}, seq_length = {seq_length}: Out of range")
+        if input_pos < self.cache_length:
+            raise ValueError(f"input_pos = {input_pos} must be >= {self.cache_length} = cache_length")
         device = kwargs.get("device", torch.get_default_device())
         return positions_wrap_around(
             num=num,
-            current=token_pos % self.cache_length,
+            current=input_pos % self.cache_length,
             start=0,
             end=self.cache_length,
             batch_size=self._shape[0],
@@ -486,7 +490,6 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             persistent=False,
         )
         self.next_position = None
-        self._next_token_pos = None
         self._replay_log = None
 
     @staticmethod
@@ -528,12 +531,8 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         return super()._parameter_names() + ["token_pos"]
 
     @property
-    def next_token_pos(self) -> Optional[int]:
-        return self._next_token_pos
-
-    @property
-    def max_prefill_length(self) -> Optional[int]:
-        return None  # This KV cache can be prefilled with any length
+    def max_prefill_length(self) -> int:
+        return self.cache_length
 
     @property
     def max_tokens_forward(self) -> int:
@@ -545,8 +544,6 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
-        if self.next_position is None:
-            raise IndexError("Cache needs to be initialized with 'prefill' before being used")
         num = key.shape[2]
         positions = positions_wrap_around(
             num=num,
@@ -565,7 +562,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         np = self.next_position
         num1 = min(num, self.cache_length - np)
         diff = num - num1
-        ntp = self._next_token_pos
+        ntp = self.input_pos
         self.token_pos[np:(np + num1)] = torch.arange(
             ntp, ntp + num1, device=self.device, dtype=torch.int
         )
@@ -578,11 +575,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             if not isinstance(self._replay_log, DefaultKVCacheReplayLog):
                 raise IndexError("Cannot switch on replay logging in the middle of inference run. Call 'prefill'.")
             self._replay_log.append_token_chunk(token_idx)
-        self._next_token_pos += num
         return k_and_v
-
-    def _update(self, *args, **kwargs):
-        pass
 
     def _prefill_internal(
         self,
@@ -591,15 +584,9 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         token_idx: torch.Tensor,
     ):
         init_length = key.shape[2]
-        eff_init_length = min(init_length, self.cache_length)
-        if eff_init_length < init_length:
-            key = key[:, :, -eff_init_length:, :]
-            value = value[:, :, -eff_init_length:, :]
         self.kv_buffers.prefill(key, value)
-        self._next_token_pos = init_length
-        self.next_position = eff_init_length % self.cache_length
-        self.token_pos[:eff_init_length] = torch.arange(
-            init_length - eff_init_length,
+        self.next_position = init_length % self.cache_length
+        self.token_pos[:init_length] = torch.arange(
             init_length,
             dtype=self.token_pos.dtype,
             device=self.device,
@@ -613,8 +600,10 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             )
 
     def token_positions(self) -> torch.Tensor:
-        return self.token_pos[:self.current_length].reshape(1, 1, -1).expand(
-            self.batch_size, self.n_query_groups, -1
+        return index_to_3d(
+            self.token_pos[:self.current_length],
+            self.batch_size,
+            self.n_query_groups,
         )
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
@@ -650,14 +639,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         return self._replay_log is not None
 
     def get_replay_log(self) -> Optional[KVCacheReplayLog]:
-        return self._replay_log
+        return copy.copy(self._replay_log)
 
     def clone(self) -> KVCache:
-        if self.kv_buffers.buffers_are_allocated:
-            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        return LastRecentlyInsertedKVCache(
-            config=self.config,
-            buffers=self.kv_buffers,
-            block_idx=self.block_idx,
-            **self._base_kwargs_for_clone(),
-        )
+        return LastRecentlyInsertedKVCache(**self._base_kwargs_for_clone())

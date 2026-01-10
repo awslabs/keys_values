@@ -93,6 +93,7 @@ class LinearPositionEncoding(PositionEncoding):
         self,
         config: Config,
         device: Optional[torch.device] = None,
+        do_set_context_width: bool = True,
     ):
         """
         Fixed scale factor in `config.rope_adjustments['factor']`, fixed
@@ -114,17 +115,19 @@ class LinearPositionEncoding(PositionEncoding):
             if self._fixed_factor is None:
                 raise ValueError("config.rope_adjustments must include 'factor'")
         self.train_context_width = config.block_size
-        self._context_width = config.block_size
         if device is None:
             device = torch.get_default_device()
         self._device = device
         self._cos = None
         self._sin = None
         if config.attention_scores_scalar is not None:
-            self._sdpa_scale_factor = 1.0 / math.sqrt(config.attention_scores_scalar)
+            temp = config.attention_scores_scalar
         else:
-            self._sdpa_scale_factor = 1.0 / math.sqrt(config.head_size)
-        self.set_context_width(self._context_width)
+            temp = config.head_size
+        self._sdpa_scale_factor = 1.0 / math.sqrt(temp)
+        self._context_width = config.block_size
+        if do_set_context_width:
+            self.set_context_width(self._context_width)
 
     @property
     def context_width(self) -> int:
@@ -149,6 +152,9 @@ class LinearPositionEncoding(PositionEncoding):
         else:
             return self._fixed_factor
 
+    def _precompute_extra_args(self) -> Dict[str, Any]:
+        return {"factor": self._factor()}
+
     def _precompute(self):
         """
         The state consists of `_cos`, `_sin`, with shapes
@@ -156,15 +162,12 @@ class LinearPositionEncoding(PositionEncoding):
         the latter if `rope_indices` is given.
 
         """
-        self._precompute_internal({"factor": self._factor()})
-
-    def _precompute_internal(self, extra_config: Dict[str, Any]):
         self._cos, self._sin = build_rope_cache(
             seq_len=self.context_width,
             n_elem=self.n_elem,
             device=self.device,
             base=self.rope_base,
-            extra_config=extra_config,
+            extra_config=self._precompute_extra_args(),
             rope_local_base_freq=self.rope_local_base_freq,
         )
 
@@ -219,22 +222,15 @@ class AdjustedPositionEncoding(LinearPositionEncoding):
             config (Config): Configuration of model
 
         """
-        self.rope_base = config.rope_base
-        self.head_size = config.head_size
-        self.n_elem = config.rope_n_elem
-        self.rope_local_base_freq = config.rope_local_base_freq
-        self.rope_indices = config.rope_indices
+        super().__init__(config, device, do_set_context_width=False)
         if config.rope_adjustments is None:
             raise ValueError("config.rope_adjustments must be given")
-        alpha = config.rope_adjustments.get("low_freq_factor")
-        beta = config.rope_adjustments.get("high_freq_factor")
         self.train_context_width = config.rope_adjustments.get("original_max_seq_len")
         if self.train_context_width is None:
             raise ValueError("Must have config.rope_adjustments['original_max_seq_len']")
-        self._fixed_factor = config.rope_adjustments.get("factor")
-        if self._fixed_factor is None:
-            raise ValueError("Must have config.rope_adjustments['factor']")
-        self._context_width = int(self._fixed_factor * self.train_context_width)
+        assert self._fixed_factor is not None  # Sanity check
+        alpha = config.rope_adjustments.get("low_freq_factor")
+        beta = config.rope_adjustments.get("high_freq_factor")
         if alpha is None:
             alpha = DEFAULT_YARN_ALPHA
         if beta is None:
@@ -243,46 +239,21 @@ class AdjustedPositionEncoding(LinearPositionEncoding):
             raise ValueError(f"alpha = {alpha}, beta = {beta}: Must be 0 < alpha < beta")
         self.alpha = alpha
         self.beta = beta
-        if device is None:
-            device = torch.get_default_device()
-        self._device = device
-        self._cos = None
-        self._sin = None
         if config.attention_scores_scalar is not None:
             temp = config.attention_scores_scalar
         else:
             temp = config.head_size
         self._sdpa_scale_factor = 1.0 / math.sqrt(temp)
+        self._context_width = int(self._fixed_factor * self.train_context_width)
         self.set_context_width(self._context_width)
 
-    @property
-    def context_width(self) -> int:
-        return self._context_width
-
-    def set_context_width(self, width: int):
-        if width <= 0:
-            raise ValueError(f"width = {width}: Must be positive")
-        self._context_width = width
-        self._precompute()
-
-    def sdpa_scale_factor(self) -> float:
-        return self._sdpa_scale_factor
-
-    @property
-    def device(self) -> Optional[torch.device]:
-        return self._device
-
-    def _factor(self) -> float:
-        return self._fixed_factor
-
-    def _precompute(self):
-        extra_config = {
+    def _precompute_extra_args(self) -> Dict[str, Any]:
+        return {
+            **super()._precompute_extra_args(),
             "original_max_seq_len": self.train_context_width,
             "low_freq_factor": self.alpha,
             "high_freq_factor": self.beta,
-            "factor": self._factor(),
         }
-        self._precompute_internal(extra_config)
 
 
 class YaRNPositionEncoding(LinearPositionEncoding):
@@ -314,11 +285,8 @@ class YaRNPositionEncoding(LinearPositionEncoding):
             beta (float): YaRN parameter, must have `0 < alpha < beta`
 
         """
-        self.rope_base = config.rope_base
+        super().__init__(config, device, do_set_context_width=False)
         self.head_size = config.head_size
-        self.n_elem = config.rope_n_elem
-        self.rope_local_base_freq = config.rope_local_base_freq
-        self.rope_indices = config.rope_indices
         if config.attention_scores_scalar is not None:
             print(
                 "You have set config.attention_scores_scalar. This is not "
@@ -347,13 +315,10 @@ class YaRNPositionEncoding(LinearPositionEncoding):
                     "initialize context_width, but will be updated with each "
                     "call of set_context_width."
                 )
-        if train_context_width is None:
-            train_context_width = config.block_size
-        self.train_context_width = train_context_width
-        if factor is None:
-            self._context_width = config.block_size
-        else:
-            self._context_width = int(factor * train_context_width)
+        if train_context_width is not None:
+            self.train_context_width = train_context_width
+        if factor is not None:
+            self._context_width = int(factor * self.train_context_width)
         if alpha is None:
             alpha = DEFAULT_YARN_ALPHA
         if beta is None:
@@ -362,42 +327,20 @@ class YaRNPositionEncoding(LinearPositionEncoding):
             raise ValueError(f"alpha = {alpha}, beta = {beta}: Must be 0 < alpha < beta")
         self.alpha = alpha
         self.beta = beta
-        if device is None:
-            device = torch.get_default_device()
-        self._device = device
-        self._cos = None
-        self._sin = None
         self._sdpa_scale_factor = None
+        self._fixed_factor = None
         self.set_context_width(self._context_width)
 
-    @property
-    def context_width(self) -> int:
-        return self._context_width
-
-    def set_context_width(self, width: int):
-        if width <= 0:
-            raise ValueError(f"width = {width}: Must be positive")
-        self._context_width = width
-        self._precompute()
-
-    def sdpa_scale_factor(self) -> float:
-        return self._sdpa_scale_factor
-
-    @property
-    def device(self) -> Optional[torch.device]:
-        return self._device
-
-    def _factor(self) -> float:
-        return max(1.0, self.context_width / self.train_context_width)
-
-    def _precompute(self):
-        extra_config = {
+    def _precompute_extra_args(self) -> Dict[str, Any]:
+        return {
+            **super()._precompute_extra_args(),
             "original_max_seq_len": self.train_context_width,
             "low_freq_factor": self.alpha,
             "high_freq_factor": self.beta,
-            "factor": self._factor(),
         }
-        self._precompute_internal(extra_config)
+
+    def _precompute(self):
+        super()._precompute()
         sqrt_inv_t = 0.1 * math.log(self._factor()) + 1.0
         self._sdpa_scale_factor = sqrt_inv_t * sqrt_inv_t / math.sqrt(self.head_size)
 

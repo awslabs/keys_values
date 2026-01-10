@@ -159,7 +159,8 @@ class H2OKVCache(AttnWeightsKVCache):
                     device=self.device
                 ).expand(*token_pos.shape)
                 token_pos = token_pos.maximum(other)
-                denom = (self.next_token_pos - token_pos).to(torch.float32)
+                # Note: `input_pos` has been increased already
+                denom = (self.input_pos - token_pos).to(torch.float32)
                 scores = scores / denom
             # Subclasses may modify the scores:
             scores = self._modify_scores(scores)
@@ -220,14 +221,7 @@ class H2OKVCache(AttnWeightsKVCache):
         return sz_total + sz_sc, dict(dct_sz, scores=sz_sc)
 
     def clone(self) -> KVCache:
-        if self.kv_buffers.buffers_are_allocated:
-            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        return H2OKVCache(
-            config=self.config,
-            buffers=self.kv_buffers,
-            block_idx=self.block_idx,
-            **self._base_kwargs_for_clone(),
-        )
+        return H2OKVCache(**self._base_kwargs_for_clone())
 
     def _base_kwargs_for_clone(self) -> Dict[str, Any]:
         base_kwargs = super()._base_kwargs_for_clone()
@@ -429,14 +423,7 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         return self.kv_buffers
 
     def clone(self) -> KVCache:
-        if self.kv_buffers.buffers_are_allocated:
-            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        return VLengthH2OKVCache(
-            config=self.config,
-            buffers=self.kv_buffers,
-            block_idx=self.block_idx,
-            **self._base_kwargs_for_clone(),
-        )
+        return VLengthH2OKVCache(**self._base_kwargs_for_clone())
 
 
 class H2OOriginalKVCache(AttnWeightsKVCache):
@@ -549,11 +536,4 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
         return super()._parameter_names() + ["scores"]
 
     def clone(self) -> KVCache:
-        if self.kv_buffers.buffers_are_allocated:
-            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        return H2OOriginalKVCache(
-            config=self.config,
-            buffers=self.kv_buffers,
-            block_idx=self.block_idx,
-            **self._base_kwargs_for_clone(),
-        )
+        return H2OOriginalKVCache(**self._base_kwargs_for_clone())

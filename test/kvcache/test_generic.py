@@ -27,11 +27,11 @@ from keys_values.kvcache.quantize.bitsandbytes import determine_blocksize
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     tensor_is_simple,
-    random_keys_values,
-    random_tensor,
     cache_name_gpu_only,
     cache_names_and_devices,
     product_with_devices,
+    random_args_cache_forward,
+    range_from_args,
 )
 
 
@@ -68,33 +68,15 @@ def test_store_retrieve(device, name, kwargs):
         num_insert = random.randint(cache_length // 2, cache_length)
     else:
         num_insert = random.randint(cache_length, 3 * cache_length)
-    max_prefill_length = kv_cache.max_prefill_length
-    num_prefill = random.randint(num_insert // 3, int(num_insert * 0.75))
-    if max_prefill_length is not None and num_prefill > max_prefill_length:
-        num_prefill = max_prefill_length
+    num_prefill = min(
+        random.randint(num_insert // 3, int(num_insert * 0.75)),
+        kv_cache.max_prefill_length,
+    )
 
-    keys, values = random_keys_values(params, num=num_insert)
-    queries = random_tensor(params, num=num_insert, is_query=True)
-    token_idx = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(params.max_batch_size, num_insert),
-    )
-    kv_cache(
-        query=queries[:, :, :num_prefill, :],
-        key=keys[:, :, :num_prefill, :],
-        value=values[:, :, :num_prefill, :],
-        token_idx=token_idx[:, :num_prefill],
-        input_pos=0,
-    )
+    data = random_args_cache_forward(params, num_insert, vocab_size)
+    kv_cache(**range_from_args(data, 0, num_prefill))
     for pos in range(num_prefill, num_insert):
-        kv_cache(
-            query=queries[:, :, pos:(pos + 1), :],
-            key=keys[:, :, pos:(pos + 1), :],
-            value=values[:, :, pos:(pos + 1), :],
-            token_idx=token_idx[:, pos:(pos + 1)],
-            input_pos=pos,
-        )
+        kv_cache(**range_from_args(data, pos, pos + 1))
 
     current_length = min(cache_length, num_insert)
     assert kv_cache.current_length == current_length
@@ -113,8 +95,8 @@ def test_store_retrieve(device, name, kwargs):
     for pos in range(current_length):
         index = token_positions[:, :, pos][:, :, None, None].expand(-1, -1, 1, params.head_size)
         # `index[i, j, 0, k] = next_position[i, j]`
-        k_expected = keys.gather(-2, index).squeeze(-2)
-        v_expected = values.gather(-2, index).squeeze(-2)
+        k_expected = data["key"].gather(-2, index).squeeze(-2)
+        v_expected = data["value"].gather(-2, index).squeeze(-2)
         torch.testing.assert_close(
             k_expected, keys_and_values.keys()[:, :, pos, :]
         )
@@ -143,35 +125,18 @@ def test_prefill(name, device):
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params)
 
-    keys, values = random_keys_values(params, num=cache_length)
-    queries = random_tensor(params, num=cache_length, is_query=True)
-    token_idx = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(params.max_batch_size, cache_length),
-    )
+    data = random_args_cache_forward(params, cache_length, vocab_size)
     keys_cached = []
     values_cached = []
-    max_prefill_length = kv_cache.max_prefill_length
     for _ in range(num_compares):
-        num_prefill = random.randint(cache_length // 8, cache_length)
-        if max_prefill_length is not None and num_prefill > max_prefill_length:
-            num_prefill = max_prefill_length
-        kv_cache(
-            query=queries[:, :, :num_prefill, :],
-            key=keys[:, :, :num_prefill, :],
-            value=values[:, :, :num_prefill, :],
-            token_idx=token_idx[:, :num_prefill],
-            input_pos=0,
+        kv_cache.reset()
+        num_prefill = min(
+            random.randint(cache_length // 8, cache_length),
+            kv_cache.max_prefill_length,
         )
+        kv_cache(**range_from_args(data, 0, num_prefill))
         for pos in range(num_prefill, cache_length):
-            kv_cache(
-                query=queries[:, :, pos:(pos + 1), :],
-                key=keys[:, :, pos:(pos + 1), :],
-                value=values[:, :, pos:(pos + 1), :],
-                token_idx=token_idx[:, pos:(pos + 1)],
-                input_pos=pos,
-            )
+            kv_cache(**range_from_args(data, pos, pos + 1))
         keys_and_values = kv_cache.get_keys_values()
         if keys_and_values is not None:
             keys_cached.append(keys_and_values.keys().clone())
@@ -289,22 +254,10 @@ def test_size_estimate(
         ]
 
         # Need to prefill caches so that `size_estimate` works
-        keys, values = random_keys_values(params, num=cache_length)
-        queries = random_tensor(params, num=cache_length, is_query=True)
-        token_idx = torch.randint(
-            low=0,
-            high=vocab_size,
-            size=(params.max_batch_size, cache_length),
-        )
+        data = random_args_cache_forward(params, cache_length, vocab_size)
         max_prefill_length = kv_caches[0].max_prefill_length
         for kv_cache in kv_caches:
-            kv_cache(
-                query=queries[:, :, :max_prefill_length, :],
-                key=keys[:, :, :max_prefill_length, :],
-                value=values[:, :, :max_prefill_length, :],
-                token_idx=token_idx[:, :max_prefill_length],
-                input_pos=0,
-            )
+            kv_cache(**range_from_args(data, 0, max_prefill_length))
         num_bits_total1, bits_by_part1 = KVCacheFactory.size_estimate(kv_caches)
         num_bits_total2, bits_by_part2 = KVCacheFactory.size_estimate_apriori(
             name=name,
