@@ -25,6 +25,7 @@ import pytest
 import torch
 import yaml
 
+from keys_values.long_context import LongContextInferenceModel
 from litgpt.config import Config
 
 import keys_values.generate.base as generate
@@ -53,11 +54,15 @@ def test_generate():
         n_head=4,
         n_embd=8,
     )
-    model = GPT(config)
+    gpt_model = GPT(config)
     max_new_tokens = 20
-    model.max_seq_length = T + max_new_tokens
-    model.set_kv_caches(batch_size=1)
-
+    gpt_model.max_seq_length = T + max_new_tokens
+    gpt_model.set_kv_caches(batch_size=1)
+    model = LongContextInferenceModel(
+        gpt_model=gpt_model,
+        head_model=None,
+        chunk_size=16,
+    )
     multinomial_results = []
 
     def multinomial(*args, **kwargs):
@@ -138,7 +143,6 @@ def test_main(fake_checkpoint_dir, monkeypatch, tensor_like):
     expected_call = call(
         model=ANY,
         prompt=tensor_like,
-        prompt_chunksize=16,
         max_returned_tokens=len_return_value,
         **sample_kwargs,
         eos_id=tokenizer_mock.return_value.eos_id,
@@ -193,9 +197,14 @@ def test_generate_different_results_with_different_top_p():
         n_embd=8,
         rotary_percentage=1,
     )
-    model = GPT(config)
-    model.max_seq_length = 50
-    model.set_kv_caches(batch_size=1)
+    gpt_model = GPT(config)
+    gpt_model.max_seq_length = 50
+    gpt_model.set_kv_caches(batch_size=1)
+    model = LongContextInferenceModel(
+        gpt_model=gpt_model,
+        head_model=None,
+        chunk_size=16,
+    )
 
     torch.manual_seed(123)
     input_idx = torch.randint(10, size=(1,))

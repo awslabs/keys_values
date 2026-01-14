@@ -248,6 +248,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         single_tokens_for_targets: bool = False,
         verbose: VerbosityLevels = VerbosityLevels.SOME,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        set_max_seq_length: bool = True,
         debug_single_cell_per_row: bool = False,
         qname: Optional[str] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
@@ -293,6 +294,13 @@ class LongContextGradientModel(LongContextInferenceModel):
                 information
             tmp_array_limit_gb: Size limit for temporary buffers in device
                 memory, for forward computations
+            set_max_seq_length: If `True`, we set `gpt_model.max_seq_length` to
+                the length of `input_ids` with each call of :meth:`forward`
+                for which `targets is not None`. The value is passed through
+                to position encoding. If `False`, this is not done, and
+                position encoding is not adjusted to the length of each input
+                batch. If :meth:`forward` is called with `targets=None`, then
+                `gpt_model.max_seq_length` is not changed in any case.
             debug_single_cell_per_row: Internal option, used for unit testing.
             qname: Determines how checkpoints are stored. See
                 :const:`SUPPORTED_QUANTIZERS`.
@@ -318,6 +326,11 @@ class LongContextGradientModel(LongContextInferenceModel):
                 to the cache length is recommended.
 
         """
+        if head_model is None:
+            raise ValueError(
+                "head_model must be given for gradient computations. Use "
+                "'LongContextInferenceModel' for inference only"
+            )
         super().__init__(
             gpt_model,
             head_model,
@@ -326,6 +339,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             chunks_per_cell_multiplier,
             verbose,
             tmp_array_limit_gb,
+            set_max_seq_length,
             debug_single_cell_per_row,
             debug_store_intermediates,
         )
@@ -450,7 +464,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 input_ids, targets, scale_factor,
             )
         else:
-            loss_value =  self._forward_only(
+            loss_value = self._forward_only(
                 input_ids, targets, scale_factor,
             )
         return loss_value

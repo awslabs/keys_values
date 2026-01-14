@@ -142,7 +142,7 @@ class GradientAccumulator:
             train_cache_kwargs = train_cache_kwargs.copy()
             self._debug_intermediates = train_cache_kwargs.pop("debug_intermediates")
         self._train_cache_kwargs = train_cache_kwargs
-        self._debug_tensors = debug_tensors  # DEBUG
+        self._debug_tensors = debug_tensors
 
     def annotation_usage_logs(self) -> Dict[int, AnnotationUsageLog]:
         return self._annotation_usage_logs
@@ -213,7 +213,6 @@ class GradientAccumulator:
         Note: This assumption relies on using a 16-bit dtype for weights. If
         32-bit weights are used, up to 2x this number of bytes could be used.
 
-        TODO: Could make this precise by knowing the dtype of weights
         """
         bytes_per_weight = 2  # Works for 16-bit weights
         dim = self.config.padded_vocab_size if head_model_needs_logits else self.config.n_embd
@@ -596,14 +595,12 @@ class GradientAccumulator:
         kv_caches_copy = model_part.get_kv_caches()
         model_part.assign_kv_caches(infer_replay_caches)
         try:
-            # DEBUG
             if self._debug_tensors is not None:
                 for layer_idx, checkpoints in zip(
                     range(model_part.first_layer_idx, model_part.first_layer_idx + model_part.num_layers),
                     self._kv_cache_checkpoints[:num_layers],
                 ):
                     checkpoints.set_debug_layer_idx(layer_idx)
-            # END DEBUG
 
             # Run forward in order to compute checkpoints
             with torch.no_grad():

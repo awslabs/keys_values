@@ -648,13 +648,6 @@ def filter_and_transform(
         min_length = test_results[0]["num_tokens_instruction"]
         max_length = test_results[-1]["num_tokens_instruction"]
         print(f"Test dataset has {len(test_results)} records, token lengths between {min_length} and {max_length}")
-        # DEBUG
-        #prefix_len = len(tokenizer.encode("\n".join(PROMPTLINES_PREFIX) + "\n"))
-        #test_results = [
-        #    dict(entry, prefix_len=prefix_len)
-        #    for entry in test_results
-        #]
-        # END DEBUG
     else:
         test_results = None
     if seq_lengths is None:

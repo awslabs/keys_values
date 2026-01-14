@@ -1012,8 +1012,6 @@ class CellComputationAutogradHooks(AutogradHooks):
             self._next_id += 1
         return new_id
 
-    # TODO: Do we need to protect `self._node_annotations.nodes` against
-    # multi-threaded access?
     def _match_annotations(
         self, flush_pack_args: bool = False,
     ) -> Optional[int]:

@@ -40,10 +40,6 @@ class ArraysForCleanup:
     The original "solution" proposed in the GitHub issue does not work for
     me, it affects too many tensors, not just those stored in the graph.
 
-    TODO: At the moment, using this with the autograd hooks and
-    :func:`protect_named_params_buffers_of_model` passing in the model
-    still leads to memory leakage. Needs more investigation.
-
     """
     def __init__(
         self,
@@ -64,7 +60,6 @@ class ArraysForCleanup:
     def add(self, x: Any):
         if isinstance(x, torch.Tensor):
             id_x = storage_id(x)
-            #if id_x not in self._arrays:  # DEBUG
             if id_x not in self._arrays and id_x not in self._protected_ids:
                 self._arrays[id_x] = x
                 self._num += 1
@@ -80,16 +75,6 @@ class ArraysForCleanup:
         if verbose:
             stats = self.stats()
         for array in self._arrays.values():
-            # DEBUG:
-            #id_x = storage_id(array)
-            #is_protected = id_x in self._protected_ids
-            #text = f"{id_x}: {getrefcount(array)}"
-            #if is_protected:
-            #    if isinstance(self._protected_ids, set):
-            #        text += " (protected)"
-            #    else:
-            #        text += f" (protected: {self._protected_ids[id_x]})"
-            #print(text)
             array.grad = None
             array.storage().resize_(0)
         self._arrays = dict()

@@ -137,10 +137,6 @@ class KVCache(torch.nn.Module):
         self.n_head = config.n_head
         self._dtype = dtype
         self.block_idx = block_idx
-        # TODO: Remove once HuggingFace bug is fixed
-        # https://github.com/huggingface/transformers/issues/35233
-        # https://github.com/huggingface/transformers/pull/35901
-        self._work_around_hf_bug = config.rope_n_elem == 1
 
     @property
     def device(self) -> Optional[torch.device]:
@@ -216,7 +212,7 @@ class KVCache(torch.nn.Module):
           typical prefill size is much larger than `num` in update, and device
           memory is much more of a concern.
         * Update (`input_pos > 0`): Continues a generation loop (or processing
-          of large prompt). The length must be `num <= max_forward_length`.
+          of large prompt). The length must be `num <= max_forward_length()`.
 
         If the cache makes eviction decisions based on scores which require
         attention weights, scores for the next :meth:`forward` call need to
@@ -232,7 +228,7 @@ class KVCache(torch.nn.Module):
         Args:
             query: New queries,
                 `(batch_size, n_query_groups, num, head_size)`. Here,
-                `num <= max_forward_length` if `input_pos > 0`, and
+                `num <= max_forward_length()` if `input_pos > 0`, and
                 `num <= max_prefill_length` if `input_pos == 0`. Must be
                 position encoded.
             key: New keys, `(batch_size, n_query_groups, num, head_size)`.
@@ -258,11 +254,10 @@ class KVCache(torch.nn.Module):
         """
         raise NotImplementedError()
 
-    @property
     def max_forward_length(self) -> int:
         """
         Note that this limit may change during the course of the generation
-        for certain caches. Also, `max_forward_length <= max_prefill_length`.
+        for certain caches. Also, `max_forward_length() <= max_prefill_length`.
 
         Returns:
             Maximum sequence length for `key`, `value` tensors passed to
@@ -337,6 +332,18 @@ class KVCache(torch.nn.Module):
         Resets the cache so that `input_pos == 0` afterwards. Needs to be
         called before the cache can be used for a new sequence. The next
         recent :meth:`forward` call after :meth:`reset` is the prefill call.
+
+        """
+        raise NotImplementedError()
+
+    def set_seq_length(self, seq_length: int) -> None:
+        """
+        Elements of a KV cache may depend on the current sequence length, or
+        the maximum sequence length (for example, the position encoding).
+        This method is called once a new sequence (batch) is processed.
+
+        Args:
+            seq_length: New sequence length
 
         """
         raise NotImplementedError()
@@ -465,8 +472,8 @@ class DefaultKVCache(KVCache):
         else:
             if batch_size != self.batch_size:
                 raise ValueError(f"query.shape[0] = {batch_size} != batch_size = {self.batch_size}")
-            if not (1 <= num <= self.max_forward_length):
-                raise ValueError(f"query.shape[2] = {num}, must be in [1, {self.max_forward_length}]")
+            if not (1 <= num <= self.max_forward_length()):
+                raise ValueError(f"query.shape[2] = {num}, must be in [1, {self.max_forward_length()}]")
         q_shape = (batch_size, self.n_head, num, self.head_size)
         if query.shape != q_shape:
             raise ValueError(f"query.shape = {query.shape}, must be {q_shape}")
@@ -597,7 +604,7 @@ class DefaultKVCache(KVCache):
 
         Args:
             key: New keys, `(batch_size, n_query_groups, num, head_size)`,
-                where `1 <= num <= max_forward_length`
+                where `1 <= num <= max_forward_length()`
             value: New values, `(batch_size, n_query_groups, num, head_size)`
             token_idx: Token indices of input sequence, `(batch_size, num)`.
 
@@ -672,6 +679,9 @@ class DefaultKVCache(KVCache):
     @property
     def max_prefill_length(self) -> int:
         return self.cache_length  # Default
+
+    def set_seq_length(self, seq_length: int) -> None:
+        self.mha.set_seq_length(seq_length)
 
 
 class KVCacheReplayLog:

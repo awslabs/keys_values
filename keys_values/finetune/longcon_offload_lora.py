@@ -79,6 +79,7 @@ from keys_values.finetune.utils import (
     print_with_rank_and_timestamp,
     print_message,
     check_kv_cache,
+    adapt_requires_grad,
 )
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
@@ -230,7 +231,7 @@ def setup(
             - 1: Only record gradient computations (after initial forward). For
                 each update, we store one snapshot file per row of cells being
                 processed.
-            - 2: Special case (DEBUG)
+            - 2: Special case
             - 3: One snapshot file during initial validation
             Defaults to 0.
         record_gpu_memory_period: Only if `record_gpu_memory_snapshots` is used.
@@ -309,7 +310,7 @@ def setup(
     )
 
     precision = precision or get_default_supported_precision(training=True)
-    # TODO: Currently not used!
+    # Currently not used:
     logger = choose_logger(
         logger_name,
         out_dir,
@@ -440,6 +441,8 @@ def main(
             **head_model_kwargs,
         )
     gpt_model = gpt_model.to(optim_device)
+    mark_only_lora_as_trainable(gpt_model)
+    adapt_requires_grad(gpt_model, head_model)
     batch_size = train.micro_batch_size
     if eval.micro_batch_size is not None:
         batch_size = max(batch_size, eval.micro_batch_size)
@@ -456,7 +459,6 @@ def main(
         profile_parts=profile_parts,
         cpu_offload_device=device,
     )
-    mark_only_lora_as_trainable(model.gpt_model)
 
     num_trainable_params = num_parameters(model, requires_grad=True)
     print_message(f"\nNumber of trainable parameters: {num_trainable_params:,}")
@@ -820,7 +822,6 @@ def fit(
                 )
             else:
                 generate_example_kwargs = None
-            # TODO: Fix bug in generation!
             valid_model = model.copy_model_for_evaluation()
             metrics = validate_and_all_reduce(
                 model=valid_model,

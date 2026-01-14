@@ -220,7 +220,6 @@ def main(
         eos_id=tokenizer.eos_id,
         ignore_index=ignore_index,
     )
-    print(f"\ntokenizer.eos_id = {tokenizer.eos_id}\n")  # DEBUG!
 
     fabric.seed_everything(seed)  # same seed for every process to init model (FSDP)
 

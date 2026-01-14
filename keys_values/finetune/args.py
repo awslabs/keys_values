@@ -64,8 +64,8 @@ class KVCacheArgs:
             dtype. The default is delayed allocation with first usage
 
     """
-    name: str  # TODO: Different per layer
-    cache_length: int  # TODO: Different per layer
+    name: str
+    cache_length: int
     chunk_size: int = 16
     cache_kwargs: Optional[Dict[str, Any]] = None
     randomize_chunk_sizes: bool = False

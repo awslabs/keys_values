@@ -352,7 +352,6 @@ class DenseKVCache(KVCacheWithBuffers):
         )
         return DenseKVCache(config, buffers, block_idx, **base_kwargs)
 
-    @property
     def max_forward_length(self) -> int:
         return self.cache_length - self.input_pos
 
@@ -544,7 +543,6 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     def _parameter_names(cls) -> List[str]:
         return super()._parameter_names() + ["token_pos"]
 
-    @property
     def max_forward_length(self) -> int:
         return self.cache_length
 

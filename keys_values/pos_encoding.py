@@ -181,7 +181,7 @@ class LinearPositionEncoding(PositionEncoding):
             raise ValueError(f"x.shape = {x.shape}, must be at least 2D, and last dimension must be {self.n_elem}")
         x_len = x.shape[-2]
         if input_pos < 0 or input_pos + x_len > self.context_width:
-            raise ValueError(f"input_pos = {input_pos}, x_len = {x_len}, must have 0 <= input_pos, input_pos + x_len <= {self.context_width}")
+            raise ValueError(f"input_pos = {input_pos}, x_len = {x_len} (x.shape = {x.shape}), must have 0 <= input_pos, input_pos + x_len <= {self.context_width}")
         if x.device != self._cos.device:
             self._device = x.device
             self._cos = self._cos.to(device=self._device)

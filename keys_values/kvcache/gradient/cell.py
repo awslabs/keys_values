@@ -135,12 +135,10 @@ class CellComputation(nn.Module):
         self.replay_logs = replay_logs
         self.batch_size = batch_size
         self._debug_intermediates = cache_kwargs.get("debug_intermediates")
-        # DEBUG:
         if self._debug_intermediates is not None:
             self._debug_intermediates, self._name_prefix = self._debug_intermediates
         else:
             self._name_prefix = None
-        # END DEBUG
         # Arguments for `TrainingAttnWeightsReplayCache` cache objects.
         kwargs = dict(
             cache_kwargs,
@@ -177,7 +175,7 @@ class CellComputation(nn.Module):
             )
         )
         self._use_new_cache = use_new_cache
-        self._debug_tensors = debug_tensors  # DEBUG
+        self._debug_tensors = debug_tensors
 
     @staticmethod
     def check_args(
@@ -335,12 +333,10 @@ class CellComputation(nn.Module):
                 debug_intermediates=self._debug_intermediates,
                 name_prefix=self._name_prefix,
             )
-            # DEBUG:
             if self.autograd_hooks is not None:
                 largest_shape = self.autograd_hooks.largest_shape()
                 if largest_shape is not None:
                     print(f"Largest node in autograd hook: shape={largest_shape.shape}, numel={largest_shape.numel} [{largest_shape.size_in_mb()} MB], count={largest_shape.count}")
-            # END DEBUG
             # Assemble return arguments
             outputs = torch.cat(output_parts, dim=1)
             k_buffers = []

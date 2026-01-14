@@ -233,11 +233,6 @@ def _wrapped_collate_fn(
     task = next(iter(tasks))
     orig_collated_samples = orig_collate_fn(samples)
     orig_idxs = [elem[ORIG_IDX_NAME] for elem in samples]
-    # DEBUG
-    #print(f"*** evaluation._wrapped_collate_fn: {orig_idxs} ({task})")
-    #offset = samples[0]["prefix_len"]
-    #print(orig_collated_samples["input_ids"][:, offset:(offset + 15)])
-    # END DEBUG
     return {
         **orig_collated_samples,
         ORIG_IDX_NAME: orig_idxs,

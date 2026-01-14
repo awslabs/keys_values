@@ -44,13 +44,16 @@ Ignore for now:
 
 - release.sh
 
+- [ ] Create issues for anything open in `work_log.md`
+
 
 ## Clean-Up
 
 - [x] Add missing comments for most important classes
-- [ ] Remove DEBUG and TODO
+- [ ] Remove DEBUG and TODO (if outdated)
 - [ ] Scan for old naming / internal comments
 - [ ] Ensure that licence header is everywhere
+- [ ] Ensure that `black` is run over the code, as well as a linter
 
 
 ## Documentation

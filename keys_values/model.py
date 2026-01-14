@@ -32,7 +32,7 @@ from keys_values.attention import (
     MultiHeadSelfAttention,
     do_softcapping,
 )
-from keys_values.kvcache.base import KVCacheParams, KVCache, DefaultKVCache
+from keys_values.kvcache.base import KVCacheParams, KVCache
 from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.use_eager_kernel import transform_mha_kwargs
 from keys_values.utils import copy_parameters
@@ -118,14 +118,11 @@ class GPT(nn.Module):
         # too small
         for l_ix, kv_cache in enumerate(self.get_kv_caches()):
             if kv_cache is not None:
+                kv_cache.set_seq_length(value)
                 if isinstance(kv_cache, DenseKVCache) and kv_cache.cache_length < value:
                     print(
                         f"KV cache for layer {l_ix} too small: Call 'set_kv_caches(batch_size={kv_cache.max_batch_size}, max_seq_length={value}) before inference"
                     )
-                    break
-                if isinstance(kv_cache, DefaultKVCache):
-                    # Multi-head attention (includes position encoding)
-                    kv_cache.mha.set_seq_length(value)
 
         # Multi-head attention (includes position encoding)
         self.mha.set_seq_length(value)
@@ -141,7 +138,7 @@ class GPT(nn.Module):
         has_no_layers = self.transformer is None or not hasattr(self.transformer,"h")
         return 0 if has_no_layers else len(self.transformer.h)
 
-    def assign_kv_caches(self, kv_caches: List[KVCache]):
+    def assign_kv_caches(self, kv_caches: List[Optional[KVCache]]):
         """
         Assigns specific KV caches to the multi-head attention blocks
         of each layer. KV caches are required for inference. If no KV caches
@@ -158,12 +155,13 @@ class GPT(nn.Module):
         if num_none == 0:
             batch_size = kv_caches[0].max_batch_size
             dtype = kv_caches[0].dtype
-            for cache in kv_caches:
-                self._check_kv_cache(self.config, cache, batch_size, dtype)
+            for kv_cache in kv_caches:
+                self._check_kv_cache(self.config, kv_cache, batch_size, dtype)
         elif num_none != num_layers:
             raise ValueError(f"kv_caches must not contain None or all be None")
-        for cache, block in zip(kv_caches, self.transformer.h):
-            block.attn.kv_cache = cache
+        for kv_cache, block in zip(kv_caches, self.transformer.h):
+            kv_cache.set_seq_length(self.max_seq_length)
+            block.attn.kv_cache = kv_cache
 
     def set_kv_caches(
         self,
@@ -208,6 +206,7 @@ class GPT(nn.Module):
                     dtype=dtype,
                     max_sequence_length=max_seq_length,
                 )
+                attn.kv_cache.set_seq_length(max_seq_length)
         self._default_kv_cache = True
 
     def get_kv_caches(self) -> List[KVCache]:
@@ -215,15 +214,13 @@ class GPT(nn.Module):
 
     def reset(self) -> None:
         """
-        Should be called before a new batch of sequences is processed. Passes
-        `max_seq_length` to `mha`, and resets all KV caches (if any).
+        Should be called before a new batch of sequences is processed.
+        Resets all KV caches (if any).
 
         """
-        # Trigger resetting the rope-cache
-        self.mha.set_seq_length(self.max_seq_length)
-        for cache in self.get_kv_caches():
-            if cache is not None:
-                cache.reset()
+        for kv_cache in self.get_kv_caches():
+            if kv_cache is not None:
+                kv_cache.reset()
 
     @property
     def start_of_layer_hook(self) -> Optional[StartOfLayerHook]:
@@ -370,14 +367,14 @@ class GPT(nn.Module):
     def kv_cache_max_forward_length(self) -> Optional[int]:
         """
         Returns:
-            Smallest `max_forward_length` over all KV caches, or `None` if KV
+            Smallest `max_forward_length()` over all KV caches, or `None` if KV
             caches are not assigned.
 
         """
         if not self.are_kv_caches_assigned():
             return None
         else:
-            return min(kvc.max_forward_length for kvc in self.get_kv_caches())
+            return min(kvc.max_forward_length() for kvc in self.get_kv_caches())
 
     def kv_cache_max_prefill_length(self) -> Optional[int]:
         """

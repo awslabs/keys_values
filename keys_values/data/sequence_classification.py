@@ -102,7 +102,6 @@ class SequenceClassificationDataset(Dataset):
         return {
             INPUT_IDS_NAME: encoded_prompt,
             LABELS_NAME: label_idx,
-            #"prefix_len": example["prefix_len"],  # DEBUG!!
             "token_counts": token_counts,
         }
 

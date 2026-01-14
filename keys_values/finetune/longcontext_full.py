@@ -32,7 +32,6 @@ from torch.nn.attention import SDPBackend
 from keys_values.utils import flush_io_streams
 from litgpt.args import TrainArgs
 from litgpt.data import DataModule
-from litgpt.generate.base import generate
 from litgpt.config import Config
 from litgpt.prompts import save_prompt_style
 from litgpt.tokenizer import Tokenizer
@@ -80,6 +79,7 @@ from keys_values.finetune.utils import (
     print_message,
     check_kv_cache,
 )
+from keys_values.generate.base import generate
 from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import HeadModel, CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
@@ -169,6 +169,7 @@ def setup(
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
     record_gpu_memory_period: int = 0,
+    generate_with_eval: bool = False,
     profile_grad_times: int = 0,
     profile_parts: Optional[str] = None,
 ) -> None:
@@ -365,6 +366,7 @@ def setup(
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
+        generate_with_eval=generate_with_eval,
         profile_grad_times=profile_grad_times,
         profile_parts=profile_parts,
     )
@@ -394,6 +396,7 @@ def main(
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
+    generate_with_eval: bool,
     profile_grad_times: int,
     profile_parts: Optional[str],
 ) -> None:
@@ -540,6 +543,7 @@ def main(
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
+        generate_with_eval=generate_with_eval,
         profile_grad_params=profile_grad_params,
     )
     training_time = time.perf_counter() - train_time
@@ -550,6 +554,13 @@ def main(
     if eval.final_validation:
         print_with_rank_and_timestamp("Starting validation evaluations.", fabric.global_rank)
         print_message("\nFinal validation evaluation ...", fabric)
+        if generate_with_eval:
+            generate_example_kwargs = dict(
+                tokenizer=tokenizer,
+                data=data,
+            )
+        else:
+            generate_example_kwargs = None
         metrics = validate_and_all_reduce(
             model=model,
             val_dataloader=val_dataloader,
@@ -557,6 +568,7 @@ def main(
             batch_transform=batch_transform,
             log_metrics=False,
             fabric=fabric,
+            generate_example_kwargs=generate_example_kwargs,
         )
         fabric.log_dict(metrics, step=state["iter_num"])
         print_message(
@@ -576,7 +588,6 @@ def main(
             save_prompt_style(data.prompt_style, save_dir)
 
 
-# TODO: Support caches of different lengths, maybe even different types
 def wrap_gpt_model(
     gpt_model: GPT,
     head_model: HeadModel,
@@ -723,6 +734,7 @@ def fit(
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
+    generate_with_eval: bool,
     profile_grad_params: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     model = state["model"]
@@ -740,12 +752,20 @@ def fit(
     if eval.initial_validation:
         print_with_rank_and_timestamp("Starting validation evaluations.", fabric.global_rank)
         print_message("\nInitial validation evaluation ...", fabric)
+        if generate_with_eval:
+            generate_example_kwargs = dict(
+                tokenizer=tokenizer,
+                data=data,
+            )
+        else:
+            generate_example_kwargs = None
         metrics = validate_and_all_reduce(
             model=model,
             val_dataloader=val_dataloader,
             eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
             batch_transform=batch_transform,
             fabric=fabric,
+            generate_example_kwargs=generate_example_kwargs,
         )
         val_loss = f"{metrics['val_loss']:.3f}"
         print_message(
@@ -905,17 +925,19 @@ def fit(
         if not is_accumulating and state["step_count"] % eval.interval == 0:
             print_with_rank_and_timestamp("Starting validation evaluations.", fabric.global_rank)
             print_message("\nPeriodic validation evaluation ...", fabric)
-            generate_example_kwargs = dict(
-                tokenizer=tokenizer,
-                data=data,
-            )
-            # TODO: Fix bug in generation!
+            if generate_with_eval:
+                generate_example_kwargs = dict(
+                    tokenizer=tokenizer,
+                    data=data,
+                )
+            else:
+                generate_example_kwargs = None
             metrics = validate_and_all_reduce(
                 model=model,
                 val_dataloader=val_dataloader,
                 eval=eval,
                 batch_transform=batch_transform,
-                # generate_example_kwargs=generate_example_kwargs,
+                generate_example_kwargs=generate_example_kwargs,
                 log_metrics=False,
                 fabric=fabric,
             )
@@ -1041,7 +1063,7 @@ def generate_example(
 
     if max_returned_tokens < gpt_model.max_seq_length:
         output = generate(
-            model=gpt_model,
+            model=model,
             prompt=encoded,
             max_returned_tokens=max_returned_tokens,
             temperature=0.8,

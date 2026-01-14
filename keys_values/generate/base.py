@@ -39,15 +39,21 @@ from litgpt.utils import (
     load_checkpoint,
 )
 
+from keys_values.finetune.utils import LIT_MODEL_FNAME
+from keys_values.kvcache.factory import (
+    deallocate_kv_cache_buffers_of_model,
+    KVCacheFactory,
+)
+from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
 
 
 def next_token(
-    model: GPT,
+    gpt_model: GPT,
     x: torch.Tensor,
     **sample_kwargs: Dict[str, Any],
 ) -> torch.Tensor:
-    logits = model(x)
+    logits = gpt_model(x)
     _next = sample(logits, **sample_kwargs).to(dtype=torch.int64)
     return _next
 
@@ -67,14 +73,14 @@ def batched_sample(
 
 
 def batched_next_token(
-    model: GPT,
+    gpt_model: GPT,
     x: torch.Tensor,
     kwargs: Union[dict, list[dict]],
 ) -> torch.Tensor:
     """
 
     Args:
-        model: GPT model
+        gpt_model: GPT model
         x: Context tokens to be used as input, shape `(batch_size, num)`. When
             used to sample new tokens, we have `num == 1`
         kwargs: Sampling parameters (can be different for each batch dimension)
@@ -84,7 +90,7 @@ def batched_next_token(
 
     """
     # Run the model on the batch.
-    logits_stack = model(x)
+    logits_stack = gpt_model(x)
 
     # Return the next token for each sample in the batch.
     return batched_sample(logits_stack, kwargs=kwargs)
@@ -92,10 +98,9 @@ def batched_next_token(
 
 @torch.inference_mode()
 def generate_fn(
-    model: GPT,
+    model: LongContextInferenceModel,
     prompt: torch.Tensor,
     max_returned_tokens: int,
-    prompt_chunksize: int = 16,
     *,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
@@ -103,27 +108,28 @@ def generate_fn(
     stop_tokens: Tuple[List[int], ...] = (),
     include_prompt: bool,
     include_eos: bool,
+    deallocate_cache_buffers: bool = True,
 ) -> Iterator[torch.Tensor]:
     """
     Generates tokens for a single prompt.
 
     Args:
-        model: The model to use.
+        model: The model to use. Must be :class:`LongContextInferenceModel`,
+            defining the chunking to be used.
         prompt: The tokenized prompt to generate from.
         max_returned_tokens: The maximum number of new tokens to return. Does not include the prompt tokens.
-        prompt_chunksize: If the prompt is longer than the KV cache length,
-            prompts are processed in chunks of this size in the prefill phase.
-            The larger, the faster the prompt is processed, but a large chunk
-            size may lead to suboptimal cache decisions.
         temperature: The temp to pass to sample().
         top_k: The top_k to pass to sample().
         top_p: The top_p to pass to sample().
         stop_tokens: A tuple of stop sequences. If any of the sequences are generated, the generation stops early before max_returned_tokens.
         include_prompt: Whether to output the prompt tokens.
         include_eos: Whether to output the stop tokens if generation stops early.
-    """
+        deallocate_cache_buffers: Whether to deallocate KV cache buffers at
+            the end.
 
-    prompt_size = prompt.size(0)
+    """
+    prompt = prompt.flatten()
+    prompt_size = prompt.numel()
     if prompt_size == 0:
         raise ValueError("prompt must not be empty")
     sample_kwargs = dict(
@@ -135,30 +141,18 @@ def generate_fn(
     assert max_returned_tokens > prompt_size, (
         f"Not enough space for {prompt_size} prompt tokens in a context length of {max_returned_tokens}."
     )
-    if model.max_seq_length < max_returned_tokens - 1:
-        raise NotImplementedError(f"max_seq_length {model.max_seq_length} needs to be >= {max_returned_tokens - 1}")
 
     # Yield the prompt if include_prompt is True
     if include_prompt:
         yield prompt
 
-    # Prompt processing. The first part of the prompt (possibly all of it)
-    # is processed with a prefill. If the prompt is larger than the KV
-    # cache length, we need to use sequential processing after that.
-    max_prefill_length = model.kv_cache_max_prefill_length()
-    end = min(prompt_size, max_prefill_length)
-    model.reset()  # Reset KV caches
-    input_pos = 0
-    all_logits = None
-    while input_pos < prompt_size:
-        inputs = prompt[input_pos:end].view(1, -1)
-        # We may need the last time slice of `all_logits` below:
-        all_logits = model(inputs)
-        input_pos = end
-        # Note that `max_forward_length` can change during the course of
-        # prompt processing:
-        chunksize = min((prompt_chunksize, model.kv_cache_max_forward_length(), prompt_size - input_pos))
-        end += chunksize
+    # Prompt processing. This is dealt with by the long context inference
+    # model. Processing is done in chunks, the first one being as long as
+    # KV caches permit, subsequent ones (if any) chosen by the model.
+    # We need the logits for the final chunk in order to generate the
+    # first token below. Chunk size does not matter, just must be nonzero.
+    gpt_model = model.gpt_model
+    logits_final_chunk = model(prompt.unsqueeze(0), targets=None)
 
     # Generation loop: One token per iteration
     tokens = []
@@ -170,11 +164,11 @@ def generate_fn(
         if token is None:
             # First token sampled from the final logits output for prompt
             # processing
-            token = sample(all_logits, **sample_kwargs).to(dtype=torch.int64)
-            all_logits = None
+            token = sample(logits_final_chunk, **sample_kwargs).to(dtype=torch.int64)
+            logits_final_chunk = None
         else:
             token = next_token(
-                model=model, x=token.view(1, -1), **sample_kwargs,
+                gpt_model=gpt_model, x=token.view(1, -1), **sample_kwargs,
             )
         tokens.append(token)
         int_token = token.item()
@@ -209,43 +203,45 @@ def generate_fn(
     if yielded_idx < len(tokens):
         yield from tokens[yielded_idx:]
 
+    if deallocate_cache_buffers:
+        deallocate_kv_cache_buffers_of_model(model.gpt_model)
+
 
 # TODO: Make include_eos work.
 # TODO: Rewrite unbatched generate_fn to use batched_generate_fn.
 @torch.inference_mode()
 def batched_generate_fn(
-    model: GPT,
+    model: LongContextInferenceModel,
     prompts: torch.Tensor,
     max_returned_tokens: int,
-    prompt_chunksize: int = 16,
     *,
     sample_args: Union[list[dict], dict],
     stop_tokens: Tuple[List[int], ...] = (),
     include_prompt: bool,
+    deallocate_cache_buffers: bool = True,
 ) -> Iterator[list[Union[torch.Tensor, None]]]:
     """
     Generates tokens for a batch of prompts.
 
     Args:
-        model: The model to use.
+        model: The model to use. Must be :class:`LongContextInferenceModel`,
+            defining the chunking to be used.
         prompts: A 2D tensor of shape [batch_size, prompt_length]. Note that
             all prompts need to have the same length (TODO: Relax this)
         max_returned_tokens: The maximum number of tokens to return, including
             the prompt tokens.
-        prompt_chunksize: If the prompt is longer than the KV cache length,
-            prompts are processed in chunks of this size in the prefill phase.
-            The larger, the faster the prompt is processed, but a large chunk
-            size may lead to suboptimal cache decisions.
         sample_args: The dictionary of kwargs to pass to sample() for each
             token for each index in the batch.
         stop_tokens: A tuple of stop sequences. If any of the sequences are
             generated, the generation stops early before max_returned_tokens.
         include_prompt: Whether to output the prompt tokens.
+        deallocate_cache_buffers: Whether to deallocate KV cache buffers at
+            the end.
 
     Yields:
         A list of tokens for each prompt in the batch, or None if a stop sequence has already been encountered for that index in the batch.
-    """
 
+    """
     if prompts.ndim == 1:
         prompts = prompts.unsqueeze(0)
     assert prompts.ndim == 2, "Prompts must be a 2D tensor."
@@ -257,36 +253,22 @@ def batched_generate_fn(
     else:
         assert len(sample_args) == batch_size, "sample_args must have the length as the batch size."
 
-    # TODO: This check (and the one in generate_fn) is not sufficient. We do the proper checks in LLM.generate().
     assert max_returned_tokens > max_prompt_size, (
         f"Not enough space for {max_prompt_size} prompt tokens in a context length of {max_returned_tokens}."
     )
-    if model.max_seq_length < max_returned_tokens - 1:
-        raise NotImplementedError(f"max_seq_length {model.max_seq_length} needs to be >= {max_returned_tokens - 1}")
 
     # Yield the prompts if include_prompt is True
     if include_prompt:
-        # TODO: Prompt length is padded, but they shouldn't all be the same length.
         for i in range(max_prompt_size):
             yield [prompt[i].view(-1) for prompt in prompts]
 
-    # Prompt processing. The first part of the prompt (possibly all of it)
-    # is processed with a prefill. If the prompt is larger than the KV
-    # cache length, we need to use sequential processing after that.
-    max_prefill_length = model.kv_cache_max_prefill_length()
-    end = min(max_prompt_size, max_prefill_length)
-    model.reset()  # Reset KV caches
-    input_pos = 0
-    all_logits = None
-    while input_pos < max_prompt_size:
-        inputs = prompts[:, input_pos:end]
-        # We may need the last time slice of `all_logits` below:
-        all_logits = model(inputs)
-        input_pos = end
-        # Note that `max_forward_length` can change during the course of
-        # prompt processing:
-        chunksize = min((prompt_chunksize, model.kv_cache_max_forward_length(), max_prompt_size - input_pos))
-        end += chunksize
+    # Prompt processing. This is dealt with by the long context inference
+    # model. Processing is done in chunks, the first one being as long as
+    # KV caches permit, subsequent ones (if any) chosen by the model.
+    # We need the logits for the final chunk in order to generate the
+    # first token below. Chunk size does not matter, just must be nonzero.
+    gpt_model = model.gpt_model
+    logits_final_chunk = model(prompts, targets=None)
 
     stop_progresses = [[0] * len(stop_tokens) for _ in range(batch_size)]  # [batch_size, ~len(stop_tokens)]
     stop_idxes = [-1] * batch_size
@@ -297,10 +279,11 @@ def batched_generate_fn(
     tokens = None
     for current_idx in range(max_returned_tokens - max_prompt_size):
         if current_idx == 0:
-            tokens = batched_sample(all_logits[:, -1:], kwargs=sample_args)
+            tokens = batched_sample(logits_final_chunk[:, -1:], kwargs=sample_args)
+            logits_final_chunk = None
         else:
             tokens = batched_next_token(
-                model=model, x=tokens, kwargs=sample_args,
+                gpt_model=gpt_model, x=tokens, kwargs=sample_args,
             )
         for i in range(batch_size):
             token_lists[i].append(tokens[i])
@@ -353,34 +336,50 @@ def batched_generate_fn(
             if all(y is None for y in y_tokens):
                 return
             yield y_tokens
-    return
+
+    if deallocate_cache_buffers:
+        deallocate_kv_cache_buffers_of_model(model.gpt_model)
 
 
 @torch.inference_mode()
 def generate(
-    model: GPT,
+    model: LongContextInferenceModel,
     prompt: torch.Tensor,
     max_returned_tokens: int,
-    prompt_chunksize: int = 16,
     *,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
     top_p: float = 1.0,
     eos_id: Optional[int] = None,
     include_prompt: bool = True,
+    deallocate_cache_buffers: bool = True,
 ) -> torch.Tensor:
     """
-    Takes a conditioning sequence (prompt) as input and continues to generate as many tokens as requested.
-    The implementation of this function is modified from A. Karpathy's nanoGPT.
+    Takes a conditioning sequence (prompt) as input and continues to generate
+    as many tokens as requested. The implementation of this function is
+    modified from A. Karpathy's nanoGPT.
+
+    `model` must be of type :class:`LongContextInferenceModel`, which
+    deals with chunking `prompt` into parts if it is too long. For example:
+
+    ```python
+    model = LongContextInferenceModel(
+        gpt_model=gpt_model,
+        head_model=None,
+        chunk_size=chunk_size,
+    )
+    ```
+
+    creates the `model` argument from a :class:`GPT` `gpt_model` and
+    chunk size `chunk_size`. The first chunk will be as long as KV
+    caches support, subsequent chunks will be of length `chunk_size`.
+    Here, `gpt_model` must have KV caches assigned.
 
     Args:
-        model: The model to use.
+        model: The model to use. Must be :class:`LongContextInferenceModel`,
+            defining the chunking to be used.
         prompt: Tensor of shape (T) with indices of the prompt sequence.
         max_returned_tokens: The maximum number of tokens to return (given plus generated).
-        prompt_chunksize: If the prompt is longer than the KV cache length,
-            prompts are processed in chunks of this size in the prefill phase.
-            The larger, the faster the prompt is processed, but a large chunk
-            size may lead to suboptimal cache decisions.
         temperature: Scales the predicted logits by 1 / temperature.
         top_k: If specified, only sample among the tokens with the k highest probabilities.
         top_p: If specified, it represents the cumulative probability threshold to consider in the sampling process.
@@ -399,8 +398,10 @@ def generate(
             or https://huyenchip.com/2024/01/16/sampling.html#top_p
         eos_id: If specified, stop generating any more token once the <eos> token is triggered.
         include_prompt: If true (default) prepends the prompt (after applying the prompt style) to the output.
-    """
+        deallocate_cache_buffers: Whether to deallocate KV cache buffers at
+            the end.
 
+    """
     token_list = list(
         generate_fn(
             include_prompt=include_prompt,
@@ -408,15 +409,21 @@ def generate(
             model=model,
             prompt=prompt,
             max_returned_tokens=max_returned_tokens,
-            prompt_chunksize=prompt_chunksize,
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
             stop_tokens=(([eos_id],) if eos_id is not None else ()),
+            deallocate_cache_buffers=deallocate_cache_buffers,
         )
     )
 
     return torch.cat(token_list) if not len(token_list) == 0 else torch.Tensor()
+
+
+DEFAULT_CACHE_FACTORY_KWARGS = {
+    "name": "lastrec-default",
+    "cache_length": 8096,
+}
 
 
 @torch.inference_mode()
@@ -424,6 +431,7 @@ def main(
     checkpoint_dir: Path,
     prompt: str = "What food do llamas eat?",
     *,
+    cache_factory_kwargs: Optional[Dict[str, Any]] = None,
     sys_prompt: Optional[str] = None,
     num_samples: int = 1,
     max_new_tokens: int = 50,
@@ -442,6 +450,8 @@ def main(
     Args:
         checkpoint_dir: The checkpoint directory to load.
         prompt: The prompt string to use for generating the samples.
+        cache_factory_kwargs: Keyword arguments to pass to
+            :meth:`KVCacheFactory.create` in order to create KV caches
         sys_prompt: The system prompt to use for generating the samples.
         num_samples: The number of text samples to generate.
         max_new_tokens: The number of generation steps to take.
@@ -475,6 +485,8 @@ def main(
     """
     checkpoint_dir = extend_checkpoint_dir(checkpoint_dir)
     pprint(locals())
+    if cache_factory_kwargs is None:
+        cache_factory_kwargs = DEFAULT_CACHE_FACTORY_KWARGS
 
     precision = precision or get_default_supported_precision(training=False)
 
@@ -495,7 +507,7 @@ def main(
     check_valid_checkpoint_dir(checkpoint_dir)
     config = Config.from_file(checkpoint_dir / "model_config.yaml")
 
-    checkpoint_path = checkpoint_dir / "lit_model.pth"
+    checkpoint_path = checkpoint_dir / LIT_MODEL_FNAME
     check_file_size_on_cpu_and_warn(checkpoint_path, fabric.device)
 
     tokenizer = Tokenizer(checkpoint_dir)
@@ -511,14 +523,24 @@ def main(
     fabric.print(f"Loading model {str(checkpoint_path)!r} with {config.__dict__}", file=sys.stderr)
     t0 = time.perf_counter()
     with fabric.init_module(empty_init=True):
-        model = GPT(config)
+        gpt_model = GPT(config)
+    gpt_model.assign_kv_caches(
+        KVCacheFactory.create(
+            **cache_factory_kwargs,
+            gpt_model=gpt_model,
+            max_batch_size=1,
+        )
+    )
     fabric.print(f"Time to instantiate model: {time.perf_counter() - t0:.02f} seconds.", file=sys.stderr)
     with fabric.init_tensor():
         # set the max_seq_length to limit the memory usage to what we need
-        model.max_seq_length = max_returned_tokens
-        # enable the kv cache
-        model.set_kv_caches(batch_size=1)
-    model.eval()
+        gpt_model.max_seq_length = max_returned_tokens
+    gpt_model.eval()
+    model = LongContextInferenceModel(
+        gpt_model=gpt_model,
+        head_model=None,
+        chunk_size=prompt_chunksize,
+    )
 
     if compile:
         torch._dynamo.config.automatic_dynamic_shapes = True
@@ -530,7 +552,7 @@ def main(
     model = fabric.setup_module(model)
 
     t0 = time.perf_counter()
-    load_checkpoint(fabric, model, checkpoint_path)
+    load_checkpoint(fabric, gpt_model, checkpoint_path)
     fabric.print(f"Time to load the model weights: {time.perf_counter() - t0:.02f} seconds.", file=sys.stderr)
 
     L.seed_everything(1234)
@@ -540,14 +562,12 @@ def main(
             model=model,
             prompt=encoded,
             max_returned_tokens=max_returned_tokens,
-            prompt_chunksize=prompt_chunksize,
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
             eos_id=tokenizer.eos_id,
         )
         t = time.perf_counter() - t0
-        model.reset()
         fabric.print(tokenizer.decode(y))
         tokens_generated = y.size(0) - prompt_length
         fabric.print(

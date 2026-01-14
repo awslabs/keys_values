@@ -407,7 +407,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             if max_chunk_size > cache_length // 2:
                 print(f"max_chunk_size = {max_chunk_size} too large to provide savings. Switching it off.")
                 max_chunk_size = None
-        self._max_chunk_size = max_chunk_size
+        self.max_chunk_size = max_chunk_size
         shape = (buffers.max_batch_size, self.n_query_groups, cache_length)
         device = self._default_device_for_new_params()
         self.register_buffer(
@@ -439,11 +439,10 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         Returns:
             Batched positions where key and value tensors in next :meth:`forward`
             call are written to, shape `(batch_size, n_query_groups, num)`,
-            where `num <= max_forward_length`, the remaining ones are not used.
+            where `num <= max_forward_length()`, the remaining ones are not used.
         """
         return None if self._next_positions is None else self._next_positions[:, :, :num]
 
-    @property
     def max_forward_length(self) -> int:
         diff = self.cache_length - self.current_length
         result = self.cache_length - self.grace_period
@@ -465,14 +464,14 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         ):
             raise IndexError("Cache needs to be initialized with 'prefill' before being used")
         diff = self.cache_length - self.current_length
-        if not 1 <= num <= self.max_forward_length:
+        if not 1 <= num <= self.max_forward_length():
             if 0 < diff < num:
                 # Cache is almost full, with `diff < num` slots free. There is no
                 # good solution for this. We don't know which `num - diff` slots to
                 # evict, because we did not compute scores so far.
                 raise ValueError(f"key.shape[2] = {num}, must be <= {diff} as long as the cache is not full")
             else:
-                raise ValueError(f"key.shape[2] = {num}, must be in [1, {self.max_forward_length}]")
+                raise ValueError(f"key.shape[2] = {num}, must be in [1, {self.max_forward_length()}]")
         if self._use_initial_rule:
             # Set `_next_positions` according to the initial rule
             num_keep = min(
@@ -643,7 +642,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
 
         Args:
             key: New keys, `(batch_size, n_query_groups, num, head_size)`,
-                where `1 <= num <= max_forward_length`
+                where `1 <= num <= max_forward_length()`
             value: New values, `(batch_size, n_query_groups, num, head_size)`
 
         Returns:
@@ -704,13 +703,13 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         scores = self._compute_scores(attn_weights, query_length)
         if self.current_length < self.cache_length:
             self._set_next_positions_to_free_slots()
-        elif self._max_chunk_size is None:
+        elif self.max_chunk_size is None:
             self._next_positions = scores.argsort(dim=-1)
         else:
             # If `debug_next_positions`, we use `sorted=True` to be able
             # to compare against not using `max_chunk_size`
             self._next_positions = scores.topk(
-                k=self._max_chunk_size,
+                k=self.max_chunk_size,
                 dim=-1,
                 largest=False,
                 sorted=self.debug_next_positions is not None,
@@ -936,7 +935,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                 replay_log_blocksize=self.replay_log_blocksize,
                 detach_attn_weights=self._detach_attn_weights,
                 keep_initial_fraction=self._keep_initial_fraction,
-                max_chunk_size=self._max_chunk_size,
+                max_chunk_size=self.max_chunk_size,
             )
         )
         return base_kwargs

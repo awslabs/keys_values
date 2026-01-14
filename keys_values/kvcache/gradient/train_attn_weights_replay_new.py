@@ -217,7 +217,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         # RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation: [torch.IntTensor [5, 4, 512]] is at version 8; expected version 7 instead
         return self._token_positions[:, :, :self.current_length].clone()
 
-    @property
     def max_forward_length(self) -> int:
         diff = self.cache_length - self.current_length
         result = self.cache_length - self.grace_period
@@ -244,7 +243,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 query, key, value, token_idx,
             )
             self._input_pos += key.shape[2]
-        # DEBUG
         if self._debug_intermediates is not None:
             prefix = self._debug_prefix + f"_inputpos{input_pos}_"
             for name, x in (
@@ -255,7 +253,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 ("attn_outputs", attn_outputs),
             ):
                 self._debug_intermediates[prefix + name] = for_debug(x)
-        # END DEBUG
         return attn_outputs
 
     def _forward_if_not_prefill(
@@ -278,13 +275,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         else:
             # All slices are the same
             positions = update_result.positions[0, 0, :]
-        # DEBUG
-        if self._debug_intermediates is not None:
-            prefix = self._debug_prefix + f"_sdpa_inputpos{self.input_pos}"
-            debug_intermediates = (self._debug_intermediates, prefix)
-        else:
-            debug_intermediates = None
-        # END DEBUG
         do_scatter = self.current_length >= self.cache_length
         if do_scatter:
             index_e = expand_index(index, head_size=self.head_size)
@@ -590,7 +580,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                     )
                 self._append_annotation(annotation)
 
-        # DEBUG:
         if self._debug_tensors is not None:
             name = f"c{self._token_chunk_pos - 1}-l{self.layer_idx}-{kind}"
             if name in self._debug_tensors:
@@ -623,7 +612,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         if self.grace_period > 0:
             # First slot to move out once the cache is full
             self._next_grace_pos = self.cache_length - self.grace_period
-        # DEBUG:
         if self._debug_tensors is not None:
             prefix = f"c0-l{self.layer_idx}-prefill-"
             for name, node in [

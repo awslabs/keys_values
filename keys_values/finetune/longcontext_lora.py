@@ -500,6 +500,7 @@ def main(
                 device=old_embedding.weight.device,
                 dtype=old_embedding.weight.dtype,
             )
+        mark_only_lora_as_trainable(gpt_model)
         head_model = HeadModelFactory.create(
             name=head_model_name,
             config=config,
@@ -523,7 +524,6 @@ def main(
             profile_parts=profile_parts,
             fabric=fabric,
         )
-    mark_only_lora_as_trainable(model.gpt_model)
 
     num_trainable_params = num_parameters(model, requires_grad=True)
     print_message(f"\nNumber of trainable parameters: {num_trainable_params:,}", fabric)
@@ -585,7 +585,6 @@ def main(
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
-        num_trainable_params=num_trainable_params,
         generate_with_eval=generate_with_eval,
         profile_grad_params=profile_grad_params,
     )
@@ -652,7 +651,6 @@ def fit(
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
-    num_trainable_params: int,
     generate_with_eval: bool,
     profile_grad_params: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
@@ -856,7 +854,6 @@ def fit(
                 )
             else:
                 generate_example_kwargs = None
-            # TODO: Fix bug in generation!
             metrics = validate_and_all_reduce(
                 model=model,
                 val_dataloader=val_dataloader,

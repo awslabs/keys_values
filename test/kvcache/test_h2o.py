@@ -246,14 +246,14 @@ def test_token_pos_and_pos_log(device, dtype):
     ).view(1, 1, -1).expand(*shape, -1)
     torch.testing.assert_close(kv_cache.token_pos[:, :, :num_prefill], other)
     # Try to insert too large of a piece
-    assert kv_cache.max_forward_length <= cache_length - num_prefill
+    assert kv_cache.max_forward_length() <= cache_length - num_prefill
     pos = num_prefill
     num = cache_length - num_prefill + 1
     with pytest.raises(ValueError):
         kv_cache(**range_from_args(data, pos, pos + num))
     # Insert to fill up the cache
     num = cache_length - num_prefill
-    assert kv_cache.max_forward_length == num
+    assert kv_cache.max_forward_length() == num
     data_part = range_from_args(data, pos, pos + num)
     kv_cache(**data_part)
     k_and_v = kv_cache.get_keys_values()

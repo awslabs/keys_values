@@ -293,7 +293,7 @@ class TestBeforeAfterKVCacheMixin:
             outputs_here["attn_weights"] = self._debug_attn_weights
             if self._debug_mode == "store":
                 self._current_record.update(**outputs_here)
-                print(f"DEBUG: Store record {self._next_ind}")
+                print(f"Store record {self._next_ind}")
                 debug_path = self._path_mask.format(self._next_ind)
                 ForwardInputOutput(**self._current_record).store(debug_path)
             else:
@@ -303,7 +303,7 @@ class TestBeforeAfterKVCacheMixin:
                     dtype=torch.float32
                 ).sum(axis=2)
                 # Compare loaded outputs with `outputs_here`
-                print(f"DEBUG: Compare against record {self._next_ind}")
+                print(f"Compare against record {self._next_ind}")
                 names = (
                     "attn_weights",
                     "cache_token_pos_after",

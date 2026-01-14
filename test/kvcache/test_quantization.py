@@ -59,6 +59,7 @@ def args_for_one_cache(cname: str) -> List[tuple]:
 # TODO:
 # We currently skip blocks_over_heads = True, name = 'dense-bnb-quantized*'.
 # Need to understand what is going on there
+# ==> Make this an issue?
 @pytest.mark.parametrize(
     "dtype, blocks_over_heads, name, device",
     args_for_one_cache("dense"),
@@ -533,7 +534,7 @@ def test_quantized_buffers_write_back(dtype, name, device):
     for n_upd in range(5):
         q_len = min(
             random.randint(1, cache_length // 2),
-            caches_common[0].max_forward_length,
+            caches_common[0].max_forward_length(),
         )
         print(f"Update {n_upd}: {q_len}")
         for c_comm, c_sep in zip(caches_common, caches_separate):

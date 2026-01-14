@@ -498,9 +498,6 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
     shapes remain the same, for compatibility with the parent class. Also,
     the score buffer `scores` has a batch dimension, even if it is not used.
 
-    TODO: Could support gradient computations and some of the arguments, if
-    this is useful for a comparison.
-
     """
     def __init__(
         self,
