@@ -51,7 +51,7 @@ def _reorder(
         )[None, None, :].expand(*x.shape[:2], -1)
         x = x.scatter(
             2,
-            index=_extend_index(
+            index=expand_index(
                 torch.cat((index_scat, index_right), dim=-1), head_size,
             ),
             src=torch.cat((x_right, x_new), dim=2),
@@ -231,7 +231,7 @@ def scaled_dot_product_attention(
             value = _reorder(value, index_gat, index_scat, do_single_step)
         else:
             # Alternative: Simpler, but
-            sort_index = _extend_index(
+            sort_index = expand_index(
                 torch.argsort(token_positions, dim=-1), head_size,
             )
             key = key.gather(2, sort_index)

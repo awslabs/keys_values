@@ -39,8 +39,6 @@ from keys_values.data.sequence_classification import (
 from keys_values.data.sft_dataset import (
     SFTDataset,
     get_sft_collate_fn,
-    INPUT_IDS_NAME,
-    LABELS_NAME,
 )
 from keys_values.head_model import (
     CrossEntropyOnLogits,

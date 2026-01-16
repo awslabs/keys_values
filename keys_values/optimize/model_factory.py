@@ -25,7 +25,6 @@ from litgpt.lora import (
 )
 
 from keys_values.attention import MultiHeadSelfAttention
-from keys_values.kvcache.base import KVCache
 from keys_values.kvcache.stack_layers import CellBlocks
 from keys_values.lora import GPT as GPTLoRA, Block as BlockLoRA
 from keys_values.model import GPT as GPTFull, Block as BlockFull

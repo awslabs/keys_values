@@ -136,7 +136,7 @@ def _sft_collate_fn(
 ) -> Dict[str, Union[torch.Tensor, Dict[str, Any]]]:
     batched = common_collate_fn(samples, pad_id=pad_id)
     batched[LABELS_NAME] = torch.nn.utils.rnn.pad_sequence(
-        [sample[key] for sample in samples],
+        [sample[LABELS_NAME] for sample in samples],
         batch_first=True,
         padding_value=ignore_index,
     )
