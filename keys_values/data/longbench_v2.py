@@ -139,6 +139,7 @@ class LongBenchV2(DataModule):
       each record
 
     """
+
     def __init__(
         self,
         mask_prompt: bool = True,
