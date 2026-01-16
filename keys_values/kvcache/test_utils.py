@@ -11,10 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple, Optional, List, Dict, Callable
-import math
 from functools import partial
 from itertools import product
+import math
+import os
+from typing import Tuple, Optional, List, Dict, Callable
 
 import torch
 
@@ -35,6 +36,8 @@ from keys_values.kvcache.gradient.checkpoints import KVCacheBufferCheckpoints
 
 # Tests run quite slowly for "mps". If this changes, switch this to True
 RUN_TESTS_FOR_MPS = False
+
+ENV_VAR_SKIP_CUDA_TESTS = "KEYSVALS_SKIP_CUDA_TESTS"
 
 
 def create_kv_cache(
@@ -275,7 +278,8 @@ def available_backends(do_mps: bool = True) -> List[torch.device]:
     result = [torch.device("cpu")]
     if do_mps and RUN_TESTS_FOR_MPS and torch.backends.mps.is_available():
         result.append(torch.device("mps"))
-    if torch.cuda.is_available():
+    run_cuda_tests = os.environ.get(ENV_VAR_SKIP_CUDA_TESTS) is None
+    if run_cuda_tests and torch.cuda.is_available():
         result.append(torch.device("cuda:0"))
     return result
 
@@ -301,7 +305,8 @@ def device_for_cache_name(name: str) -> torch.device:
 
 
 def filter_cache_names(names: List[str]) -> List[str]:
-    if torch.cuda.is_available():
+    run_cuda_tests = os.environ.get(ENV_VAR_SKIP_CUDA_TESTS) is None
+    if run_cuda_tests and torch.cuda.is_available():
         return names
     else:
         return [name for name in names if not cache_name_gpu_only(name)]
