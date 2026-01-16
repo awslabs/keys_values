@@ -273,7 +273,7 @@ Basic arguments are:
 These arguments select the dataset for training and evaluation, as well as the
 loss function and head model to be used. We inherit dataset management from
 `LitGPT`, in that a subclass of `litgpt.data.DataModule` needs to be provided.
-An example is given by [data.LongBenchV2](./keys_values/data/longbench_v2.py#127).
+An example is given by [data.LongBenchV2](./keys_values/data/longbench_v2.py#L127).
 All `DataModule` subclasses imported in the script file can be chosen by `--data`.
 Moreover, `--data.*` is used to set constructor parameters for the dataset.
 
@@ -300,7 +300,7 @@ Relevant arguments for `LongBenchV2` (which is the default dataset):
     token sequence length (non-decreasing).
 
 Training loss function and head model are represented by
-[HeadModel](./keys_values/head_model.py#24). In general, the LLM outputs a logits
+[HeadModel](./keys_values/head_model.py#L24). In general, the LLM outputs a logits
 tensor over the vocabulary, which the head model maps to a loss function value,
 given a targets tensor as well. Head models support chunk-wise evaluation in
 order to limit the amount of memory needed. The main method is
@@ -329,25 +329,25 @@ starts a new batch. While most loss functions are just additive, some have a
 state which allows for other aggregation modes over chunks. For some loss
 functions, `targets` is passed with the final chunk only. If a loss function
 is normalized over the number of targets, the
-[HeadModel.num_target_entries](./keys_values/head_model.py#73) method is used
+[HeadModel.num_target_entries](./keys_values/head_model.py#L73) method is used
 in order to determine the normalization constants for each part.
 
 For head models which operate on top of logits outputs, the
-[HeadModel.needs_logits](./keys_values/head_model.py#35) method returns `True`.
+[HeadModel.needs_logits](./keys_values/head_model.py#L35) method returns `True`.
 If this returns `False`, the head model operates on top of final layer outputs,
 so the LLM skips the final linear map to logits.
 
 The following head models are currently supported:
 
 * `--head_model next_token_prediction`:
-  [CrossEntropyOnLogits](./keys_values/head_model.py#132). Cross-entropy loss
+  [CrossEntropyOnLogits](./keys_values/head_model.py#L132). Cross-entropy loss
   on target tokens. Needs logits. `targets` can be shorter than `model_outputs`,
   in which case they are aligned on the right. The current implementation only
   supports this specific type of masking.<br>
   For next-token prediction, ensure that the inputs to the LLM and the targets
   are based on the same sequences, but shifted by one token position.
 * `--head_model seq_classification_on_logits`:
-  [SequenceClassificationOnLogits](./keys_values/head_model.py#222). Works for
+  [SequenceClassificationOnLogits](./keys_values/head_model.py#L222). Works for
   multi-way classification. Needs logits. The label of each class must be
   represented by a single token. The logits output by the LLM are restricted to
   the class label tokens, then cross-entropy loss is applied. For example,
@@ -359,7 +359,7 @@ The following head models are currently supported:
   `--head_model next_token_prediction` with classification targets, because
   the model cannot output anything different from class labels.
 * `--head_model seq_classification`:
-  [SequenceClassification](./keys_values/head_model.py#310). Works for
+  [SequenceClassification](./keys_values/head_model.py#L310). Works for
   multi-way classification. Does not need logits. Here, the head model
   contains a linear map from last layer outputs to logits over class labels,
   whose weights are fine-tuned alongside LLM weights (in return, the final
@@ -402,14 +402,14 @@ slots are overwritten once the cache is full) and `bname` determines the buffer
 strategy (i.e., how is the KV information stored). These KV cache policies are
 currently supported:
 
-* `dense`: [DenseKVCache](./keys_values/kvcache/basics.py#296). Represents
+* `dense`: [DenseKVCache](./keys_values/kvcache/basics.py#L296). Represents
   exact KV caching, in that the KV information for all tokens is stored. Can
   only be used for sequences of length up to `cache_length`.
-* `lastrec`: [LastRecentlyInsertedKVCache]./keys_values/kvcache/basics.py#478).
+* `lastrec`: [LastRecentlyInsertedKVCache](./keys_values/kvcache/basics.py#L478).
   This cache maintains KV information for the `cache_length` last recently
   inserted tokens in the cache. When the cache is full, new information
   overwrites slots which have not been overwritten for the longest time.
-* `h2o`: [H2OKVCache](./keys_values/kvcache/h2o.py#28). Implements an improved
+* `h2o`: [H2OKVCache](./keys_values/kvcache/h2o.py#L28). Implements an improved
   variant of the heavy hitter oracle (H2O) strategy (for citation, see
   docstring). H2O scores each `(b, h, j)` by the sum of attention weights
   assigned to the KV pair since it is in the cache. Information is evicted if
@@ -418,18 +418,18 @@ currently supported:
   dot product attention (SDPA) to return summed attention weights.<br>
   We implement a number of simple improvements over what has been published as
   H2O.
-* `qh2o`: [QuantizedH2OKVCache](./keys_values/kvcache/qh2o.py#31).
+* `qh2o`: [QuantizedH2OKVCache](./keys_values/kvcache/qh2o.py#L31).
   When H2O is combined with buffer quantization (which is recommended), it can
   be improved by taking quantization errors into account, as has been published
   in a follow-up paper (see docstring for citation).
-* `h2o-vlen`: [VLengthH2OKVCache](/keys_values/kvcache/h2o.py#334). Replaces the
+* `h2o-vlen`: [VLengthH2OKVCache](/keys_values/kvcache/h2o.py#L334). Replaces the
   H2O cumulative attention weights score with an expected value norm score,
   which accounts for the length of value vectors as well. In the end, the
   attention output is a linear combination of value vectors, so these lengths
   should play a role. Can be used as alternative to `h2o`.
-* `qh2o-vlen`: [QuantizedVLengthH2OKVCache](./keys_values/kvcache/qh2o.py#216).
+* `qh2o-vlen`: [QuantizedVLengthH2OKVCache](./keys_values/kvcache/qh2o.py#L216).
   Combination of `h2o-vlen` and `qh2o`. Can be used as alternative to `qh2o`.
-* `h2o-orig`: [H2OOriginalKVCache](./keys_values/kvcache/h2o.py#482). Implements
+* `h2o-orig`: [H2OOriginalKVCache](./keys_values/kvcache/h2o.py#L482). Implements
   the H2O cache policy as originally published. This has some shortcomings which
   we corrected with `h2o`. This cache is for comparison purposes only, we do not
   recommend to use it otherwise, use `h2o` or the other variants instead.
@@ -441,17 +441,17 @@ This is directed by the buffer strategy, which can be combined the KV cache
 policy. Note that KV information is maintained with the same `dtype` as model
 weigths, so typically `float16` or `bfloat16`. Buffer strategies are:
 
-* `default`: [DefaultKVCacheBuffers](./keys_values/kvcache/buffers.py#390).
+* `default`: [DefaultKVCacheBuffers](./keys_values/kvcache/buffers.py#L390).
   Buffers are stored as is, no compression. This is fastest, but needs the most
   GPU memory.
 * `torch-quantized8`:
-  [TorchBasicQuantizer](./keys_values/kvcache/quantize/pytorch.py#119). Default
+  [TorchBasicQuantizer](./keys_values/kvcache/quantize/pytorch.py#L119). Default
   `PyTorch` quantization to 8 bits. This quantizer works on CPU as well.
 * `ao-quantized4`, `ao-quantized8`:
-  [TorchAOQuantizer](./keys_values/kvcache/quantize/torch_ao.py#27). `torchao`
+  [TorchAOQuantizer](./keys_values/kvcache/quantize/torch_ao.py#L27). `torchao`
   quantization to 4 or 8 bits. GPU only.
 * `bnb-quantized4`, `bnb-quantized8`:
-  [BitsAndBytesQuantizer](./keys_values/kvcache/quantize/bitsandbytes.py#48).
+  [BitsAndBytesQuantizer](./keys_values/kvcache/quantize/bitsandbytes.py#L48).
   `bitsandbytes` quantization to 4 or 8 bits. GPU only.
 
 With 16 bit standard `dtype`, 4 bit quantization reduces GPU memory requirements
@@ -470,7 +470,7 @@ are:
   `query.shape[2]` for calls to `kv_cache.forward` except for the prefill (when
   `input_pos == 0`). This is used to speed up finding the score minimizers.
 * `keep_initial_fraction`: Not for `dense`, `lastrec`. See docstring of
-  [AttnWeightsKVCache](./keys_values/kvcache/attn_weights.py#283).
+  [AttnWeightsKVCache](./keys_values/kvcache/attn_weights.py#L283).
 * `normalize_scores`: Not for `dense`, `lastrec`. Scores are cumulative over
   the time (in token positions) some entry is in the cache already. This may
   favor earlier tokens. Scores are normalized by the age of the entry if
@@ -519,7 +519,7 @@ The most popular stochastic gradient optimizers from `PyTorch` can be selected,
 and others can easily be added. Optimizer arguments are:
 
 * `--optimizer {name}`: Choose among
-  [SUPPORTED_OPTIMIZERS](./keys_values/finetune/args.py#167). Defaults to
+  [SUPPORTED_OPTIMIZERS](./keys_values/finetune/args.py#L167). Defaults to
   "AdamW".
 * `optimizer.learning_rate`: Base learning rate
 * `optimizer.weight_decay`: Weight decay constant
@@ -536,17 +536,17 @@ Key-value information supports the computation of multi-head self attention (MHA
 in the case when queries are shorter than (and aligned on the right with) keys
 and values. For token generation, `query` has length 1, while for processing
 a long prompt, it often has length close to `chunk_size`. In fact, our KV
-cache abstraction has [KVCache.forward](./keys_values/kvcache/base.py#197)
+cache abstraction has [KVCache.forward](./keys_values/kvcache/base.py#L197)
 computing in this case, when `query`, `key`, `value` correspond to *new tokens*.
 For exact KV caching, `key` and `value` would be appended to the existing
 buffers. In general, they overwrite slots in the cache buffers, evicting the
 information for earlier tokens if the cache is full.
 
 The typical structure of this `forward` call is implemented in
-[DefaultKVCache.forward](./keys_values/kvcache/base.py#520). After the cache
+[DefaultKVCache.forward](./keys_values/kvcache/base.py#L520). After the cache
 is updated, we make a `self.mha(...)` call, passing `query` along with the
 full cache content for keys and values. This
-[MultiHeadSelfAttention](./keys_values/attention.py#95) abstraction computes
+[MultiHeadSelfAttention](./keys_values/attention.py#L95) abstraction computes
 the *scaled dot product attention* (SDPA) inner part of MHA, after `query,
 key, value` are determined and position encoded. SDPA is by far the
 computationally most crucial primitive in LLM inference and is usually
@@ -556,7 +556,7 @@ represented by highly optimized SDPA kernels written in CUDA.
 
 We implement `RoPE` for position encoding, essentially following `LitGPT`. In
 terms of adjusting `RoPE` for sequence length, we use `YaRN`, see docstring
-of [YaRNPositionEncoding](./keys_values/pos_encoding.py#259). This can be
+of [YaRNPositionEncoding](./keys_values/pos_encoding.py#L259). This can be
 switched off with `--yarn_rope False`, in which case the same static RoPE
 is used for all sequences. This is not recommended.
 
@@ -569,7 +569,7 @@ be stored before encoding.
 #### Scaled Dot Product Attention
 
 Scaled dot product attention (SDPA) is represented by
-[MultiHeadSelfAttention.__call__](./keys_values/attention.py#209). Ideally, its
+[MultiHeadSelfAttention.__call__](./keys_values/attention.py#L209). Ideally, its
 implementations are via fast kernels, such as
 [torch.nn.functional.scaled_dot_product_attention](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html).
 However, we have some special requirements:
@@ -598,7 +598,7 @@ library (and would be very happy for help, see
   `key`, `query` so that the new entries (corresponding to `query`) are on
   the right end. Cannot return attention weights.
 * Naive blockwise SDPA: We use an own implementation
-  [scaled_dot_product_attention_in_blocks](./keys_values/attention.py#477).
+  [scaled_dot_product_attention_in_blocks](./keys_values/attention.py#L477).
   The computation is done in blocks so that no more than `tmp_array_limit_gb`
   GB of GPU memory is needed for the temporary buffers.
 
@@ -669,7 +669,7 @@ backward direction, storing nodes of the latter size in the `autograd` graph
 only.
 
 Implementing this simple idea in `PyTorch` ends up quite challenging, see
-[CellComputationAutogradHooks](./keys_values/kvcache/gradient/autograd_hooks.py#382).
+[CellComputationAutogradHooks](./keys_values/kvcache/gradient/autograd_hooks.py#L382).
 We use the [autograd saved tensors hooks](https://docs.pytorch.org/tutorials/intermediate/autograd_saved_tensors_hooks_tutorial.html)
 mechanism. This has some shortcomings, which renders our code somewhat complex.
 However, it is only with this mechanism that we can run our method with
@@ -682,7 +682,7 @@ rather than `chunk_size`, so becomes comparable to KV cache size.
 Second, when using `torch.nn.functional.scaled_dot_product_attention` as
 operator, we find that this creates several large arrays in the `autograd` graph.
 To get around this, we implemented our own `PyTorch` operator
-[KVCacheScatterUpdateAndSDPAFunction](./keys_values/kvcache/gradient/sdpa_op.py#474).
+[KVCacheScatterUpdateAndSDPAFunction](./keys_values/kvcache/gradient/sdpa_op.py#L474).
 for SDPA fused with `torch.scatter` KV cache update. Its `backward` requires naive
 blockwise SDPA. We are working on a CUDA version for this fused SDPA operator,
 which will speed up computations without sacrificing memory efficiency (like
@@ -706,7 +706,7 @@ Important arguments for gradient computations are:
 
 These two are important hyper-parameters, to be adjusted to use as much of
 the available GPU as possible. Further arguments are documented in
-[GradientArgs](./keys_values/finetune/args.py#112), use them as `grad.*`.
+[GradientArgs](./keys_values/finetune/args.py#L112), use them as `grad.*`.
 
 How to choose `layers_per_cell` and `chunks_per_cell_multiplier`? They determine
 GPU memory usage during the *second phase* only. Their choices becomes most
@@ -779,12 +779,12 @@ Researchers do not need to care about details such as cache quantization
 can focus on the essentials. Here, we detail the most important classes to
 start from.
 
-### [AttnWeightsKVCache](./keys_values/kvcache/attn_weights.py#283)
+### [AttnWeightsKVCache](./keys_values/kvcache/attn_weights.py#L283)
 
 Choose this base class to implement a KV cache policy which makes score-based
 decisions. The score values may depend on attention weights (summed over the
 query axis). For a concrete example, look at
-[H2OKVCache](./keys_values/kvcache/h2o.py#28). The base class supports a few
+[H2OKVCache](./keys_values/kvcache/h2o.py#L28). The base class supports a few
 features generically:
 
 * Score computations and eviction decision making, by way of
@@ -795,21 +795,21 @@ features generically:
   scores for slots outside the grace region in `_compute_scores`.
 * Support of replay logging and gradient computation. This should work out of
   the box. If replaying your cache needs more information than stored in
-  [AttnWeightsReplayLog](./keys_values/kvcache/attn_weights.py#39), you need
+  [AttnWeightsReplayLog](./keys_values/kvcache/attn_weights.py#L39), you need
   to create a subclass.
 
-### [KVCacheWithBuffers](./keys_values/kvcache/basics.py#42)
+### [KVCacheWithBuffers](./keys_values/kvcache/basics.py#L42)
 
 Choose this base class to implement a KV cache policy which makes use of one of
 the provided buffer strategies (subclasses of
-[KVCacheBuffers](./keys_values/kvcache/buffers.py#128)), and if
+[KVCacheBuffers](./keys_values/kvcache/buffers.py#L128)), and if
 `AttnWeightsKVCache` does not work for you or is not needed. The separation
 between KV cache policy and buffer strategy is an important aspect of our
 abstraction and has a number of direct advantages. Policies and strategies can
 be combined at will. Also, we support buffer de-allocation and re-allocation,
 which is important to save GPU memory during the backward pass.
 
-### [DefaultKVCache](./keys_values/kvcache/base.py#383)
+### [DefaultKVCache](./keys_values/kvcache/base.py#L383)
 
 Choose this base class to implement a KV cache policy where scaled dot product
 attention (SDPA) and position encoding can be factored out, and if
@@ -819,7 +819,7 @@ Maybe you like to wrap some code which comes with its own buffer strategy.
 However, consider extracting the strategy and contribute it separately, so that
 other cache policies can make use of it as well.
 
-### [KVCache](./keys_values/kvcache/base.py#68)
+### [KVCache](./keys_values/kvcache/base.py#L68)
 
 Choose this base class only if all others do not apply. Your code will have to
 deal with SDPA, position encoding and buffer strategies. We recommend to use
