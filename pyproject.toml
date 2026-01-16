@@ -23,6 +23,8 @@ scripts.keys_values = "keys_values.__main__:main"
 dependencies = [
     "torchao",
     "filelock",
+    "black",
+    "flake8",
 ]
 
 [tool.setuptools.packages.find]
