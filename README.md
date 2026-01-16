@@ -392,8 +392,8 @@ token position (in the complete sequence batch) for which `keys[b, h, j, :]`,
 but also to create the causal attention masks for multi-head self attention.
 In other words, we do not maintain keys and values as block-sparse tensors, but
 as standard dense tensors: this is simple and allows us to use normal `PyTorch`
-operators. `token_pos` matterns only when creating attention masks. Moreover,
-we use `torch.gather` to extract information for a slot, and `torch.scatter`
+operators. `token_pos` matters only when creating attention masks. Moreover,
+we use `torch.gather` to extract information for slots, and `torch.scatter`
 to write information for new tokens into the cache.
 
 For the CLI, a cache is identified by `kv_cache.name`, which can be a string
@@ -656,7 +656,7 @@ To be precise, gradients are computed in two phases:
   forward over chunks to store KV cache checkpoints on CPU. Then, we loop
   backwards over cells, running `torch.autograd` to accumulate gradients.
 
-One more idea is important. The larger cells are the faster our method runs,
+Two more ideas are important. The larger cells are the faster our method runs,
 because `torch.autograd` is best run as few times as possible on larger graphs.
 However, `autograd` stores tensors in its compute graph which are needed during
 the backward pass, which quickly fills up GPU memory. The largest such nodes
@@ -678,6 +678,15 @@ should a cell be in the horizontal direction? We argue that the sum of chunk
 lengths for a cell should be approximately `cache_length`. With this convention,
 the size of tensors stored in the `autograd` graph scales with `cache_length`
 rather than `chunk_size`, so becomes comparable to KV cache size.
+
+Second, when using `torch.nn.functional.scaled_dot_product_attention` as
+operator, we find that this creates several large arrays in the `autograd` graph.
+To get around this, we implemented our own `PyTorch` operator
+[KVCacheScatterUpdateAndSDPAFunction](./keys_values/kvcache/gradient/sdpa_op.py#474).
+for SDPA fused with `torch.scatter` KV cache update. Its `backward` requires naive
+blockwise SDPA. We are working on a CUDA version for this fused SDPA operator,
+which will speed up computations without sacrificing memory efficiency (like
+PyTorch SDPA does).
 
 Important arguments for gradient computations are:
 
