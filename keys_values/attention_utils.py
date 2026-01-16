@@ -42,9 +42,14 @@ def filter_sdpa_kernels(
     for kernel in sdpa_kernels:
         if kernel == SDPBackend.FLASH_ATTENTION and not can_use_flash_attention(params):
             continue
-        elif kernel == SDPBackend.EFFICIENT_ATTENTION and not can_use_efficient_attention(params):
+        elif (
+            kernel == SDPBackend.EFFICIENT_ATTENTION
+            and not can_use_efficient_attention(params)
+        ):
             continue
-        elif kernel == SDPBackend.CUDNN_ATTENTION and not can_use_cudnn_attention(params):
+        elif kernel == SDPBackend.CUDNN_ATTENTION and not can_use_cudnn_attention(
+            params
+        ):
             continue
         new_kernels.append(kernel)
     return new_kernels
@@ -202,11 +207,21 @@ def mask_slice_bool(
     q_per_kv = n_head // n_query_groups
     assert n_head == n_query_groups * q_per_kv and q_per_kv >= 1
     if q_per_kv > 1:
-        token_positions = token_positions.unsqueeze(2).expand(
-            -1, -1, q_per_kv, -1,
-        ).reshape(batch_size, n_head, -1)
+        token_positions = (
+            token_positions.unsqueeze(2)
+            .expand(
+                -1,
+                -1,
+                q_per_kv,
+                -1,
+            )
+            .reshape(batch_size, n_head, -1)
+        )
     token_positions = token_positions.unsqueeze(2).expand(
-        -1, -1, num, -1,
+        -1,
+        -1,
+        num,
+        -1,
     )
     kwargs = dict(device=token_positions.device, dtype=token_positions.dtype)
     bool_mask = (
@@ -276,7 +291,7 @@ def build_mask_slice(
 
 
 # Maximum number of `float32` entries for `tmp_array` for GB
-ENTRIES_PER_GB = 2 ** 28
+ENTRIES_PER_GB = 2**28
 
 # Maximum size of `tmp_array` in GB
 DEFAULT_TMP_ARRAY_LIMIT_GB = 3
@@ -324,7 +339,9 @@ def create_temp_array(
     else:
         tmp_len = tmp_array_max_num_entries // factor
         if tmp_len < 1:
-            raise ValueError(f"batch_size={batch_size}, n_head={n_head}, kv_len={kv_len} too large. Their product must be <= {tmp_array_max_num_entries}")
+            raise ValueError(
+                f"batch_size={batch_size}, n_head={n_head}, kv_len={kv_len} too large. Their product must be <= {tmp_array_max_num_entries}"
+            )
         num_splits = int(math.ceil(q_len / tmp_len))
     shape = (batch_size, n_head, tmp_len, kv_len)
     kwargs = dict(device=device, dtype=torch.float32)
@@ -388,7 +405,10 @@ def sdpa_attention_weights(
     _, n_query_groups, kv_len, _ = key.shape
     # Compute attention weights f(S)
     attention_compute_scores(
-        query=query, key=key, out=tmp_array, scale_factor=scale_factor,
+        query=query,
+        key=key,
+        out=tmp_array,
+        scale_factor=scale_factor,
     )
     # Attention masking
     if token_positions is None:
@@ -422,17 +442,21 @@ def sample_token_positions(
 ) -> torch.Tensor:
     index_kwargs = dict(dtype=torch.int64, device=device)
     token_positions = torch.zeros(
-        (batch_size, n_query_groups, kv_len), **index_kwargs,
+        (batch_size, n_query_groups, kv_len),
+        **index_kwargs,
     )
     for bs in range(batch_size):
         for nq in range(n_query_groups):
             token_positions[bs, nq, :] = torch.randperm(
-                input_pos, **index_kwargs,
+                input_pos,
+                **index_kwargs,
             )[:kv_len]
             # Ensure that `input_pos:(input_pos + q_len)` is present
             index = torch.randperm(kv_len, **index_kwargs)[:q_len]
             token_positions[bs, nq, index] = torch.arange(
-                input_pos, input_pos + q_len, **index_kwargs,
+                input_pos,
+                input_pos + q_len,
+                **index_kwargs,
             )
     return token_positions
 

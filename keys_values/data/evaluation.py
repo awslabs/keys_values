@@ -56,6 +56,7 @@ class EvaluationTasks:
     by its directory name, starting from `out_dir`.
 
     """
+
     def __init__(self, out_dir: Path, model_type: str):
         self.model_type = model_type
         self._tasks = None
@@ -88,7 +89,9 @@ class EvaluationTasks:
                 if name != LORA_WEIGHTS_FNAME:
                     missing_files.append(name)
                 elif not (task_path / LORA_WEIGHTS_FNAME_OLD).exists():
-                    missing_files.append(f"{LORA_WEIGHTS_FNAME} or {LORA_WEIGHTS_FNAME_OLD}")
+                    missing_files.append(
+                        f"{LORA_WEIGHTS_FNAME} or {LORA_WEIGHTS_FNAME_OLD}"
+                    )
         if missing_files:
             print(f"{task_path.name}: Incomplete, did not find {missing_files}")
             return False
@@ -109,6 +112,7 @@ class EvaluationWithTasksDataset(Dataset):
     avoid that a batch sent to a device contains cases from different tasks.
 
     """
+
     def __init__(
         self,
         dataset: Dataset,
@@ -132,7 +136,9 @@ class EvaluationWithTasksDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         if not (0 <= idx < self._num_cases):
-            raise IndexError(f"index {idx} out of range, must be in [0, {self._num_cases})")
+            raise IndexError(
+                f"index {idx} out of range, must be in [0, {self._num_cases})"
+            )
         task = self._tasks[idx // self._num_orig_cases_padded]
         orig_idx = idx % self._num_orig_cases_padded
         if orig_idx < self._num_orig_cases:
@@ -155,6 +161,7 @@ class EvaluationWithTasksHelper:
     dataloader we use.
 
     """
+
     def __init__(self, out_dir: Path, tag: Optional[str] = None):
         self._out_dir = out_dir
         if tag is None:
@@ -229,7 +236,9 @@ def _wrapped_collate_fn(
         return dict()  # Empty batch can happen
     tasks = set(elem[TASK_NAME] for elem in samples)
     if len(tasks) > 1:
-        raise IndexError(f"Batch must only have single {TASK_NAME} value, but has {tasks}")
+        raise IndexError(
+            f"Batch must only have single {TASK_NAME} value, but has {tasks}"
+        )
     task = next(iter(tasks))
     orig_collated_samples = orig_collate_fn(samples)
     orig_idxs = [elem[ORIG_IDX_NAME] for elem in samples]
@@ -257,8 +266,12 @@ class ReorderWrapperDataset(Dataset):
     * Device 2: [8, 9, 10, 11], [20, 21, 22, 23], ...
 
     """
+
     def __init__(
-        self, dataset: Dataset, num_devices: int, batch_size: int,
+        self,
+        dataset: Dataset,
+        num_devices: int,
+        batch_size: int,
     ):
         self._dataset = dataset
         self._num_devices = num_devices
@@ -277,7 +290,7 @@ class ReorderWrapperDataset(Dataset):
         else:
             ndev = self._num_devices
             bs = self._batch_size
-            period =  ndev * bs
+            period = ndev * bs
             offset = (idx // period) * period
             orig_idx = idx % period
             orig_idx = (orig_idx % ndev) * bs + (orig_idx // ndev) + offset

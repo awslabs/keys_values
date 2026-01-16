@@ -41,6 +41,7 @@ class ArraysForCleanup:
     me, it affects too many tensors, not just those stored in the graph.
 
     """
+
     def __init__(
         self,
         protected_ids: Optional[Union[Set[int], Dict[int, str]]] = None,
@@ -81,7 +82,9 @@ class ArraysForCleanup:
         self._num = 0
         if verbose:
             if stats.num > 0:
-                print(f"Deallocated {stats.num} arrays [total: {stats.total_mem:.3f} GB].")
+                print(
+                    f"Deallocated {stats.num} arrays [total: {stats.total_mem:.3f} GB]."
+                )
             else:
                 print("Autograd graph has been properly deallocated.")
 
@@ -89,7 +92,7 @@ class ArraysForCleanup:
         assert self._num == len(self._arrays), (self._num, len(self._arrays))
         total_mem = sum(
             x.numel() * bytes_for_torch_dtype(x.dtype) for x in self._arrays.values()
-        ) / (2 ** 30)
+        ) / (2**30)
         return ArraysForCleanupStats(
             num=self._num,
             max_num=self._max_size,
@@ -98,7 +101,8 @@ class ArraysForCleanup:
 
 
 def _params_and_buffers(
-    model: torch.nn.Module, map_names: bool,
+    model: torch.nn.Module,
+    map_names: bool,
 ) -> Union[Iterable[torch.Tensor], Iterable[Tuple[str, torch.Tensor]]]:
     if not map_names:
         for param in model.parameters():
@@ -117,7 +121,8 @@ def _params_and_buffers(
 
 
 def protect_named_params_buffers_of_model(
-    model: torch.nn.Module, map_names: bool = False,
+    model: torch.nn.Module,
+    map_names: bool = False,
 ) -> Union[Set[int], Dict[int, str]]:
     """
     Args:
@@ -131,11 +136,8 @@ def protect_named_params_buffers_of_model(
 
     """
     if not map_names:
-        return {
-            storage_id(x) for x in _params_and_buffers(model, map_names)
-        }
+        return {storage_id(x) for x in _params_and_buffers(model, map_names)}
     else:
         return {
-            storage_id(x): name
-            for name, x in _params_and_buffers(model, map_names)
+            storage_id(x): name for name, x in _params_and_buffers(model, map_names)
         }

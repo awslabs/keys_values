@@ -26,7 +26,9 @@ from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradH
 from keys_values.kvcache.gradient.train_attn_weights_replay import (
     TrainingAttnWeightsReplayCache,
 )
-from keys_values.kvcache.gradient.train_attn_weights_replay_new import TrainingAttnWeightsReplayCacheNew
+from keys_values.kvcache.gradient.train_attn_weights_replay_new import (
+    TrainingAttnWeightsReplayCacheNew,
+)
 from keys_values.kvcache.stack_layers import CellBlocks
 from keys_values.kvcache.utils import for_debug
 
@@ -99,6 +101,7 @@ class CellComputation(nn.Module):
     of a row.
 
     """
+
     def __init__(
         self,
         model_part: CellBlocks,
@@ -125,10 +128,15 @@ class CellComputation(nn.Module):
         """
         super().__init__()
         self.check_args(
-            model_part.config, autograd_hooks, replay_logs, batch_size,
+            model_part.config,
+            autograd_hooks,
+            replay_logs,
+            batch_size,
         )
         if model_part.num_layers != len(replay_logs):
-            raise ValueError(f"model_part.num_layers = {model_part.num_layers} != {len(replay_logs)} = len(replay_logs)")
+            raise ValueError(
+                f"model_part.num_layers = {model_part.num_layers} != {len(replay_logs)} = len(replay_logs)"
+            )
         self.model_part = model_part
         self.config = model_part.config
         self.autograd_hooks = autograd_hooks
@@ -170,9 +178,7 @@ class CellComputation(nn.Module):
             )
 
         self._token_pos_per_chunk = [0] + list(
-            accumulate(
-                idx.shape[-1] for idx in replay_logs[0].token_chunks
-            )
+            accumulate(idx.shape[-1] for idx in replay_logs[0].token_chunks)
         )
         self._use_new_cache = use_new_cache
         self._debug_tensors = debug_tensors
@@ -186,14 +192,17 @@ class CellComputation(nn.Module):
     ):
         if autograd_hooks is not None:
             if autograd_hooks.batch_size < batch_size:
-                raise ValueError(f"autograd_hooks.batch_size = {autograd_hooks.batch_size}, must be >= batch_size = {batch_size}")
-            if config.n_query_groups != autograd_hooks.n_query_groups or config.head_size != autograd_hooks.head_size:
+                raise ValueError(
+                    f"autograd_hooks.batch_size = {autograd_hooks.batch_size}, must be >= batch_size = {batch_size}"
+                )
+            if (
+                config.n_query_groups != autograd_hooks.n_query_groups
+                or config.head_size != autograd_hooks.head_size
+            ):
                 raise ValueError(f"config and autograd_hooks not consistent")
 
         def chunks_equal(a: List[torch.Tensor], b: List[torch.Tensor]) -> bool:
-            return len(a) == len(b) and all(
-                xa.equal(xb) for xa, xb in zip(a, b)
-            )
+            return len(a) == len(b) and all(xa.equal(xb) for xa, xb in zip(a, b))
 
         for i, log in enumerate(replay_logs):
             if not chunks_equal(log.token_chunks, replay_logs[0].token_chunks):
@@ -267,14 +276,18 @@ class CellComputation(nn.Module):
 
         """
         token_idxs = self.replay_logs[0].token_chunks[
-            first_chunk_idx:(first_chunk_idx + num_chunks)
+            first_chunk_idx : (first_chunk_idx + num_chunks)
         ]
         num_layers = self.model_part.num_layers
         if first_chunk_idx > 0:
             if k_buffers is None or v_buffers is None:
-                raise ValueError("Both k_buffers and v_buffers must be given if first_chunk_idx > 0")
+                raise ValueError(
+                    "Both k_buffers and v_buffers must be given if first_chunk_idx > 0"
+                )
             if len(k_buffers) != num_layers or len(v_buffers) != num_layers:
-                raise ValueError(f"k_buffers and v_buffers must have length {num_layers}")
+                raise ValueError(
+                    f"k_buffers and v_buffers must have length {num_layers}"
+                )
             shape = [
                 self.batch_size,
                 self.config.n_query_groups,
@@ -282,34 +295,43 @@ class CellComputation(nn.Module):
                 self.config.head_size,
             ]
             for (block_idx, kv_cache), k_buffer, v_buffer in zip(
-                self.model_part.get_kv_caches(), k_buffers, v_buffers,
+                self.model_part.get_kv_caches(),
+                k_buffers,
+                v_buffers,
             ):
                 cache_length = kv_cache.cache_length
                 k_size = k_buffer.shape[2]
                 if k_size > cache_length:
-                    raise ValueError(f"layer_idx={block_idx}: k_buffers.shape = {k_buffer.shape}, cache_length = {cache_length}. Invalid!")
+                    raise ValueError(
+                        f"layer_idx={block_idx}: k_buffers.shape = {k_buffer.shape}, cache_length = {cache_length}. Invalid!"
+                    )
                 shape[2] = k_size
                 if k_buffer.shape != tuple(shape):
-                    raise ValueError(f"layer_idx={block_idx}: k_buffers.shape = {k_buffer.shape}, must be {shape}")
+                    raise ValueError(
+                        f"layer_idx={block_idx}: k_buffers.shape = {k_buffer.shape}, must be {shape}"
+                    )
                 if v_buffer.shape != tuple(shape):
-                    raise ValueError(f"layer_idx={block_idx}: v_buffers.shape = {v_buffer.shape}, must be {shape}")
+                    raise ValueError(
+                        f"layer_idx={block_idx}: v_buffers.shape = {v_buffer.shape}, must be {shape}"
+                    )
         else:
             k_buffers = [None] * num_layers
             v_buffers = [None] * num_layers
         # Hook training replay caches into self attention blocks, and assign
         # buffers.
         train_replay_caches = self._create_train_replay_caches(
-            first_chunk_idx, num_chunks,
+            first_chunk_idx,
+            num_chunks,
         )
         kv_caches_copy = self.model_part.get_kv_caches()
         cache_lengths = [c.cache_length for _, c in kv_caches_copy]
         if first_chunk_idx > 0:
             for rc, keys, values in zip(
-                train_replay_caches, k_buffers, v_buffers,
+                train_replay_caches,
+                k_buffers,
+                v_buffers,
             ):
-                rc.initialize_buffers(
-                    DefaultKeysAndValues(keys=keys, values=values)
-                )
+                rc.initialize_buffers(DefaultKeysAndValues(keys=keys, values=values))
         self.model_part.assign_kv_caches(train_replay_caches)
 
         try:
@@ -336,7 +358,9 @@ class CellComputation(nn.Module):
             if self.autograd_hooks is not None:
                 largest_shape = self.autograd_hooks.largest_shape()
                 if largest_shape is not None:
-                    print(f"Largest node in autograd hook: shape={largest_shape.shape}, numel={largest_shape.numel} [{largest_shape.size_in_mb()} MB], count={largest_shape.count}")
+                    print(
+                        f"Largest node in autograd hook: shape={largest_shape.shape}, numel={largest_shape.numel} [{largest_shape.size_in_mb()} MB], count={largest_shape.count}"
+                    )
             # Assemble return arguments
             outputs = torch.cat(output_parts, dim=1)
             k_buffers = []

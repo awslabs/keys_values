@@ -79,7 +79,11 @@ def sdpa_backward_core(
                 )
             torch.matmul(grad_attn_output.mT, attn_weights_part, out=tmp_grad_val)
             grad_value = tmp_grad_val.view(
-                batch_size, n_query_groups, q_per_kv, head_size, kv_len,
+                batch_size,
+                n_query_groups,
+                q_per_kv,
+                head_size,
+                kv_len,
             ).sum(dim=2)
         grad_value = grad_value.mT
     if need_query or need_key:
@@ -93,11 +97,7 @@ def sdpa_backward_core(
             # _arg1: (bs, nh_k, q_per_kv, q_len, hs)
             # _arg2: (bs, nh_k, 1, hs, kv_len)
             # o_shape: (bs, nh_k, q_per_kv, q_len, kv_len)
-            torch.matmul(
-                _arg1,
-                _arg2,
-                out=tmp_array.view(*o_shape)
-            )
+            torch.matmul(_arg1, _arg2, out=tmp_array.view(*o_shape))
         tmp_array *= attn_weights_part
         attn_weights_part *= tmp_array.sum(dim=-1, keepdim=True)  # (diag e) f(S)
         # E: (bs, nh_q, q_len, kv_len)
@@ -127,11 +127,17 @@ def sdpa_backward_core(
                     tmp_grad_key = attn_weights_part.view(-1)[:numel].view(*shape)
                 else:
                     tmp_grad_key = torch.empty(
-                        shape, dtype=tmp_array.dtype, device=tmp_array.device,
+                        shape,
+                        dtype=tmp_array.dtype,
+                        device=tmp_array.device,
                     )
                 torch.matmul(query.mT, tmp_array, out=tmp_grad_key)
                 grad_key = tmp_grad_key.view(
-                    batch_size, n_query_groups, q_per_kv, head_size, kv_len,
+                    batch_size,
+                    n_query_groups,
+                    q_per_kv,
+                    head_size,
+                    kv_len,
                 ).sum(dim=2)
             grad_key *= scale_factor
             grad_key = grad_key.mT
@@ -169,7 +175,9 @@ def sdpa_backward(
         batch_size, n_head, q_len, _ = query.shape
         kv_len = key.shape[2]
         if grad_attn_output.shape != query.shape:
-            raise ValueError(f"grad_attn_output.shape = {grad_attn_output.shape}, query.shape = {query.shape}, must be the same")
+            raise ValueError(
+                f"grad_attn_output.shape = {grad_attn_output.shape}, query.shape = {query.shape}, must be the same"
+            )
         tmp_array, num_splits, tmp_len = create_temp_array(
             batch_size=batch_size,
             n_head=n_head,
@@ -250,6 +258,7 @@ class SDPAFunction(Function):
     intermediates.
 
     """
+
     @staticmethod
     def forward(
         query: torch.Tensor,
@@ -431,7 +440,9 @@ def scatter_on_buffers(
     if do_grace_period:
         if positions.ndim == 1:
             positions = positions[None, None, :].expand(
-                batch_size, n_query_groups, -1,
+                batch_size,
+                n_query_groups,
+                -1,
             )
         else:
             assert positions.shape[:-1] == (batch_size, n_query_groups)
@@ -443,7 +454,8 @@ def scatter_on_buffers(
         value_buffer_new = value_buffer.scatter(-2, index_e, value)
     else:
         ext_index = expand_index(
-            torch.cat((index, positions), dim=-1), head_size,
+            torch.cat((index, positions), dim=-1),
+            head_size,
         )
         positions_e = expand_index(positions, head_size)
         key_buffer_new = key_buffer.scatter(
@@ -470,6 +482,7 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
     in that `input_pos > 0`.
 
     """
+
     @staticmethod
     def forward(
         query: torch.Tensor,
@@ -563,7 +576,8 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
         ) = inputs
         if positions is not None and positions.ndim == 1:
             positions = positions[None, None, :].expand(
-                *index.shape[:2], -1,
+                *index.shape[:2],
+                -1,
             )
         ctx.save_for_backward(
             query,
@@ -731,7 +745,14 @@ class KVCacheScatterUpdateAndSDPAFunction(Function):
                 if not need_value_buffer:
                     grad_value_buffer = None
 
-        return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 7)
+        return (
+            grad_query,
+            grad_key,
+            grad_value,
+            grad_key_buffer,
+            grad_value_buffer,
+            *([None] * 7),
+        )
 
 
 def cat_on_buffers(
@@ -760,9 +781,16 @@ def cat_on_buffers(
         key_buffer_new = key
         value_buffer_new = value
     # Compute SDPA
-    token_positions = torch.arange(
-        0, kv_len + q_len, device=key.device, dtype=torch.int,
-    ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
+    token_positions = (
+        torch.arange(
+            0,
+            kv_len + q_len,
+            device=key.device,
+            dtype=torch.int,
+        )
+        .view(1, 1, -1)
+        .expand(batch_size, n_query_groups, -1)
+    )
     return key_buffer_new, value_buffer_new, token_positions, kv_len
 
 
@@ -777,6 +805,7 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
     `value_buffer` must be given.
 
     """
+
     @staticmethod
     def forward(
         query: torch.Tensor,
@@ -814,10 +843,15 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
 
         """
         if key_buffer is None or value_buffer is None:
-            raise ValueError("key_buffer, value_buffer must be given. Do not use this operator for the prefill call")
+            raise ValueError(
+                "key_buffer, value_buffer must be given. Do not use this operator for the prefill call"
+            )
         # Check dimensions, compose new buffers
         key_buffer_new, value_buffer_new, token_positions, kv_len = cat_on_buffers(
-            key, value, key_buffer, value_buffer,
+            key,
+            value,
+            key_buffer,
+            value_buffer,
         )
         # Compute SDPA
         attn_output = SDPAFunction.forward(
@@ -890,43 +924,55 @@ class KVCacheCatUpdateAndSDPAFunction(Function):
         need_one_of_value = need_value or need_value_buffer
         if need_query or need_one_of_key or need_one_of_value:
             key_buffer_new, value_buffer_new, token_positions, kv_len = cat_on_buffers(
-                key, value, key_buffer, value_buffer,
+                key,
+                value,
+                key_buffer,
+                value_buffer,
             )
             # Backward of SDPA
-            grad_query, grad_key_buffer_new_indir, grad_value_buffer_new_indir = sdpa_backward(
-                grad_attn_output=grad_attn_output,
-                query=query,
-                key=key_buffer_new,
-                value=value_buffer_new,
-                token_positions=token_positions,
-                input_pos=kv_len,
-                scale_factor=mha.get_scale_factor(),
-                sliding_window_size=ctx.extra_args["sliding_window_size"],
-                need_query=need_query,
-                need_key=need_one_of_key,
-                need_value=need_one_of_value,
-                tmp_array_limit_gb=mha.tmp_array_limit_gb_value(),
-                debug_intermediates=ctx.extra_args["debug_intermediates"],
+            grad_query, grad_key_buffer_new_indir, grad_value_buffer_new_indir = (
+                sdpa_backward(
+                    grad_attn_output=grad_attn_output,
+                    query=query,
+                    key=key_buffer_new,
+                    value=value_buffer_new,
+                    token_positions=token_positions,
+                    input_pos=kv_len,
+                    scale_factor=mha.get_scale_factor(),
+                    sliding_window_size=ctx.extra_args["sliding_window_size"],
+                    need_query=need_query,
+                    need_key=need_one_of_key,
+                    need_value=need_one_of_value,
+                    tmp_array_limit_gb=mha.tmp_array_limit_gb_value(),
+                    debug_intermediates=ctx.extra_args["debug_intermediates"],
+                )
             )
             if need_key_buffer:
                 grad_key_buffer = (
-                    grad_key_buffer_new[:, :, :kv_len, :] +
-                    grad_key_buffer_new_indir[:, :, :kv_len, :]
+                    grad_key_buffer_new[:, :, :kv_len, :]
+                    + grad_key_buffer_new_indir[:, :, :kv_len, :]
                 )
             if need_key:
                 grad_key = (
-                    grad_key_buffer_new[:, :, kv_len:, :] +
-                    grad_key_buffer_new_indir[:, :, kv_len:, :]
+                    grad_key_buffer_new[:, :, kv_len:, :]
+                    + grad_key_buffer_new_indir[:, :, kv_len:, :]
                 )
             if need_value_buffer:
                 grad_value_buffer = (
-                    grad_value_buffer_new[:, :, :kv_len, :] +
-                    grad_value_buffer_new_indir[:, :, :kv_len, :]
+                    grad_value_buffer_new[:, :, :kv_len, :]
+                    + grad_value_buffer_new_indir[:, :, :kv_len, :]
                 )
             if need_value:
                 grad_value = (
-                    grad_value_buffer_new[:, :, kv_len:, :] +
-                    grad_value_buffer_new_indir[:, :, kv_len:, :]
+                    grad_value_buffer_new[:, :, kv_len:, :]
+                    + grad_value_buffer_new_indir[:, :, kv_len:, :]
                 )
 
-        return grad_query, grad_key, grad_value, grad_key_buffer, grad_value_buffer, *([None] * 3)
+        return (
+            grad_query,
+            grad_key,
+            grad_value,
+            grad_key_buffer,
+            grad_value_buffer,
+            *([None] * 3),
+        )

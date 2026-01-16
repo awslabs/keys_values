@@ -107,21 +107,23 @@ def smallest_covering_ranges(
         [(a, b - a) for a, b in zip(slots[:-1], slots[1:]) if b > a + 1],
         key=lambda x: x[1],
         reverse=True,
-    )[:(max_num_ranges - 1)]
-    holes = [(None, mn)] + sorted(
-        [(a, a + l) for a, l in diffs], key=lambda x: x[0],
-    ) + [(mx, None)]
-    result = [
-        (hole1[1], hole2[0] + 1)
-        for hole1, hole2 in zip(holes[:-1], holes[1:])
-    ]
+    )[: (max_num_ranges - 1)]
+    holes = (
+        [(None, mn)]
+        + sorted(
+            [(a, a + l) for a, l in diffs],
+            key=lambda x: x[0],
+        )
+        + [(mx, None)]
+    )
+    result = [(hole1[1], hole2[0] + 1) for hole1, hole2 in zip(holes[:-1], holes[1:])]
     return result
 
 
 def message_with_device_memory(device: torch.device) -> str:
     free, total = torch.cuda.mem_get_info(device)
-    used_in_gb = (total - free) / (1024 ** 3)
-    free_in_gb = free / (1024 ** 3)
+    used_in_gb = (total - free) / (1024**3)
+    free_in_gb = free / (1024**3)
     return f"Memory on {device}: Used {used_in_gb:.3f} GB, Free {free_in_gb:.3f} GB"
 
 
@@ -129,8 +131,7 @@ def message_memory_all_devices() -> str:
     num_devices = torch.cuda.device_count()
     assert num_devices > 0, "There are no CUDA devices"
     lines = [
-        message_with_device_memory(torch.device("cuda", i))
-        for i in range(num_devices)
+        message_with_device_memory(torch.device("cuda", i)) for i in range(num_devices)
     ]
     return "\n".join(lines)
 
@@ -141,7 +142,7 @@ def log_memory_all_devices() -> Dict[str, float]:
     for i in range(num_devices):
         device = torch.device("cuda", i)
         free, total = torch.cuda.mem_get_info(device)
-        used_in_gb = (total - free) / (1024 ** 3)
+        used_in_gb = (total - free) / (1024**3)
         result[f"memory_cuda{i}"] = used_in_gb
     return result
 

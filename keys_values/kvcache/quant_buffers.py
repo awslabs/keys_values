@@ -63,6 +63,7 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
     share the same `dequant_buffers`. It remains allocated.
 
     """
+
     def __init__(
         self,
         quantizer_k: Quantizer,
@@ -92,7 +93,10 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
 
     @property
     def buffers_are_allocated(self) -> bool:
-        return self.quantizer_k.buffers_are_allocated and self.quantizer_v.buffers_are_allocated
+        return (
+            self.quantizer_k.buffers_are_allocated
+            and self.quantizer_v.buffers_are_allocated
+        )
 
     @property
     def debug_label(self) -> Optional[str]:
@@ -107,7 +111,8 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
         self.dequant_buffers.reset()
 
     def _allocate_buffers(
-        self, device: Optional[torch.device] = None,
+        self,
+        device: Optional[torch.device] = None,
     ):
         """
         Args:
@@ -129,16 +134,20 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
                 # No need to reallocate
                 batch_size = None
             elif self.quantizer_k.batch_size < batch_size:
-                print(f"Batch size increased from {self.quantizer_k.batch_size} to {batch_size}: Re-allocating buffers")
+                print(
+                    f"Batch size increased from {self.quantizer_k.batch_size} to {batch_size}: Re-allocating buffers"
+                )
         if batch_size is not None:
             # Note: We also call `allocate_buffers` of quantizers if batch size
             # decreases. In general, this does not lead to re-allocation, but
             # the quantizers need to know the effective batch size as well.
             self.quantizer_k.allocate_buffers(
-                batch_size=batch_size, device=device,
+                batch_size=batch_size,
+                device=device,
             )
             self.quantizer_v.allocate_buffers(
-                batch_size=batch_size, device=device,
+                batch_size=batch_size,
+                device=device,
             )
 
     def _check_init_args(
@@ -148,7 +157,9 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
         dequant_buffers: "DequantizedKVCacheBuffers",
     ):
         if not (0 < self.cache_length <= dequant_buffers.cache_length):
-            raise ValueError(f"quantizer_k.cache_length = {self.cache_length}, must be <= dequant_buffers.cache_length = {dequant_buffers.cache_length}")
+            raise ValueError(
+                f"quantizer_k.cache_length = {self.cache_length}, must be <= dequant_buffers.cache_length = {dequant_buffers.cache_length}"
+            )
         params = dequant_buffers.get_params()
         quant_shape_k = quantizer_k.shape
         quant_shape_v = quantizer_v.shape
@@ -184,7 +195,9 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
         return self.quantizer_k.blocks_over_heads
 
     def _assert_buffers_allocated(self):
-        assert self.buffers_are_allocated, "Buffers are not allocated. Call 'prefill' first"
+        assert (
+            self.buffers_are_allocated
+        ), "Buffers are not allocated. Call 'prefill' first"
 
     def get_slots(
         self,
@@ -253,7 +266,8 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
         self._allocate_buffers(device=key.device)
         self.dequant_buffers.set_quantized_cache(self)
         return self.dequant_buffers.prefill(
-            key.to(dtype=self.dtype), value.to(dtype=self.dtype),
+            key.to(dtype=self.dtype),
+            value.to(dtype=self.dtype),
         )
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
@@ -268,7 +282,8 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
 
     @staticmethod
     def size_estimate_apriori(
-        params: KVCacheBuffersParams, **kwargs,
+        params: KVCacheBuffersParams,
+        **kwargs,
     ) -> Tuple[int, Dict[str, int]]:
         quantizer_type = kwargs.get("quantizer_type")
         if quantizer_type is None:
@@ -276,7 +291,8 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
         else:
             assert isclass(quantizer_type)
         total_k, parts_k = quantizer_type.size_estimate_apriori(
-            params, **kwargs,
+            params,
+            **kwargs,
         )
         bits_by_part = {
             **{"quant_k_" + name: num for name, num in parts_k.items()},
@@ -373,6 +389,7 @@ class DequantizedKVCacheBuffers:
     this leads to registration and infinite loops.
 
     """
+
     def __init__(
         self,
         params: KVCacheBuffersParams,
@@ -390,7 +407,9 @@ class DequantizedKVCacheBuffers:
         self.k_buff = None
         self.v_buff = None
         self._quantized_cache = None
-        self._max_num_ranges = DEFAULT_MAX_NUM_RANGES if max_num_ranges is None else max_num_ranges
+        self._max_num_ranges = (
+            DEFAULT_MAX_NUM_RANGES if max_num_ranges is None else max_num_ranges
+        )
         self._needs_write_back = False
         self._slots_to_write_back = None
         # Do not track more than this many slots
@@ -418,7 +437,12 @@ class DequantizedKVCacheBuffers:
         if self.dtype is None:
             self.dtype = dtype
         if not self.buffers_are_allocated or device != self.device:
-            shape = (self.max_batch_size, self.n_query_groups, self.cache_length, self.head_size)
+            shape = (
+                self.max_batch_size,
+                self.n_query_groups,
+                self.cache_length,
+                self.head_size,
+            )
             self.k_buff = torch.zeros(shape, device=device, dtype=self.dtype)
             self.v_buff = torch.zeros(shape, device=device, dtype=self.dtype)
 
@@ -459,15 +483,21 @@ class DequantizedKVCacheBuffers:
         if cache is self._quantized_cache:
             return  # Assignment remains unchanged
         if cache is not None and cache.cache_length > self.cache_length:
-            raise ValueError(f"cache.cache_length={cache.cache_length}, must be <= {self.cache_length}")
+            raise ValueError(
+                f"cache.cache_length={cache.cache_length}, must be <= {self.cache_length}"
+            )
         self.write_back()
         self._quantized_cache = cache  # Change association
         if cache is not None:
             if not cache.buffers_are_allocated:
-                raise ValueError("Cannot call set_quantized_cache from a non-allocated cache")
+                raise ValueError(
+                    "Cannot call set_quantized_cache from a non-allocated cache"
+                )
             # Buffers here must be on same device as `_quantized_cache`
             if self.buffers_are_allocated and self.device != cache.device:
-                raise ValueError(f"cache.device = {cache.device}, must be equal to {self.device}")
+                raise ValueError(
+                    f"cache.device = {cache.device}, must be equal to {self.device}"
+                )
             self._allocate_buffers(cache.device, cache.dtype)
             self._dequantize()  # Dequantize and copy
 
@@ -485,14 +515,22 @@ class DequantizedKVCacheBuffers:
         # It can happen that `self._quantized_cache.buffers_are_allocated` is
         # False here, because buffers have been deallocated due to OOM error.
         # In this case, we don't need to write back anything
-        if self._quantized_cache is not None and self._needs_write_back and self._quantized_cache.buffers_are_allocated:
+        if (
+            self._quantized_cache is not None
+            and self._needs_write_back
+            and self._quantized_cache.buffers_are_allocated
+        ):
             self._quantize()  # Quantize and write back
 
     def _check_quantized_cache(self):
         if self._quantized_cache is None:
-            raise IndexError("Quantized cache is not assigned. Call `set_quantized_cache` first.")
+            raise IndexError(
+                "Quantized cache is not assigned. Call `set_quantized_cache` first."
+            )
         if self._quantized_cache.batch_size is None:
-            raise IndexError("Quantized cache does not have effective batch size set. Call `prefill` first.")
+            raise IndexError(
+                "Quantized cache does not have effective batch size set. Call `prefill` first."
+            )
 
     @property
     def eff_cache_length(self) -> int:
@@ -516,7 +554,7 @@ class DequantizedKVCacheBuffers:
     def get_slots(
         self,
         positions: PositionsType,
-    )  -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         if not self.buffers_are_allocated:
             raise IndexError("Buffers are not allocated. Call 'prefill' first")
         self._check_quantized_cache()
@@ -524,12 +562,12 @@ class DequantizedKVCacheBuffers:
         if isinstance(positions, torch.Tensor):
             # `index[i, j, k, l] = positions[i, j, k]
             index = expand_index(positions, self.head_size)
-            res_k = self.k_buff[:self.batch_size, ...].gather(-2, index)
-            res_v = self.v_buff[:self.batch_size, ...].gather(-2, index)
+            res_k = self.k_buff[: self.batch_size, ...].gather(-2, index)
+            res_v = self.v_buff[: self.batch_size, ...].gather(-2, index)
         else:
             start, end = positions
-            res_k = self.k_buff[:self.batch_size, :, start:end, :]
-            res_v = self.v_buff[:self.batch_size, :, start:end, :]
+            res_k = self.k_buff[: self.batch_size, :, start:end, :]
+            res_v = self.v_buff[: self.batch_size, :, start:end, :]
         return res_k, res_v
 
     def _track_slots(self, positions: PositionsType):
@@ -550,7 +588,10 @@ class DequantizedKVCacheBuffers:
                 self._slots_to_write_back = None
             else:
                 self._slots_to_write_back.update(range(start, end))
-        if self._slots_to_write_back is not None and len(self._slots_to_write_back) > self._max_slots_tracked:
+        if (
+            self._slots_to_write_back is not None
+            and len(self._slots_to_write_back) > self._max_slots_tracked
+        ):
             # Too many slots: Write back everything
             self._slots_to_write_back = None
         self._needs_write_back = True
@@ -564,19 +605,21 @@ class DequantizedKVCacheBuffers:
         if not self.buffers_are_allocated:
             raise IndexError("Buffers are not allocated. Call 'prefill' first")
         if self.device != key.device:
-            raise ValueError(f"key.device = {key.device}, must be equal to {self.device}")
+            raise ValueError(
+                f"key.device = {key.device}, must be equal to {self.device}"
+            )
         self._check_quantized_cache()
         positions = self._check_positions(positions)
         self._track_slots(positions)
         if isinstance(positions, torch.Tensor):
             # `index[i, j, k, l] = positions[i, j, k]`
             index = expand_index(positions, self.head_size)
-            self.k_buff[:self.batch_size, ...].scatter_(-2, index, key)
-            self.v_buff[:self.batch_size, ...].scatter_(-2, index, value)
+            self.k_buff[: self.batch_size, ...].scatter_(-2, index, key)
+            self.v_buff[: self.batch_size, ...].scatter_(-2, index, value)
         else:
             start, end = positions
-            self.k_buff[:self.batch_size, :, start:end, :] = key
-            self.v_buff[:self.batch_size, :, start:end, :] = value
+            self.k_buff[: self.batch_size, :, start:end, :] = key
+            self.v_buff[: self.batch_size, :, start:end, :] = value
 
     # Copied from `KVCacheBuffers.forward`:
     def forward(
@@ -618,7 +661,9 @@ class DequantizedKVCacheBuffers:
             raise ValueError("key must have 4 dimensions")
         batch_size, _, init_length, _ = key.shape
         if not (1 <= batch_size <= self.max_batch_size):
-            raise ValueError(f"key.shape[0] = {batch_size} must be in [1, {self.max_batch_size}]")
+            raise ValueError(
+                f"key.shape[0] = {batch_size} must be in [1, {self.max_batch_size}]"
+            )
         shape = (batch_size, self.n_query_groups, init_length, self.head_size)
         if key.shape != shape or (value is not None and value.shape != shape):
             msg = f"Shapes of key, value must be {shape}, but key.shape = {key.shape}"
@@ -630,7 +675,9 @@ class DequantizedKVCacheBuffers:
     def _prefill(self, key: torch.Tensor, value: torch.Tensor):
         # Sanity check
         if self.batch_size is None or self.batch_size != key.shape[0]:
-            raise IndexError(f"self.batch_size = {self.batch_size}, key.shape[0] = {key.shape[0]}. Must be the same!")
+            raise IndexError(
+                f"self.batch_size = {self.batch_size}, key.shape[0] = {key.shape[0]}. Must be the same!"
+            )
         # Initialize cache buffers
         init_length = key.shape[2]
         self.set_slots((0, init_length), key, value)
@@ -640,7 +687,9 @@ class DequantizedKVCacheBuffers:
         return sz_buffs, dict(buffers=sz_buffs)
 
     @staticmethod
-    def size_estimate_apriori(params: KVCacheBuffersParams, **kwargs) -> Tuple[int, Dict[str, int]]:
+    def size_estimate_apriori(
+        params: KVCacheBuffersParams, **kwargs
+    ) -> Tuple[int, Dict[str, int]]:
         cache_length = kwargs.get("cache_length")
         if cache_length is None:
             raise IndexError("Argument 'cache_length' is missing")
@@ -649,7 +698,12 @@ class DequantizedKVCacheBuffers:
         dtype = params.dtype
         if dtype is None:
             raise ValueError("params.dtype must be provided")
-        numel = params.max_batch_size * params.n_query_groups * cache_length * params.head_size
+        numel = (
+            params.max_batch_size
+            * params.n_query_groups
+            * cache_length
+            * params.head_size
+        )
         sz_buffs = 2 * numel * bits_for_torch_dtype(dtype)
         return sz_buffs, dict(buffers=sz_buffs)
 
@@ -670,9 +724,9 @@ class DequantizedKVCacheBuffers:
             assert 0 <= start < end <= self.eff_cache_length
         else:
             assert (
-                positions.ndim == 3 and
-                positions.shape[0] in (1, self.batch_size) and
-                positions.shape[1] in (1, self.n_query_groups)
+                positions.ndim == 3
+                and positions.shape[0] in (1, self.batch_size)
+                and positions.shape[1] in (1, self.n_query_groups)
             ), f"positions.shape = {positions.shape} not compatible with batch_size = {self.batch_size}, n_query_groups = {self.n_query_groups}"
             if positions.dtype != torch.int64:
                 positions = positions.to(dtype=torch.int64)
@@ -689,17 +743,26 @@ class DequantizedKVCacheBuffers:
             ranges = [(0, self.eff_cache_length)]
         else:
             ranges = smallest_covering_ranges(
-                self._slots_to_write_back, self._max_num_ranges,
+                self._slots_to_write_back,
+                self._max_num_ranges,
             )
         for a, b in ranges:
             cache.quantizer_k.quantize(
-                a, b, self.k_buff[:self.batch_size, :, a:b, :],
+                a,
+                b,
+                self.k_buff[: self.batch_size, :, a:b, :],
             )
             cache.quantizer_v.quantize(
-                a, b, self.v_buff[:self.batch_size, :, a:b, :],
+                a,
+                b,
+                self.v_buff[: self.batch_size, :, a:b, :],
             )
         if self.debug_events is not None:
-            slots = None if self._slots_to_write_back is None else list(self._slots_to_write_back)
+            slots = (
+                None
+                if self._slots_to_write_back is None
+                else list(self._slots_to_write_back)
+            )
             self.debug_events.append(
                 DebugDequantBuffEvent(
                     kind="write",
@@ -720,12 +783,12 @@ class DequantizedKVCacheBuffers:
         cache.quantizer_k.dequantize(
             start=0,
             end=ecl,
-            out=self.k_buff[:self.batch_size, :, :ecl, :],
+            out=self.k_buff[: self.batch_size, :, :ecl, :],
         )
         cache.quantizer_v.dequantize(
             start=0,
             end=ecl,
-            out=self.v_buff[:self.batch_size, :, :ecl, :],
+            out=self.v_buff[: self.batch_size, :, :ecl, :],
         )
         if self.debug_events is not None:
             self.debug_events.append(
@@ -745,7 +808,9 @@ class DequantizedBufferKeysAndValues(KeysAndValues):
         self._buffers = buffers
         self._assoc_quant_buffers = buffers._quantized_cache
         if self._assoc_quant_buffers is None:
-            raise ValueError("buffers must have associated cache. Use 'set_quantized_cache' first")
+            raise ValueError(
+                "buffers must have associated cache. Use 'set_quantized_cache' first"
+            )
 
     def keys(self) -> torch.Tensor:
         if not (self._assoc_quant_buffers is self._buffers._quantized_cache):

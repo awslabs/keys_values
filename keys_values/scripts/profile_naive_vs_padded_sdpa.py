@@ -24,7 +24,10 @@ from torch.nn.attention import SDPBackend
 
 from litgpt.config import Config
 
-from keys_values.attention import scaled_dot_product_attention_in_blocks, DefaultKeysAndValues
+from keys_values.attention import (
+    scaled_dot_product_attention_in_blocks,
+    DefaultKeysAndValues,
+)
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.test_utils import random_keys_values, random_tensor
 from keys_values.sdpa_wrapper import scaled_dot_product_attention
@@ -52,7 +55,9 @@ def sample_inputs(
         for h in range(config.n_query_groups):
             randpos = torch.randperm(cache_length, **index_kwargs)[:chunk_size]
             token_positions[b, h, randpos] = torch.arange(
-                input_pos, input_pos + chunk_size, **index_kwargs,
+                input_pos,
+                input_pos + chunk_size,
+                **index_kwargs,
             )
     return {
         "query": query,
@@ -160,7 +165,9 @@ def find_chunk_size(
         if repeat is not None:
             sum_time_in_ms += time_in_ms
     time_padded_query = sum_time_in_ms / num_repeats
-    print(f"\ncache_length = {params.cache_length}: Time for padded-query SDPA = {time_padded_query} ms")
+    print(
+        f"\ncache_length = {params.cache_length}: Time for padded-query SDPA = {time_padded_query} ms"
+    )
     # Running root finding
     records = []
     root_func = partial(
@@ -189,13 +196,19 @@ def find_chunk_size(
         f_left = root_func(bracket[0])
         f_right = root_func(bracket[1])
         if f_left > 0:
-            print(f"f({bracket[0]}) = {f_left} > 0: Always use query-padded SDPA for cache_lenght = {params.cache_length}")
+            print(
+                f"f({bracket[0]}) = {f_left} > 0: Always use query-padded SDPA for cache_lenght = {params.cache_length}"
+            )
             always_left = True
         elif f_right < 0:
-            print(f"f({bracket[1]}) = {f_right} < 0: Never use query-padded SDPA for cache_lenght = {params.cache_length}")
+            print(
+                f"f({bracket[1]}) = {f_right} < 0: Never use query-padded SDPA for cache_lenght = {params.cache_length}"
+            )
             always_left = False
         else:
-            print(f"f({bracket[0]}) = {f_left} <= 0 <= {f_right} = f({bracket[1]}): Seems fine to me. Pick the one closer to 0.")
+            print(
+                f"f({bracket[0]}) = {f_left} <= 0 <= {f_right} = f({bracket[1]}): Seems fine to me. Pick the one closer to 0."
+            )
             always_left = abs(f_left) <= abs(f_right)
         if always_left:
             return {
@@ -214,7 +227,9 @@ def find_chunk_size(
 
     chunk_size = round(result.root)
     if result.converged:
-        print(f"Converged with {result.function_calls} evals.\nchunk_size = {chunk_size}")
+        print(
+            f"Converged with {result.function_calls} evals.\nchunk_size = {chunk_size}"
+        )
     else:
         print(f"No convergence: {result.flag}\nchunk_size = {chunk_size}")
     return {
@@ -292,23 +307,23 @@ if __name__ == "__main__":
     # depends on `(n_head, n_query_groups, head_size)`, so we skip over
     # configs if this tuple has already been measured.
     config_names = [
-        "Qwen2.5-0.5B",   # (14, 2, 64)
-        "Qwen2.5-1.5B",   # (12, 2, 128)
-        "Qwen2.5-3B",     # (16, 2, 128)
-        "Qwen2.5-7B",     # (28, 4, 128)
-        "Qwen2.5-14B",    # (40, 8, 128)
-        "Qwen3-0.6B",     # (16, 8, 128)
-        "Qwen3-1.7B",     # (16, 8, 128) [skip]
-        "Qwen3-4B",       # (32, 8, 128)
-        "Qwen3-8B",       # (32, 8, 128) [skip]
-        "Qwen3-14B",      # (40, 8, 128) [skip]
-        "Qwen3-32B",      # (64, 8, 128)
+        "Qwen2.5-0.5B",  # (14, 2, 64)
+        "Qwen2.5-1.5B",  # (12, 2, 128)
+        "Qwen2.5-3B",  # (16, 2, 128)
+        "Qwen2.5-7B",  # (28, 4, 128)
+        "Qwen2.5-14B",  # (40, 8, 128)
+        "Qwen3-0.6B",  # (16, 8, 128)
+        "Qwen3-1.7B",  # (16, 8, 128) [skip]
+        "Qwen3-4B",  # (32, 8, 128)
+        "Qwen3-8B",  # (32, 8, 128) [skip]
+        "Qwen3-14B",  # (40, 8, 128) [skip]
+        "Qwen3-32B",  # (64, 8, 128)
         "Llama-2-7b-hf",  # (32, 32, 128)
-        "Llama-2-13b-hf", # (40, 40, 128)
-        "Llama-3-8B",     # (32, 8, 128) [skip]
-        "Llama-3.1-8B",   # (32, 8, 128) [skip]
-        "Llama-3.2-1B",   # (32, 8, 64)
-        "Llama-3.2-3B",   # (24, 8, 128)
+        "Llama-2-13b-hf",  # (40, 40, 128)
+        "Llama-3-8B",  # (32, 8, 128) [skip]
+        "Llama-3.1-8B",  # (32, 8, 128) [skip]
+        "Llama-3.2-1B",  # (32, 8, 64)
+        "Llama-3.2-3B",  # (24, 8, 128)
     ]
     config_names = ["Llama-2-13b-hf"]
     batch_sizes = [8]

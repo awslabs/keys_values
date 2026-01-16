@@ -56,7 +56,8 @@ from keys_values.finetune.utils import (
     LIT_MODEL_FNAME,
     HEAD_MODEL_FNAME,
     LORA_WEIGHTS_FNAME,
-    LORA_WEIGHTS_FNAME_OLD, check_kv_cache,
+    LORA_WEIGHTS_FNAME_OLD,
+    check_kv_cache,
 )
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.utils import VerbosityLevels
@@ -139,12 +140,15 @@ def setup(
     )
     # Base model checkpoint
     checkpoint_dir = auto_download_checkpoint(
-        model_name=hyp_pars["checkpoint_dir"], access_token=access_token,
+        model_name=hyp_pars["checkpoint_dir"],
+        access_token=access_token,
     )
     pprint(locals())
     # Dataset
     if not hyp_pars["data"]["class_path"].endswith("data.LongBenchV2"):
-        raise ValueError(f"Currently, this script supports --data LongBenchV2 only, but got {hyp_pars['data']['class_path']}")
+        raise ValueError(
+            f"Currently, this script supports --data LongBenchV2 only, but got {hyp_pars['data']['class_path']}"
+        )
     data = LongBenchV2(**hyp_pars["data"]["init_args"])
     if data.metadata_dir is None:
         data.metadata_dir = str(out_dir / "data")
@@ -253,7 +257,8 @@ def main(
 
                 old_embedding = gpt_model.transformer.wte
                 new_wte = StableEmbedding(
-                    old_embedding.num_embeddings, old_embedding.embedding_dim,
+                    old_embedding.num_embeddings,
+                    old_embedding.embedding_dim,
                 )
                 with torch.no_grad():
                     new_wte.weight.copy_(old_embedding.weight)
@@ -330,7 +335,8 @@ def main(
             print("*** longcontext_eval.main:")
             first = batch[INPUT_IDS_NAME][0, :]
             for second, label in zip(
-                batch[INPUT_IDS_NAME][1:, :], batch["targets"],
+                batch[INPUT_IDS_NAME][1:, :],
+                batch["targets"],
             ):
                 print(f"{label.item()}: {(first != second).sum().item()}")
                 first = second
@@ -399,7 +405,8 @@ def get_dataloader(
 
 
 def load_configuration(
-    task_path: Path, model_type: str,
+    task_path: Path,
+    model_type: str,
 ) -> Tuple[ModelConfiguration, Dict[str, Any]]:
     # Load hyperparameters
     hyp_pars = yaml.safe_load((task_path / "hyperparameters.yaml").open())
@@ -412,7 +419,9 @@ def load_configuration(
     else:
         lora = hyp_pars.get("lora")
         if lora is None:
-            raise ValueError(f"{task_path / 'hyperparameters.yaml'} does not contain 'lora':\n{hyp_pars}")
+            raise ValueError(
+                f"{task_path / 'hyperparameters.yaml'} does not contain 'lora':\n{hyp_pars}"
+            )
         kwargs = dict(
             lora_r=lora["r"],
             lora_alpha=lora["alpha"],
@@ -426,20 +435,25 @@ def load_configuration(
         )
         try:
             config = ConfigLoRA.from_file(
-                task_path / "model_config.yaml", **kwargs,
+                task_path / "model_config.yaml",
+                **kwargs,
             )
         except TypeError:
             config = ConfigLoRA_OLD.from_file(
-                task_path / "model_config.yaml", **kwargs,
+                task_path / "model_config.yaml",
+                **kwargs,
             )
     # Head model
     head_model_name = hyp_pars["head_model"]
     head_model_kwargs = hyp_pars.get("head_model_kwargs", dict())
-    return ModelConfiguration(
-        config=config,
-        head_model_name=head_model_name,
-        head_model_kwargs=head_model_kwargs,
-    ), hyp_pars
+    return (
+        ModelConfiguration(
+            config=config,
+            head_model_name=head_model_name,
+            head_model_kwargs=head_model_kwargs,
+        ),
+        hyp_pars,
+    )
 
 
 def load_model_checkpoint(
@@ -507,7 +521,7 @@ def debug_check_weights(gpt_model: GPTFull):
 
 def debug_lora_get_weights(gpt_model: GPTLoRA) -> Dict[str, Any]:
     result = {
-        "fixed" : {
+        "fixed": {
             "attn.qkv": gpt_model.transformer.h[6].attn.qkv.linear.weight,
             "attn.proj": gpt_model.transformer.h[10].attn.proj.linear.weight,
             "mlp.fc_1": gpt_model.transformer.h[2].mlp.fc_1.linear.weight,

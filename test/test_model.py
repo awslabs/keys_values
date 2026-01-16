@@ -33,7 +33,12 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.models.falcon import FalconConfig, FalconForCausalLM
 from transformers.models.gemma import GemmaConfig, GemmaForCausalLM
 from transformers.models.gemma2 import Gemma2Config, Gemma2ForCausalLM
-from transformers.models.gemma3 import Gemma3Config, Gemma3ForCausalLM, Gemma3ForConditionalGeneration, Gemma3TextConfig
+from transformers.models.gemma3 import (
+    Gemma3Config,
+    Gemma3ForCausalLM,
+    Gemma3ForConditionalGeneration,
+    Gemma3TextConfig,
+)
 from transformers.models.gpt_neox import GPTNeoXConfig, GPTNeoXForCausalLM
 from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 from transformers.models.mistral import MistralConfig, MistralForCausalLM
@@ -90,7 +95,9 @@ from keys_values.pos_encoding import LinearPositionEncoding
         ),
     ],
 )
-def test_against_gpt_neox_model(rotary_pct, batch_size, n_embd, parallel_residual, device, dtype) -> None:
+def test_against_gpt_neox_model(
+    rotary_pct, batch_size, n_embd, parallel_residual, device, dtype
+) -> None:
     torch.set_default_dtype(dtype)
 
     ours_config = Config(
@@ -127,7 +134,11 @@ def test_against_gpt_neox_model(rotary_pct, batch_size, n_embd, parallel_residua
     ours_model.load_state_dict(state_dict)
 
     token_sample = torch.randint(
-        0, ours_config.padded_vocab_size, size=(batch_size, ours_config.block_size), dtype=torch.int64, device=device
+        0,
+        ours_config.padded_vocab_size,
+        size=(batch_size, ours_config.block_size),
+        dtype=torch.int64,
+        device=device,
     )
 
     theirs = theirs_model(token_sample)["logits"]
@@ -208,7 +219,9 @@ def test_against_hf_falcon(kwargs, device, dtype):
 def test_against_original_open_llama_3b(device, dtype):
     torch.set_default_dtype(dtype)
 
-    ours_config = Config.from_name("open_llama_3b", n_layer=2, n_head=8, n_embd=32, intermediate_size=86)
+    ours_config = Config.from_name(
+        "open_llama_3b", n_layer=2, n_head=8, n_embd=32, intermediate_size=86
+    )
     T = 5
     theirs_config = LlamaConfig(
         hidden_size=ours_config.n_embd,
@@ -273,7 +286,12 @@ def test_against_hf_llama_2_and_3(ours_kwargs, device, dtype):
     torch.set_default_dtype(dtype)
 
     ours_config = Config.from_name(
-        padded_vocab_size=10000, n_layer=2, n_head=8, n_embd=32, intermediate_size=86, **ours_kwargs
+        padded_vocab_size=10000,
+        n_layer=2,
+        n_head=8,
+        n_embd=32,
+        intermediate_size=86,
+        **ours_kwargs,
     )
     T = 5
     theirs_config = LlamaConfig(
@@ -314,7 +332,10 @@ def test_against_hf_llama_2_and_3(ours_kwargs, device, dtype):
         pytest.param(
             torch.device("cuda"),
             torch.float16,
-            marks=[pytest.mark.xfail(raises=AssertionError, strict=False), _RunIf(min_cuda_gpus=1)],
+            marks=[
+                pytest.mark.xfail(raises=AssertionError, strict=False),
+                _RunIf(min_cuda_gpus=1),
+            ],
         ),
     ],
 )
@@ -325,7 +346,12 @@ def test_against_hf_phi(model_name, device, dtype):
     torch.set_default_dtype(dtype)
 
     ours_config = Config.from_name(
-        model_name, padded_vocab_size=10000, n_layer=2, n_head=4, n_embd=256, rotary_percentage=0.5
+        model_name,
+        padded_vocab_size=10000,
+        n_layer=2,
+        n_head=4,
+        n_embd=256,
+        rotary_percentage=0.5,
     )
     T = 5
     theirs_config = PhiConfig(
@@ -374,7 +400,10 @@ def test_against_hf_phi(model_name, device, dtype):
         pytest.param(
             torch.device("cuda"),
             torch.float16,
-            marks=[pytest.mark.xfail(raises=AssertionError, strict=False), _RunIf(min_cuda_gpus=1)],
+            marks=[
+                pytest.mark.xfail(raises=AssertionError, strict=False),
+                _RunIf(min_cuda_gpus=1),
+            ],
         ),
     ],
 )
@@ -483,7 +512,9 @@ def test_against_mistral_hf_models(device, dtype, model_name):
     ours_model.load_state_dict(state_dict)
 
     # test end to end
-    x = torch.randint(low=0, high=ours_config.padded_vocab_size, size=(T,), device=device).unsqueeze(0)
+    x = torch.randint(
+        low=0, high=ours_config.padded_vocab_size, size=(T,), device=device
+    ).unsqueeze(0)
     assert x.size(1) == T
     ours_y = ours_model(x)
     theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
@@ -551,7 +582,9 @@ def test_against_mathstral_hf_models(device, dtype):
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("model_name", ("Mixtral-8x7B-Instruct-v0.1", "Mixtral-8x22B-Instruct-v0.1"))
+@pytest.mark.parametrize(
+    "model_name", ("Mixtral-8x7B-Instruct-v0.1", "Mixtral-8x22B-Instruct-v0.1")
+)
 def test_against_hf_mixtral(model_name):
     device = torch.device("cpu")
     dtype = torch.float32
@@ -588,7 +621,11 @@ def test_against_hf_mixtral(model_name):
     ours_model.load_state_dict(state_dict)
 
     # test end to end
-    x = torch.tensor([[9856, 23, 491, 1536, 304], [23, 345, 65, 123, 321]], dtype=torch.int32, device=device)
+    x = torch.tensor(
+        [[9856, 23, 491, 1536, 304], [23, 345, 65, 123, 321]],
+        dtype=torch.int32,
+        device=device,
+    )
     assert x.size(1) == T
     ours_y = ours_model(x)
     theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
@@ -735,7 +772,9 @@ def test_against_original_stablelm_zephyr_3b(device, dtype):
     torch.set_default_dtype(dtype)
 
     T = 5
-    ours_config = Config.from_name("stablelm-zephyr-3b", n_layer=2, n_head=16, n_embd=32, intermediate_size=86)
+    ours_config = Config.from_name(
+        "stablelm-zephyr-3b", n_layer=2, n_head=16, n_embd=32, intermediate_size=86
+    )
     theirs_config = AutoConfig.from_pretrained(
         "stabilityai/stablelm-zephyr-3b",
         trust_remote_code=True,
@@ -749,7 +788,9 @@ def test_against_original_stablelm_zephyr_3b(device, dtype):
     )
     assert ours_config.intermediate_size == theirs_config.intermediate_size
 
-    theirs_model = AutoModelForCausalLM.from_config(theirs_config, trust_remote_code=True).to(device)
+    theirs_model = AutoModelForCausalLM.from_config(
+        theirs_config, trust_remote_code=True
+    ).to(device)
     theirs_state_dict = theirs_model.state_dict()
     state_dict = {}
     copy_weights_hf_llama(ours_config, {}, state_dict, theirs_state_dict)
@@ -891,14 +932,18 @@ def test_against_original_gemma_2(model_name, device, dtype):
     ours_model.load_state_dict(state_dict)
 
     # test end to end
-    x = torch.randint(low=0, high=ours_config.padded_vocab_size, size=(T,), device=device).unsqueeze(0)
+    x = torch.randint(
+        low=0, high=ours_config.padded_vocab_size, size=(T,), device=device
+    ).unsqueeze(0)
     ours_y = ours_model(x)
     theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
     torch.testing.assert_close(ours_y, theirs_y, rtol=3e-5, atol=3e-5)
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("model_name", ["gemma-3-1b-it", "gemma-3-4b-it", "gemma-3-12b-it", "gemma-3-27b-it"])
+@pytest.mark.parametrize(
+    "model_name", ["gemma-3-1b-it", "gemma-3-4b-it", "gemma-3-12b-it", "gemma-3-27b-it"]
+)
 @pytest.mark.parametrize(
     ("device", "dtype"),
     [
@@ -961,7 +1006,9 @@ def test_against_original_gemma_3(model_name, device, dtype):
     ours_model.load_state_dict(state_dict)
 
     # test end to end
-    x = torch.randint(low=0, high=ours_config.padded_vocab_size, size=(T,), device=device).unsqueeze(0)
+    x = torch.randint(
+        low=0, high=ours_config.padded_vocab_size, size=(T,), device=device
+    ).unsqueeze(0)
     assert x.size(1) == T
     ours_y = ours_model(x)
     theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
@@ -969,7 +1016,9 @@ def test_against_original_gemma_3(model_name, device, dtype):
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("model_name", ["gemma-3-4b-it", "gemma-3-12b-it", "gemma-3-27b-it"])
+@pytest.mark.parametrize(
+    "model_name", ["gemma-3-4b-it", "gemma-3-12b-it", "gemma-3-27b-it"]
+)
 @pytest.mark.parametrize(
     ("device", "dtype"),
     [
@@ -1033,7 +1082,9 @@ def test_against_multimodal_gemma_3(model_name, device, dtype):
     ours_model.load_state_dict(state_dict)
 
     # test end to end
-    x = torch.randint(low=0, high=ours_config.padded_vocab_size, size=(T,), device=device).unsqueeze(0)
+    x = torch.randint(
+        low=0, high=ours_config.padded_vocab_size, size=(T,), device=device
+    ).unsqueeze(0)
     assert x.size(1) == T
     ours_y = ours_model(x)
     theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
@@ -1042,7 +1093,14 @@ def test_against_multimodal_gemma_3(model_name, device, dtype):
 
 @torch.inference_mode()
 @pytest.mark.parametrize(
-    "model_name", ["Qwen2.5-1.5B", "Qwen2.5-Coder-1.5B", "Qwen2.5-Math-1.5B", "QwQ-32B-Preview", "QwQ-32B"]
+    "model_name",
+    [
+        "Qwen2.5-1.5B",
+        "Qwen2.5-Coder-1.5B",
+        "Qwen2.5-Math-1.5B",
+        "QwQ-32B-Preview",
+        "QwQ-32B",
+    ],
 )
 @pytest.mark.parametrize(
     ("device", "dtype"),
@@ -1097,7 +1155,9 @@ def test_against_original_qwen_2_5(model_name, device, dtype):
     ours_model.load_state_dict(state_dict)
 
     # test end to end
-    x = torch.randint(low=0, high=ours_config.padded_vocab_size, size=(T,), device=device).unsqueeze(0)
+    x = torch.randint(
+        low=0, high=ours_config.padded_vocab_size, size=(T,), device=device
+    ).unsqueeze(0)
     assert x.size(1) == T
     ours_y = ours_model(x)
     theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
@@ -1167,7 +1227,9 @@ def test_against_original_qwen_3(model_name, device, dtype):
     ours_model.load_state_dict(state_dict)
 
     # test end to end
-    x = torch.randint(low=0, high=ours_config.padded_vocab_size, size=(T,), device=device).unsqueeze(0)
+    x = torch.randint(
+        low=0, high=ours_config.padded_vocab_size, size=(T,), device=device
+    ).unsqueeze(0)
     assert x.size(1) == T
     ours_y = ours_model(x)
     theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
@@ -1176,7 +1238,13 @@ def test_against_original_qwen_3(model_name, device, dtype):
 
 @torch.inference_mode()
 @pytest.mark.parametrize(
-    "model_name", ["Qwen3-30B-A3B", "Qwen3-235B-A22B", "Qwen3-235B-A22B-Thinking-2507", "Qwen3-235B-A22B-Instruct-2507"]
+    "model_name",
+    [
+        "Qwen3-30B-A3B",
+        "Qwen3-235B-A22B",
+        "Qwen3-235B-A22B-Thinking-2507",
+        "Qwen3-235B-A22B-Instruct-2507",
+    ],
 )
 @pytest.mark.parametrize(
     ("device", "dtype"),
@@ -1235,7 +1303,9 @@ def test_against_original_qwen_3_moe(model_name, device, dtype):
     ours_model.load_state_dict(state_dict)
 
     # test end to end
-    x = torch.randint(low=0, high=ours_config.padded_vocab_size, size=(T,), device=device).unsqueeze(0)
+    x = torch.randint(
+        low=0, high=ours_config.padded_vocab_size, size=(T,), device=device
+    ).unsqueeze(0)
     assert x.size(1) == T
     ours_y = ours_model(x)
     theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
@@ -1426,7 +1496,9 @@ def test_against_hf_falcon3(model_name, device, dtype):
 @torch.inference_mode()
 def test_model_compile():
     model = GPT.from_name("pythia-14m", n_layer=3)
-    x = torch.randint(model.config.vocab_size, size=(2, model.config.block_size), dtype=torch.int64)
+    x = torch.randint(
+        model.config.vocab_size, size=(2, model.config.block_size), dtype=torch.int64
+    )
 
     explanation = torch._dynamo.explain(model)(x)
     assert isinstance(explanation, debugging.ExplainOutput)
@@ -1454,15 +1526,27 @@ def test_model_kv_cache_amp():
 
 # https://github.com/pytorch/pytorch/blob/ad3572a5d/torch/testing/_internal/common_cuda.py#L31-L34
 SUPPORTS_FLASH_ATTENTION = (
-    torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 0) and not _IS_WINDOWS
+    torch.cuda.is_available()
+    and torch.cuda.get_device_capability() >= (8, 0)
+    and not _IS_WINDOWS
 )
 
 
 def assert_sdpa_backend(
-    original_fn, config, enable_gqa, expected, query, k_and_v, **kwargs,
+    original_fn,
+    config,
+    enable_gqa,
+    expected,
+    query,
+    k_and_v,
+    **kwargs,
 ):
     sdpa_mode = kwargs.get("sdpa_mode")
-    exp_mode = SDPA_IMPL_PYTORCH if config.attention_logit_softcapping is None else SDPA_IMPL_EAGER_NO_BLOCKS
+    exp_mode = (
+        SDPA_IMPL_PYTORCH
+        if config.attention_logit_softcapping is None
+        else SDPA_IMPL_EAGER_NO_BLOCKS
+    )
     assert sdpa_mode == exp_mode, f"sdpa_mode = {sdpa_mode} != {exp_mode}"
     # This is also done in `MultiHeadSelfAttention.scaled_dot_product_attention`
     mask = kwargs.get("mask")
@@ -1484,17 +1568,23 @@ def assert_sdpa_backend(
 
     # SDPAParams gained an additional argument in PyTorch 2.5
     args = [_enable_gqa] if hasattr(SDPAParams, "enable_gqa") else []
-    params = SDPAParams(query, _k_and_v.keys(), _k_and_v.values(), mask, 0.0, True, *args)
+    params = SDPAParams(
+        query, _k_and_v.keys(), _k_and_v.values(), mask, 0.0, True, *args
+    )
     if expected is SDPBackend.FLASH_ATTENTION:
         assert flash_sdp_enabled(), "flash_sdp_enabled() is False"
         if config.sliding_window_size is None:
-            assert can_use_flash_attention(params, True), "can_use_flash_attention(params, True) is False"
+            assert can_use_flash_attention(
+                params, True
+            ), "can_use_flash_attention(params, True) is False"
     elif expected is SDPBackend.EFFICIENT_ATTENTION:
         assert mem_efficient_sdp_enabled(), "mem_efficient_sdp_enabled() is False"
         if (not enable_gqa) or mask is None:
             # At present, `SDPBackend.EFFICIENT_ATTENTION` does not support
             # `enabla_gqa=True` and a mask specified
-            assert can_use_efficient_attention(params, True), "can_use_efficient_attention(params, True) is False"
+            assert can_use_efficient_attention(
+                params, True
+            ), "can_use_efficient_attention(params, True) is False"
     elif expected is SDPBackend.MATH:
         assert math_sdp_enabled(), "math_sdp_enabled() is False"
     else:
@@ -1509,7 +1599,11 @@ def test_flash_attention_sdpa():
 
 
 @_RunIf(min_cuda_gpus=1)
-@pytest.mark.parametrize("config", deepcopy(config_module.configs), ids=[c["name"] for c in config_module.configs])
+@pytest.mark.parametrize(
+    "config",
+    deepcopy(config_module.configs),
+    ids=[c["name"] for c in config_module.configs],
+)
 @torch.inference_mode()
 def test_sdpa_choice(config):
     if config["name"].startswith("Gemma-2-"):
@@ -1546,7 +1640,11 @@ def test_sdpa_choice(config):
         model.mha.scaled_dot_product_attention,
         config,
         enable_gqa,
-        SDPBackend.EFFICIENT_ATTENTION if config.head_size % 8 == 0 else SDPBackend.MATH,
+        (
+            SDPBackend.EFFICIENT_ATTENTION
+            if config.head_size % 8 == 0
+            else SDPBackend.MATH
+        ),
     )
     with torch.backends.cuda.sdp_kernel(enable_flash=False):
         model(x)
@@ -1554,7 +1652,11 @@ def test_sdpa_choice(config):
 
 
 @_RunIf(min_cuda_gpus=1)
-@pytest.mark.parametrize("config", deepcopy(config_module.configs), ids=[c["name"] for c in config_module.configs])
+@pytest.mark.parametrize(
+    "config",
+    deepcopy(config_module.configs),
+    ids=[c["name"] for c in config_module.configs],
+)
 @torch.inference_mode()
 def test_sdpa_choice_kv_cache(config):
     torch.set_default_dtype(torch.float16)
@@ -1588,7 +1690,8 @@ def test_sdpa_choice_kv_cache(config):
         # flash attention does not support an attention mask
         for cache, _ in reset_meth:
             cache.mha.scaled_dot_product_attention = partial(
-                sdpa_wrapper, SDPBackend.MATH,
+                sdpa_wrapper,
+                SDPBackend.MATH,
             )
         with torch.backends.cuda.sdp_kernel(enable_mem_efficient=False):
             model(x)
@@ -1596,12 +1699,15 @@ def test_sdpa_choice_kv_cache(config):
             cache.mha.scaled_dot_product_attention = reset
 
     expected = (
-        SDPBackend.EFFICIENT_ATTENTION if config.head_size % 8 == 0 and config.n_query_groups != 1 else SDPBackend.MATH
+        SDPBackend.EFFICIENT_ATTENTION
+        if config.head_size % 8 == 0 and config.n_query_groups != 1
+        else SDPBackend.MATH
     )
     model.reset()
     for cache, _ in reset_meth:
         cache.mha.scaled_dot_product_attention = partial(
-            sdpa_wrapper, expected,
+            sdpa_wrapper,
+            expected,
         )
     with torch.backends.cuda.sdp_kernel(enable_flash=False):
         model(x)
@@ -1638,7 +1744,9 @@ def test_load_legacy_state_dict():
     # make weights to be as-like in a legacy checkpoint, with `attn.attn.weight` instead of `attn.qkv.weight`
     # and make them interleaved
     state_dict = deepcopy(attention_1.state_dict())
-    state_dict["attn.weight"] = make_qkv_interleaved(state_dict.pop("qkv.weight"), config)
+    state_dict["attn.weight"] = make_qkv_interleaved(
+        state_dict.pop("qkv.weight"), config
+    )
     state_dict["attn.bias"] = make_qkv_interleaved(state_dict.pop("qkv.bias"), config)
 
     attention_2 = CausalSelfAttention(config=config, block_idx=0)

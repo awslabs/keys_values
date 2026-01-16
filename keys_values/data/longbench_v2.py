@@ -71,7 +71,9 @@ class LongestFirstIterator(Iterator):
     ):
         assert len(inds_longest) == batch_size
         if not all(0 <= x < dataset_size for x in inds_longest):
-            raise ValueError(f"inds_longest = {inds_longest}: all entries must be in [0, {dataset_size})")
+            raise ValueError(
+                f"inds_longest = {inds_longest}: all entries must be in [0, {dataset_size})"
+            )
         self.dataset_size = dataset_size
         self.batch_size = batch_size
         remainder = list(set(range(dataset_size)) - set(inds_longest))
@@ -137,6 +139,7 @@ class LongBenchV2(DataModule):
       each record
 
     """
+
     def __init__(
         self,
         mask_prompt: bool = True,
@@ -188,7 +191,9 @@ class LongBenchV2(DataModule):
 
         """
         if test_set_tag is not None and test_set_tag not in SUPPORTED_TEST_SET_TAGS:
-            raise ValueError(f"test_set_tag = {test_set_tag} is not supported, must be None or in {SUPPORTED_TEST_SET_TAGS}")
+            raise ValueError(
+                f"test_set_tag = {test_set_tag} is not supported, must be None or in {SUPPORTED_TEST_SET_TAGS}"
+            )
         self.mask_prompt = mask_prompt
         self.val_split_fraction = val_split_fraction
         self.ignore_index = ignore_index
@@ -197,7 +202,9 @@ class LongBenchV2(DataModule):
         self.num_workers = num_workers
         self.include_multiturn_conversations = include_multiturn_conversations
         self.repo_id = repo_id
-        self.access_token = os.getenv("HF_TOKEN") if access_token is None else access_token
+        self.access_token = (
+            os.getenv("HF_TOKEN") if access_token is None else access_token
+        )
         self.metadata_dir = metadata_dir
         self.head_model = None
         self._is_sequence_classification = None
@@ -247,7 +254,9 @@ class LongBenchV2(DataModule):
         if head_model is None:
             raise ValueError("head_model must be provided")
         if not head_model in SUPPORTED_HEAD_MODELS:
-            raise ValueError(f"head_model '{head_model}' not supported, must be in {SUPPORTED_HEAD_MODELS}")
+            raise ValueError(
+                f"head_model '{head_model}' not supported, must be in {SUPPORTED_HEAD_MODELS}"
+            )
         self.tokenizer = tokenizer
         self.batch_size = batch_size
         if max_seq_length is not None:
@@ -356,7 +365,8 @@ class LongBenchV2(DataModule):
             assert self._sequence_lengths_for_train is not None
             assert len(self._sequence_lengths_for_train) == len(self.train_dataset)
             inds_longest = [
-                x[1] for x in nlargest(
+                x[1]
+                for x in nlargest(
                     self.batch_size,
                     zip(
                         self._sequence_lengths_for_train,
@@ -445,7 +455,9 @@ class LongBenchV2(DataModule):
             for label in CLASS_LABELS:
                 token_idx = self.tokenizer.encode(label)
                 if len(token_idx) != 1:
-                    raise ValueError(f"Class label {label} maps to tokens {token_idx}, but must map to a single token")
+                    raise ValueError(
+                        f"Class label {label} maps to tokens {token_idx}, but must map to a single token"
+                    )
                 class_label_tokens.append(int(token_idx.item()))
             result["class_label_tokens"] = class_label_tokens
             print(f"Class label tokens: {CLASS_LABELS} -> {class_label_tokens}")
@@ -503,7 +515,9 @@ class LongBenchV2(DataModule):
         with meta_path.open("r") as fp:
             data = json.load(fp)
         if not METADATA_KEYS.issubset(data.keys()):
-            print(f"Metadata loaded from {meta_path} does not contain all keys {METADATA_KEYS}:\n{data}")
+            print(
+                f"Metadata loaded from {meta_path} does not contain all keys {METADATA_KEYS}:\n{data}"
+            )
             return None
         seq_lenghts = self._get_seq_lengths(data)
         if seq_lenghts is None:
@@ -546,7 +560,7 @@ PROMPTLINES_POSTFIX = [
 
 PROMPTLINES_FINAL = {
     CrossEntropyOnLogits.NAME: [
-        "Format your response as follows: \"The correct answer is (insert answer here)\".",
+        'Format your response as follows: "The correct answer is (insert answer here)".',
         "",
         "Answer:",
         "The correct answer is ",
@@ -594,7 +608,9 @@ def filter_and_transform(
         data_iter = tqdm(dataset)
     else:
         if len(seq_lengths) != len(dataset):
-            raise ValueError(f"len(seq_lengths) = {len(seq_lengths)} != {len(dataset)} = len(dataset)")
+            raise ValueError(
+                f"len(seq_lengths) = {len(seq_lengths)} != {len(dataset)} = len(dataset)"
+            )
         data_iter = dataset
     new_seq_lengths = []
     for idx, entry in enumerate(data_iter):
@@ -604,10 +620,10 @@ def filter_and_transform(
             for k in ("question", "choice_A", "choice_B", "choice_C", "choice_D")
         }
         instruction_list = (
-            PROMPTLINES_PREFIX +
-            [entry["context"]] +
-            [line.format(**values) for line in PROMPTLINES_POSTFIX] +
-            PROMPTLINES_FINAL[head_model]
+            PROMPTLINES_PREFIX
+            + [entry["context"]]
+            + [line.format(**values) for line in PROMPTLINES_POSTFIX]
+            + PROMPTLINES_FINAL[head_model]
         )
         instruction = "\n".join(instruction_list)
         output = entry["answer"]
@@ -641,11 +657,14 @@ def filter_and_transform(
     if test_set_tag == "rest":
         # Sort by increasing length
         test_results = sorted(
-            test_results, key=lambda x: x["num_tokens_instruction"],
+            test_results,
+            key=lambda x: x["num_tokens_instruction"],
         )
         min_length = test_results[0]["num_tokens_instruction"]
         max_length = test_results[-1]["num_tokens_instruction"]
-        print(f"Test dataset has {len(test_results)} records, token lengths between {min_length} and {max_length}")
+        print(
+            f"Test dataset has {len(test_results)} records, token lengths between {min_length} and {max_length}"
+        )
     else:
         test_results = None
     if seq_lengths is None:
@@ -669,6 +688,7 @@ class LongBenchV2Truncated(LongBenchV2):
       :func:`truncate_contexts_and_transform`.
 
     """
+
     def __init__(
         self,
         metadata_dir: str,
@@ -730,8 +750,10 @@ class LongBenchV2Truncated(LongBenchV2):
         truncation_lengths = None
         tl_map = metadata.get(METADATA_TRUNCATION_LENGHTS_KEY)
         if tl_map is not None:
-            tl_map = {int(k): {int(inner_k): inner_v for inner_k, inner_v in v.items()}
-                      for k, v in tl_map.items()}
+            tl_map = {
+                int(k): {int(inner_k): inner_v for inner_k, inner_v in v.items()}
+                for k, v in tl_map.items()
+            }
             truncation_lengths = tl_map.get(self.truncation_context_width)
         try_to_store = truncation_lengths is None
         # If `truncation_lengths` could not be loaded, it is recomputed and
@@ -788,7 +810,9 @@ def truncate_contexts_and_transform(
     results: List[Dict[str, str]] = []
     num_used = 0
     num_total = 0
-    print(f"\nProcessing dataset, truncating prompts for baseline with context width {truncation_context_width}")
+    print(
+        f"\nProcessing dataset, truncating prompts for baseline with context width {truncation_context_width}"
+    )
     if truncation_lengths is None:
         # Show progress bar: This takes a while
         data_iter = tqdm(dataset)
@@ -811,23 +835,32 @@ def truncate_contexts_and_transform(
                 len_truncated_context = truncation_lengths[idx]
             else:
                 encoded_postfix = tokenizer.encode(
-                    "\n" + "\n".join(
-                        [line.format(**values) for line in PROMPTLINES_POSTFIX] +
-                        PROMPTLINES_FINAL[head_model]
+                    "\n"
+                    + "\n".join(
+                        [line.format(**values) for line in PROMPTLINES_POSTFIX]
+                        + PROMPTLINES_FINAL[head_model]
                     )
                 )
-                num_tokens_context = truncation_context_width - len(encoded_postfix) - len(encoded_prefix)
+                num_tokens_context = (
+                    truncation_context_width
+                    - len(encoded_postfix)
+                    - len(encoded_prefix)
+                )
                 if num_tokens_context <= 0:
-                    raise ValueError(f"idx={idx}: truncation_context_width={truncation_context_width} is too short (len(encoded_prefix)={len(encoded_prefix)}, len(encoded_postfix)={len(encoded_postfix)})")
+                    raise ValueError(
+                        f"idx={idx}: truncation_context_width={truncation_context_width} is too short (len(encoded_prefix)={len(encoded_prefix)}, len(encoded_postfix)={len(encoded_postfix)})"
+                    )
                 encoded_context = tokenizer.encode(entry["context"])
-                len_truncated_context = len(tokenizer.decode(encoded_context[(-num_tokens_context):]))
+                len_truncated_context = len(
+                    tokenizer.decode(encoded_context[(-num_tokens_context):])
+                )
                 new_truncation_lengths[idx] = len_truncated_context
             truncated_context = entry["context"][(-len_truncated_context):]
             instruction_list = (
-                PROMPTLINES_PREFIX +
-                [truncated_context] +
-                [line.format(**values) for line in PROMPTLINES_POSTFIX] +
-                PROMPTLINES_FINAL[head_model]
+                PROMPTLINES_PREFIX
+                + [truncated_context]
+                + [line.format(**values) for line in PROMPTLINES_POSTFIX]
+                + PROMPTLINES_FINAL[head_model]
             )
             instruction = "\n".join(instruction_list)
             output = entry["answer"]
@@ -837,4 +870,6 @@ def truncate_contexts_and_transform(
                 print(f"DEBUG: Stop with {num_used} records.")
                 break
     print(f"\nKept {num_used} of {num_total} entries.")
-    return results, new_truncation_lengths if truncation_lengths is None else truncation_lengths
+    return results, (
+        new_truncation_lengths if truncation_lengths is None else truncation_lengths
+    )

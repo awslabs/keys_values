@@ -24,7 +24,7 @@ def test_smallest_covering_ranges():
     torch.random.manual_seed(seed)
 
     num_repeats = 100
-    cache_length = 2 ** 14
+    cache_length = 2**14
     for _ in range(num_repeats):
         num = random.randint(32, 1024)
         slots = torch.randperm(cache_length)[:num].tolist()
@@ -46,5 +46,5 @@ def test_smallest_covering_ranges():
             diffs = sorted(
                 [b - a - 1 for a, b in zip(slots[:-1], slots[1:]) if b > a + 1],
                 reverse=True,
-            )[:(max_num_ranges - 1)]
+            )[: (max_num_ranges - 1)]
             assert sum(diffs) == sum_size_holes

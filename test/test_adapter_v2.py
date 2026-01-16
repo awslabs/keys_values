@@ -25,7 +25,11 @@ from transformers.models.mixtral import MixtralConfig, MixtralForCausalLM
 
 import litgpt.config as config_module
 from litgpt.adapter_v2 import Config, adapter_filter
-from litgpt.scripts.convert_hf_checkpoint import copy_weights_gemma_2, copy_weights_gemma_3, copy_weights_hf_llama
+from litgpt.scripts.convert_hf_checkpoint import (
+    copy_weights_gemma_2,
+    copy_weights_gemma_3,
+    copy_weights_hf_llama,
+)
 from litgpt.scripts.convert_lit_checkpoint import qkv_reassemble as make_qkv_interleaved
 from litgpt.utils import _RunIf
 
@@ -83,10 +87,20 @@ def test_adapter_v2_filter(tmp_path):
 
 
 def test_adapter_v2_gpt_init_weights():
-    config = Config(n_layer=1, n_head=6, n_embd=12, block_size=1, vocab_size=1, adapter_start_layer=0)
+    config = Config(
+        n_layer=1,
+        n_head=6,
+        n_embd=12,
+        block_size=1,
+        vocab_size=1,
+        adapter_start_layer=0,
+    )
     model = AdapterV2GPT(config)
 
-    for param in (model.transformer.h[0].attn.gating_factor, model.lm_head.adapter_bias):
+    for param in (
+        model.transformer.h[0].attn.gating_factor,
+        model.lm_head.adapter_bias,
+    ):
         assert (param == 0).all()
         torch.nn.init.constant_(param, 1.23)
         assert (param != 0).any()
@@ -96,7 +110,13 @@ def test_adapter_v2_gpt_init_weights():
 
 @pytest.mark.parametrize("name", [c["name"] for c in config_module.configs])
 def test_base_model_can_be_adapter_v2_loaded(name):
-    kwargs = {"n_layer": 2, "n_head": 8, "n_query_groups": 4, "n_embd": 16, "padded_vocab_size": 32}
+    kwargs = {
+        "n_layer": 2,
+        "n_head": 8,
+        "n_query_groups": 4,
+        "n_embd": 16,
+        "padded_vocab_size": 32,
+    }
     base_model = BaseGPT.from_name(name, **kwargs)
     base_model_state_dict = base_model.state_dict()
     lora_model = AdapterV2GPT.from_name(name, **kwargs, adapter_start_layer=0)
@@ -110,7 +130,9 @@ def test_base_model_can_be_adapter_v2_loaded(name):
 @torch.inference_mode()
 def test_adapter_v2_compile():
     model = AdapterV2GPT.from_name("pythia-14m", n_layer=3)
-    x = torch.randint(model.config.vocab_size, size=(2, model.config.block_size), dtype=torch.int64)
+    x = torch.randint(
+        model.config.vocab_size, size=(2, model.config.block_size), dtype=torch.int64
+    )
 
     explanation = torch._dynamo.explain(model)(x)
     assert isinstance(explanation, debugging.ExplainOutput)
@@ -163,7 +185,11 @@ def test_against_hf_mixtral():
     ours_model.load_state_dict(state_dict, strict=False)
 
     # test end to end
-    x = torch.tensor([[9856, 23, 491, 1536, 304], [23, 345, 65, 123, 321]], dtype=torch.int32, device=device)
+    x = torch.tensor(
+        [[9856, 23, 491, 1536, 304], [23, 345, 65, 123, 321]],
+        dtype=torch.int32,
+        device=device,
+    )
     assert x.size(1) == T
     ours_y = ours_model(x)
     theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
@@ -176,7 +202,9 @@ def test_against_hf_gemma(model_name):
     device = torch.device("cpu")
     dtype = torch.float32
     T = 5
-    ours_config = Config.from_name(model_name, n_layer=2, n_head=16, n_embd=32, intermediate_size=86)
+    ours_config = Config.from_name(
+        model_name, n_layer=2, n_head=16, n_embd=32, intermediate_size=86
+    )
     theirs_config = GemmaConfig(
         vocab_size=ours_config.padded_vocab_size,
         hidden_size=ours_config.n_embd,
@@ -265,7 +293,9 @@ def test_against_original_gemma_2(model_name):
         assert adapter_filter(k, None)
 
     # test end to end
-    x = torch.randint(low=0, high=ours_config.padded_vocab_size, size=(T,), device=device).unsqueeze(0)
+    x = torch.randint(
+        low=0, high=ours_config.padded_vocab_size, size=(T,), device=device
+    ).unsqueeze(0)
     assert x.size(1) == T
     ours_y = ours_model(x)
     theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
@@ -279,7 +309,9 @@ def test_against_original_gemma_2(model_name):
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("model_name", ("gemma-3-1b-it", "gemma-3-4b-it", "gemma-3-12b-it", "gemma-3-27b-it"))
+@pytest.mark.parametrize(
+    "model_name", ("gemma-3-1b-it", "gemma-3-4b-it", "gemma-3-12b-it", "gemma-3-27b-it")
+)
 def test_against_original_gemma_3(model_name):
     device = torch.device("cpu")
     dtype = torch.float32
@@ -330,7 +362,9 @@ def test_against_original_gemma_3(model_name):
         assert adapter_filter(k, None)
 
     # test end to end
-    x = torch.randint(low=0, high=ours_config.padded_vocab_size, size=(T,), device=device).unsqueeze(0)
+    x = torch.randint(
+        low=0, high=ours_config.padded_vocab_size, size=(T,), device=device
+    ).unsqueeze(0)
     assert x.size(1) == T
     ours_y = ours_model(x)
     theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
@@ -354,8 +388,12 @@ def test_load_legacy_state_dict():
     # make weights to be as-like in a legacy checkpoint, with `attn.attn.weight` instead of `attn.qkv.weight`
     # and make them interleaved
     state_dict = deepcopy(attention_1.state_dict())
-    state_dict["attn.linear.weight"] = make_qkv_interleaved(state_dict.pop("qkv.linear.weight"), config)
-    state_dict["attn.linear.bias"] = make_qkv_interleaved(state_dict.pop("qkv.linear.bias"), config)
+    state_dict["attn.linear.weight"] = make_qkv_interleaved(
+        state_dict.pop("qkv.linear.weight"), config
+    )
+    state_dict["attn.linear.bias"] = make_qkv_interleaved(
+        state_dict.pop("qkv.linear.bias"), config
+    )
 
     attention_2 = CausalSelfAttention(config=config, block_idx=0)
     attention_2.load_state_dict(state_dict)

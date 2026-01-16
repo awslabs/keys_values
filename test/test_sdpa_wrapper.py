@@ -82,7 +82,8 @@ def test_sdpa_wrapper(device, n_head, n_query_groups):
         # cases: Overlap / no overlap between the two parts which are
         # exchanged
         token_positions = torch.zeros(
-            (batch_size, n_query_groups, kv_len), **index_kwargs,
+            (batch_size, n_query_groups, kv_len),
+            **index_kwargs,
         )
         if repeat % 2 == 0:
             # No overlap case
@@ -93,11 +94,16 @@ def test_sdpa_wrapper(device, n_head, n_query_groups):
             l2 = s1
             for b in range(batch_size):
                 for h in range(n_query_groups):
-                    token_positions[b, h, :left_sz] = torch.randperm(
-                        l1, **index_kwargs,
-                    ) + s1
+                    token_positions[b, h, :left_sz] = (
+                        torch.randperm(
+                            l1,
+                            **index_kwargs,
+                        )
+                        + s1
+                    )
                     token_positions[b, h, left_sz:] = torch.randperm(
-                        l2, **index_kwargs,
+                        l2,
+                        **index_kwargs,
                     )[:q_len]
         else:
             # Overlap case
@@ -117,7 +123,9 @@ def test_sdpa_wrapper(device, n_head, n_query_groups):
             if not done:
                 print("Did not manage to reach overlap threshold")
         print(f"repeat {repeat}:")
-        print(f"head_size={head_size}, batch_size={batch_size}, kv_len={kv_len}, input_pos={input_pos}, q_len={q_len}")
+        print(
+            f"head_size={head_size}, batch_size={batch_size}, kv_len={kv_len}, input_pos={input_pos}, q_len={q_len}"
+        )
         shape = (batch_size, n_head, q_len, head_size)
         query = torch.randn(shape, **gen_kwargs)
         shape = (batch_size, n_query_groups, kv_len, head_size)
@@ -203,13 +211,15 @@ def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
     cache_old = KVCacheFactory.create_single(
         **kwargs,
         cache_kwargs=dict(
-            use_eager_kernel = lambda kv_len, q_len: True,
+            use_eager_kernel=lambda kv_len, q_len: True,
         ),
     )
     cache_new = KVCacheFactory.create_single(**kwargs)
     assert cache_old.mha._use_eager_kernel is not None
     data = random_args_cache_forward(
-        params, num=seq_length, vocab_size=vocab_size,
+        params,
+        num=seq_length,
+        vocab_size=vocab_size,
     )
 
     outputs = []
@@ -217,9 +227,7 @@ def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
         input_pos = 0
         parts = []
         for num in tokens_per_chunk:
-            parts.append(
-                cache(**range_from_args(data, input_pos, input_pos + num))
-            )
+            parts.append(cache(**range_from_args(data, input_pos, input_pos + num)))
             input_pos += num
         outputs.append(torch.cat(parts, dim=1))
 

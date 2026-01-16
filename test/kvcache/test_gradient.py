@@ -43,7 +43,7 @@ def make_get_inputs_slice(x: torch.Tensor) -> GetInputSlice:
 
 def make_write_outputs_slice(x: torch.Tensor) -> WriteOutputsSlice:
     def result(start: int, value: torch.Tensor):
-        x[:, start:(start + value.shape[1]), :].copy_(value)
+        x[:, start : (start + value.shape[1]), :].copy_(value)
 
     return result
 
@@ -124,7 +124,9 @@ def test_gradient_row_of_cells(
     random.seed(seed)
     torch.random.manual_seed(seed)
     print(f"cache_name={cache_name}, cache_kwargs={cache_kwargs}")
-    print(f"cache_length={cache_lengths}\ntokens_per_chunk={tokens_per_chunk}\nchunks_per_cell={chunks_per_cell}\nuse_new_cache={use_new_cache}")
+    print(
+        f"cache_length={cache_lengths}\ntokens_per_chunk={tokens_per_chunk}\nchunks_per_cell={chunks_per_cell}\nuse_new_cache={use_new_cache}"
+    )
 
     use_autograd_hooks = True
     do_gradient_testing = True
@@ -208,14 +210,12 @@ def test_gradient_row_of_cells(
         input_pos = 0
         y_parts = []
         for num in tokens_per_chunk:
-            y_parts.append(
-                gpt_model(token_idxs[:, input_pos:(input_pos + num)])
-            )
+            y_parts.append(gpt_model(token_idxs[:, input_pos : (input_pos + num)]))
             input_pos += num
         y = torch.cat(y_parts, dim=1)
 
     assert y.device == device
-    gpt_model.set_start_of_layer_hook(None)   # Do not record layer inputs from now on
+    gpt_model.set_start_of_layer_hook(None)  # Do not record layer inputs from now on
     seq_len = sum(tokens_per_chunk)
     replay_logs = get_replay_logs(gpt_model)
     assert len(replay_logs) == n_layer
@@ -256,7 +256,7 @@ def test_gradient_row_of_cells(
             use_new_cache=use_new_cache,
             debug_full_args=True,
             debug_print_annotations=True,
-        )
+        ),
     )
     accumulator._batch_size = batch_size
     accumulator._initialize_internal(replay_logs, chunks_per_cell)
@@ -271,7 +271,9 @@ def test_gradient_row_of_cells(
     inputs = layer_inputs[0]
     # We could compute real head gradients from the outputs
     head_gradients = torch.randn(
-        *inputs.shape, device=device, dtype=inputs.dtype,
+        *inputs.shape,
+        device=device,
+        dtype=inputs.dtype,
     )
     below_gradients = torch.zeros_like(head_gradients)
     print(f"\nGradient accumulation with activation checkpointing: {chunks_per_cell}")
@@ -307,7 +309,8 @@ def test_gradient_row_of_cells(
     )
     accumulator_comp._batch_size = batch_size
     accumulator_comp._initialize_internal(
-        replay_logs, chunks_per_cell=[num_chunks],
+        replay_logs,
+        chunks_per_cell=[num_chunks],
     )
     gpt_model.zero_grad()
     gpt_model.reset()
@@ -338,7 +341,9 @@ def test_gradient_row_of_cells(
             value = debug_cache_tensors[name]
             value_comp = debug_cache_tensors_comp.get(name)
             if value_comp is None:
-                print(f"{name} is in debug_cache_tensors, but not in debug_cache_tensors_comp")
+                print(
+                    f"{name} is in debug_cache_tensors, but not in debug_cache_tensors_comp"
+                )
             else:
                 try:
                     torch.testing.assert_close(value, value_comp)
@@ -351,7 +356,8 @@ def test_gradient_row_of_cells(
         print("\nAnnotation usage logs (per cell):")
         num_unmatched = []
         for first_chunk_idx, annotation_usage in sorted(
-            list(logs.items()), reverse=True,
+            list(logs.items()),
+            reverse=True,
         ):
             print(f"\nCell(first_chunk_idx {first_chunk_idx}):")
             print(annotation_usage.report())
@@ -359,18 +365,25 @@ def test_gradient_row_of_cells(
             # All annotations should be matched:
             assert len(annotation_usage.unmatched_annotations) == 0
         assert len(num_unmatched) == len(limit_num_unmatched)
-        assert all (a <= b for a, b in zip(num_unmatched, limit_num_unmatched)), (num_unmatched, limit_num_unmatched)
+        assert all(a <= b for a, b in zip(num_unmatched, limit_num_unmatched)), (
+            num_unmatched,
+            limit_num_unmatched,
+        )
 
     print("\nComparing gradients")
     for name, value in param_gradients.items():
         value_comp = param_gradients_comp.get(name)
         if value_comp is None:
-            raise IndexError(f"name = {name} is in param_gradients, but not in param_gradients_comp")
+            raise IndexError(
+                f"name = {name} is in param_gradients, but not in param_gradients_comp"
+            )
         print(f"Comparing gradient for {name}")
         torch.testing.assert_close(value, value_comp, **tol_kwargs)
     print("Comparing below_gradients:")
     torch.testing.assert_close(
-        below_gradients, below_gradients_comp, **tol_kwargs,
+        below_gradients,
+        below_gradients_comp,
+        **tol_kwargs,
     )
 
     if use_autograd_hooks and autograd_hooks.log_all_shapes:
@@ -380,7 +393,8 @@ def test_gradient_row_of_cells(
                 (shape, math.prod(shape[:-1]), count)
                 for shape, count in autograd_hooks.shapes_counter().items()
             ],
-            key=lambda x: x[1], reverse=True,
+            key=lambda x: x[1],
+            reverse=True,
         ):
             print(f"{shape} [{numel}]: {count}")
 

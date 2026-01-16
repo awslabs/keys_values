@@ -64,6 +64,7 @@ class KVCacheArgs:
             dtype. The default is delayed allocation with first usage
 
     """
+
     name: str
     cache_length: int
     chunk_size: int = 16
@@ -77,20 +78,28 @@ class KVCacheArgs:
 
     def __post_init__(self):
         supported_names = KVCacheFactory.supported_names()
-        assert self.name in supported_names, f"name = {self.name} not supported, must be in {supported_names}"
+        assert (
+            self.name in supported_names
+        ), f"name = {self.name} not supported, must be in {supported_names}"
         _check_positive(self.cache_length, "cache_length")
         assert self.cache_length >= 1
         if self.verbose is None:
             self.verbose = VerbosityLevels.SOME.value
         else:
-            assert self.verbose in VerbosityLevels, f"verbose = {self.verbose} not supported, must be in {VerbosityLevels}"
+            assert (
+                self.verbose in VerbosityLevels
+            ), f"verbose = {self.verbose} not supported, must be in {VerbosityLevels}"
             print("--kv_cache.verbose is deprecated, use --verbose instead")
         if self.attention_forward_temp_size_gb is not None:
             assert self.attention_forward_temp_size_gb > 0
-            print("--kv_cache.attention_forward_temp_size_gb is deprecated, use --attention_forward_temp_size_gb instead")
+            print(
+                "--kv_cache.attention_forward_temp_size_gb is deprecated, use --attention_forward_temp_size_gb instead"
+            )
         if self.attention_backward_temp_size_gb is not None:
             assert self.attention_backward_temp_size_gb > 0
-            print("--kv_cache.attention_backward_temp_size_gb is deprecated, use --attention_backward_temp_size_gb instead")
+            print(
+                "--kv_cache.attention_backward_temp_size_gb is deprecated, use --attention_backward_temp_size_gb instead"
+            )
 
     @property
     def verbosity_level(self) -> VerbosityLevels:
@@ -140,9 +149,10 @@ class GradientArgs:
             GPU memory.
 
     """
+
     layers_per_cell: int = 1
     chunks_per_cell_multiplier: float = 1.0
-    single_tokens_for_targets: bool = False,
+    single_tokens_for_targets: bool = (False,)
     use_new_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
     layer_checkpoint_chunk_size: Optional[int] = None
@@ -222,6 +232,7 @@ class OptimizerArgs:
         rmspprop_alpha: Alpha constant (RMSprop only)
 
     """
+
     name: Optional[str] = None
     learning_rate: Optional[float] = None
     weight_decay: Optional[float] = None
@@ -236,7 +247,9 @@ class OptimizerArgs:
         if self.name is None:
             self.name = "AdamW"  # Default optimizer
         elif self.name not in SUPPORTED_OPTIMIZERS:
-            raise ValueError(f"name = {self.name} not supported [{SUPPORTED_OPTIMIZERS}]")
+            raise ValueError(
+                f"name = {self.name} not supported [{SUPPORTED_OPTIMIZERS}]"
+            )
         _check_positive(self.learning_rate, "learning_rate")
         _check_nonnegative(self.weight_decay, "weight_decay")
         _check_positive(self.eps, "eps")
@@ -244,9 +257,13 @@ class OptimizerArgs:
         _check_nonnegative(self.dampening, "dampening")
         if self.adam_betas is not None:
             if not isinstance(self.adam_betas, tuple) or len(self.adam_betas) != 2:
-                raise ValueError(f"adam_betas = {self.adam_betas} must be tuple of size 2")
-            if any (not 0 <= x < 1 for x in self.adam_betas):
-                raise ValueError(f"adam_betas = {self.adam_betas}, entries must be in [0, 1)")
+                raise ValueError(
+                    f"adam_betas = {self.adam_betas} must be tuple of size 2"
+                )
+            if any(not 0 <= x < 1 for x in self.adam_betas):
+                raise ValueError(
+                    f"adam_betas = {self.adam_betas}, entries must be in [0, 1)"
+                )
         if self.adadelta_rho is not None and not (0 <= self.adadelta_rho <= 1):
             raise ValueError(f"adadelta_rho = {self.adadelta_rho}, must be in [0, 1]")
         _check_nonnegative(self.rmspprop_alpha, "rmspprop_alpha")
@@ -296,7 +313,8 @@ class LoRAARgs:
             block.
         head: Whether to apply LoRA to linear output weights in the head.
 
-   """
+    """
+
     r: int = 8
     alpha: int = 16
     dropout: float = 0.05
@@ -318,4 +336,5 @@ class EvalArgs(_EvalArgs):
             for evaluation
 
     """
+
     micro_batch_size: Optional[int] = None

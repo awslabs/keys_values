@@ -55,12 +55,15 @@ class GPT(BaseModel):
         self.transformer = nn.ModuleDict(
             dict(
                 wte=nn.Embedding(config.padded_vocab_size, config.n_embd),
-                h=nn.ModuleList(Block(config, block_idx) for block_idx in range(config.n_layer)),
+                h=nn.ModuleList(
+                    Block(config, block_idx) for block_idx in range(config.n_layer)
+                ),
                 ln_f=config.norm_class(config.n_embd, eps=config.norm_eps),
             )
         )
         self.mha = MultiHeadSelfAttention(
-            config, **transform_mha_kwargs(mha_kwargs, config),
+            config,
+            **transform_mha_kwargs(mha_kwargs, config),
         )
         self.max_seq_length = self.config.block_size
         self._start_of_layer_hook = None
@@ -77,9 +80,14 @@ class GPT(BaseModel):
         if isinstance(module, AdapterV2Linear):
             module.reset_parameters()
 
-    def _load_from_state_dict(self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any) -> None:
+    def _load_from_state_dict(
+        self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any
+    ) -> None:
         """For compatibility with base checkpoints."""
-        mapping = {"lm_head.weight": "lm_head.linear.weight", "lm_head.bias": "lm_head.linear.bias"}
+        mapping = {
+            "lm_head.weight": "lm_head.linear.weight",
+            "lm_head.bias": "lm_head.linear.bias",
+        }
         state_dict = map_old_state_dict_weights(state_dict, mapping, prefix)
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
@@ -107,6 +115,7 @@ class Block(BaseBlock):
 
 class CausalSelfAttention(BaseCausalSelfAttention):
     """A modification of `keys_values.adapter.CausalSelfAttention` that uses the Adapter V2 Linear class"""
+
     def __init__(
         self,
         config: Config,
@@ -129,7 +138,11 @@ class CausalSelfAttention(BaseCausalSelfAttention):
         )
 
     def _load_from_state_dict(
-        self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any,
+        self,
+        state_dict: Dict,
+        prefix: str,
+        *args: Any,
+        **kwargs: Any,
     ) -> None:
         """For compatibility with base and/or legacy checkpoints."""
         mapping = {
@@ -140,13 +153,17 @@ class CausalSelfAttention(BaseCausalSelfAttention):
         }
         state_dict = map_old_state_dict_weights(state_dict, mapping, prefix)
         # For compatibility with older checkpoints
-        if (key := prefix + "gating_factor") in state_dict and state_dict[key].size(1) == self.config.n_head:
+        if (key := prefix + "gating_factor") in state_dict and state_dict[key].size(
+            1
+        ) == self.config.n_head:
             state_dict[key] = state_dict[key].permute(0, 2, 1, 3)
 
         for attr in ("weight", "bias"):
             legacy_key = f"{prefix}attn.linear.{attr}"
             current_key = f"{prefix}qkv.linear.{attr}"
             if legacy_key in state_dict:
-                state_dict[current_key] = qkv_reassemble(state_dict.pop(legacy_key), self.config)
+                state_dict[current_key] = qkv_reassemble(
+                    state_dict.pop(legacy_key), self.config
+                )
 
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)

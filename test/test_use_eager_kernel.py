@@ -23,7 +23,7 @@ from keys_values.use_eager_kernel import (
     DefaultUseEagerKernel,
 )
 
-#DATA_KV_LEN = [4096, 6144, 8192, 12288, 16384, 24576, 32768]
+# DATA_KV_LEN = [4096, 6144, 8192, 12288, 16384, 24576, 32768]
 
 
 @pytest.mark.parametrize(
@@ -35,12 +35,17 @@ from keys_values.use_eager_kernel import (
         ([67, 128, 141, 257, 363, 357, 528], 15360, 336.5),
         ([67, 128, 141, 257, 363, 357, 528], 4224, 70.8125),
         ([67, 128, 141, 257, 363, 357, 528], 256, 5.125),
-    ]
+    ],
 )
 def test_linear_interpolation(
-    data_q_len_thresh: List[int], kv_len: int, thresh: float,
+    data_q_len_thresh: List[int],
+    kv_len: int,
+    thresh: float,
 ):
-    assert abs(thresh - linear_interpolation(kv_len, DATA_KV_LEN, data_q_len_thresh)) < 1e-9
+    assert (
+        abs(thresh - linear_interpolation(kv_len, DATA_KV_LEN, data_q_len_thresh))
+        < 1e-9
+    )
 
 
 # (batch_size, n_head, n_query_groups, head_size)
@@ -53,7 +58,7 @@ def test_linear_interpolation(
         ((7, 29, 12, 128), 34),
         ((9, 54, 54, 132), 49),
         ((5, 54, 54, 132), 48),
-    ]
+    ],
 )
 def test_nearest_neighbor(fingerprint: Tuple[int, ...], nn_ind):
     default_factory = DefaultUseEagerKernel()

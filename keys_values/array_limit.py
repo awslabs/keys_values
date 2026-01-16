@@ -14,7 +14,17 @@
 from typing import Optional
 
 
-REDUCTION_FACTORS = [3/4, 2/4, 1/4, 3/16, 2/16, 1/16, 3/64, 2/64, 1/64]
+REDUCTION_FACTORS = [
+    3 / 4,
+    2 / 4,
+    1 / 4,
+    3 / 16,
+    2 / 16,
+    1 / 16,
+    3 / 64,
+    2 / 64,
+    1 / 64,
+]
 
 
 class TemporaryArrayLimit:
@@ -28,6 +38,7 @@ class TemporaryArrayLimit:
     to this object and read the limit from here.
 
     """
+
     def __init__(self, init_val: float, name: str):
         if init_val <= 0:
             raise ValueError("Initial value must be positive (unit is GB)")

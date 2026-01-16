@@ -70,12 +70,15 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(
             dict(
                 wte=nn.Embedding(config.padded_vocab_size, config.n_embd),
-                h=nn.ModuleList(Block(config, block_idx) for block_idx in range(config.n_layer)),
+                h=nn.ModuleList(
+                    Block(config, block_idx) for block_idx in range(config.n_layer)
+                ),
                 ln_f=config.norm_class(config.n_embd, eps=config.norm_eps),
             )
         )
         self.mha = MultiHeadSelfAttention(
-            config, **transform_mha_kwargs(mha_kwargs, config),
+            config,
+            **transform_mha_kwargs(mha_kwargs, config),
         )
         self.max_seq_length = config.block_size
         self._start_of_layer_hook = None
@@ -135,7 +138,7 @@ class GPT(nn.Module):
         return result
 
     def _num_layers(self) -> int:
-        has_no_layers = self.transformer is None or not hasattr(self.transformer,"h")
+        has_no_layers = self.transformer is None or not hasattr(self.transformer, "h")
         return 0 if has_no_layers else len(self.transformer.h)
 
     def assign_kv_caches(self, kv_caches: List[Optional[KVCache]]):
@@ -268,7 +271,9 @@ class GPT(nn.Module):
                 f"config and kv_cache not compatible: config.head_size = {head_size} != {params.head_size} = kv_cache.head_size"
             )
         if batch_size != params.max_batch_size:
-            raise ValueError(f"kv_cache.batch_size = {params.max_batch_size}, must be {batch_size}")
+            raise ValueError(
+                f"kv_cache.batch_size = {params.max_batch_size}, must be {batch_size}"
+            )
         if dtype != params.dtype:
             raise ValueError(f"kv_cache.dtype = {params.dtype}, must be {dtype}")
 
@@ -312,10 +317,14 @@ class GPT(nn.Module):
         if idx.ndim == 1:
             idx = idx.unsqueeze(0)
         elif idx.ndim != 2:
-            raise ValueError(f"idx must be 1D or 2D tensor, but idx.shape = {idx.shape}")
+            raise ValueError(
+                f"idx must be 1D or 2D tensor, but idx.shape = {idx.shape}"
+            )
         num = idx.size(1)
         if self.max_seq_length < num:
-            raise ValueError(f"Cannot forward sequence of length {num}, max seq length is only {self.max_seq_length}.")
+            raise ValueError(
+                f"Cannot forward sequence of length {num}, max seq length is only {self.max_seq_length}."
+            )
 
         x = self.transformer.wte(idx)  # (batch_size, num, n_embd)
         if self.config.scale_embeddings:
@@ -433,8 +442,14 @@ class GPT(nn.Module):
             # Remove KV caches before copy is created
             for l_ix, block in enumerate(self.transformer.h):
                 kv_cache = block.attn.kv_cache
-                if kv_cache is not None and isinstance(kv_cache, KVCacheWithBuffers) and kv_cache.buffers_are_allocated:
-                    raise ValueError(f"KV cache of layer {l_ix} has buffers allocated. Deallocate buffers with `deallocate_kv_cache_buffers_of_model`")
+                if (
+                    kv_cache is not None
+                    and isinstance(kv_cache, KVCacheWithBuffers)
+                    and kv_cache.buffers_are_allocated
+                ):
+                    raise ValueError(
+                        f"KV cache of layer {l_ix} has buffers allocated. Deallocate buffers with `deallocate_kv_cache_buffers_of_model`"
+                    )
                 kv_caches.append(kv_cache)
                 block.attn.kv_cache = None
             # Create empty copy
@@ -463,19 +478,31 @@ class Block(nn.Module):
                 " (non-parallel residual and shared attention norm)."
             )
 
-        self.norm_1 = nn.Identity() if not config.norm_1 else config.norm_class(config.n_embd, eps=config.norm_eps)
+        self.norm_1 = (
+            nn.Identity()
+            if not config.norm_1
+            else config.norm_class(config.n_embd, eps=config.norm_eps)
+        )
         self.attn = CausalSelfAttention(config, block_idx, kv_cache=kv_cache)
         self.post_attention_norm = (
-            config.norm_class(config.n_embd, eps=config.norm_eps) if config.post_attention_norm else nn.Identity()
+            config.norm_class(config.n_embd, eps=config.norm_eps)
+            if config.post_attention_norm
+            else nn.Identity()
         )
         self.norm_2 = (
             nn.Identity()
             if not config.norm_2
-            else (None if config.shared_attention_norm else config.norm_class(config.n_embd, eps=config.norm_eps))
+            else (
+                None
+                if config.shared_attention_norm
+                else config.norm_class(config.n_embd, eps=config.norm_eps)
+            )
         )
         self.mlp = config.mlp_class(config)
         self.post_mlp_norm = (
-            config.norm_class(config.n_embd, eps=config.norm_eps) if config.post_mlp_norm else nn.Identity()
+            config.norm_class(config.n_embd, eps=config.norm_eps)
+            if config.post_mlp_norm
+            else nn.Identity()
         )
         self.config = config
 
@@ -531,18 +558,27 @@ class CausalSelfAttention(nn.Module):
         # key, query and value projections for all heads, but in a batch
         self.qkv = nn.Linear(
             config.n_embd,
-            (config.n_head + 2 * config.n_query_groups) * config.head_size,  # support for grouped/multi queries
+            (config.n_head + 2 * config.n_query_groups)
+            * config.head_size,  # support for grouped/multi queries
             bias=config.bias or config.attn_bias,
         )
         # output projection
-        self.proj = nn.Linear(config.head_size * config.n_head, config.n_embd, bias=config.bias)
+        self.proj = nn.Linear(
+            config.head_size * config.n_head, config.n_embd, bias=config.bias
+        )
         # KV cache (needed for inference)
         self.kv_cache = kv_cache
 
         if config.norm_qk:
-            norm_q_size = config.n_head * config.head_size if config.norm_qk_type == "olmo2" else config.head_size
+            norm_q_size = (
+                config.n_head * config.head_size
+                if config.norm_qk_type == "olmo2"
+                else config.head_size
+            )
             norm_k_size = (
-                config.n_query_groups * config.head_size if config.norm_qk_type == "olmo2" else config.head_size
+                config.n_query_groups * config.head_size
+                if config.norm_qk_type == "olmo2"
+                else config.head_size
             )
             self.norm_q = config.norm_class(norm_q_size, eps=config.norm_eps)
             self.norm_k = config.norm_class(norm_k_size, eps=config.norm_eps)
@@ -698,13 +734,17 @@ class CausalSelfAttention(nn.Module):
             dtype=dtype,
         )
 
-    def _load_from_state_dict(self, state_dict: dict, prefix: str, *args: Any, **kwargs: Any) -> None:
+    def _load_from_state_dict(
+        self, state_dict: dict, prefix: str, *args: Any, **kwargs: Any
+    ) -> None:
         """For compatibility with legacy checkpoints."""
 
         for attr in ("weight", "bias"):
             legacy_key = f"{prefix}attn.{attr}"
             current_key = f"{prefix}qkv.{attr}"
             if legacy_key in state_dict:
-                state_dict[current_key] = qkv_reassemble(state_dict.pop(legacy_key), self.config)
+                state_dict[current_key] = qkv_reassemble(
+                    state_dict.pop(legacy_key), self.config
+                )
 
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)

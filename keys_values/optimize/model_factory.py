@@ -41,6 +41,7 @@ class BlockComponentName:
     :class:`keys_values.model.GPT`.
 
     """
+
     @staticmethod
     def wte() -> str:
         return "transformer.wte"
@@ -70,9 +71,7 @@ class BlockComponentName:
             for layer_idx, block in enumerate(model.transformer.h)
         ]
         if lm_head:
-            result.append(
-                (BlockComponentName.lm_head(), model.lm_head)
-            )
+            result.append((BlockComponentName.lm_head(), model.lm_head))
         return result
 
     REGEX_H_NAME = re.compile(r"transformer\.h\.(\d+)$")
@@ -87,9 +86,10 @@ class BlockComponentName:
 
 
 def parent_of_parameter(
-    module: nn.Module, param_name: str,
+    module: nn.Module,
+    param_name: str,
 ) -> Tuple[nn.Module, str]:
-    parts = param_name.split('.')
+    parts = param_name.split(".")
     parent = module
     for part in parts[:-1]:
         parent = getattr(parent, part)
@@ -127,7 +127,9 @@ def device_of_flat_vectors(
             vec.device for vecs in flat_vectors.values() for vec in vecs.values()
         }
     if len(devices) > 1:
-        raise ValueError(f"flat_vectors contains vectors on more than one device: {devices}")
+        raise ValueError(
+            f"flat_vectors contains vectors on more than one device: {devices}"
+        )
     return next(iter(devices))
 
 
@@ -159,19 +161,13 @@ def names_and_modules_for_shard(
     end = None
     include_all = shard_type is None
     if include_all or shard_type == "wte":
-        names_and_modules.append(
-            (BlockComponentName.wte(), gpt_model.transformer.wte)
-        )
-    if include_all or (
-        (not names_and_modules) and shard_type == "lm_head"
-    ):
+        names_and_modules.append((BlockComponentName.wte(), gpt_model.transformer.wte))
+    if include_all or ((not names_and_modules) and shard_type == "lm_head"):
         names_and_modules.append(
             (BlockComponentName.ln_f(), gpt_model.transformer.ln_f)
         )
         if use_lm_head:
-            names_and_modules.append(
-                (BlockComponentName.lm_head(), gpt_model.lm_head)
-            )
+            names_and_modules.append((BlockComponentName.lm_head(), gpt_model.lm_head))
     if include_all or not names_and_modules:
         if include_all:
             start = 0
@@ -196,7 +192,9 @@ def names_and_modules_for_shard(
     ret2 = None
     if not include_all:
         if not names_and_modules:
-            raise ValueError(f"shard_type = {shard_type} unknown, must be 'wte', 'lm_head', or 'h<start>:<end>'")
+            raise ValueError(
+                f"shard_type = {shard_type} unknown, must be 'wte', 'lm_head', or 'h<start>:<end>'"
+            )
         if start is not None:
             ret2 = (start, end)
     return names_and_modules, ret2
@@ -208,6 +206,7 @@ class GPTFullWrapper(GPTFull):
     passed at construction.
 
     """
+
     def __init__(
         self,
         config: ConfigFull,
@@ -240,7 +239,8 @@ class GPTFullWrapper(GPTFull):
         )
         if mha is None:
             self.mha = MultiHeadSelfAttention(
-                config, **transform_mha_kwargs(mha_kwargs, config),
+                config,
+                **transform_mha_kwargs(mha_kwargs, config),
             )
         else:
             self.mha = mha
@@ -262,6 +262,7 @@ class GPTLoRAWrapper(GPTLoRA):
     passed at construction.
 
     """
+
     def __init__(
         self,
         config: ConfigLoRA,
@@ -296,7 +297,8 @@ class GPTLoRAWrapper(GPTLoRA):
         )
         if mha is None:
             self.mha = MultiHeadSelfAttention(
-                config, **transform_mha_kwargs(mha_kwargs, config),
+                config,
+                **transform_mha_kwargs(mha_kwargs, config),
             )
         else:
             self.mha = mha
@@ -314,13 +316,14 @@ class GPTLoRAWrapper(GPTLoRA):
 
 class GPTShardOfBlocks(GPTFull):
     """
-    Represents a shard of a model of type :class:`keys_values.model.GPT` or
-    :class:`keys_values.lora.GPT`. Different to :class:`GPTFullWrapper` or
-    :class:`GPTLoRAWrapper`, not all model components are present. Objects of
-    this class cannot be used in the normal way, but only with methods of
-    :class:`keys_values.kvcache.gradient.accumulate.GradientAccumulator`.
-`
+        Represents a shard of a model of type :class:`keys_values.model.GPT` or
+        :class:`keys_values.lora.GPT`. Different to :class:`GPTFullWrapper` or
+        :class:`GPTLoRAWrapper`, not all model components are present. Objects of
+        this class cannot be used in the normal way, but only with methods of
+        :class:`keys_values.kvcache.gradient.accumulate.GradientAccumulator`.
+    `
     """
+
     def __init__(
         self,
         config: ConfigFull,
@@ -353,7 +356,9 @@ class GPTShardOfBlocks(GPTFull):
             idxs, mods = zip(*h_modules)
             first_layer_idx = idxs[0]
             if idxs != tuple(range(first_layer_idx, first_layer_idx + len(idxs))):
-                raise ValueError(f"Layer components have idxs {idxs}, must be {list(range(first_layer_idx, first_layer_idx + len(idxs)))}")
+                raise ValueError(
+                    f"Layer components have idxs {idxs}, must be {list(range(first_layer_idx, first_layer_idx + len(idxs)))}"
+                )
             modules["h"] = nn.ModuleList(mods)
         else:
             first_layer_idx = None
@@ -364,7 +369,8 @@ class GPTShardOfBlocks(GPTFull):
             self.transformer = None
         if mha is None:
             self.mha = MultiHeadSelfAttention(
-                config, **transform_mha_kwargs(mha_kwargs, config),
+                config,
+                **transform_mha_kwargs(mha_kwargs, config),
             )
         else:
             self.mha = mha
@@ -372,7 +378,7 @@ class GPTShardOfBlocks(GPTFull):
             self.max_seq_length = config.block_size
 
     def _has_layers(self) -> bool:
-        return self.transformer is not None and hasattr(self.transformer,"h")
+        return self.transformer is not None and hasattr(self.transformer, "h")
 
     @property
     def max_seq_length(self) -> int:
@@ -391,13 +397,14 @@ class GPTShardOfBlocks(GPTFull):
             raise NotImplementedError("Cannot be used for this model shard")
 
     def get_gradients_as_flat(
-        self, device: Optional[torch.device] = None,
+        self,
+        device: Optional[torch.device] = None,
     ) -> Dict[str, FlatVectors]:
         if self.first_layer_idx is not None:
             result = {
-                BlockComponentName.h(
-                    self.first_layer_idx + i
-                ): AccessWeightsGradients(block).get_gradients(device=device)
+                BlockComponentName.h(self.first_layer_idx + i): AccessWeightsGradients(
+                    block
+                ).get_gradients(device=device)
                 for i, block in enumerate(self.transformer.h)
             }
         else:
@@ -418,7 +425,9 @@ class GPTShardOfBlocks(GPTFull):
         return result
 
     def forward(
-        self, idx: torch.Tensor, skip_lm_head: bool = False,
+        self,
+        idx: torch.Tensor,
+        skip_lm_head: bool = False,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
         raise NotImplementedError("Must not call `forward` for this object")
 
@@ -441,6 +450,7 @@ class GPTShardCellBlock(CellBlocks):
     :class:`keys_values.kvcache.gradient.accumulate.GradientAccumulator`.
 
     """
+
     def __init__(self, shard: GPTShardOfBlocks):
         super().__init__(shard.config)
         if shard.first_layer_idx is None:
@@ -475,6 +485,7 @@ class ModelFromFlatVectorsFactory:
     weights from flat vectors.
 
     """
+
     @staticmethod
     def create_full_block(
         config: ConfigFull,
@@ -581,9 +592,10 @@ class ModelFromFlatVectorsFactory:
 
     @staticmethod
     def _get_component_keys(all_keys: List[str], n_layer: int) -> List[str]:
-        component_keys = [
-            BlockComponentName.h(i) for i in range(n_layer)
-        ] + [BlockComponentName.wte(), BlockComponentName.ln_f()]
+        component_keys = [BlockComponentName.h(i) for i in range(n_layer)] + [
+            BlockComponentName.wte(),
+            BlockComponentName.ln_f(),
+        ]
         for key in component_keys:
             if key not in all_keys:
                 raise ValueError(f"weights_vecs is missing key {key}")
@@ -622,7 +634,9 @@ class ModelFromFlatVectorsFactory:
             else:
                 block_idx = BlockComponentName.is_h(comp_name)
                 if block_idx is None:
-                    raise ValueError(f"Entry '{comp_name}' in component_keys is not valid")
+                    raise ValueError(
+                        f"Entry '{comp_name}' in component_keys is not valid"
+                    )
                 components[comp_name] = ModelFromFlatVectorsFactory.create_full_block(
                     config=config,
                     block_idx=block_idx,
@@ -658,7 +672,8 @@ class ModelFromFlatVectorsFactory:
         """
         # Create components
         component_keys = ModelFromFlatVectorsFactory._get_component_keys(
-            list(weights_vecs.keys()), config.n_layer,
+            list(weights_vecs.keys()),
+            config.n_layer,
         )
         components = ModelFromFlatVectorsFactory._create_components_full_model(
             config=config,
@@ -690,7 +705,9 @@ class ModelFromFlatVectorsFactory:
             else:
                 block_idx = BlockComponentName.is_h(comp_name)
                 if block_idx is None:
-                    raise ValueError(f"Entry '{comp_name}' in component_keys is not valid")
+                    raise ValueError(
+                        f"Entry '{comp_name}' in component_keys is not valid"
+                    )
                 components[comp_name] = ModelFromFlatVectorsFactory.create_lora_block(
                     config=config,
                     block_idx=block_idx,
@@ -726,7 +743,8 @@ class ModelFromFlatVectorsFactory:
         """
         # Create components
         component_keys = ModelFromFlatVectorsFactory._get_component_keys(
-            list(weights_vecs.keys()), config.n_layer,
+            list(weights_vecs.keys()),
+            config.n_layer,
         )
         components = ModelFromFlatVectorsFactory._create_components_lora_model(
             config=config,

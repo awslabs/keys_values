@@ -117,7 +117,9 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
                 don't want to apply LoRA we can set it as False. For example if we want to apply LoRA only to `query`
                 and `value` but keep `key` without weight updates we should pass `[True, False, True]`
         """
-        super(LoRALinear, self).__init__(r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout)
+        super(LoRALinear, self).__init__(
+            r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+        )
         out_features = head_size * (n_head + 2 * n_query_groups)
         self.linear = torch.nn.Linear(in_features, out_features, **kwargs)
         self.head_size = head_size
@@ -142,12 +144,16 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
             head_size * n_query_groups,
         )
         if r > 0 and any(enable_lora):
-            self.lora_A = nn.Parameter(torch.empty((r * sum(enable_lora), in_features)))  # (4, 128)
+            self.lora_A = nn.Parameter(
+                torch.empty((r * sum(enable_lora), in_features))
+            )  # (4, 128)
             # qkv_shapes will be used to split a tensor with weights correctly
             self.qkv_shapes = [
                 s for s, e in zip(self._all_qkv_shapes, enable_lora) if e
             ]
-            self.lora_B = nn.Parameter(torch.empty(sum(self.qkv_shapes), r))  # (256, 2))
+            self.lora_B = nn.Parameter(
+                torch.empty(sum(self.qkv_shapes), r)
+            )  # (256, 2))
             # Notes about shapes above
             # - self.lora_A has shape (4, 128): 4 because rank is 2 and LoRA is applied only to two matrices;
             # 128 is the input size of the x (embedding size). (4, 128) and not (128, 4) because later on in
@@ -180,7 +186,9 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
                 off += size
             assert len(lora_ind) == sum(self.qkv_shapes)  # Sanity check
             self.register_buffer(
-                "_lora_ind", torch.tensor(lora_ind, device=self.linear.weight.device), persistent=False
+                "_lora_ind",
+                torch.tensor(lora_ind, device=self.linear.weight.device),
+                persistent=False,
             )
 
         return self._lora_ind
@@ -203,12 +211,15 @@ class GPT(BaseModel):
         self.transformer = nn.ModuleDict(
             dict(
                 wte=nn.Embedding(config.padded_vocab_size, config.n_embd),
-                h=nn.ModuleList(Block(config, block_idx) for block_idx in range(config.n_layer)),
+                h=nn.ModuleList(
+                    Block(config, block_idx) for block_idx in range(config.n_layer)
+                ),
                 ln_f=config.norm_class(config.n_embd, eps=config.norm_eps),
             )
         )
         self.mha = MultiHeadSelfAttention(
-            config, **transform_mha_kwargs(mha_kwargs, config),
+            config,
+            **transform_mha_kwargs(mha_kwargs, config),
         )
         self.max_seq_length = self.config.block_size
         self._start_of_layer_hook = None
@@ -225,9 +236,14 @@ class GPT(BaseModel):
         if isinstance(module, LoRALinear):
             module.reset_parameters()
 
-    def _load_from_state_dict(self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any) -> None:
+    def _load_from_state_dict(
+        self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any
+    ) -> None:
         """For compatibility with base checkpoints."""
-        mapping = {"lm_head.weight": "lm_head.linear.weight", "lm_head.bias": "lm_head.linear.bias"}
+        mapping = {
+            "lm_head.weight": "lm_head.linear.weight",
+            "lm_head.bias": "lm_head.linear.bias",
+        }
         state_dict = map_old_state_dict_weights(state_dict, mapping, prefix)
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
@@ -282,7 +298,9 @@ class CausalSelfAttention(BaseCausalSelfAttention):
             use_r=config.lora_projection,
         )
 
-    def _load_from_state_dict(self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any) -> None:
+    def _load_from_state_dict(
+        self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any
+    ) -> None:
         """For compatibility with base and/or legacy checkpoints."""
         mapping = {
             "qkv.weight": "qkv.linear.weight",
@@ -296,6 +314,8 @@ class CausalSelfAttention(BaseCausalSelfAttention):
             legacy_key = f"{prefix}attn.linear.{attr}"
             current_key = f"{prefix}qkv.linear.{attr}"
             if legacy_key in state_dict:
-                state_dict[current_key] = qkv_reassemble(state_dict.pop(legacy_key), self.config)
+                state_dict[current_key] = qkv_reassemble(
+                    state_dict.pop(legacy_key), self.config
+                )
 
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)

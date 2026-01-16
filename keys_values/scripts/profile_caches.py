@@ -58,13 +58,21 @@ def main(
     )
     cache_kwargs = {
         "tmp_array_limit_gb": TemporaryArrayLimit(
-            init_val=4, name="attention_forward_temp_size_gb",
+            init_val=4,
+            name="attention_forward_temp_size_gb",
         )
     }
     names = ["lastrec-default", "lastrec-alt-default"]
     print(f"Comparing caches: {names}")
     result_fixed = dict()
-    for key in ("n_head", "n_query_groups", "head_size", "max_batch_size", "dtype", "device"):
+    for key in (
+        "n_head",
+        "n_query_groups",
+        "head_size",
+        "max_batch_size",
+        "dtype",
+        "device",
+    ):
         val = getattr(params, key)
         print(f"{key} = {getattr(params, key)}")
         result_fixed[key] = str(val) if key in {"dtype", "device"} else val
@@ -108,21 +116,27 @@ def main(
                     num = cache_length
                     if prefill is None:
                         prefill = random_args_cache_forward(
-                            params, num, config.padded_vocab_size,
+                            params,
+                            num,
+                            config.padded_vocab_size,
                         )
                     cache(**prefill)
                     # Insert (prepare)
                     num = next_pos
                     if insert1 is None:
                         insert1 = random_args_cache_forward(
-                            params, num, config.padded_vocab_size,
+                            params,
+                            num,
+                            config.padded_vocab_size,
                         )
                     cache(**insert1)
                     # Insert (measure)
                     num = chunk_size
                     if insert2 is None:
                         insert2 = random_args_cache_forward(
-                            params, num, config.padded_vocab_size,
+                            params,
+                            num,
+                            config.padded_vocab_size,
                         )
                     if on_gpu:
                         torch.cuda.current_stream().synchronize()
@@ -146,13 +160,15 @@ def main(
 if __name__ == "__main__":
     batch_size = 3
     dtype = torch.bfloat16
-    device = torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
+    device = (
+        torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
+    )
     num_repeats = 10
     result_path = Path("./profile_lastrec.csv")
-    cache_length = 2 ** 15
+    cache_length = 2**15
     setups = [
         (cache_length, chunk_size)
-        for chunk_size in [2 ** 8, 2 ** 9, 2 ** 10, 2 ** 11] + list(range(2048, 2 ** 14, 2048))
+        for chunk_size in [2**8, 2**9, 2**10, 2**11] + list(range(2048, 2**14, 2048))
     ]
     model_names = ["Qwen3-4B"]
     for model_name in model_names:

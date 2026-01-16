@@ -62,14 +62,18 @@ def main(
     input_pos = 2 * cache_length
     scale_factor = 1.0 / math.sqrt(config.head_size)
 
-    print(f"config = {config}\ncache_length = {cache_length}\nbatch_size = {batch_size}\ndtype = {dtype}")
+    print(
+        f"config = {config}\ncache_length = {cache_length}\nbatch_size = {batch_size}\ndtype = {dtype}"
+    )
     for chunk_size in chunk_sizes:
         print(f"\nchunk_size = {chunk_size}")
         results = np.zeros((3, num_repeats), dtype=np.float64)
         for repeat in [None] * warmup_repeats + list(range(num_repeats)):
             # Sample input data
             data = random_args_cache_forward(
-                params, cache_length, config.padded_vocab_size,
+                params,
+                cache_length,
+                config.padded_vocab_size,
             )
             data["query"] = data["query"][:, :, :chunk_size, :]
             token_positions = torch.randint(
@@ -82,7 +86,9 @@ def main(
                 for h in range(config.n_query_groups):
                     randpos = torch.randperm(cache_length, **index_kwargs)[:chunk_size]
                     token_positions[b, h, randpos] = torch.arange(
-                        input_pos, input_pos + chunk_size, **index_kwargs,
+                        input_pos,
+                        input_pos + chunk_size,
+                        **index_kwargs,
                     )
             sdpa_kwargs = dict(
                 query=data["query"],

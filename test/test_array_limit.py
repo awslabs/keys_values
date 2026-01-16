@@ -39,7 +39,8 @@ def test_tmp_array_limit_object():
     )
     batch_size = 3
     tmp_array_limit_forward_gb = TemporaryArrayLimit(
-        init_val=3, name="attention_forward_temp_size_gb",
+        init_val=3,
+        name="attention_forward_temp_size_gb",
     )
     gpt_model = GPT(config, tmp_array_limit_gb=tmp_array_limit_forward_gb)
     kv_cache_args = KVCacheArgs(
@@ -60,7 +61,8 @@ def test_tmp_array_limit_object():
     )
     verbose = VerbosityLevels.SOME.value
     cache_kwargs = cleanup_cache_kwargs(
-        split_name(kv_cache_args.name)[0], kv_cache_args.cache_kwargs,
+        split_name(kv_cache_args.name)[0],
+        kv_cache_args.cache_kwargs,
     )
     assert "tmp_array_limit_gb" in cache_kwargs
     kv_caches = KVCacheFactory.create(
@@ -75,9 +77,13 @@ def test_tmp_array_limit_object():
     # Ensure that `tmp_array_limit_gb` is used in all relevant objects
     mha = gpt_model.mha
     if mha.tmp_array_limit_gb is None:
-        raise ValueError("tmp_array_limit_gb is set, but model.mha.tmp_array_limit_gb is not")
+        raise ValueError(
+            "tmp_array_limit_gb is set, but model.mha.tmp_array_limit_gb is not"
+        )
     if not (mha.tmp_array_limit_gb is tmp_array_limit_forward_gb):
-        raise ValueError("tmp_array_limit_gb and model.mha.tmp_array_limit_gb must be the same object")
+        raise ValueError(
+            "tmp_array_limit_gb and model.mha.tmp_array_limit_gb must be the same object"
+        )
     for block_idx, kv_cache in enumerate(gpt_model.get_kv_caches()):
         prefix = f"Block {block_idx} of model: "
         for obj, name in (
@@ -86,9 +92,15 @@ def test_tmp_array_limit_object():
             (kv_cache.kv_buffers.quantizer_v, "kv_buffers.quantizer_v"),
         ):
             if obj.tmp_array_limit_gb is None:
-                raise ValueError(prefix + f"tmp_array_limit_gb is set, but block.attn.kv_cache.{name}.tmp_array_limit_gb is not")
+                raise ValueError(
+                    prefix
+                    + f"tmp_array_limit_gb is set, but block.attn.kv_cache.{name}.tmp_array_limit_gb is not"
+                )
             if not (obj.tmp_array_limit_gb is tmp_array_limit_forward_gb):
-                raise ValueError(prefix + f"tmp_array_limit_gb and block.attn.kv_cache.{name}.tmp_array_limit_gb must be the same object")
+                raise ValueError(
+                    prefix
+                    + f"tmp_array_limit_gb and block.attn.kv_cache.{name}.tmp_array_limit_gb must be the same object"
+                )
     # Step 2: Backward limit
     # Create wrapper model and run forward
     common_kwargs = dict(
@@ -101,7 +113,8 @@ def test_tmp_array_limit_object():
         tmp_array_limit_gb=tmp_array_limit_forward_gb,
     )
     tmp_array_limit_backward_gb = TemporaryArrayLimit(
-        init_val=2, name="attention_backward_temp_size_gb",
+        init_val=2,
+        name="attention_backward_temp_size_gb",
     )
     train_cache_kwargs = {"tmp_array_limit_gb": tmp_array_limit_backward_gb}
     cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_backward_gb

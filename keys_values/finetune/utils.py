@@ -82,25 +82,37 @@ def get_lr_scheduler(
 ):
     if train_args.lr_warmup_fraction is None:
         if train_args.lr_warmup_steps is None:
-            raise ValueError("Either train.lr_warmup_fraction or train_args.lr_warmup_steps must be given")
+            raise ValueError(
+                "Either train.lr_warmup_fraction or train_args.lr_warmup_steps must be given"
+            )
         warmup_steps = min(train_args.lr_warmup_steps, max_steps)
     else:
         if not (0 <= train_args.lr_warmup_fraction <= 1):
-            raise ValueError(f"train_args.lr_warmup_fraction = {train_args.lr_warmup_fraction}, must be in [0, 1]")
+            raise ValueError(
+                f"train_args.lr_warmup_fraction = {train_args.lr_warmup_fraction}, must be in [0, 1]"
+            )
         if train_args.lr_warmup_steps is not None:
-            print(f"train.lr_warmup_fraction = {train_args.lr_warmup_fraction}, train_args.lr_warmup_steps = {train_args.lr_warmup_steps}. Using the former.")
+            print(
+                f"train.lr_warmup_fraction = {train_args.lr_warmup_fraction}, train_args.lr_warmup_steps = {train_args.lr_warmup_steps}. Using the former."
+            )
         warmup_steps = train_args.lr_warmup_fraction * max_steps
     # Linear warmup followed by cosine annealing
-    scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=(max_steps - warmup_steps))
+    scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=(max_steps - warmup_steps)
+    )
     if warmup_steps <= 0:
         return scheduler2
     # Note: The first LR (for `step=0`) is being used. Must not be 0
-    scheduler1 = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: (step + 1) / warmup_steps)
+    scheduler1 = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lambda step: (step + 1) / warmup_steps
+    )
     if warmup_steps >= max_steps:
         return scheduler1
     else:
         return torch.optim.lr_scheduler.SequentialLR(
-            optimizer, [scheduler1, scheduler2], milestones=[warmup_steps],
+            optimizer,
+            [scheduler1, scheduler2],
+            milestones=[warmup_steps],
         )
 
 
@@ -127,7 +139,8 @@ def get_dataloaders(
     val_dataloader = data.val_dataloader()
     if fabric is not None:
         train_dataloader, val_dataloader = fabric.setup_dataloaders(
-            train_dataloader, val_dataloader,
+            train_dataloader,
+            val_dataloader,
         )
     return train_dataloader, val_dataloader
 
@@ -138,14 +151,20 @@ def validate_args(train: TrainArgs, eval: EvalArgs) -> None:
     for args, names in unsupported:
         for name in names:
             if getattr(args, name) is not None:
-                issues.append(f"{__file__} doesn't support the {name!r} argument. This is set in {args}")
+                issues.append(
+                    f"{__file__} doesn't support the {name!r} argument. This is set in {args}"
+                )
     required = [(train, ["epochs"]), (eval, ["max_new_tokens"])]
     for args, names in required:
         for name in names:
             if getattr(args, name) is None:
-                issues.append(f"{__file__} requires the {name!r} argument. This is set in {args}")
+                issues.append(
+                    f"{__file__} requires the {name!r} argument. This is set in {args}"
+                )
     if not train.epochs and not train.max_steps:
-        issues.append(f"{__file__} requires either epochs or max_steps to be set. This is set in {train}")
+        issues.append(
+            f"{__file__} requires either epochs or max_steps to be set. This is set in {train}"
+        )
     if issues:
         raise ValueError("\n".join(issues))
 
@@ -197,7 +216,9 @@ def choose_logger(
             from lightning.pytorch.loggers.tensorboard import TensorBoardLogger
 
             return TensorBoardLogger(
-                out_dir, name=name, **kwargs,
+                out_dir,
+                name=name,
+                **kwargs,
             )
         if logger_name == "wandb":
             from lightning.pytorch.loggers.wandb import WandbLogger
@@ -208,7 +229,11 @@ def choose_logger(
             run = log_args.get("run", os.environ.get("WANDB_RUN_NAME"))
             group = log_args.get("group", os.environ.get("WANDB_RUN_GROUP"))
             return WandbLogger(
-                project=project, name=run, group=group, resume=resume, **kwargs,
+                project=project,
+                name=run,
+                group=group,
+                resume=resume,
+                **kwargs,
             )
         if logger_name == "mlflow":
             from lightning.pytorch.loggers.mlflow import MLFlowLogger
@@ -223,7 +248,9 @@ def choose_logger(
                 save_dir=str(out_dir),
                 **kwargs,
             )
-        raise ValueError(f"`logger_name={logger_name}` is not a valid option. Choose from 'csv', 'tensorboard', 'wandb', 'mlflow'.")
+        raise ValueError(
+            f"`logger_name={logger_name}` is not a valid option. Choose from 'csv', 'tensorboard', 'wandb', 'mlflow'."
+        )
 
 
 def adapt_requires_grad(

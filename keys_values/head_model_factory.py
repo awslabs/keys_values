@@ -53,7 +53,9 @@ class HeadModelFactory:
         """
         model_cls = SUPPORTED_HEAD_MODELS.get(name)
         if model_cls is None:
-            raise ValueError(f"name = {name} not supported, must be in {HeadModelFactory.supported_names()}")
+            raise ValueError(
+                f"name = {name} not supported, must be in {HeadModelFactory.supported_names()}"
+            )
         head_kwargs = dict()
         if data is not None and isinstance(data, LongBenchV2):
             head_kwargs = data.head_model_kwargs(name)

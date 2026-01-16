@@ -108,24 +108,35 @@ class ForwardInputOutput:
         prefix: str,
     ) -> Tuple[Dict[str, Any], Optional[torch.Tensor]]:
         if not self.token_idx.equal(token_idx):
-            raise ValueError(prefix + f": token_idx = {token_idx}; stored token_idx = {self.token_idx}")
+            raise ValueError(
+                prefix
+                + f": token_idx = {token_idx}; stored token_idx = {self.token_idx}"
+            )
         if next_positions.shape != self.next_positions.shape:
-            raise ValueError(prefix + f": next_positions.shape = {next_positions.shape}; stored next_positions.shape = {self.next_positions.shape}")
+            raise ValueError(
+                prefix
+                + f": next_positions.shape = {next_positions.shape}; stored next_positions.shape = {self.next_positions.shape}"
+            )
         num_diff = (next_positions != self.next_positions).sum().item()
         if num_diff > 0:
             # Differences can arise, because small diffs between score entries
             # can lead to different sort orderings
             rel_diff = 100 * num_diff / next_positions.numel()
-            print(prefix + f": next_positions: num_diff = {num_diff} ({rel_diff:.2f} %)")
+            print(
+                prefix + f": next_positions: num_diff = {num_diff} ({rel_diff:.2f} %)"
+            )
             next_positions = self.next_positions
         else:
             next_positions = None
-        return dict(
-            query=self.query,
-            key=self.key,
-            value=self.value,
-            token_idx=token_idx,
-        ), next_positions
+        return (
+            dict(
+                query=self.query,
+                key=self.key,
+                value=self.value,
+                token_idx=token_idx,
+            ),
+            next_positions,
+        )
 
 
 class TestLogInputsKVCacheMixin:
@@ -134,6 +145,7 @@ class TestLogInputsKVCacheMixin:
     :class:`AttnWeightsKVCache`.
 
     """
+
     def start_logging(
         self,
         inputs: List[ForwardInput],
@@ -168,7 +180,9 @@ class TestLogInputsKVCacheMixin:
         )
         if hasattr(self, "_inputs"):
             self._entry = ForwardInput.from_inputs(
-                **forward_kwargs, cache=self._get_self(), input_pos=input_pos,
+                **forward_kwargs,
+                cache=self._get_self(),
+                input_pos=input_pos,
             )
         return forward_kwargs
 
@@ -193,6 +207,7 @@ class TestBeforeAfterKVCacheMixin:
     slow drift between old and new, this is not what we want to test here.
 
     """
+
     def start_storing(
         self,
         path_mask: str,
@@ -286,8 +301,7 @@ class TestBeforeAfterKVCacheMixin:
             assert self._debug_attn_weights is not None
             # Collect outputs:
             outputs_here = {
-                k + "_after": v
-                for k, v in self._get_cache_content().items()
+                k + "_after": v for k, v in self._get_cache_content().items()
             }
             outputs_here["attn_outputs"] = attn_outputs
             outputs_here["attn_weights"] = self._debug_attn_weights
@@ -347,6 +361,7 @@ class TestH2OKVCache(H2OKVCache, TestBeforeAfterKVCacheMixin):
         Otherwise, the program exits after `num_steps` calls.
 
     """
+
     def __init__(
         self,
         config: Config,

@@ -92,6 +92,7 @@ class DefaultUseEagerKernel:
     architectures of sizes 0.5B until 14B parameters.
 
     """
+
     def __init__(self):
         inputs, self._q_len_thresh = load_q_len_thresh_data()
         self._nearest_neighbor = KDTree(inputs)
@@ -135,11 +136,16 @@ def transform_mha_kwargs(
     batch_size: int = 1,
     default_factory: Optional[DefaultUseEagerKernel] = None,
 ) -> Dict[str, Any]:
-    if mha_kwargs.get("use_eager_kernel") is not None or mha_kwargs.get("use_eager_sdpa_always", False):
+    if mha_kwargs.get("use_eager_kernel") is not None or mha_kwargs.get(
+        "use_eager_sdpa_always", False
+    ):
         return mha_kwargs
     if default_factory is None:
         default_factory = DefaultUseEagerKernel()
     use_eager_kernel = default_factory(
-        config.n_head, config.n_query_groups, config.head_size, batch_size,
+        config.n_head,
+        config.n_query_groups,
+        config.head_size,
+        batch_size,
     )
     return dict(mha_kwargs, use_eager_kernel=use_eager_kernel)

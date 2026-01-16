@@ -84,13 +84,19 @@ def clone_model_shard_via_flat_vectors(
         c is not None and isinstance(c, KVCacheWithBuffers) and c.buffers_are_allocated
         for c in kv_caches
     ):
-        raise ValueError("KV caches must have buffers deallocated. Use `deallocate_kv_cache_buffers_of_model`")
+        raise ValueError(
+            "KV caches must have buffers deallocated. Use `deallocate_kv_cache_buffers_of_model`"
+        )
     try:
         # Remove KV caches before copy is created
         model.clear_kv_caches()
         # Loop to create components on the target device
         components = dict()
-        choices = ModelFromFlatVectorsFactory.CHOICES_LORA if is_lora else ModelFromFlatVectorsFactory.CHOICES_FULL
+        choices = (
+            ModelFromFlatVectorsFactory.CHOICES_LORA
+            if is_lora
+            else ModelFromFlatVectorsFactory.CHOICES_FULL
+        )
         for comp_name, src_module in names_and_modules:
             flat_vecs_src = AccessWeightsGradients(src_module).get_weights()
             flat_vecs_trg = copy_function(flat_vecs_src, device)
@@ -142,10 +148,7 @@ def clone_model_shard_via_flat_vectors(
     return model_copy
 
 
-def _transfer_requires_grad(
-    model_from: torch.nn.Module,
-    model_to: torch.nn.Module
-):
+def _transfer_requires_grad(model_from: torch.nn.Module, model_to: torch.nn.Module):
     for name, param_to in model_to.named_parameters():
         param_from = model_from.get_parameter(name)
         param_to.requires_grad_(param_from.requires_grad)

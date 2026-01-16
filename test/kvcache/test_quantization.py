@@ -46,11 +46,13 @@ from keys_values.model import GPT
 
 def args_for_one_cache(cname: str) -> List[tuple]:
     return [
-        (a, b) + c for a, b, c in product(
+        (a, b) + c
+        for a, b, c in product(
             [torch.float32, torch.float16, torch.bfloat16],
             [False, True],
             cache_names_and_devices(
-                filter_name=lambda name: name.startswith(cname) and not name.endswith("default"),
+                filter_name=lambda name: name.startswith(cname)
+                and not name.endswith("default"),
             ),
         )
     ]
@@ -69,7 +71,9 @@ def test_quantization_error(dtype, blocks_over_heads, name, device):
     random.seed(seed)
     torch.random.manual_seed(seed)
     if not ("bnb" in name and blocks_over_heads):
-        print(f"dtype={dtype}, blocks_over_heads={blocks_over_heads}, name={name}, device={device}")
+        print(
+            f"dtype={dtype}, blocks_over_heads={blocks_over_heads}, name={name}, device={device}"
+        )
 
         if "bnb" in name and not blocks_over_heads:
             # Minimum blocksize for bitsandbytes is 64
@@ -106,20 +110,29 @@ def test_quantization_error(dtype, blocks_over_heads, name, device):
             head_size = head_sizes[i]
             assert n_parts * head_size == head_sizes[-1]
             assert n_parts * batch_size == params[i].max_batch_size
-            _keys = keys.view(*keys.shape[:-1], n_parts, head_size).permute(
-                3, 0, 1, 2, 4,
-            ).reshape(n_parts * batch_size, n_query_groups, -1, head_size)
+            _keys = (
+                keys.view(*keys.shape[:-1], n_parts, head_size)
+                .permute(
+                    3,
+                    0,
+                    1,
+                    2,
+                    4,
+                )
+                .reshape(n_parts * batch_size, n_query_groups, -1, head_size)
+            )
             # Errors with smaller blocksize (should be smaller)
             # Only error for keys, ignore for values
             errors = kv_cache.kv_buffers.quantization_error(_keys, _keys)[0].view(
-                n_parts, batch_size, n_query_groups, -1,
+                n_parts,
+                batch_size,
+                n_query_groups,
+                -1,
             )
             assert errors.shape[-1] == cache_length
             errors = vector_norm(errors, dim=0)
             q_errors.append(errors)
-        q_errors.append(
-            kv_caches[-1].kv_buffers.quantization_error(keys, keys)[0]
-        )
+        q_errors.append(kv_caches[-1].kv_buffers.quantization_error(keys, keys)[0])
         assert q_errors[0].shape == q_errors[1].shape
         assert q_errors[0].shape == q_errors[2].shape
         # Weak test: The smaller the blocksize, the smaller the error should be,
@@ -135,7 +148,9 @@ def test_quantization_error(dtype, blocks_over_heads, name, device):
                 index_lt = index_lt.nonzero()
                 print(f"{num_lt} violations of total {total_sz}")
                 for row in index_lt:
-                    print(f"{row.tolist()}: err{hs_gt} = {q_errors[i + 1][*row]:.7f} < {q_errors[i][*row]:.7f} = err{hs_lt}")
+                    print(
+                        f"{row.tolist()}: err{hs_gt} = {q_errors[i + 1][*row]:.7f} < {q_errors[i][*row]:.7f} = err{hs_lt}"
+                    )
             # Only a fraction of the comparisons should violate the relation
             # which holds "on average"
             assert num_lt < total_sz / 4
@@ -149,7 +164,9 @@ def test_concatenation(dtype, blocks_over_heads, name, device):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
-    print(f"name={name}, dtype={dtype}, blocks_over_heads={blocks_over_heads}, device={device}")
+    print(
+        f"name={name}, dtype={dtype}, blocks_over_heads={blocks_over_heads}, device={device}"
+    )
 
     vocab_size = 128
     params = KVCacheParams(
@@ -163,7 +180,9 @@ def test_concatenation(dtype, blocks_over_heads, name, device):
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params, blocks_over_heads=blocks_over_heads)
     data = random_args_cache_forward(
-        params, num=cache_length, vocab_size=vocab_size,
+        params,
+        num=cache_length,
+        vocab_size=vocab_size,
     )
     kv_cache._prefill(data["key"], data["value"], data["token_idx"])
     positions = random_index(params, 0, cache_length, num=7)
@@ -196,7 +215,9 @@ def test_quantizer_states(dtype, blocks_over_heads, name, device):
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params, blocks_over_heads=blocks_over_heads)
     data = random_args_cache_forward(
-        params, num=cache_length, vocab_size=vocab_size,
+        params,
+        num=cache_length,
+        vocab_size=vocab_size,
     )
     kv_cache._prefill(data["key"], data["value"], data["token_idx"])
     kv_buffers = kv_cache.kv_buffers
@@ -230,7 +251,8 @@ def test_quantizer_states(dtype, blocks_over_heads, name, device):
         torch.testing.assert_close(before_v, after_v)
 
 
-_MAX_TEMP_SIZE_IN_BYTES = 2 ** 16
+_MAX_TEMP_SIZE_IN_BYTES = 2**16
+
 
 class _TorchBasicQuantizer(TorchBasicQuantizer):
     def __init__(self, *args, **kwargs):
@@ -371,11 +393,18 @@ def args_bitsandbytes_with_blocks_over_heads() -> List[tuple]:
     args_bitsandbytes_with_blocks_over_heads(),
 )
 def test_bitsandbytes_with_blocks_over_heads(
-    qname, batch_size, n_query_groups, head_size, shape, is_valid,
+    qname,
+    batch_size,
+    n_query_groups,
+    head_size,
+    shape,
+    is_valid,
 ):
     name = "lastrec-" + qname
     device = torch.device("cuda:0")
-    print(f"qname={qname}, batch_size={batch_size}, n_query_groups={n_query_groups}, head_size={head_size}, shape={shape}, is_valid={is_valid}")
+    print(
+        f"qname={qname}, batch_size={batch_size}, n_query_groups={n_query_groups}, head_size={head_size}, shape={shape}, is_valid={is_valid}"
+    )
     params = KVCacheParams(
         max_batch_size=batch_size,
         n_query_groups=n_query_groups,
@@ -402,7 +431,8 @@ def write_back_all(caches: List[KVCacheWithBuffers]):
 
 
 def compare_buffers(
-    caches1: List[KVCacheWithBuffers], caches2: List[KVCacheWithBuffers],
+    caches1: List[KVCacheWithBuffers],
+    caches2: List[KVCacheWithBuffers],
 ):
     assert len(caches1) == len(caches2)
     for block_idx, (cache1, cache2) in enumerate(zip(caches1, caches2)):
@@ -412,19 +442,59 @@ def compare_buffers(
         assert isinstance(buffer2, QuantizedKVCacheBuffers)
         if isinstance(buffer1.quantizer_k, TorchBasicQuantizer):
             compare_these = [
-                (buffer1.quantizer_k.quant_scales, buffer2.quantizer_k.quant_scales, "k_quant_scales"),
-                (buffer1.quantizer_k.quant_zero_points, buffer2.quantizer_k.quant_zero_points, "k_quant_zero_points"),
-                (buffer1.quantizer_v.quant_scales, buffer2.quantizer_v.quant_scales, "v_quant_scales"),
-                (buffer1.quantizer_v.quant_zero_points, buffer2.quantizer_v.quant_zero_points, "v_quant_zero_points"),
-                (buffer1.quantizer_k.quant_buffer, buffer2.quantizer_k.quant_buffer, "k_quant_buffer"),
-                (buffer1.quantizer_v.quant_buffer, buffer2.quantizer_v.quant_buffer, "v_quant_buffer"),
+                (
+                    buffer1.quantizer_k.quant_scales,
+                    buffer2.quantizer_k.quant_scales,
+                    "k_quant_scales",
+                ),
+                (
+                    buffer1.quantizer_k.quant_zero_points,
+                    buffer2.quantizer_k.quant_zero_points,
+                    "k_quant_zero_points",
+                ),
+                (
+                    buffer1.quantizer_v.quant_scales,
+                    buffer2.quantizer_v.quant_scales,
+                    "v_quant_scales",
+                ),
+                (
+                    buffer1.quantizer_v.quant_zero_points,
+                    buffer2.quantizer_v.quant_zero_points,
+                    "v_quant_zero_points",
+                ),
+                (
+                    buffer1.quantizer_k.quant_buffer,
+                    buffer2.quantizer_k.quant_buffer,
+                    "k_quant_buffer",
+                ),
+                (
+                    buffer1.quantizer_v.quant_buffer,
+                    buffer2.quantizer_v.quant_buffer,
+                    "v_quant_buffer",
+                ),
             ]
         else:
             compare_these = [
-                (buffer1.quantizer_k.quant_absmax, buffer2.quantizer_k.quant_absmax, "k_quant_absmax"),
-                (buffer1.quantizer_v.quant_absmax, buffer2.quantizer_v.quant_absmax, "v_quant_absmax"),
-                (buffer1.quantizer_k.quant_buffer, buffer2.quantizer_k.quant_buffer, "k_quant_buffer"),
-                (buffer1.quantizer_v.quant_buffer, buffer2.quantizer_v.quant_buffer, "v_quant_buffer"),
+                (
+                    buffer1.quantizer_k.quant_absmax,
+                    buffer2.quantizer_k.quant_absmax,
+                    "k_quant_absmax",
+                ),
+                (
+                    buffer1.quantizer_v.quant_absmax,
+                    buffer2.quantizer_v.quant_absmax,
+                    "v_quant_absmax",
+                ),
+                (
+                    buffer1.quantizer_k.quant_buffer,
+                    buffer2.quantizer_k.quant_buffer,
+                    "k_quant_buffer",
+                ),
+                (
+                    buffer1.quantizer_v.quant_buffer,
+                    buffer2.quantizer_v.quant_buffer,
+                    "v_quant_buffer",
+                ),
             ]
         for x1, x2, name in compare_these:
             print(f"Comparing {block_idx}: {name}")
@@ -432,7 +502,8 @@ def compare_buffers(
 
 
 def check_same_events(
-    cache1: KVCacheWithBuffers, caches2: List[KVCacheWithBuffers],
+    cache1: KVCacheWithBuffers,
+    caches2: List[KVCacheWithBuffers],
 ):
     events_all = [str(x) for x in cache1.kv_buffers.dequant_buffers.debug_events]
     _events_all = set(events_all)
@@ -460,7 +531,8 @@ def args_quantized_buffers_write_back() -> List[tuple]:
 
 
 @pytest.mark.parametrize(
-    "dtype, name, device", args_quantized_buffers_write_back(),
+    "dtype, name, device",
+    args_quantized_buffers_write_back(),
 )
 def test_quantized_buffers_write_back(dtype, name, device):
     seed = 31415927
@@ -522,7 +594,9 @@ def test_quantized_buffers_write_back(dtype, name, device):
     for c_comm, c_sep in zip(caches_common, caches_separate):
         c_sep.kv_buffers.dequant_buffers.start_debug_event_protocol()
         data = random_args_cache_forward(
-            params, num=num_prefill, vocab_size=config.vocab_size,
+            params,
+            num=num_prefill,
+            vocab_size=config.vocab_size,
         )
         c_comm(**data)
         c_sep(**data)
@@ -542,7 +616,9 @@ def test_quantized_buffers_write_back(dtype, name, device):
             # reading from quantized, which gives differences
             c_sep.kv_buffers.drop_association()
             data = random_args_cache_forward(
-                params, num=q_len, vocab_size=config.vocab_size,
+                params,
+                num=q_len,
+                vocab_size=config.vocab_size,
             )
             c_comm(**data)
             c_sep(**data)

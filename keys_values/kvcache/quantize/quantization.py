@@ -48,6 +48,7 @@ class Quantizer(torch.nn.Module):
     as long as they are not allocated, and can change with the next allocation.
 
     """
+
     def __init__(
         self,
         shape: Tuple[int, int, int, int],
@@ -140,7 +141,7 @@ class Quantizer(torch.nn.Module):
         end: int,
         out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-       raise NotImplementedError
+        raise NotImplementedError
 
     def deallocate(self):
         """
@@ -172,8 +173,9 @@ class Quantizer(torch.nn.Module):
 
     @staticmethod
     def size_estimate_apriori(
-        params: KVCacheBuffersParams, **kwargs,
-    ) ->Tuple[int, Dict[str, int]]:
+        params: KVCacheBuffersParams,
+        **kwargs,
+    ) -> Tuple[int, Dict[str, int]]:
         """
         Same semantics as :meth:`size_estimate`, but can be called without a
         cache being created. Results may not be exactly the same, but should
@@ -206,17 +208,23 @@ class Quantizer(torch.nn.Module):
     def _check_slots(self, start: int, end: int):
         cache_length = self.shape[2]
         if not (0 <= start < end <= cache_length):
-            raise ValueError(f"start = {start}, end = {end}, range must be in [0, {cache_length})")
+            raise ValueError(
+                f"start = {start}, end = {end}, range must be in [0, {cache_length})"
+            )
 
     def _check_shape_dtype(self, values: torch.Tensor, num: int, name: str):
         batch_size = values.shape[0]
         if batch_size > self.shape[0]:
-            raise ValueError(f"{name}.shape[0] = {batch_size}, must be <= {self.shape[0]}")
+            raise ValueError(
+                f"{name}.shape[0] = {batch_size}, must be <= {self.shape[0]}"
+            )
         desired_shape = (batch_size, self.shape[1], num, self.shape[3])
         if values.shape != desired_shape:
             raise ValueError(f"{name}.shape = {values.shape}, must be {desired_shape}")
         if values.dtype != self.source_dtype:
-            raise ValueError(f"{name}.dtype = {values.dtype}, must be {self.source_dtype}")
+            raise ValueError(
+                f"{name}.dtype = {values.dtype}, must be {self.source_dtype}"
+            )
 
     def create_quantizer_state(
         self,
@@ -247,6 +255,7 @@ class QuantizerState:
     device.
 
     """
+
     def __init__(
         self,
         quantizer: Quantizer,
@@ -286,7 +295,7 @@ class QuantizerState:
         self,
         start: int = 0,
         end: Optional[int] = None,
-):
+    ):
         """
         Restores content of `quantizer` from the buffers here. If `start, `end`
         are given, only this slice is restored.
@@ -295,10 +304,14 @@ class QuantizerState:
         raise NotImplementedError
 
     def _check_range(
-        self, start: int = 0, end: Optional[int] = None,
+        self,
+        start: int = 0,
+        end: Optional[int] = None,
     ) -> Tuple[int, int]:
         if end is None:
             end = self.cache_length
         if not (0 <= start < end <= self.cache_length):
-            raise ValueError(f"start = {start}, end = {end}, must have 0 <= start < end <= {self.cache_length}")
+            raise ValueError(
+                f"start = {start}, end = {end}, must have 0 <= start < end <= {self.cache_length}"
+            )
         return start, end

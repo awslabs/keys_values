@@ -18,9 +18,14 @@ import torch
 from litgpt.config import Config
 
 from keys_values.kvcache.attn_weights import (
-    AttnWeightsKVCache, AttnWeightsReplayLog,
+    AttnWeightsKVCache,
+    AttnWeightsReplayLog,
 )
-from keys_values.kvcache.base import DefaultKVCacheReplayLog, KVCacheReplayLog, DefaultKVCache
+from keys_values.kvcache.base import (
+    DefaultKVCacheReplayLog,
+    KVCacheReplayLog,
+    DefaultKVCache,
+)
 from keys_values.kvcache.basics import (
     DenseKVCache,
     LastRecentlyInsertedKVCache,
@@ -48,6 +53,7 @@ class InferenceReplayCacheMixin:
     done in training mode.
 
     """
+
     def __init__(self):
         self.replay_log = None
         self.token_chunk_pos = 0
@@ -80,11 +86,15 @@ class InferenceReplayCacheMixin:
         kwargs = {"dtype": torch.int64, "device": self.device}
         if self.current_length < self.cache_length:
             assert num <= self.cache_length - self.current_length
-            return torch.arange(
-                self.current_length,
-                min(self.cache_length, self.current_length + num),
-                **kwargs,
-            ).view(1, 1, -1).expand(self.batch_size, self.n_query_groups, -1)
+            return (
+                torch.arange(
+                    self.current_length,
+                    min(self.cache_length, self.current_length + num),
+                    **kwargs,
+                )
+                .view(1, 1, -1)
+                .expand(self.batch_size, self.n_query_groups, -1)
+            )
         else:
             return self.replay_log.extract_index(self.input_pos, num, **kwargs)
 
@@ -95,7 +105,9 @@ class InferenceReplayCacheMixin:
             device=self.device,
         )
         if not token_idx.equal(other):
-            raise ValueError(f"token_idx:\n{token_idx} -- {token_idx.shape}\nreplay_log.token_chunks[{self.token_chunk_pos}]:\n{other} -- {other.shape}\nShould be the same!")
+            raise ValueError(
+                f"token_idx:\n{token_idx} -- {token_idx.shape}\nreplay_log.token_chunks[{self.token_chunk_pos}]:\n{other} -- {other.shape}\nShould be the same!"
+            )
         self.token_chunk_pos += 1
 
 
@@ -117,9 +129,7 @@ def check_replay_log(
             pass
 
 
-class InferenceAttnWeightsReplayCache(
-    AttnWeightsKVCache, InferenceReplayCacheMixin
-):
+class InferenceAttnWeightsReplayCache(AttnWeightsKVCache, InferenceReplayCacheMixin):
     def __init__(
         self,
         config: Config,
@@ -137,7 +147,11 @@ class InferenceAttnWeightsReplayCache(
             **base_kwargs,
         )
         InferenceReplayCacheMixin.__init__(self)
-        if replay_log is None or len(replay_log) == 0 or not isinstance(replay_log, AttnWeightsReplayLog):
+        if (
+            replay_log is None
+            or len(replay_log) == 0
+            or not isinstance(replay_log, AttnWeightsReplayLog)
+        ):
             raise ValueError("replay_log is empty or has wrong type")
         check_replay_log(self, replay_log)
         self.replay_log = replay_log
@@ -200,9 +214,7 @@ class InferenceAttnWeightsReplayCache(
         InferenceReplayCacheMixin._validate_token_idx(self, token_idx)
 
 
-class InferenceDenseReplayCache(
-    DenseKVCache, InferenceReplayCacheMixin
-):
+class InferenceDenseReplayCache(DenseKVCache, InferenceReplayCacheMixin):
     def __init__(
         self,
         config: Config,
@@ -219,7 +231,11 @@ class InferenceDenseReplayCache(
             **base_kwargs,
         )
         InferenceReplayCacheMixin.__init__(self)
-        if replay_log is None or len(replay_log) == 0 or not isinstance(replay_log, DefaultKVCacheReplayLog):
+        if (
+            replay_log is None
+            or len(replay_log) == 0
+            or not isinstance(replay_log, DefaultKVCacheReplayLog)
+        ):
             raise ValueError("replay_log is empty or has wrong type")
         check_replay_log(self, replay_log)
         self.replay_log = replay_log
@@ -274,7 +290,11 @@ class InferenceLastRecentlyInsertedReplayCache(
             **base_kwargs,
         )
         InferenceReplayCacheMixin.__init__(self)
-        if replay_log is None or len(replay_log) == 0 or not isinstance(replay_log, LastRecentlyInsertedKVCacheReplayLog):
+        if (
+            replay_log is None
+            or len(replay_log) == 0
+            or not isinstance(replay_log, LastRecentlyInsertedKVCacheReplayLog)
+        ):
             raise ValueError("replay_log is empty or has wrong type")
         check_replay_log(self, replay_log)
         self.replay_log = replay_log
@@ -341,11 +361,12 @@ def inference_replay_cache_factory(
 
 def get_replay_logs(gpt_model: GPT) -> List[KVCacheReplayLog]:
     kv_caches = gpt_model.get_kv_caches()
-    if any(
-        c is None or not isinstance(c, KVCacheWithBuffers)
-        for c in kv_caches
-    ):
-        raise IndexError("All blocks of GPT model must have KV caches of type KVCacheWithBuffers assigned")
+    if any(c is None or not isinstance(c, KVCacheWithBuffers) for c in kv_caches):
+        raise IndexError(
+            "All blocks of GPT model must have KV caches of type KVCacheWithBuffers assigned"
+        )
     if not all(c.do_replay_logging for c in kv_caches):
-        raise IndexError("All KV caches of GPT model must have replay logging activated")
+        raise IndexError(
+            "All KV caches of GPT model must have replay logging activated"
+        )
     return [c.get_replay_log() for c in kv_caches]

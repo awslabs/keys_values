@@ -45,7 +45,9 @@ class ParameterStructure:
     def __post_init__(self):
         sum_sizes = sum(x.size for x in self.entries)
         if sum_sizes != self.size:
-            raise ValueError(f"size = {self.size}, sum_sizes = {sum_sizes}. Must be the same")
+            raise ValueError(
+                f"size = {self.size}, sum_sizes = {sum_sizes}. Must be the same"
+            )
 
     def append(self, name: str, shape: Tuple[int, ...], requires_grad: bool):
         size = math.prod(shape)
@@ -75,6 +77,7 @@ class AccessWeightsGradients:
     device as model parameters.
 
     """
+
     def __init__(self, module: torch.nn.Module):
         """
         Args:
@@ -98,22 +101,30 @@ class AccessWeightsGradients:
             dtype = str(param.dtype)
             shape = tuple(param.shape)
             if math.prod(shape) != param.numel():
-                raise ValueError(f"name={name}, shape={shape}, numel={param.numel()}: Parameter is not flat")
+                raise ValueError(
+                    f"name={name}, shape={shape}, numel={param.numel()}: Parameter is not flat"
+                )
             requires_grad = param.requires_grad
             if dtype not in self._param_structure:
                 self._param_structure[dtype] = ParameterStructure(
-                    entries=[], dtype=param.dtype, size=0,
+                    entries=[],
+                    dtype=param.dtype,
+                    size=0,
                 )
             if device is None:
                 device = param.device
                 name_device = name
             elif device != param.device:
-                raise ValueError(f"All parameters must be on the same device (but {name_device} on {device}; {name} on {param.device})")
+                raise ValueError(
+                    f"All parameters must be on the same device (but {name_device} on {device}; {name} on {param.device})"
+                )
             self._param_structure[dtype].append(name, shape, requires_grad)
             if requires_grad:
                 if dtype not in self._grad_structure:
                     self._grad_structure[dtype] = ParameterStructure(
-                        entries=[], dtype=param.dtype, size=0,
+                        entries=[],
+                        dtype=param.dtype,
+                        size=0,
                     )
                 self._grad_structure[dtype].append(name, shape, requires_grad)
         self._device = device
@@ -141,13 +152,19 @@ class AccessWeightsGradients:
     ):
         for dtype, vec in vecs.items():
             if dtype not in structures:
-                raise ValueError(f"{vname}[{dtype}] exists, but {dtype} not a key in structures")
+                raise ValueError(
+                    f"{vname}[{dtype}] exists, but {dtype} not a key in structures"
+                )
             structure = structures[dtype]
             vsize = vec.numel()
             if vsize != structure.size:
-                raise ValueError(f"{vname}[{dtype}] has size {vsize}, must be {structure.size}")
+                raise ValueError(
+                    f"{vname}[{dtype}] has size {vsize}, must be {structure.size}"
+                )
             if vec.shape != (vsize,):
-                raise ValueError(f"{vname}[{dtype}] has shape {vec.shape}, numel()={vsize}. Must be flat")
+                raise ValueError(
+                    f"{vname}[{dtype}] has shape {vec.shape}, numel()={vsize}. Must be flat"
+                )
 
     def _get_internal(
         self,
@@ -163,7 +180,9 @@ class AccessWeightsGradients:
         if out is None:
             out = {
                 dtype: torch.empty(
-                    (structure.size,), dtype=structure.dtype, device=device,
+                    (structure.size,),
+                    dtype=structure.dtype,
+                    device=device,
                 )
                 for dtype, structure in structures.items()
             }
@@ -188,7 +207,9 @@ class AccessWeightsGradients:
         device: Optional[torch.device] = None,
     ) -> FlatVectors:
         return self._get_internal(
-            do_gradients=False, out=out, device=device,
+            do_gradients=False,
+            out=out,
+            device=device,
         )
 
     def get_gradients(
@@ -197,7 +218,9 @@ class AccessWeightsGradients:
         device: Optional[torch.device] = None,
     ) -> FlatVectors:
         return self._get_internal(
-            do_gradients=True, out=out, device=device,
+            do_gradients=True,
+            out=out,
+            device=device,
         )
 
     def _set_internal(

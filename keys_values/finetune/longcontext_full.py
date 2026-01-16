@@ -246,7 +246,9 @@ def setup(
             printed, then the program stops.
 
     """
-    checkpoint_dir = auto_download_checkpoint(model_name=checkpoint_dir, access_token=access_token)
+    checkpoint_dir = auto_download_checkpoint(
+        model_name=checkpoint_dir, access_token=access_token
+    )
     pprint(locals())
     data = LongBenchV2() if data is None else data
     if isinstance(data, LongBenchV2) and data.metadata_dir is None:
@@ -263,7 +265,9 @@ def setup(
         eval.initial_validation = devices > 1
     if optimizer is None:
         optimizer = OptimizerArgs(name="AdamW")
-        print("Choosing optimizer AdamW with default learning rate. We recommend to at least tune optimizer.learning_rate")
+        print(
+            "Choosing optimizer AdamW with default learning rate. We recommend to at least tune optimizer.learning_rate"
+        )
     else:
         print(str(optimizer))
     if profile_parts is not None and profile_parts not in ("forward", "backward"):
@@ -305,13 +309,13 @@ def setup(
 
     if devices * num_nodes > 1:
         # FSDP without cpu off load
-        #strategy = FSDPStrategy(
+        # strategy = FSDPStrategy(
         #    auto_wrap_policy={Block},
         #    activation_checkpointing_policy={Block},
         #    state_dict_type="full",
         #    limit_all_gathers=True,
         #    cpu_offload=False,
-        #)
+        # )
         # Baseline DDP strategy (just data parallelism)
         # - static_graph=True: Optimizes communication by assuming the
         #   computation graph is the same every iteration (no dynamic control
@@ -418,8 +422,12 @@ def main(
         eos_id=tokenizer.eos_id,
         ignore_index=ignore_index,
     )
-    steps_per_epoch = len(train_dataloader) // train.gradient_accumulation_iters(devices, num_nodes)
-    lr_max_steps = min(train.epochs * steps_per_epoch, (train.max_steps or float("inf")))
+    steps_per_epoch = len(train_dataloader) // train.gradient_accumulation_iters(
+        devices, num_nodes
+    )
+    lr_max_steps = min(
+        train.epochs * steps_per_epoch, (train.max_steps or float("inf"))
+    )
     print(f"Number of optimizer steps per epoch: {lr_max_steps}")
     fabric.seed_everything(seed)  # same seed for every process to init model (FSDP)
 
@@ -488,7 +496,9 @@ def main(
     model = fabric.setup(model)
 
     optimizer = instantiate_torch_optimizer(
-        optimizer.name, model.parameters(), **optimizer.optimizer_kwargs(),
+        optimizer.name,
+        model.parameters(),
+        **optimizer.optimizer_kwargs(),
     )
     optimizer = fabric.setup_optimizers(optimizer)
     scheduler = get_lr_scheduler(optimizer, train_args=train, max_steps=lr_max_steps)
@@ -547,12 +557,16 @@ def main(
         profile_grad_params=profile_grad_params,
     )
     training_time = time.perf_counter() - train_time
-    output = create_finetuning_performance_report(training_time, token_counts, fabric.device.type)
+    output = create_finetuning_performance_report(
+        training_time, token_counts, fabric.device.type
+    )
     print_message(output, fabric)
 
     # Final evaluation
     if eval.final_validation:
-        print_with_rank_and_timestamp("Starting validation evaluations.", fabric.global_rank)
+        print_with_rank_and_timestamp(
+            "Starting validation evaluations.", fabric.global_rank
+        )
         print_message("\nFinal validation evaluation ...", fabric)
         if generate_with_eval:
             generate_example_kwargs = dict(
@@ -613,10 +627,12 @@ def wrap_gpt_model(
     gpt_model.clear_kv_caches()
     cache_kwargs = dict() if kv_cache.cache_kwargs is None else kv_cache.cache_kwargs
     cache_kwargs = dict(
-        cache_kwargs, max_chunk_size=kv_cache.maximum_chunk_size(),
+        cache_kwargs,
+        max_chunk_size=kv_cache.maximum_chunk_size(),
     )
     cache_kwargs = cleanup_cache_kwargs(
-        split_name(kv_cache.name)[0], cache_kwargs,
+        split_name(kv_cache.name)[0],
+        cache_kwargs,
     )
     tmp_array_limit_gb = cache_kwargs.get("tmp_array_limit_gb")
     if tmp_array_limit_gb is not None:
@@ -675,7 +691,8 @@ def wrap_gpt_model(
             add_msg = ""
         if kv_cache.qname != "default":
             print_message(
-                f"Using layer_checkpoint_chunk_size = {layer_checkpoint_chunk_size}" + add_msg,
+                f"Using layer_checkpoint_chunk_size = {layer_checkpoint_chunk_size}"
+                + add_msg,
                 fabric,
             )
         model = LongContextGradientModel(
@@ -745,12 +762,18 @@ def fit(
     # Initial evaluation
     token_counts = {
         "raw_tokens": torch.tensor(0, device=fabric.device, dtype=torch.long),
-        "raw_tokens_plus_prompt_template": torch.tensor(0, device=fabric.device, dtype=torch.long),
-        "raw_tokens_plus_prompt_template_and_padding": torch.tensor(0, device=fabric.device, dtype=torch.long),
+        "raw_tokens_plus_prompt_template": torch.tensor(
+            0, device=fabric.device, dtype=torch.long
+        ),
+        "raw_tokens_plus_prompt_template_and_padding": torch.tensor(
+            0, device=fabric.device, dtype=torch.long
+        ),
     }
     val_loss = "n/a"
     if eval.initial_validation:
-        print_with_rank_and_timestamp("Starting validation evaluations.", fabric.global_rank)
+        print_with_rank_and_timestamp(
+            "Starting validation evaluations.", fabric.global_rank
+        )
         print_message("\nInitial validation evaluation ...", fabric)
         if generate_with_eval:
             generate_example_kwargs = dict(
@@ -804,9 +827,10 @@ def fit(
             fabric,
         )
 
-    running_loss = RunningMean(window=train.gradient_accumulation_iters(devices, num_nodes), sync_on_compute=False).to(
-        fabric.device
-    )
+    running_loss = RunningMean(
+        window=train.gradient_accumulation_iters(devices, num_nodes),
+        sync_on_compute=False,
+    ).to(fabric.device)
     fabric.barrier()
     print_message(
         "\nGPU memory before training starts:\n" + message_memory_all_devices(),
@@ -821,10 +845,14 @@ def fit(
             break
 
         if record_gpu_memory_snapshots is not None:
-            run_no = state['iter_num'] - 1
+            run_no = state["iter_num"] - 1
             if record_gpu_memory_period >= 1:
                 run_no = run_no % record_gpu_memory_period
-            name = "snapshot.pickle" if record_gpu_memory_kind == 0 else "snapshot_initial.pickle"
+            name = (
+                "snapshot.pickle"
+                if record_gpu_memory_kind == 0
+                else "snapshot_initial.pickle"
+            )
             path = out_dir / "gpu_memory_snapshots" / f"iteration{run_no}" / name
             record_gpu_memory_snapshots = RecordGPUMemory(
                 path=str(path),
@@ -832,15 +860,25 @@ def fit(
             )
             record_gpu_memory_snapshots.start_recording()
 
-        is_accumulating = state["iter_num"] % train.gradient_accumulation_iters(devices, num_nodes) != 0
-        print_with_rank_and_timestamp("Starting gradient computation.", fabric.global_rank)
+        is_accumulating = (
+            state["iter_num"] % train.gradient_accumulation_iters(devices, num_nodes)
+            != 0
+        )
+        print_with_rank_and_timestamp(
+            "Starting gradient computation.", fabric.global_rank
+        )
         with fabric.no_backward_sync(model, enabled=is_accumulating):
             loss = model(
                 input_ids=batch[INPUT_IDS_NAME],
                 targets=batch["targets"],
-                scale_factor=1.0 / train.gradient_accumulation_iters(devices, num_nodes),
+                scale_factor=1.0
+                / train.gradient_accumulation_iters(devices, num_nodes),
                 record_gpu_memory_snapshots=record_gpu_memory_snapshots,
-                record_gpu_memory_kind=record_gpu_memory_kind if record_gpu_memory_snapshots is not None else None,
+                record_gpu_memory_kind=(
+                    record_gpu_memory_kind
+                    if record_gpu_memory_snapshots is not None
+                    else None
+                ),
             )
             fabric.backward(loss)
 
@@ -850,9 +888,7 @@ def fit(
             records = model.profile_records()
             skip_names = ("path", "profile_grad_times")
             fixed_col_names = [
-                name
-                for name in profile_grad_params.keys()
-                if name not in skip_names
+                name for name in profile_grad_params.keys() if name not in skip_names
             ]
             prefix = [profile_grad_params[name] for name in fixed_col_names]
             var_col_names = list(records[0].keys())
@@ -874,7 +910,9 @@ def fit(
             record_gpu_memory_snapshots.stop_recording()
 
         if not is_accumulating:
-            print_with_rank_and_timestamp("Waiting for optimizer to update.", fabric.global_rank)
+            print_with_rank_and_timestamp(
+                "Waiting for optimizer to update.", fabric.global_rank
+            )
             optimizer.step()
             print_message("Optimizer update done.", fabric)
             optimizer.zero_grad(set_to_none=True)
@@ -885,7 +923,8 @@ def fit(
         torch.cuda.empty_cache()
         print_message(
             f"\nGPU memory at training step {state['iter_num'] - 1}:\n"
-            + message_memory_all_devices() + "\n",
+            + message_memory_all_devices()
+            + "\n",
             fabric,
         )
 
@@ -897,7 +936,9 @@ def fit(
         token_counts["raw_tokens_plus_prompt_template_and_padding"] += num_tokens
 
         if state["iter_num"] % train.log_interval == 0:
-            loss = running_loss.compute().item()  # expensive device-to-host synchronization
+            loss = (
+                running_loss.compute().item()
+            )  # expensive device-to-host synchronization
             t1 = time.perf_counter()
             metrics = {
                 "loss": loss,
@@ -906,7 +947,8 @@ def fit(
                 "epoch": train_iterator.epoch,
                 "iter_time": t1 - iter_t0,
                 "tokens": token_counts["raw_tokens_plus_prompt_template"],
-                "total_tokens": token_counts["raw_tokens_plus_prompt_template"] * fabric.world_size,
+                "total_tokens": token_counts["raw_tokens_plus_prompt_template"]
+                * fabric.world_size,
                 "learning_rate": scheduler.get_last_lr()[0],
                 **log_memory_all_devices(),
             }
@@ -923,7 +965,9 @@ def fit(
             fabric.log_dict(metrics, step=state["iter_num"])
 
         if not is_accumulating and state["step_count"] % eval.interval == 0:
-            print_with_rank_and_timestamp("Starting validation evaluations.", fabric.global_rank)
+            print_with_rank_and_timestamp(
+                "Starting validation evaluations.", fabric.global_rank
+            )
             print_message("\nPeriodic validation evaluation ...", fabric)
             if generate_with_eval:
                 generate_example_kwargs = dict(
@@ -942,7 +986,9 @@ def fit(
                 fabric=fabric,
             )
             fabric.log_dict(metrics, step=state["iter_num"])
-            print_with_rank_and_timestamp("Finished validation evaluations.", fabric.global_rank)
+            print_with_rank_and_timestamp(
+                "Finished validation evaluations.", fabric.global_rank
+            )
             val_loss = f"{metrics['val_loss']:.3f}"
             print_message(
                 f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}",
@@ -951,8 +997,14 @@ def fit(
             flush_io_streams()
             fabric.barrier()
 
-        if train.save_interval is not None and not is_accumulating and state["step_count"] % train.save_interval == 0:
-            checkpoint_file = out_dir / f"step-{state['step_count']:06d}" / LIT_MODEL_FNAME
+        if (
+            train.save_interval is not None
+            and not is_accumulating
+            and state["step_count"] % train.save_interval == 0
+        ):
+            checkpoint_file = (
+                out_dir / f"step-{state['step_count']:06d}" / LIT_MODEL_FNAME
+            )
             checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
             print_message(
                 f"Saving checkpoint to {str(checkpoint_file.parent)!r}",
@@ -999,7 +1051,9 @@ def validate_and_all_reduce(
     if fabric is not None:
         val_loss_tensor = val_loss.clone().to(fabric.device)
         val_time_tensor = torch.tensor(
-            val_time, device=fabric.device, dtype=torch.float32,
+            val_time,
+            device=fabric.device,
+            dtype=torch.float32,
         )
         fabric.all_reduce(val_loss_tensor, reduce_op="mean")
         fabric.all_reduce(val_time_tensor, reduce_op="mean")

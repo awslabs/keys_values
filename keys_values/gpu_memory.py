@@ -51,7 +51,9 @@ class RecordGPUMemory:
         self._path = path
 
     def _print_message(self) -> bool:
-        return self.verbose is VerbosityLevels.MORE or self.verbose is VerbosityLevels.ALL
+        return (
+            self.verbose is VerbosityLevels.MORE or self.verbose is VerbosityLevels.ALL
+        )
 
     def start_recording(self):
         if self._path is not None and self._print_message():

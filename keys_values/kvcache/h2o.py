@@ -50,6 +50,7 @@ class H2OKVCache(AttnWeightsKVCache):
     :class:`H2OOriginalKVCache` (for comparison only; not recommended).
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -164,24 +165,26 @@ class H2OKVCache(AttnWeightsKVCache):
 
         """
         if attn_weights.dtype != torch.float32:
-            raise ValueError(f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}")
+            raise ValueError(
+                f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}"
+            )
         self.scores[
-            :self.batch_size, :, :self.current_length
+            : self.batch_size, :, : self.current_length
         ] += self._instantaneous_score(attn_weights, query_length)
         scores = None
         if self.current_length == self.cache_length:
             # Exclude the grace region, so that these tokens are not evicted
             limit = self.cache_length - self.grace_period
-            scores = self.scores[:self.batch_size, :, :limit]
+            scores = self.scores[: self.batch_size, :, :limit]
             if self.normalize_scores:
                 # Normalize cumulative scores
-                token_pos = self.token_pos[:self.batch_size, :, :limit]
+                token_pos = self.token_pos[: self.batch_size, :, :limit]
                 assert token_pos.shape == scores.shape  # Sanity check
                 other = torch.full(
                     (1, 1, 1),
                     self.prefill_length - 1,
                     dtype=self.token_pos.dtype,
-                    device=self.device
+                    device=self.device,
                 ).expand(*token_pos.shape)
                 token_pos = token_pos.maximum(other)
                 # Note: `input_pos` has been increased already
@@ -235,7 +238,9 @@ class H2OKVCache(AttnWeightsKVCache):
         return sz_total + sz_sc, dict(dct_sz, scores=sz_sc)
 
     @classmethod
-    def size_estimate_apriori(cls, params: KVCacheParams, **kwargs) -> Tuple[int, Dict[str, int]]:
+    def size_estimate_apriori(
+        cls, params: KVCacheParams, **kwargs
+    ) -> Tuple[int, Dict[str, int]]:
         sz_total, dct_sz = super().size_estimate_apriori(params, **kwargs)
         numel = params.max_batch_size * params.n_query_groups * params.cache_length
         sz = int(numel * bits_for_torch_dtype(torch.float32))
@@ -260,6 +265,7 @@ class VLengthInstantScoreMixin:
     modified to take the length of V vectors into account.
 
     """
+
     def get_v_norm(self) -> torch.Tensor:
         """
         Returns:
@@ -311,7 +317,7 @@ class VLengthInstantScoreMixin:
     ) -> Dict[str, torch.Tensor]:
         return {
             self.get_name_v_norm(): vector_norm(
-                value[:self.batch_size],
+                value[: self.batch_size],
                 dim=-1,
                 dtype=torch.float32,
             )
@@ -324,7 +330,7 @@ class VLengthInstantScoreMixin:
     ):
         v_norm_buffer = self.get_v_norm()
         vector_norm(
-            value[:self.batch_size],
+            value[: self.batch_size],
             dim=-1,
             dtype=torch.float32,
             out=v_norm_buffer,
@@ -350,6 +356,7 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
     attention weights.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -442,7 +449,9 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         query_length: int,
     ) -> torch.Tensor:
         return VLengthInstantScoreMixin._instantaneous_score(
-            self, attn_weights, query_length,
+            self,
+            attn_weights,
+            query_length,
         )
 
     def _initial_scores_in_forward(
@@ -461,7 +470,7 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         VLengthInstantScoreMixin._initial_scores_in_prefill(self, key, value)
 
     def get_v_norm(self) -> torch.Tensor:
-        return self.v_norm[:self.batch_size, :, :self.current_length]
+        return self.v_norm[: self.batch_size, :, : self.current_length]
 
     def get_kv_buffers(self) -> KVCacheBuffers:
         return self.kv_buffers
@@ -499,6 +508,7 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
     the score buffer `scores` has a batch dimension, even if it is not used.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -508,7 +518,9 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
     ):
         for name in REMOVE_ARG_NAMES:
             if name in base_kwargs:
-                raise ValueError(f"Parameter {name} not supported for this class. Use 'H2OKVCache' instead.")
+                raise ValueError(
+                    f"Parameter {name} not supported for this class. Use 'H2OKVCache' instead."
+                )
         super().__init__(config, buffers, block_idx, **base_kwargs)
         # Note: `scores` has a batch dimension, even though it is not used.
         # This is because all score buffers in :class:`AttnWeightsKVCache` have
@@ -559,12 +571,14 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
         query_length: int,
     ) -> Optional[torch.Tensor]:
         if attn_weights.dtype != torch.float32:
-            raise ValueError(f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}")
+            raise ValueError(
+                f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}"
+            )
         # Sum over the batch dimension
         aggregated_weights = attn_weights.sum(0, keepdim=True)
-        self.scores[:self.batch_size, :, :self.current_length] += aggregated_weights
+        self.scores[: self.batch_size, :, : self.current_length] += aggregated_weights
         if self.current_length == self.cache_length:
-            return self.scores[:self.batch_size]
+            return self.scores[: self.batch_size]
         else:
             return None
 
@@ -574,7 +588,9 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
         return sz_total + sz_sc, dict(dct_sz, scores=sz_sc)
 
     @classmethod
-    def size_estimate_apriori(cls, params: KVCacheParams, **kwargs) -> Tuple[int, Dict[str, int]]:
+    def size_estimate_apriori(
+        cls, params: KVCacheParams, **kwargs
+    ) -> Tuple[int, Dict[str, int]]:
         numel = params.n_query_groups * params.cache_length
         sz_sc = numel * bits_for_torch_dtype(torch.float32)
         sz_total, dct_sz = super().size_estimate_apriori(params, **kwargs)

@@ -84,7 +84,9 @@ def test_generate():
 
     assert out.size(0) == T + max_new_tokens, (out.size(0), T + max_new_tokens)
     multinomial_results = torch.hstack(multinomial_results)
-    print(f"input_idx {input_idx.shape}, multinomial_results: {multinomial_results.shape}")
+    print(
+        f"input_idx {input_idx.shape}, multinomial_results: {multinomial_results.shape}"
+    )
     expected = torch.cat((input_idx, multinomial_results.squeeze(0)))
     assert out.shape == expected.shape, (out.shape, expected.shape)
     torch.testing.assert_close(out, expected)
@@ -138,7 +140,8 @@ def test_main(fake_checkpoint_dir, monkeypatch, tensor_like):
 
     assert len(tokenizer_mock.return_value.decode.mock_calls) == num_samples
     assert torch.allclose(
-        tokenizer_mock.return_value.decode.call_args[0][0].to(torch.device("cpu")), generate_mock.return_value
+        tokenizer_mock.return_value.decode.call_args[0][0].to(torch.device("cpu")),
+        generate_mock.return_value,
     )
     expected_call = call(
         model=ANY,

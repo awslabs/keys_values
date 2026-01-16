@@ -89,7 +89,7 @@ def random_keys_values(
     device: Optional[torch.device] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     keys = random_tensor(params, num, device=device)
-    values= random_tensor(params, num, device=device)
+    values = random_tensor(params, num, device=device)
     return keys, values
 
 
@@ -110,13 +110,12 @@ def random_index(
         raise ValueError(f"end - start = {diff}, must be >= num = {num}")
     index_kwargs = dict(dtype=torch.int64, device=device)
     result = torch.empty(
-        (batch_size, params.n_query_groups, num), **index_kwargs,
+        (batch_size, params.n_query_groups, num),
+        **index_kwargs,
     )
     for b in range(batch_size):
         for h in range(params.n_query_groups):
-            result[b, h, :] = (
-                torch.randperm(diff, **index_kwargs) + start
-            )[:num]
+            result[b, h, :] = (torch.randperm(diff, **index_kwargs) + start)[:num]
     return result
 
 
@@ -165,7 +164,7 @@ def attention_mask_forward(
     if device is None:
         device = torch.device("cpu")
     mask = torch.cat(
-(
+        (
             torch.zeros(q_len, k_len - q_len, dtype=dtype, device=device),
             torch.ones(q_len, q_len, dtype=dtype, device=device).triu(diagonal=1),
         ),
@@ -189,15 +188,16 @@ class KVCacheBufferTestingCheckpoints(KVCacheBufferCheckpoints):
     memory for checkpoints up front, but copy them as they come in.
 
     """
+
     def __init__(
         self,
         chunk_numbers: List[int],
         device: Optional[torch.device] = None,
     ):
         super().__init__(chunk_numbers)
-        self._checkpoints: List[
-            Optional[DefaultKeysAndValues]
-        ] = [None] * len(chunk_numbers)
+        self._checkpoints: List[Optional[DefaultKeysAndValues]] = [None] * len(
+            chunk_numbers
+        )
         if device is None:
             device = torch.get_default_device()
         self.device = device
@@ -221,12 +221,15 @@ class KVCacheBufferTestingCheckpoints(KVCacheBufferCheckpoints):
     ):
         checkpoint = self._checkpoints[pos]
         if checkpoint is None:
-            raise ValueError(f"checkpoint at pos={pos} is still empty. Use 'set_checkpoint'")
+            raise ValueError(
+                f"checkpoint at pos={pos} is still empty. Use 'set_checkpoint'"
+            )
         out.prefill_from_keys_values(checkpoint)
 
 
 def copy_gradients(
-    model: torch.nn.Module, device: Optional[torch.device] = None,
+    model: torch.nn.Module,
+    device: Optional[torch.device] = None,
 ) -> Dict[str, torch.Tensor]:
     return {
         name: param.grad.data.to(device=device, copy=True)
@@ -245,15 +248,18 @@ def exchange_kv_cache_checkpoints(
     which simplifies gradient testing a lot.
 
     """
+
     def wrapped_create_checkpoints_and_buffers(
-        orig_func, model_part,
+        orig_func,
+        model_part,
     ):
         cache_buffers, checkpoints = orig_func(model_part)
         # Need to replace checkpoints
         chunk_numbers = checkpoints[0].chunk_numbers
         checkpoints = [
             KVCacheBufferTestingCheckpoints(
-                chunk_numbers=chunk_numbers, device=device,
+                chunk_numbers=chunk_numbers,
+                device=device,
             )
             for _ in range(len(checkpoints))
         ]
@@ -261,7 +267,7 @@ def exchange_kv_cache_checkpoints(
 
     accumulator._create_checkpoints_and_buffers = partial(
         wrapped_create_checkpoints_and_buffers,
-        accumulator._create_checkpoints_and_buffers
+        accumulator._create_checkpoints_and_buffers,
     )
 
 
@@ -298,9 +304,7 @@ def filter_cache_names(names: List[str]) -> List[str]:
     if torch.cuda.is_available():
         return names
     else:
-        return [
-            name for name in names if not cache_name_gpu_only(name)
-        ]
+        return [name for name in names if not cache_name_gpu_only(name)]
 
 
 def cache_names_and_devices(
@@ -311,11 +315,14 @@ def cache_names_and_devices(
         filter_name = lambda name: True
     result = []
     for name, device in product(
-        KVCacheFactory.supported_names(), available_backends(),
+        KVCacheFactory.supported_names(),
+        available_backends(),
     ):
         if filter_name(name):
             is_cpu = device.type != "cuda"
-            if (is_cpu and not cache_name_gpu_only(name)) or (not is_cpu and not only_cpu):
+            if (is_cpu and not cache_name_gpu_only(name)) or (
+                not is_cpu and not only_cpu
+            ):
                 result.append((name, device))
     return result
 
@@ -325,7 +332,8 @@ def product_with_devices(
     arg_names: str,
 ) -> Tuple[str, List[tuple]]:
     return "device, " + arg_names, [
-        (a,) + b for a, b in product(
+        (a,) + b
+        for a, b in product(
             available_backends(),
             list_tuples,
         )
@@ -355,7 +363,9 @@ def random_args_cache_forward(
 
 
 def range_from_args(
-    data: Dict[str, torch.Tensor], start: int, end: int,
+    data: Dict[str, torch.Tensor],
+    start: int,
+    end: int,
 ) -> Dict[str, torch.Tensor]:
     return {
         "query": data["query"][:, :, start:end, :],

@@ -107,6 +107,7 @@ class GradientAccumulator:
     plays two different toles (see above).
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -120,12 +121,16 @@ class GradientAccumulator:
         if qname is None:
             qname = "torch-quantized8"
         elif qname not in SUPPORTED_QUANTIZERS:
-            raise ValueError(f"qname = {qname} is not supported, must be in {SUPPORTED_QUANTIZERS}")
+            raise ValueError(
+                f"qname = {qname} is not supported, must be in {SUPPORTED_QUANTIZERS}"
+            )
 
         self.config = config
         self.autograd_hooks = autograd_hooks
         self.verbose = verbose
-        self._verbose_more = verbose is VerbosityLevels.MORE or verbose is VerbosityLevels.ALL
+        self._verbose_more = (
+            verbose is VerbosityLevels.MORE or verbose is VerbosityLevels.ALL
+        )
         self.qname = qname
         if cache_kwargs is None:
             cache_kwargs = dict()
@@ -174,14 +179,20 @@ class GradientAccumulator:
             self._batch_size,
         )
         if len(replay_logs) != self.config.n_layer:
-            raise ValueError(f"len(replay_logs) = {len(replay_logs)} != {self.config.n_layer} = config.n_layer")
+            raise ValueError(
+                f"len(replay_logs) = {len(replay_logs)} != {self.config.n_layer} = config.n_layer"
+            )
         if len(chunks_per_cell) == 0:
             raise ValueError(f"chunks_per_cell must not be empty")
         if any(x <= 0 for x in chunks_per_cell):
-            raise ValueError(f"chunks_per_cell = {chunks_per_cell}: All entries must be positive")
+            raise ValueError(
+                f"chunks_per_cell = {chunks_per_cell}: All entries must be positive"
+            )
         num_chunks = len(replay_logs[0].token_chunks)
         if sum(chunks_per_cell) != num_chunks:
-            raise ValueError(f"chunks_per_cell = {chunks_per_cell}: Entries must sum to {num_chunks}")
+            raise ValueError(
+                f"chunks_per_cell = {chunks_per_cell}: Entries must sum to {num_chunks}"
+            )
         self.replay_logs = replay_logs.copy()
         self.chunks_per_cell = chunks_per_cell.copy()
         self.seq_length = len(self.replay_logs[0])
@@ -201,7 +212,8 @@ class GradientAccumulator:
         self._annotation_usage_logs: Dict[int, AnnotationUsageLog] = dict()
 
     def _initialize_top_bottom_ranges(
-        self, head_model_needs_logits: bool,
+        self,
+        head_model_needs_logits: bool,
     ):
         """
         These ranges are used for chunking in :meth:`run_head_model` and
@@ -215,7 +227,11 @@ class GradientAccumulator:
 
         """
         bytes_per_weight = 2  # Works for 16-bit weights
-        dim = self.config.padded_vocab_size if head_model_needs_logits else self.config.n_embd
+        dim = (
+            self.config.padded_vocab_size
+            if head_model_needs_logits
+            else self.config.n_embd
+        )
         bytes_per_token = self._batch_size * dim * bytes_per_weight
         chunk_size = min(
             max(HEAD_OR_INITIAL_TENSORS_MAX_BYTES // bytes_per_token, 1),
@@ -225,7 +241,8 @@ class GradientAccumulator:
         self.top_bottom_ranges = list(zip(points[:-1], points[1:]))
 
     def _create_checkpoints_and_buffers(
-        self, model_part: CellBlocks,
+        self,
+        model_part: CellBlocks,
     ) -> Tuple[List[DefaultKVCacheBuffers], List[Optional[KVCacheBufferCheckpoints]]]:
         """
         Creates buffers for inference replay caches and checkpointing objects, the
@@ -295,7 +312,8 @@ class GradientAccumulator:
         return cache_buffers, checkpoints
 
     def _create_inference_replay_caches(
-        self, model_part: CellBlocks,
+        self,
+        model_part: CellBlocks,
     ) -> List[KVCacheWithBuffers]:
         assert self.do_checkpointing
         cache_buffers, checkpoints = self._create_checkpoints_and_buffers(model_part)
@@ -303,7 +321,9 @@ class GradientAccumulator:
         self._kv_cache_checkpoints = checkpoints
         infer_replay_caches = []
         for (block_idx, kv_cache), buffers, checkpoint in zip(
-            model_part.get_kv_caches(), cache_buffers, checkpoints,
+            model_part.get_kv_caches(),
+            cache_buffers,
+            checkpoints,
         ):
             # Use the same MHA object. Ensures that properties like position
             # encoding are transferred
@@ -339,7 +359,9 @@ class GradientAccumulator:
                 cache.set_checkpoint_hook(None)
 
     def _hooks_for_cell_computation(self) -> Optional[CellComputationAutogradHooks]:
-        if self.autograd_hooks is not None and isinstance(self.autograd_hooks, CellComputationAutogradHooks):
+        if self.autograd_hooks is not None and isinstance(
+            self.autograd_hooks, CellComputationAutogradHooks
+        ):
             return self.autograd_hooks
         else:
             return None
@@ -386,7 +408,9 @@ class GradientAccumulator:
             self._annotation_usage_logs = dict()  # Reset
         if self._verbose_more:
             if num_layers > 1:
-                print(f"\nProcessing row of cells: Layers {first_layer_idx} ... {first_layer_idx + num_layers - 1}")
+                print(
+                    f"\nProcessing row of cells: Layers {first_layer_idx} ... {first_layer_idx + num_layers - 1}"
+                )
             else:
                 print(f"\nProcessing row of cells: Layer {first_layer_idx}")
         if record_gpu_memory_snapshots is not None:
@@ -414,14 +438,16 @@ class GradientAccumulator:
             if self._debug_intermediates is not None:
                 debug_intermediates = (
                     self._debug_intermediates,
-                    f"backward_blocks{first_layer_idx}:{first_layer_idx + num_layers}"
+                    f"backward_blocks{first_layer_idx}:{first_layer_idx + num_layers}",
                 )
             else:
                 debug_intermediates = None
             cell = CellComputation(
                 model_part=model_part,
                 autograd_hooks=self._hooks_for_cell_computation(),
-                replay_logs=self.replay_logs[first_layer_idx:(first_layer_idx + num_layers)],
+                replay_logs=self.replay_logs[
+                    first_layer_idx : (first_layer_idx + num_layers)
+                ],
                 batch_size=self._batch_size,
                 debug_tensors=self._debug_tensors,
                 **self._train_cache_kwargs,
@@ -437,9 +463,7 @@ class GradientAccumulator:
 
             for col_idx, (first_chunk_idx, num_chunks, (start, end)) in reversed(
                 list(
-                    enumerate(
-                        zip(chunk_idxs, self.chunks_per_cell, self.inputs_ranges)
-                    )
+                    enumerate(zip(chunk_idxs, self.chunks_per_cell, self.inputs_ranges))
                 )
             ):
                 # Gather inputs and head gradients:
@@ -510,15 +534,17 @@ class GradientAccumulator:
                 if self.autograd_hooks is not None:
                     cell_hooks = self._hooks_for_cell_computation()
                     if cell_hooks is not None:
-                        self._annotation_usage_logs[
-                            first_chunk_idx
-                        ] = cell_hooks.annotation_usage_log()
+                        self._annotation_usage_logs[first_chunk_idx] = (
+                            cell_hooks.annotation_usage_log()
+                        )
                     if self._verbose_more:
                         arrays_cleanup = self.autograd_hooks.arrays_cleanup
                         if arrays_cleanup is not None:
                             stats = arrays_cleanup.stats()
                             if stats.num > 0:
-                                print(f"Remaining arrays not cleaned up: {stats.num} ({stats.total_mem} GB) of {stats.max_num}")
+                                print(
+                                    f"Remaining arrays not cleaned up: {stats.num} ({stats.total_mem} GB) of {stats.max_num}"
+                                )
                     if cell_hooks is not None:
                         cell_hooks.clear()  # Clear memory
                         if self.verbose is VerbosityLevels.ALL:
@@ -526,7 +552,9 @@ class GradientAccumulator:
                                 part = f"layers {first_layer_idx} to {first_layer_idx + num_layers - 1}"
                             else:
                                 part = f"layer {first_layer_idx}"
-                            print(f"\nAnnotation usage log [{part}; chunks {first_chunk_idx} to {first_chunk_idx + num_chunks - 1}]")
+                            print(
+                                f"\nAnnotation usage log [{part}; chunks {first_chunk_idx} to {first_chunk_idx + num_chunks - 1}]"
+                            )
                             print(self._annotation_usage_logs[first_chunk_idx].report())
 
         finally:
@@ -557,7 +585,7 @@ class GradientAccumulator:
 
         def get_inputs_slice_local(start, end):
             assert input_pos <= start < end
-            return cell_inputs[:, (start - input_pos):(end - input_pos), :]
+            return cell_inputs[:, (start - input_pos) : (end - input_pos), :]
 
         cell_outputs, output_k_buffers, output_v_buffers = cell(
             get_inputs_slice=get_inputs_slice_local,
@@ -581,8 +609,14 @@ class GradientAccumulator:
         first_layer_idx: int,
         num_layers: int,
     ):
-        if first_layer_idx < 0 or num_layers < 1 or first_layer_idx + num_layers > self.config.n_layer:
-            raise ValueError(f"first_layer_idx = {first_layer_idx}, num_layers = {num_layers}, config.n_layer = {self.config.n_layer}")
+        if (
+            first_layer_idx < 0
+            or num_layers < 1
+            or first_layer_idx + num_layers > self.config.n_layer
+        ):
+            raise ValueError(
+                f"first_layer_idx = {first_layer_idx}, num_layers = {num_layers}, config.n_layer = {self.config.n_layer}"
+            )
 
     def _compute_checkpoints(
         self,
@@ -597,7 +631,10 @@ class GradientAccumulator:
         try:
             if self._debug_tensors is not None:
                 for layer_idx, checkpoints in zip(
-                    range(model_part.first_layer_idx, model_part.first_layer_idx + model_part.num_layers),
+                    range(
+                        model_part.first_layer_idx,
+                        model_part.first_layer_idx + model_part.num_layers,
+                    ),
                     self._kv_cache_checkpoints[:num_layers],
                 ):
                     checkpoints.set_debug_layer_idx(layer_idx)
@@ -653,14 +690,18 @@ class GradientAccumulator:
 
         """
         if input_ids.ndim != 2 or input_ids.shape[1] != self.seq_length:
-            raise ValueError(f"input_ids.shape = {input_ids.shape}, must be 2D with latter size {self.seq_length}")
-        assert self.replay_logs is not None, "Call 'run_head_model' and 'run' for a new batch"
+            raise ValueError(
+                f"input_ids.shape = {input_ids.shape}, must be 2D with latter size {self.seq_length}"
+            )
+        assert (
+            self.replay_logs is not None
+        ), "Call 'run_head_model' and 'run' for a new batch"
         assert self._batch_size is not None
         # We do gradient accumulation in chunks, which saves memory
         wte = gpt_model.transformer.wte
         if wte.weight.requires_grad:
             # Only run this if embedding weights are to be updated
-            alpha = self.config.n_embd ** 0.5
+            alpha = self.config.n_embd**0.5
             if self._verbose_more:
                 print("\nGradient accumulation for input embeddings")
             for start, end in self.top_bottom_ranges:
@@ -716,7 +757,9 @@ class GradientAccumulator:
             Loss function value. We use mean reduction over the sequence.
 
         """
-        assert self.replay_logs is None, "Call 'run_input_embeddings' to end processing a batch"
+        assert (
+            self.replay_logs is None
+        ), "Call 'run_input_embeddings' to end processing a batch"
         assert targets.ndim == 2
         num_output_tokens = targets.shape[1]
         # Initialize members which are needed for processing this batch
@@ -728,9 +771,13 @@ class GradientAccumulator:
         )
         # Ensure that model supports the sequence length
         if not (1 <= num_output_tokens <= self.seq_length):
-            raise ValueError(f"targets.shape[1] = {num_output_tokens} must in [1, seq_length = {self.seq_length}]")
+            raise ValueError(
+                f"targets.shape[1] = {num_output_tokens} must in [1, seq_length = {self.seq_length}]"
+            )
         if head_model.needs_logits():
-            clamp_head = partial(do_softcapping, thresh=self.config.final_logit_softcapping)
+            clamp_head = partial(
+                do_softcapping, thresh=self.config.final_logit_softcapping
+            )
         else:
             clamp_head = None
         # Head model must be on the same device as the final outputs

@@ -54,6 +54,7 @@ class ForTestInferenceAttnWeightsReplayCache(InferenceAttnWeightsReplayCache):
     the attention weights are not needed.
 
     """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -70,7 +71,9 @@ def _cache_kwargs(name: str) -> Dict[str, Any]:
 
 def args_inference_replay():
     names_devices = cache_names_and_devices(
-        filter_name=lambda name: not (name.startswith("dense") or name.startswith("h2o-orig"))
+        filter_name=lambda name: not (
+            name.startswith("dense") or name.startswith("h2o-orig")
+        )
     )
     result = [(name, device, _cache_kwargs(name)) for name, device in names_devices]
     result += [
@@ -82,7 +85,8 @@ def args_inference_replay():
 
 
 @pytest.mark.parametrize(
-    "cache_name, device, cache_kwargs", args_inference_replay(),
+    "cache_name, device, cache_kwargs",
+    args_inference_replay(),
 )
 def test_inference_replay(cache_name, device, cache_kwargs):
     seed = 31415927
@@ -165,7 +169,8 @@ def test_inference_replay(cache_name, device, cache_kwargs):
                 ir_cache = ForTestInferenceAttnWeightsReplayCache(**kwargs)
             else:
                 ir_cache = inference_replay_cache_factory(
-                    kv_cache=kv_cache, **kwargs,
+                    kv_cache=kv_cache,
+                    **kwargs,
                 )
             model.transformer.h[0].attn.kv_cache = ir_cache
             print("* Replay inference pass")
@@ -174,9 +179,7 @@ def test_inference_replay(cache_name, device, cache_kwargs):
             input_pos = 0
             y_parts = []
             for num in tokens_per_chunk:
-                y_parts.append(
-                    model(token_idxs[:, input_pos:(input_pos + num)])
-                )
+                y_parts.append(model(token_idxs[:, input_pos : (input_pos + num)]))
                 input_pos += num
             y = torch.cat(y_parts, dim=1)
 
@@ -201,8 +204,8 @@ def args_training_replay():
     tol_kwargs = dict(atol=0.004, rtol=0.1)
     names_devices = cache_names_and_devices(
         filter_name=lambda name: (
-            split_name(name)[1] == "default" and
-            split_name(name)[0] not in ("dense", "h2o-orig")
+            split_name(name)[1] == "default"
+            and split_name(name)[0] not in ("dense", "h2o-orig")
         ),
     )
     result1 = [
@@ -220,7 +223,8 @@ def args_training_replay():
 @pytest.mark.parametrize(
     "cache_name, device, cache_kwargs, tol_kwargs, use_new_cache",
     [
-        a + (b,) for a, b in product(
+        a + (b,)
+        for a, b in product(
             args_training_replay(),
             [False, True],
         )
@@ -321,9 +325,7 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_new_c
             input_pos = 0
             y_parts = []
             for num in tokens_per_chunk:
-                y_parts.append(
-                    model(token_idxs[:, input_pos:(input_pos + num)])
-                )
+                y_parts.append(model(token_idxs[:, input_pos : (input_pos + num)]))
                 input_pos += num
             y = torch.cat(y_parts, dim=1)
 

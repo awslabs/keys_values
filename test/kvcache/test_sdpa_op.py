@@ -75,7 +75,9 @@ from keys_values.utils import repeat_interleave
         "n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size",
     ),
 )
-def test_sdpa_op_gradients(device, n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size):
+def test_sdpa_op_gradients(
+    device, n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size
+):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -85,7 +87,9 @@ def test_sdpa_op_gradients(device, n_head, n_query_groups, q_len, kv_len, dtype,
     input_pos = seq_len - q_len if not is_causal else 0
     enable_gqa = n_query_groups < n_head
 
-    print(f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}, device={device}")
+    print(
+        f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}, device={device}"
+    )
     kwargs = dict(device=device, dtype=dtype)
     for repeat in range(num_repeats):
         head_size = 2 ** random.randint(3, 6)
@@ -177,11 +181,16 @@ def test_sdpa_op_gradients(device, n_head, n_query_groups, q_len, kv_len, dtype,
             gradients[kind] = (query.grad, key.grad, value.grad)
         # Compare
         for name, grad_op, grad_noop in zip(
-            ("query", "key", "value"), gradients["op"], gradients["noop"],
+            ("query", "key", "value"),
+            gradients["op"],
+            gradients["noop"],
         ):
             print(f"Compare gradients for {name}")
             torch.testing.assert_close(
-                grad_op, grad_noop, atol=0.0005, rtol=0.05,
+                grad_op,
+                grad_noop,
+                atol=0.0005,
+                rtol=0.05,
             )
 
 
@@ -203,7 +212,9 @@ def test_sdpa_op_gradients(device, n_head, n_query_groups, q_len, kv_len, dtype,
         "n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size",
     ),
 )
-def test_sdpa_backward(device, n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size):
+def test_sdpa_backward(
+    device, n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size
+):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -212,7 +223,9 @@ def test_sdpa_backward(device, n_head, n_query_groups, q_len, kv_len, dtype, sli
     is_causal = q_len == kv_len
     input_pos = seq_len - q_len if not is_causal else 0
 
-    print(f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}, device={device}")
+    print(
+        f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}, device={device}"
+    )
     kwargs = dict(device=device, dtype=dtype)
     for repeat in range(num_repeats):
         head_size = 2 ** random.randint(3, 6)
@@ -266,7 +279,10 @@ def test_sdpa_backward(device, n_head, n_query_groups, q_len, kv_len, dtype, sli
         for name, grads in gradients.items():
             print(f"Compare gradients for {name}")
             torch.testing.assert_close(
-                grads[0], grads[1], atol=0.0005, rtol=0.05,
+                grads[0],
+                grads[1],
+                atol=0.0005,
+                rtol=0.05,
             )
 
 
@@ -310,7 +326,8 @@ class H2OLogInputsKVCache(H2OKVCache, TestLogInputsKVCacheMixin):
             token_idx=token_idx,
         )
         forward_kwargs = self.call_before_forward(
-            **_kwargs, input_pos=self.input_pos,
+            **_kwargs,
+            input_pos=self.input_pos,
         )
         attn_outputs = super().forward(**forward_kwargs)
         self.call_after_forward(attn_outputs)
@@ -357,7 +374,8 @@ class QuantizedH2OLogInputsKVCache(QuantizedH2OKVCache, TestLogInputsKVCacheMixi
             token_idx=token_idx,
         )
         forward_kwargs = self.call_before_forward(
-            **_kwargs, input_pos=self.input_pos,
+            **_kwargs,
+            input_pos=self.input_pos,
         )
         attn_outputs = super().forward(**forward_kwargs)
         self.call_after_forward(attn_outputs)
@@ -401,7 +419,9 @@ def test_gradient_new_and_old_spda(
     random.seed(seed)
     torch.random.manual_seed(seed)
     print(f"cache_name={cache_name}, cache_kwargs={cache_kwargs}")
-    print(f"cache_length={cache_length}\ntokens_per_chunk={tokens_per_chunk}\nchunks_per_cell={chunks_per_cell}")
+    print(
+        f"cache_length={cache_length}\ntokens_per_chunk={tokens_per_chunk}\nchunks_per_cell={chunks_per_cell}"
+    )
     dtype = torch.float32
     torch.set_default_dtype(dtype)  # Set default dtype
 
@@ -483,9 +503,7 @@ def test_gradient_new_and_old_spda(
         input_pos = 0
         y_parts = []
         for num in tokens_per_chunk:
-            y_parts.append(
-                gpt_model(token_idxs[:, input_pos:(input_pos + num)])
-            )
+            y_parts.append(gpt_model(token_idxs[:, input_pos : (input_pos + num)]))
             input_pos += num
         y = torch.cat(y_parts, dim=1)
 
@@ -510,20 +528,27 @@ def test_gradient_new_and_old_spda(
     for entry in list_inputs:
         other = replay_log.token_chunks[token_chunk_pos]
         if not entry.token_idx.to(device=other.device).equal(other):
-            raise ValueError(f"token_idx:\n{entry.token_idx}\nreplay_log.token_chunks[{token_chunk_pos}]:\n{other}\nShould be the same!")
+            raise ValueError(
+                f"token_idx:\n{entry.token_idx}\nreplay_log.token_chunks[{token_chunk_pos}]:\n{other}\nShould be the same!"
+            )
         num = other.shape[-1]
         is_prefill = entry.input_pos == 0
         is_cat = entry.input_pos < cache_length
-        print(f"input_pos={entry.input_pos}, num={num}, is_prefill={is_prefill}, is_cat={is_cat}")
+        print(
+            f"input_pos={entry.input_pos}, num={num}, is_prefill={is_prefill}, is_cat={is_cat}"
+        )
         # Sampling head gradients at random
         head_attn_outputs = torch.randn(
-            *entry.attn_outputs_shape, **head_kwargs,
+            *entry.attn_outputs_shape,
+            **head_kwargs,
         )
         head_keys_after = torch.randn(
-            *entry.cache_keys_after_shape, **head_kwargs,
+            *entry.cache_keys_after_shape,
+            **head_kwargs,
         )
         head_values_after = torch.randn(
-            *entry.cache_values_after_shape, **head_kwargs,
+            *entry.cache_values_after_shape,
+            **head_kwargs,
         )
         gradients = dict()
         # Way 1: Special SDPA operator
@@ -550,20 +575,20 @@ def test_gradient_new_and_old_spda(
             )
         elif is_cat:
             assert entry.input_pos == key_buffer1.shape[2]
-            attn_outputs1, cache_keys_after1, cache_values_after1 = KVCacheCatUpdateAndSDPAFunction.apply(
-                query1,
-                key1,
-                value1,
-                key_buffer1,
-                value_buffer1,
-                gpt_model.mha,
-                None,
+            attn_outputs1, cache_keys_after1, cache_values_after1 = (
+                KVCacheCatUpdateAndSDPAFunction.apply(
+                    query1,
+                    key1,
+                    value1,
+                    key_buffer1,
+                    value_buffer1,
+                    gpt_model.mha,
+                    None,
+                )
             )
         else:
             # Scatter case
-            index = replay_log.extract_index(
-                next_token_pos, num, **index_kwargs
-            )
+            index = replay_log.extract_index(next_token_pos, num, **index_kwargs)
             token_positions = entry.cache_token_pos.clone()
             # Note: `token_positions` is updated here. This is also used in
             # way 2 below
@@ -580,23 +605,27 @@ def test_gradient_new_and_old_spda(
                 positions = update_result.positions[0, 0, :]
             else:
                 positions = None
-            attn_outputs1, cache_keys_after1, cache_values_after1 = KVCacheScatterUpdateAndSDPAFunction.apply(
-                query1,
-                key1,
-                value1,
-                key_buffer1,
-                value_buffer1,
-                index,
-                token_positions,  # after update
-                entry.input_pos,
-                gpt_model.mha,
-                positions,
-                None,
+            attn_outputs1, cache_keys_after1, cache_values_after1 = (
+                KVCacheScatterUpdateAndSDPAFunction.apply(
+                    query1,
+                    key1,
+                    value1,
+                    key_buffer1,
+                    value_buffer1,
+                    index,
+                    token_positions,  # after update
+                    entry.input_pos,
+                    gpt_model.mha,
+                    positions,
+                    None,
+                )
             )
         attn_outputs1 = attn_outputs1.transpose(1, 2).reshape(batch_size, num, -1)
-        loss = (attn_outputs1 * head_attn_outputs).sum() + (
-            cache_keys_after1 * head_keys_after
-        ).sum() + (cache_values_after1 * head_values_after).sum()
+        loss = (
+            (attn_outputs1 * head_attn_outputs).sum()
+            + (cache_keys_after1 * head_keys_after).sum()
+            + (cache_values_after1 * head_values_after).sum()
+        )
         loss.backward()
         grads1 = dict(
             query=query1.grad,
@@ -616,7 +645,10 @@ def test_gradient_new_and_old_spda(
         if is_cat:
             # Cat case
             cache_keys_after2, cache_values_after2, _, _ = cat_on_buffers(
-                key2, value2, key_buffer2, value_buffer2,
+                key2,
+                value2,
+                key_buffer2,
+                value_buffer2,
             )
             token_positions = None
         else:
@@ -639,9 +671,11 @@ def test_gradient_new_and_old_spda(
             sdpa_kernels=sdpa_kernels,
         )
         attn_outputs2 = attn_outputs2.transpose(1, 2).reshape(batch_size, num, -1)
-        loss = (attn_outputs2 * head_attn_outputs).sum() + (
-            cache_keys_after2 * head_keys_after
-        ).sum() + (cache_values_after2 * head_values_after).sum()
+        loss = (
+            (attn_outputs2 * head_attn_outputs).sum()
+            + (cache_keys_after2 * head_keys_after).sum()
+            + (cache_values_after2 * head_values_after).sum()
+        )
         loss.backward()
         grads2 = dict(
             query=query2.grad,
@@ -669,6 +703,4 @@ def test_gradient_new_and_old_spda(
             elif update_result is not None and update_result.num1 == 0:
                 # Increment in round-robin fashion (only if num <= grace_period)
                 prefix = update_result.prefix
-                next_grace_pos = (
-                    next_grace_pos - prefix + num
-                ) % grace_period + prefix
+                next_grace_pos = (next_grace_pos - prefix + num) % grace_period + prefix

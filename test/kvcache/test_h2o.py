@@ -45,7 +45,7 @@ from keys_values.utils import expand_index, copy_parameters
     product(
         available_backends(),
         ["h2o-default", "h2o-vlen-default"],
-    )
+    ),
 )
 def test_grace_period(device, name):
     seed = 31415927
@@ -65,7 +65,10 @@ def test_grace_period(device, name):
     grace_period = 13
     kv_cache = create_kv_cache(name, params, grace_period=grace_period)
     num_insert = random.randint(cache_length, 3 * cache_length)
-    num_prefill = min(random.randint(num_insert // 3, int(num_insert * 0.75)), kv_cache.max_prefill_length)
+    num_prefill = min(
+        random.randint(num_insert // 3, int(num_insert * 0.75)),
+        kv_cache.max_prefill_length,
+    )
 
     keys, values = random_keys_values(params, num=num_insert)
     queries = random_tensor(params, num=num_insert, is_query=True)
@@ -82,10 +85,10 @@ def test_grace_period(device, name):
     )
     for pos in range(num_prefill, num_insert):
         kv_cache(
-            query=queries[:, :, pos:(pos + 1), :],
-            key=keys[:, :, pos:(pos + 1), :],
-            value=values[:, :, pos:(pos + 1), :],
-            token_idx=token_idx[:, pos:(pos + 1)],
+            query=queries[:, :, pos : (pos + 1), :],
+            key=keys[:, :, pos : (pos + 1), :],
+            value=values[:, :, pos : (pos + 1), :],
+            token_idx=token_idx[:, pos : (pos + 1)],
         )
         if pos >= cache_length:
             prefix = cache_length - grace_period
@@ -94,7 +97,11 @@ def test_grace_period(device, name):
             assert tensor_is_simple(token_positions[:, :, prefix:])
             pos_in = token_positions[0, 0, prefix:].tolist()
             assert len(set(pos_in)) == grace_period
-            assert all(pos - grace_period < x <= pos for x in pos_in), (pos - grace_period, pos, pos_in)
+            assert all(pos - grace_period < x <= pos for x in pos_in), (
+                pos - grace_period,
+                pos,
+                pos_in,
+            )
             # Positions outside grace region
             pos_out = token_positions[:, :, :prefix].flatten().tolist()
             pos_out = list(set(pos_out))
@@ -109,24 +116,26 @@ def compute_scores(
 ) -> torch.Tensor:
     T, head_size = queries.shape[-2:]
     scores = torch.zeros(
-        queries.shape[:-1], dtype=torch.float32, device=queries.device,
+        queries.shape[:-1],
+        dtype=torch.float32,
+        device=queries.device,
     )
     keys = k_and_v.keys()
     values = k_and_v.values()
     for pos in range(num_prefill, T):
         k_and_v_red = DefaultKeysAndValues(
-            keys=keys[:, :, :(pos + 1), :],
-            values=values[:, :, :(pos + 1), :],
+            keys=keys[:, :, : (pos + 1), :],
+            values=values[:, :, : (pos + 1), :],
         )
         _attn_weights = compute_attn_weights(
-            query=queries[:, :, pos:(pos + 1), :],
+            query=queries[:, :, pos : (pos + 1), :],
             k_and_v=k_and_v_red,
         )
         if v_length:
             v_norm = vector_norm(k_and_v_red.values(), dim=-1, dtype=torch.float32)
             _attn_weights *= v_norm
             _attn_weights /= _attn_weights.sum(dim=-1, keepdim=True)
-        scores[:, :, :(pos + 1)] += _attn_weights
+        scores[:, :, : (pos + 1)] += _attn_weights
     return scores
 
 
@@ -155,10 +164,16 @@ def test_h2o_scores(device, name, dtype):
     )
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params)
-    num_prefill = min(random.randint(cache_length // 3, cache_length // 2), kv_cache.max_prefill_length)
+    num_prefill = min(
+        random.randint(cache_length // 3, cache_length // 2),
+        kv_cache.max_prefill_length,
+    )
     step = (cache_length - num_prefill) // 3
     test_positions = (
-        num_prefill, num_prefill + step, num_prefill + 2 * step, cache_length - 1
+        num_prefill,
+        num_prefill + step,
+        num_prefill + 2 * step,
+        cache_length - 1,
     )
 
     keys, values = random_keys_values(params, num=cache_length)
@@ -174,28 +189,31 @@ def test_h2o_scores(device, name, dtype):
         value=values[:, :, :num_prefill, :],
         token_idx=token_idx[:, :num_prefill],
     )
-    print(f"test_positions: {test_positions}\nnum_prefill = {num_prefill}, v_length={v_length}, cache_length={cache_length}")
+    print(
+        f"test_positions: {test_positions}\nnum_prefill = {num_prefill}, v_length={v_length}, cache_length={cache_length}"
+    )
     for pos in range(num_prefill, cache_length - 1):
         kv_cache(
-            query=queries[:, :, pos:(pos + 1), :],
-            key=keys[:, :, pos:(pos + 1), :],
-            value=values[:, :, pos:(pos + 1), :],
-            token_idx=token_idx[:, pos:(pos + 1)],
+            query=queries[:, :, pos : (pos + 1), :],
+            key=keys[:, :, pos : (pos + 1), :],
+            value=values[:, :, pos : (pos + 1), :],
+            token_idx=token_idx[:, pos : (pos + 1)],
         )
         # Note: `kv_cache.scores` are normalized only once the cache is full!
         if pos in test_positions:
             # Compare scores
             other = compute_scores(
-                queries[:, :, :(pos + 1), :],
+                queries[:, :, : (pos + 1), :],
                 k_and_v=DefaultKeysAndValues(
-                    keys[:, :, :(pos + 1), :], values[:, :, :(pos + 1), :],
+                    keys[:, :, : (pos + 1), :],
+                    values[:, :, : (pos + 1), :],
                 ),
                 num_prefill=num_prefill,
                 v_length=v_length,
             )
             print(f"pos={pos}")
             torch.testing.assert_close(
-                kv_cache.scores[:, :, :(pos + 1)],
+                kv_cache.scores[:, :, : (pos + 1)],
                 other,
                 rtol=0.005,
                 atol=0.005,
@@ -232,7 +250,10 @@ def test_token_pos_and_pos_log(device, dtype):
     num_insert = cache_length + 5
     num_prefill = cache_length - 2
     data = random_args_cache_forward(
-        params, num=num_insert, vocab_size=vocab_size, device=device,
+        params,
+        num=num_insert,
+        vocab_size=vocab_size,
+        device=device,
     )
     token_chunks = []
     # Prefill up to cache_length - 2
@@ -241,9 +262,16 @@ def test_token_pos_and_pos_log(device, dtype):
     token_chunks.append(data_part["token_idx"])
     # Checks
     assert kv_cache.input_pos == num_prefill
-    other = torch.arange(
-        0, num_prefill, dtype=torch.int, device=device,
-    ).view(1, 1, -1).expand(*shape, -1)
+    other = (
+        torch.arange(
+            0,
+            num_prefill,
+            dtype=torch.int,
+            device=device,
+        )
+        .view(1, 1, -1)
+        .expand(*shape, -1)
+    )
     torch.testing.assert_close(kv_cache.token_pos[:, :, :num_prefill], other)
     # Try to insert too large of a piece
     assert kv_cache.max_forward_length() <= cache_length - num_prefill
@@ -261,9 +289,16 @@ def test_token_pos_and_pos_log(device, dtype):
     pos = cache_length
     # Checks
     assert kv_cache.input_pos == pos
-    other = torch.arange(
-        0, pos, dtype=torch.int, device=device,
-    ).view(1, 1, -1).expand(*shape, -1)
+    other = (
+        torch.arange(
+            0,
+            pos,
+            dtype=torch.int,
+            device=device,
+        )
+        .view(1, 1, -1)
+        .expand(*shape, -1)
+    )
     torch.testing.assert_close(kv_cache.token_pos[:, :, :pos], other)
     torch.testing.assert_close(k_and_v.keys(), data["key"][:, :, :pos, :])
     torch.testing.assert_close(k_and_v.values(), data["value"][:, :, :pos, :])
@@ -288,8 +323,8 @@ def test_token_pos_and_pos_log(device, dtype):
     keys_expected = data["key"][:, :, :cache_length, :].clone()
     values_expected = data["value"][:, :, :cache_length, :].clone()
     index = expand_index(next_positions[:, :, :num], params.head_size)
-    keys_expected.scatter_(-2, index, data["key"][:, :, pos:(pos + num), :])
-    values_expected.scatter_(-2, index, data["value"][:, :, pos:(pos + num), :])
+    keys_expected.scatter_(-2, index, data["key"][:, :, pos : (pos + num), :])
+    values_expected.scatter_(-2, index, data["value"][:, :, pos : (pos + num), :])
     torch.testing.assert_close(k_and_v.keys(), keys_expected)
     torch.testing.assert_close(k_and_v.values(), values_expected)
     # Check slot position log
@@ -302,7 +337,8 @@ def test_token_pos_and_pos_log(device, dtype):
     dtype = replay_log.slot_positions[0].dtype
     block = next_positions[:, :, :num].to(dtype=dtype)
     torch.testing.assert_close(
-        replay_log.slot_positions[0].to(device=device), block,
+        replay_log.slot_positions[0].to(device=device),
+        block,
     )
 
 
@@ -335,9 +371,13 @@ def test_max_chunk_size():
         cache_length = random.randint(128, 256)
         chunk_size = random.randint(8, cache_length // 2)
         num_chunks = random.randint(2, 8)
-        seq_length = cache_length + (num_chunks - 2) * chunk_size + random.randint(1, chunk_size)
+        seq_length = (
+            cache_length + (num_chunks - 2) * chunk_size + random.randint(1, chunk_size)
+        )
         max_chunk_size = chunk_size
-        print(f"\nrepeat {repeat}: cache_length = {cache_length}, chunk_size = {chunk_size}, seq_length = {seq_length}, num_chunks = {num_chunks}")
+        print(
+            f"\nrepeat {repeat}: cache_length = {cache_length}, chunk_size = {chunk_size}, seq_length = {seq_length}, num_chunks = {num_chunks}"
+        )
         # Create model and KV cache
         config = replace(_config, block_size=seq_length)
         params = KVCacheParams.from_config(
@@ -366,7 +406,8 @@ def test_max_chunk_size():
             gpt_models.append(gpt_model)
         head_model_name = CrossEntropyOnLogits.NAME
         head_model = HeadModelFactory.create(
-            name=head_model_name, config=config,
+            name=head_model_name,
+            config=config,
         )
         models = [
             # Do not deallocate KV cache buffers after forward
@@ -394,10 +435,10 @@ def test_max_chunk_size():
         print("next_positions used per chunk")
         kv_caches = [model.gpt_model.get_kv_caches()[0] for model in models]
         next_pos = [c.debug_next_positions for c in kv_caches]
-        assert(len(next_pos[0]) == len(next_pos[1]))
+        assert len(next_pos[0]) == len(next_pos[1])
         for i, (np0, np1) in enumerate(zip(next_pos[0], next_pos[1])):
             print(f"Chunk {i}")
-            assert(np0.shape == np1.shape)
+            assert np0.shape == np1.shape
             torch.testing.assert_close(np0, np1)
         print("Cache buffer contents")
         k_and_vs = [c.kv_buffers.get_keys_values() for c in kv_caches]

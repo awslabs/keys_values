@@ -37,7 +37,8 @@ from keys_values.kvcache.test_utils import (
 
 def args_store_retrieve() -> Tuple[str, List[tuple]]:
     names = [
-        (name, dict()) for name in KVCacheFactory.supported_names()
+        (name, dict())
+        for name in KVCacheFactory.supported_names()
         if name.endswith("-default")
     ] + [
         ("h2o-default", dict(grace_period=3)),
@@ -81,7 +82,11 @@ def test_store_retrieve(device, name, kwargs):
     current_length = min(cache_length, num_insert)
     assert kv_cache.current_length == current_length
     token_positions = kv_cache.token_positions().to(dtype=torch.int64)
-    assert token_positions.shape == (params.max_batch_size, params.n_query_groups, current_length)
+    assert token_positions.shape == (
+        params.max_batch_size,
+        params.n_query_groups,
+        current_length,
+    )
     if "h2o" not in name:
         assert tensor_is_simple(token_positions)
     # Positions for every (b, h) must be different
@@ -93,16 +98,14 @@ def test_store_retrieve(device, name, kwargs):
     # Test cache content slice by slice
     keys_and_values = kv_cache.get_keys_values()
     for pos in range(current_length):
-        index = token_positions[:, :, pos][:, :, None, None].expand(-1, -1, 1, params.head_size)
+        index = token_positions[:, :, pos][:, :, None, None].expand(
+            -1, -1, 1, params.head_size
+        )
         # `index[i, j, 0, k] = next_position[i, j]`
         k_expected = data["key"].gather(-2, index).squeeze(-2)
         v_expected = data["value"].gather(-2, index).squeeze(-2)
-        torch.testing.assert_close(
-            k_expected, keys_and_values.keys()[:, :, pos, :]
-        )
-        torch.testing.assert_close(
-            v_expected, keys_and_values.values()[:, :, pos, :]
-        )
+        torch.testing.assert_close(k_expected, keys_and_values.keys()[:, :, pos, :])
+        torch.testing.assert_close(v_expected, keys_and_values.values()[:, :, pos, :])
 
 
 @pytest.mark.parametrize("name, device", cache_names_and_devices())
@@ -172,7 +175,8 @@ def _filter_func(record: tuple) -> bool:
 def args_size_estimate() -> List[tuple]:
     excludes = {"h2o-vlen", "qh2o-vlen", "h2o-orig"}
     names_devices = [
-        tup for tup in cache_names_and_devices()
+        tup
+        for tup in cache_names_and_devices()
         if split_name(tup[0])[0] not in excludes
     ]
     batch_sizes = [1, 3]  # 2
@@ -190,7 +194,7 @@ def args_size_estimate() -> List[tuple]:
             n_head_groups,
             head_sizes,
             dtypes,
-            boh_lst
+            boh_lst,
         )
         if _filter_func(record)
     ]
@@ -267,7 +271,9 @@ def test_size_estimate(
             dtype=dtype,
             cache_kwargs=cache_kwargs,
         )
-        print(f"name={name}, batch_size={batch_size}, cache_length={cache_length}, n_head={n_head}, n_query_groups={n_query_groups}, head_size={head_size}, dtype={dtype}, blocks_over_heads={blocks_over_heads}")
+        print(
+            f"name={name}, batch_size={batch_size}, cache_length={cache_length}, n_head={n_head}, n_query_groups={n_query_groups}, head_size={head_size}, dtype={dtype}, blocks_over_heads={blocks_over_heads}"
+        )
         print(bits_by_part1)
         print(bits_by_part2)
         assert num_bits_total1 == num_bits_total2

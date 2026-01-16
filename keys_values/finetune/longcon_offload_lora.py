@@ -56,7 +56,8 @@ from keys_values.finetune.args import (
     OptimizerArgs,
 )
 from keys_values.finetune.batch_transform import (
-    BatchTransformFactory, BatchTransform,
+    BatchTransformFactory,
+    BatchTransform,
 )
 from keys_values.finetune.longcontext_full import (
     wrap_gpt_model,
@@ -118,15 +119,15 @@ def setup(
         max_seq_length=None,
     ),
     lora: LoRAARgs = LoRAARgs(
-        r = 8,
-        alpha = 16,
-        dropout = 0.05,
-        query = True,
-        key = False,
-        value = True,
-        projection = False,
-        mlp = False,
-        head = False,
+        r=8,
+        alpha=16,
+        dropout=0.05,
+        query=True,
+        key=False,
+        value=True,
+        projection=False,
+        mlp=False,
+        head=False,
     ),
     eval: EvalArgs = EvalArgs(
         interval=100,
@@ -248,7 +249,8 @@ def setup(
 
     """
     checkpoint_dir = auto_download_checkpoint(
-        model_name=checkpoint_dir, access_token=access_token,
+        model_name=checkpoint_dir,
+        access_token=access_token,
     )
     pprint(locals())
     data = LongBenchV2() if data is None else data
@@ -263,10 +265,14 @@ def setup(
     if not torch.cuda.is_available():
         raise ValueError("CUDA not available")
     if not (0 <= device < torch.cuda.device_count()):
-        raise ValueError(f"device = {device}, must be in [0, {torch.cuda.device_count() - 1}]")
+        raise ValueError(
+            f"device = {device}, must be in [0, {torch.cuda.device_count() - 1}]"
+        )
     if optimizer is None:
         optimizer = OptimizerArgs(name="AdamW")
-        print("Choosing optimizer AdamW with default learning rate. We highly recommend to at least tune optimizer.learning_rate")
+        print(
+            "Choosing optimizer AdamW with default learning rate. We highly recommend to at least tune optimizer.learning_rate"
+        )
     else:
         print(str(optimizer))
     if train.global_batch_size != train.micro_batch_size:
@@ -396,8 +402,12 @@ def main(
         eos_id=tokenizer.eos_id,
         ignore_index=ignore_index,
     )
-    steps_per_epoch = len(train_dataloader) // train.gradient_accumulation_iters(devices=1, num_nodes=1)
-    lr_max_steps = min(train.epochs * steps_per_epoch, (train.max_steps or float("inf")))
+    steps_per_epoch = len(train_dataloader) // train.gradient_accumulation_iters(
+        devices=1, num_nodes=1
+    )
+    lr_max_steps = min(
+        train.epochs * steps_per_epoch, (train.max_steps or float("inf"))
+    )
     print(f"Number of optimizer steps per epoch: {lr_max_steps}")
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -462,7 +472,9 @@ def main(
 
     num_trainable_params = num_parameters(model, requires_grad=True)
     print_message(f"\nNumber of trainable parameters: {num_trainable_params:,}")
-    print_message(f"Number of non-trainable parameters: {num_parameters(model, requires_grad=False):,}")
+    print_message(
+        f"Number of non-trainable parameters: {num_parameters(model, requires_grad=False):,}"
+    )
 
     # We use a optimizer on CPU for all parameters of `gpt_model`. If
     # `head_model` has parameters, we use another optimizer on GPU for them.
@@ -494,7 +506,9 @@ def main(
     head_model_params = list(head_model.parameters())
     if head_model_params:
         gpu_optimizer = instantiate_torch_optimizer(
-            optimizer.name, head_model_params, **optimizer.optimizer_kwargs(),
+            optimizer.name,
+            head_model_params,
+            **optimizer.optimizer_kwargs(),
         )
         gpu_scheduler = get_lr_scheduler(
             gpu_optimizer,
@@ -544,13 +558,17 @@ def main(
         profile_grad_params=profile_grad_params,
     )
     training_time = time.perf_counter() - train_time
-    output = create_finetuning_performance_report(training_time, token_counts, device.type)
+    output = create_finetuning_performance_report(
+        training_time, token_counts, device.type
+    )
     print_message(output)
 
     # Final evaluation
     if eval.final_validation:
         print_with_rank_and_timestamp("Starting validation evaluations.", 0)
-        print_message(f"\nFinal validation evaluation (batch_size = {val_dataloader.batch_size}) ...")
+        print_message(
+            f"\nFinal validation evaluation (batch_size = {val_dataloader.batch_size}) ..."
+        )
         if generate_with_eval:
             generate_example_kwargs = dict(
                 tokenizer=tokenizer,
@@ -617,10 +635,14 @@ def fit(
     token_counts = {
         "raw_tokens": torch.tensor(0, device=optim_device, dtype=torch.long),
         "raw_tokens_plus_prompt_template": torch.tensor(
-            0, device=optim_device, dtype=torch.long,
+            0,
+            device=optim_device,
+            dtype=torch.long,
         ),
         "raw_tokens_plus_prompt_template_and_padding": torch.tensor(
-            0, device=optim_device, dtype=torch.long,
+            0,
+            device=optim_device,
+            dtype=torch.long,
         ),
     }
     if record_gpu_memory_kind == 3:
@@ -635,11 +657,14 @@ def fit(
     valid_model = model.copy_model_for_evaluation()
     if record_gpu_memory_kind == 3:
         valid_model.set_record_gpu_memory(
-            record_gpu_memory_snapshots, record_gpu_memory_kind,
+            record_gpu_memory_snapshots,
+            record_gpu_memory_kind,
         )
     if eval.initial_validation:
         print_with_rank_and_timestamp("Starting validation evaluations.", 0)
-        print_message(f"\nInitial validation evaluation  (batch_size = {val_dataloader.batch_size}) ...")
+        print_message(
+            f"\nInitial validation evaluation  (batch_size = {val_dataloader.batch_size}) ..."
+        )
         if generate_with_eval:
             generate_example_kwargs = dict(
                 tokenizer=tokenizer,
@@ -701,7 +726,7 @@ def fit(
             break
 
         if record_gpu_memory_snapshots is not None:
-            run_no = state['iter_num'] - 1
+            run_no = state["iter_num"] - 1
             if record_gpu_memory_period >= 1:
                 run_no = run_no % record_gpu_memory_period
             if record_gpu_memory_kind == 0:
@@ -722,7 +747,9 @@ def fit(
             )
             record_gpu_memory_snapshots.start_recording()
 
-        is_accumulating = state["iter_num"] % train.gradient_accumulation_iters(1, 1) != 0
+        is_accumulating = (
+            state["iter_num"] % train.gradient_accumulation_iters(1, 1) != 0
+        )
         print_with_rank_and_timestamp("Starting gradient computation.", 0)
 
         loss = model(
@@ -730,7 +757,11 @@ def fit(
             targets=batch["targets"],
             scale_factor=1.0 / train.gradient_accumulation_iters(1, 1),
             record_gpu_memory_snapshots=record_gpu_memory_snapshots,
-            record_gpu_memory_kind=record_gpu_memory_kind if record_gpu_memory_snapshots is not None else None,
+            record_gpu_memory_kind=(
+                record_gpu_memory_kind
+                if record_gpu_memory_snapshots is not None
+                else None
+            ),
         )
         loss.backward()
         running_loss.update(loss.detach().to(device=optim_device))
@@ -740,9 +771,7 @@ def fit(
             records = model.profile_records()
             skip_names = ("path", "profile_grad_times")
             fixed_col_names = [
-                name
-                for name in profile_grad_params.keys()
-                if name not in skip_names
+                name for name in profile_grad_params.keys() if name not in skip_names
             ]
             prefix = [profile_grad_params[name] for name in fixed_col_names]
             var_col_names = list(records[0].keys())
@@ -777,7 +806,8 @@ def fit(
         torch.cuda.empty_cache()
         print_message(
             f"\nGPU memory at training step {state['iter_num'] - 1}:\n"
-            + message_memory_all_devices() + "\n"
+            + message_memory_all_devices()
+            + "\n"
         )
 
         token_counts["raw_tokens"] += batch["token_counts"]["raw"].sum().item()
@@ -814,7 +844,9 @@ def fit(
 
         if not is_accumulating and state["step_count"] % eval.interval == 0:
             print_with_rank_and_timestamp("Starting validation evaluations.", 0)
-            print_message(f"\nPeriodic validation evaluation  (batch_size = {val_dataloader.batch_size}) ...")
+            print_message(
+                f"\nPeriodic validation evaluation  (batch_size = {val_dataloader.batch_size}) ..."
+            )
             if generate_with_eval:
                 generate_example_kwargs = dict(
                     tokenizer=tokenizer,
@@ -840,7 +872,11 @@ def fit(
             deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
             del valid_model
 
-        if train.save_interval is not None and not is_accumulating and state["step_count"] % train.save_interval == 0:
+        if (
+            train.save_interval is not None
+            and not is_accumulating
+            and state["step_count"] % train.save_interval == 0
+        ):
             interval_dir = out_dir / f"step-{state['step_count']:06d}"
             save_lora_checkpoint(model, interval_dir)
             copy_config_files(checkpoint_dir, interval_dir)

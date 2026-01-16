@@ -32,7 +32,10 @@ from keys_values.kvcache.quant_buffers import (
     DequantizedKVCacheBuffers,
 )
 from keys_values.kvcache.quantize import (
-    Quantizer, TorchBasicQuantizer, TorchAOQuantizer, BitsAndBytesQuantizer,
+    Quantizer,
+    TorchBasicQuantizer,
+    TorchAOQuantizer,
+    BitsAndBytesQuantizer,
 )
 from keys_values.model import GPT
 
@@ -69,7 +72,7 @@ SUPPORTED_CACHES = {
 def split_name(name: str) -> Tuple[str, str]:
     for qname in SUPPORTED_QUANTIZERS.keys():
         if name.endswith(qname):
-            return name[:-(len(qname) + 1)], qname
+            return name[: -(len(qname) + 1)], qname
     raise ValueError(f"Name {name} is not supported")
 
 
@@ -106,6 +109,7 @@ class KVCacheFactory:
       publication. Not recommended, only for comparisons
 
     """
+
     @staticmethod
     def create_single(
         name: str,
@@ -177,8 +181,12 @@ class KVCacheFactory:
                     cache_length=cache_length,
                     max_num_ranges=max_num_ranges,
                 )
-                quant_kwargs, quantizer_type, cache_kwargs = KVCacheFactory.get_quant_kwargs(
-                    params, qname, cache_kwargs,
+                quant_kwargs, quantizer_type, cache_kwargs = (
+                    KVCacheFactory.get_quant_kwargs(
+                        params,
+                        qname,
+                        cache_kwargs,
+                    )
                 )
                 quant_kwargs["allocate_buffers"] = allocate_buffers
                 quant_kwargs["device"] = device
@@ -240,7 +248,9 @@ class KVCacheFactory:
         if end is None:
             end = config.n_layer
         if not (0 <= start < end <= config.n_layer):
-            raise ValueError(f"start={start}, end={end}, must be 0 <= start < end <= {config.n_layer}")
+            raise ValueError(
+                f"start={start}, end={end}, must be 0 <= start < end <= {config.n_layer}"
+            )
         num_layers = end - start
         if cache_kwargs is None:
             cache_kwargs = dict()
@@ -249,9 +259,13 @@ class KVCacheFactory:
         elif len(cache_length) == 1:
             cache_length = [cache_length[0]] * num_layers
         elif len(cache_length) != num_layers:
-            raise ValueError(f"len(cache_length) = {len(cache_length)}, must be 1 or {num_layers}")
+            raise ValueError(
+                f"len(cache_length) = {len(cache_length)}, must be 1 or {num_layers}"
+            )
         if not all(x > 0 for x in cache_length):
-            raise ValueError(f"cache_length = {cache_length}, must contain only positive integers")
+            raise ValueError(
+                f"cache_length = {cache_length}, must contain only positive integers"
+            )
 
         cache_type = SUPPORTED_CACHES.get(name)
         if cache_type is not None:
@@ -321,7 +335,9 @@ class KVCacheFactory:
         return list(SUPPORTED_CACHES.keys())
 
     @staticmethod
-    def size_estimate(model_or_caches: Union[GPT, List[KVCache]]) -> Tuple[int, Dict[str, int]]:
+    def size_estimate(
+        model_or_caches: Union[GPT, List[KVCache]],
+    ) -> Tuple[int, Dict[str, int]]:
         """
         Args:
             model_or_caches: GPT model or list of KV caches (one per layer).
@@ -381,8 +397,12 @@ class KVCacheFactory:
             else:
                 kwargs["buffer_type"] = QuantizedKVCacheBuffers
                 quantized_buffer = True
-                quant_kwargs, quantizer_type, cache_kwargs = KVCacheFactory.get_quant_kwargs(
-                    params, qname, cache_kwargs,
+                quant_kwargs, quantizer_type, cache_kwargs = (
+                    KVCacheFactory.get_quant_kwargs(
+                        params,
+                        qname,
+                        cache_kwargs,
+                    )
                 )
                 kwargs["quantizer_type"] = quantizer_type
                 # Extra arguments going to the cache buffer
@@ -390,20 +410,14 @@ class KVCacheFactory:
             total_sz, dct_sz = cache_type.size_estimate_apriori(params, **kwargs)
             num_bits_total = total_sz * n_layers
             # Note: Only one entry for all layers, they are all the same
-            bits_by_part = {
-                "layer_" + k: v * n_layers for k, v in dct_sz.items()
-            }
+            bits_by_part = {"layer_" + k: v * n_layers for k, v in dct_sz.items()}
             if quantized_buffer:
                 total_sz, dct_sz = DequantizedKVCacheBuffers.size_estimate_apriori(
                     params=KVCacheBuffersParams.from_params(params),
                     cache_length=cache_length,
                 )
                 num_bits_total += total_sz
-                bits_by_part.update(
-                    {
-                        "dequant_" + k: v for k, v in dct_sz.items()
-                    }
-                )
+                bits_by_part.update({"dequant_" + k: v for k, v in dct_sz.items()})
             return num_bits_total, bits_by_part
         else:
             raise ValueError(f"name = {name} not supported")
@@ -413,7 +427,9 @@ class KVCacheFactory:
         if isinstance(model_or_caches, GPT):
             caches = model_or_caches.get_kv_caches()
             if any(cache is None for cache in caches):
-                raise IndexError("Some layers of model do not have a cache. Run 'assign_kv_cache' or 'set_kv_cache' first.")
+                raise IndexError(
+                    "Some layers of model do not have a cache. Run 'assign_kv_cache' or 'set_kv_cache' first."
+                )
         else:
             caches = model_or_caches
         return caches
@@ -435,8 +451,13 @@ class KVCacheFactory:
             blocks_over_heads = cache_kwargs.pop("blocks_over_heads")
         except KeyError:
             blocks_over_heads = False
-        if blocks_over_heads is False and params.head_size < quantizer_type.minimum_blocksize():
-            print(f"blocksize = {params.head_size} too small. Switching to blocks_over_heads = True.")
+        if (
+            blocks_over_heads is False
+            and params.head_size < quantizer_type.minimum_blocksize()
+        ):
+            print(
+                f"blocksize = {params.head_size} too small. Switching to blocks_over_heads = True."
+            )
             blocks_over_heads = True
         shape = (
             params.max_batch_size,
@@ -493,7 +514,9 @@ def create_quantized_kv_buffers(
             cache_length=cache_length,
         )
         quant_kwargs, quantizer_type, cache_kwargs = KVCacheFactory.get_quant_kwargs(
-            _cache_params, qname, cache_kwargs,
+            _cache_params,
+            qname,
+            cache_kwargs,
         )
         quant_kwargs["allocate_buffers"] = allocate_buffers
         quant_kwargs["device"] = device
@@ -543,8 +566,25 @@ def deallocate_kv_cache_buffers_of_model(gpt_model: GPT):
 
 
 REMOVE_KEYS = {
-    "dense": ("replay_log_blocksize", "grace_period", "detach_attn_weights", "keep_initial_fraction", "normalize_scores", "combination_constant", "scratch_blocksize", "max_chunk_size"),
-    "lastrec": ("replay_log_blocksize", "grace_period", "detach_attn_weights", "keep_initial_fraction", "normalize_scores" "combination_constant", "scratch_blocksize", "max_chunk_size"),
+    "dense": (
+        "replay_log_blocksize",
+        "grace_period",
+        "detach_attn_weights",
+        "keep_initial_fraction",
+        "normalize_scores",
+        "combination_constant",
+        "scratch_blocksize",
+        "max_chunk_size",
+    ),
+    "lastrec": (
+        "replay_log_blocksize",
+        "grace_period",
+        "detach_attn_weights",
+        "keep_initial_fraction",
+        "normalize_scores" "combination_constant",
+        "scratch_blocksize",
+        "max_chunk_size",
+    ),
     "h2o": ("combination_constant", "scratch_blocksize"),
     "h2o-vlen": ("combination_constant", "scratch_blocksize"),
     "qh2o": (),
@@ -554,7 +594,8 @@ REMOVE_KEYS = {
 
 
 def cleanup_cache_kwargs(
-    cname: str, cache_kwargs: Optional[Dict[str, Any]],
+    cname: str,
+    cache_kwargs: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     if cache_kwargs is None:
         return dict()

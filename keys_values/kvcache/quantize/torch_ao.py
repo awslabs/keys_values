@@ -33,6 +33,7 @@ class TorchAOQuantizer(TorchBasicQuantizer):
     using half the block size.
 
     """
+
     def __init__(
         self,
         shape: Tuple[int, int, int, int],
@@ -44,7 +45,9 @@ class TorchAOQuantizer(TorchBasicQuantizer):
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
     ):
         if source_dtype not in self.supported_source_dtypes():
-            raise ValueError(f"source_dtype = {source_dtype} is not supported, must be in {self.supported_source_dtypes()}")
+            raise ValueError(
+                f"source_dtype = {source_dtype} is not supported, must be in {self.supported_source_dtypes()}"
+            )
         if num_bits not in (4, 8):
             raise ValueError(f"num_bits = {num_bits}, must be 4 or 8")
         self._is_4bit = num_bits == 4
@@ -63,7 +66,9 @@ class TorchAOQuantizer(TorchBasicQuantizer):
         if self._is_4bit:
             # Need another intermediate array
             bits_per_entry += bits_for_torch_dtype(torch.uint8)
-        self._bytes_per_entry = (batch_size * n_query_groups * head_size / 8) * bits_per_entry
+        self._bytes_per_entry = (
+            batch_size * n_query_groups * head_size / 8
+        ) * bits_per_entry
 
     @staticmethod
     def _validate_blocksize(blocksize):
@@ -78,7 +83,8 @@ class TorchAOQuantizer(TorchBasicQuantizer):
         return torch.uint8
 
     def _quantization_states(
-        self, values: torch.Tensor,
+        self,
+        values: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         from torchao.quantization.observer import AffineQuantizedMinMaxObserver
         from torchao.quantization.granularity import PerAxis
@@ -127,7 +133,10 @@ class TorchAOQuantizer(TorchBasicQuantizer):
             target_dtype=self.target_dtype,
         )
         int_data = quant_tensor.tensor_impl.get_plain()[0]
-        if int_data.dtype != self._quant_buffer_dtype() or int_data.shape != input_float.shape:
+        if (
+            int_data.dtype != self._quant_buffer_dtype()
+            or int_data.shape != input_float.shape
+        ):
             raise NotImplementedError(
                 f"int_data.dtype = {int_data.dtype} [should be {self._quant_buffer_dtype()}], "
                 f"int_data.shape = {int_data.shape} [should be {input_float.shape}]. "
@@ -160,7 +169,10 @@ class TorchAOQuantizer(TorchBasicQuantizer):
         int_data = self._uncompress_internal(int_data, is_4bit=self._is_4bit)
         tensor_impl_ctr = get_tensor_impl_constructor(PlainLayout)
         tensor_impl = tensor_impl_ctr(
-            int_data, scales, zero_points, PlainLayout(),
+            int_data,
+            scales,
+            zero_points,
+            PlainLayout(),
         )
         return AffineQuantizedTensor(
             tensor_impl,
@@ -175,15 +187,19 @@ class TorchAOQuantizer(TorchBasicQuantizer):
 
     @staticmethod
     def _quant_buffer_blocksize_num_channels_apriori(
-        params: KVCacheBuffersParams, **kwargs,
+        params: KVCacheBuffersParams,
+        **kwargs,
     ) -> Tuple[int, int]:
         num_bits = kwargs.get("num_bits")
         if num_bits is None:
             raise IndexError("Argument 'num_bits' is missing")
         elif num_bits not in (4, 8):
             raise ValueError(f"num_bits = {num_bits}, must be 4 or 8")
-        blocksize, num_channels = TorchBasicQuantizer._quant_buffer_blocksize_num_channels_apriori(
-            params, **kwargs,
+        blocksize, num_channels = (
+            TorchBasicQuantizer._quant_buffer_blocksize_num_channels_apriori(
+                params,
+                **kwargs,
+            )
         )
         if num_bits == 4:
             blocksize /= 2
@@ -191,13 +207,22 @@ class TorchAOQuantizer(TorchBasicQuantizer):
 
     @staticmethod
     def size_estimate_apriori(
-        params: KVCacheBuffersParams, **kwargs,
+        params: KVCacheBuffersParams,
+        **kwargs,
     ) -> Tuple[int, Dict[str, int]]:
-        blocksize, num_channels = TorchAOQuantizer._quant_buffer_blocksize_num_channels_apriori(
-            params, **kwargs,
+        blocksize, num_channels = (
+            TorchAOQuantizer._quant_buffer_blocksize_num_channels_apriori(
+                params,
+                **kwargs,
+            )
         )
-        sz_buffer = blocksize * num_channels * TorchAOQuantizer._quant_buffer_dtype_bits_apriori(
-            params, **kwargs,
+        sz_buffer = (
+            blocksize
+            * num_channels
+            * TorchAOQuantizer._quant_buffer_dtype_bits_apriori(
+                params,
+                **kwargs,
+            )
         )
         sz_states = 2 * num_channels * bits_for_torch_dtype(torch.float32)
         return sz_buffer + sz_states, dict(buffer=sz_buffer, q_states=sz_states)

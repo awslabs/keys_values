@@ -49,6 +49,7 @@ class NodeAnnotation:
     pack argument is equal to `x_new`)
 
     """
+
     kind: str
     layer_idx: int
     chunk_idx: int
@@ -69,7 +70,9 @@ class NodeAnnotation:
         if self.index is not None:
             assert self.delta is not None
             device = self.delta.device
-            assert self.index.device == device, f"delta.device = {device}, index.device = {self.index.device}, must be the same"
+            assert (
+                self.index.device == device
+            ), f"delta.device = {device}, index.device = {self.index.device}, must be the same"
         else:
             assert self.delta is None
             device = None
@@ -77,7 +80,9 @@ class NodeAnnotation:
             assert self.is_scatter, "positions only with scatter"
             assert self.positions.ndim == 1, "positions must be a 1D tensor"
             if device is not None:
-                assert self.positions.device == device, f"delta.device = {device}, positions.device = {self.positions.device}, must be the same"
+                assert (
+                    self.positions.device == device
+                ), f"delta.device = {device}, positions.device = {self.positions.device}, must be the same"
 
     def __str__(self) -> str:
         return f"{self.kind} ({self.layer_idx},{self.chunk_idx}): {self.shape}"
@@ -124,7 +129,9 @@ class NodeAnnotation:
 
     @staticmethod
     def kind_is_valid(kind: str):
-        assert kind in _ANNOTATION_KIND_VALUES, f"kind = '{kind}', must be in {_ANNOTATION_KIND_VALUES}"
+        assert (
+            kind in _ANNOTATION_KIND_VALUES
+        ), f"kind = '{kind}', must be in {_ANNOTATION_KIND_VALUES}"
 
 
 class NodeAnnotationForLog:
@@ -136,7 +143,13 @@ class NodeAnnotationForLog:
         self.index_shape = shape_to_tuple(annotation.index)
         self.delta_shape = shape_to_tuple(annotation.delta)
         self.dtype = annotation.delta.dtype
-        self.positions_shape = None if annotation.positions is None else shape_to_tuple(annotation.positions),
+        self.positions_shape = (
+            (
+                None
+                if annotation.positions is None
+                else shape_to_tuple(annotation.positions)
+            ),
+        )
         self.debug_msg = annotation.debug_msg
 
 
@@ -156,7 +169,8 @@ class Annotations:
         self.chunk_idx_values.clear()
 
     def _get_dicts(
-        self, kind: str,
+        self,
+        kind: str,
     ) -> Tuple[Dict[int, torch.Tensor], Dict[int, int]]:
         if NodeAnnotation.kind_is_keys(kind):
             return self.final_keys, self.chunk_idx_keys
@@ -164,7 +178,11 @@ class Annotations:
             return self.final_values, self.chunk_idx_values
 
     def set_final(
-        self, x: torch.Tensor, layer_idx: int, chunk_idx: int, kind: str,
+        self,
+        x: torch.Tensor,
+        layer_idx: int,
+        chunk_idx: int,
+        kind: str,
     ):
         x_dct, chidx_dct = self._get_dicts(kind)
         curr_val = x_dct.get(layer_idx)
@@ -185,12 +203,12 @@ class Annotations:
                 pos
                 for pos, annot in enumerate(self.nodes)
                 if (
-                    annot.layer_idx == annotation.layer_idx and
-                    annot.chunk_idx == annotation.chunk_idx and
-                    annot.kind == annotation.kind
+                    annot.layer_idx == annotation.layer_idx
+                    and annot.chunk_idx == annotation.chunk_idx
+                    and annot.kind == annotation.kind
                 )
             ),
-            None
+            None,
         )
 
     def append_safe(self, annotation: NodeAnnotation):
@@ -260,6 +278,7 @@ class AnnotationUsageLog:
         matched.
 
     """
+
     num_matched_annotations: int
     num_comparisons: int
     num_4d_indexes: int
@@ -278,7 +297,9 @@ class AnnotationUsageLog:
         if self.unmatched_annotations:
             lines.append("Remaining unmatched annotations:")
             for a in self.unmatched_annotations:
-                line = f"  ({a.layer_idx},{a.chunk_idx}): {a.shape}, {a.dtype}, {a.kind}"
+                line = (
+                    f"  ({a.layer_idx},{a.chunk_idx}): {a.shape}, {a.dtype}, {a.kind}"
+                )
                 if a.debug_msg is not None:
                     line += f": {a.debug_msg} -- delta {a.delta_shape}"
                 lines.append(line)
@@ -335,7 +356,7 @@ class LargeShapeEntry:
             return self
 
     def size_in_mb(self) -> float:
-        return self.numel * bytes_for_torch_dtype(self.dtype) / (2 ** 20)
+        return self.numel * bytes_for_torch_dtype(self.dtype) / (2**20)
 
 
 class AutogradHooks:
@@ -360,6 +381,7 @@ class CleanupArraysAutogradHooks(AutogradHooks):
     should be.
 
     """
+
     def __init__(self, arrays_cleanup: ArraysForCleanup):
         self._arrays_cleanup = arrays_cleanup
 
@@ -526,6 +548,7 @@ class CellComputationAutogradHooks(AutogradHooks):
     a model for memory size.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -613,9 +636,15 @@ class CellComputationAutogradHooks(AutogradHooks):
 
         """
         if eff_num_layers <= 0:
-            raise ValueError(f"eff_num_layers {eff_num_layers} must be positive integer")
-        if len(cache_lengths) != eff_num_layers or not all(x > 0 for x in cache_lengths):
-            raise ValueError(f"cache_lengths = {cache_lengths} invalid, must have length {eff_num_layers}")
+            raise ValueError(
+                f"eff_num_layers {eff_num_layers} must be positive integer"
+            )
+        if len(cache_lengths) != eff_num_layers or not all(
+            x > 0 for x in cache_lengths
+        ):
+            raise ValueError(
+                f"cache_lengths = {cache_lengths} invalid, must have length {eff_num_layers}"
+            )
         assert num_chunks > 0
         assert first_layer_idx >= 0
         assert first_chunk_idx >= 0
@@ -645,7 +674,10 @@ class CellComputationAutogradHooks(AutogradHooks):
         if self._track_largest_shape:
             # Dummy: Replaced with first shape
             self._largest_shape = LargeShapeEntry(
-                shape=(0,), numel=0, dtype=torch.float32, count=0,
+                shape=(0,),
+                numel=0,
+                dtype=torch.float32,
+                count=0,
             )
 
     @property
@@ -841,7 +873,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                         self._id_to_unpacked[idd] = x
                         self._id_counts[idd] -= 1
                 elif isinstance(value, PackArgumentAsIndex):
-                     x = expand_index(value.index_3d, value.final_dim)
+                    x = expand_index(value.index_3d, value.final_dim)
                 else:
                     # Unmatched pack argument
                     assert isinstance(value, torch.Tensor)  # Sanity check
@@ -854,7 +886,8 @@ class CellComputationAutogradHooks(AutogradHooks):
         return x
 
     def _unpack_from_annotation(
-        self, annotation: NodeAnnotation,
+        self,
+        annotation: NodeAnnotation,
     ) -> torch.Tensor:
         kind = annotation.kind
         if kind == "padded-query":
@@ -865,10 +898,13 @@ class CellComputationAutogradHooks(AutogradHooks):
             layer_idx = annotation.layer_idx
             chunk_idx = annotation.chunk_idx
             buffer, final_idx = self._node_annotations.get_final(
-                layer_idx, kind,
+                layer_idx,
+                kind,
             )
             if self.debug_print_annotations:
-                print(f"_unpack_from_annotation: {str(annotation)}, buffer={buffer.shape}, final_idx={final_idx}")
+                print(
+                    f"_unpack_from_annotation: {str(annotation)}, buffer={buffer.shape}, final_idx={final_idx}"
+                )
             # This is complex, because it happens that "ext-*" appears before
             # "scatter-*" or "cat-*" for the same node. In this case, we need
             # to first execute this "prior annotation", since otherwise the
@@ -882,7 +918,9 @@ class CellComputationAutogradHooks(AutogradHooks):
                         print(f"--> Doing {str(prior_annotation)} first")
                     annotations_todo.insert(0, prior_annotation)
                 elif final_idx != chunk_idx:
-                    raise ValueError(f"Annotation {str(annotation)}: final chunk_idx = {final_idx}, must be in [{chunk_idx}, {chunk_idx + 1}]")
+                    raise ValueError(
+                        f"Annotation {str(annotation)}: final chunk_idx = {final_idx}, must be in [{chunk_idx}, {chunk_idx + 1}]"
+                    )
             else:
                 if final_idx == chunk_idx:
                     # Has already been done to support ext-* annotation
@@ -890,11 +928,16 @@ class CellComputationAutogradHooks(AutogradHooks):
                         print("--> Skip (already done)")
                     annotations_todo = []
                 elif final_idx != chunk_idx + 1:
-                    raise ValueError(f"Annotation {str(annotation)}: final chunk_idx = {final_idx}, must be in [{chunk_idx}, {chunk_idx + 1}]")
+                    raise ValueError(
+                        f"Annotation {str(annotation)}: final chunk_idx = {final_idx}, must be in [{chunk_idx}, {chunk_idx + 1}]"
+                    )
             for annot in annotations_todo:
                 if annot.is_ext:
                     buffer = self._unpack_extended(
-                        buffer, annot, self.n_head, self.head_size,
+                        buffer,
+                        annot,
+                        self.n_head,
+                        self.head_size,
                     )
                 else:
                     length = annot.shape[2]
@@ -906,12 +949,17 @@ class CellComputationAutogradHooks(AutogradHooks):
                     else:
                         buffer = buffer[:, :, :length, :]
                     self._node_annotations.set_final(
-                        buffer, layer_idx, chunk_idx, kind,
+                        buffer,
+                        layer_idx,
+                        chunk_idx,
+                        kind,
                     )
             # Sanity check
             final_idx = self._node_annotations.get_final(layer_idx, kind)[1]
             if final_idx != chunk_idx:
-                raise IndexError(f"kind={kind}, layer_idx={layer_idx}, chunk_idx={chunk_idx}, final_chunk_idx={final_idx}")
+                raise IndexError(
+                    f"kind={kind}, layer_idx={layer_idx}, chunk_idx={chunk_idx}, final_chunk_idx={final_idx}"
+                )
         return buffer
 
     def _get_cache_length(self, layer_idx: int) -> int:
@@ -934,10 +982,12 @@ class CellComputationAutogradHooks(AutogradHooks):
                     and (e.annot.is_scatter or e.annot.is_cat)
                 )
             ),
-            None
+            None,
         )
         if result is None:
-            raise IndexError(f"{str(annotation)}: Don't find prior annotation for this one!")
+            raise IndexError(
+                f"{str(annotation)}: Don't find prior annotation for this one!"
+            )
         return result
 
     @staticmethod
@@ -948,17 +998,25 @@ class CellComputationAutogradHooks(AutogradHooks):
         head_size: int,
     ) -> torch.Tensor:
         # Extended keys, values may be permuted
-        sort_index = None if annotation.extra_info is None else annotation.extra_info.get("sort_index")
+        sort_index = (
+            None
+            if annotation.extra_info is None
+            else annotation.extra_info.get("sort_index")
+        )
         if sort_index is not None:
             buffer = torch.gather(
-                buffer, 2, expand_index(sort_index, head_size),
+                buffer,
+                2,
+                expand_index(sort_index, head_size),
             )
         buffer = repeat_interleave(buffer, n_head)
         return buffer
 
     @staticmethod
     def _unpack_scatter(
-        buffer: torch.Tensor, annotation: NodeAnnotation, grace_period: int,
+        buffer: torch.Tensor,
+        annotation: NodeAnnotation,
+        grace_period: int,
     ):
         if grace_period > 0:
             # If there is a grace period, the unpacking is slightly more complex,
@@ -968,7 +1026,9 @@ class CellComputationAutogradHooks(AutogradHooks):
             num2 = min(num, grace_period)
             buff_cp = buffer.gather(2, annotation.index[:, :, :num2, :])
             positions = annotation.positions.view(1, 1, -1, 1).expand(
-                *buffer.shape[:2], -1, buffer.shape[-1],
+                *buffer.shape[:2],
+                -1,
+                buffer.shape[-1],
             )
             buffer.scatter_(2, positions, buff_cp)
         buffer.scatter_(2, annotation.index, annotation.delta)
@@ -983,7 +1043,9 @@ class CellComputationAutogradHooks(AutogradHooks):
         return torch.cat(
             (
                 torch.zeros(
-                    (1, 1, 1, 1), dtype=delta.dtype, device=delta.device,
+                    (1, 1, 1, 1),
+                    dtype=delta.dtype,
+                    device=delta.device,
                 ).expand(*shape[:2], kv_len - q_len, shape[3]),
                 delta,
             ),
@@ -1006,14 +1068,13 @@ class CellComputationAutogradHooks(AutogradHooks):
         new_id = None
         if shape in self._shapes_to_match:
             new_id = self._next_id
-            self._pack_arguments.append(
-                PackHookArgument(id=new_id, shape=shape, x=x)
-            )
+            self._pack_arguments.append(PackHookArgument(id=new_id, shape=shape, x=x))
             self._next_id += 1
         return new_id
 
     def _match_annotations(
-        self, flush_pack_args: bool = False,
+        self,
+        flush_pack_args: bool = False,
     ) -> Optional[int]:
         """
         In :meth:`pack_hook` calls, we add candidates for packing into
@@ -1044,7 +1105,8 @@ class CellComputationAutogradHooks(AutogradHooks):
                     list(enumerate(self._node_annotations.nodes))
                 ):
                     parg_matched_to, was_compared = self._single_match(
-                        pack_arg, annotation,
+                        pack_arg,
+                        annotation,
                     )
                     if parg_matched_to is not None:
                         parg_matched_to = (an_pos, parg_matched_to)
@@ -1075,7 +1137,9 @@ class CellComputationAutogradHooks(AutogradHooks):
                         # temporarily, until :meth:`_flush_remaining_pack_arguments`
                         # is called, and they are transformed to take less memory.
                         if self.debug_print_annotations:
-                            print(f"Remove pack arg ID={pack_arg.id} after {pack_arg.count} match trials")
+                            print(
+                                f"Remove pack arg ID={pack_arg.id} after {pack_arg.count} match trials"
+                            )
                         self._unmatched_pack_args.append(pack_arg)
                     else:
                         rem_pack_args.append(pack_arg)
@@ -1106,13 +1170,17 @@ class CellComputationAutogradHooks(AutogradHooks):
                 was_compared = True
                 self._num_comparisons += 1
                 parg_delta = self._delta_for_pack_argument(
-                    x=pack_arg.x, annotation=annotation,
+                    x=pack_arg.x,
+                    annotation=annotation,
                 )
                 if try_with_cast:
                     parg_delta = parg_delta.to(dtype=annot_dtype)
                 annot_delta = self._delta_for_annotation(annotation)
                 if torch.allclose(
-                    annot_delta, parg_delta, atol=1e-6, rtol=1e-4,
+                    annot_delta,
+                    parg_delta,
+                    atol=1e-6,
+                    rtol=1e-4,
                 ):
                     # Match confirmed: delta's the same
                     # Only used for testing:
@@ -1120,7 +1188,8 @@ class CellComputationAutogradHooks(AutogradHooks):
                         if self.debug_print_annotations:
                             print("Checking " + str(annotation))
                         torch.testing.assert_close(
-                            pack_arg.x, annotation.debug_full_arg,
+                            pack_arg.x,
+                            annotation.debug_full_arg,
                         )
                     if self._debug_test_args:
                         annotation = replace(
@@ -1132,7 +1201,8 @@ class CellComputationAutogradHooks(AutogradHooks):
                         # being stored in `_packed_arg_for_id`
                         value = PackArgumentAsAnnotation(
                             annot=self._transform_annotation(
-                                annotation, pack_arg.x,
+                                annotation,
+                                pack_arg.x,
                             ),
                             target_dtype=parg_dtype if try_with_cast else None,
                         )
@@ -1142,7 +1212,11 @@ class CellComputationAutogradHooks(AutogradHooks):
                                 deb_msg += f", q_len={annotation.extra_info['q_len']}"
                             elif annotation.is_ext:
                                 si_shape = annotation.extra_info
-                                si_shape = None if si_shape is None else si_shape.get("sort_index")
+                                si_shape = (
+                                    None
+                                    if si_shape is None
+                                    else si_shape.get("sort_index")
+                                )
                                 si_shape = None if si_shape is None else si_shape.shape
                                 deb_msg += f", sort_index={si_shape}"
                             print(deb_msg)
@@ -1190,9 +1264,13 @@ class CellComputationAutogradHooks(AutogradHooks):
                 # One more attempt to match this annotation
                 matched_pos = None
                 for pa_pos, pack_arg in enumerate(self._unmatched_pack_args):
-                    if self._single_match(
-                        pack_arg, annotation,
-                    )[0] is not None:
+                    if (
+                        self._single_match(
+                            pack_arg,
+                            annotation,
+                        )[0]
+                        is not None
+                    ):
                         matched_pos = pa_pos
                         break
                 if matched_pos is not None:
@@ -1205,10 +1283,14 @@ class CellComputationAutogradHooks(AutogradHooks):
                     if annotation.is_scatter or annotation.is_cat:
                         self._num_unmatched_scatter_cat += 1
                         if self.debug_print_annotations:
-                            print(f"Unmatched {str(annotation)}: Add with ID={self._next_id}")
-                        self._packed_arg_for_id[self._next_id] = PackArgumentAsAnnotation(
-                            annot=self._transform_annotation(annotation, None),
-                            target_dtype=None,
+                            print(
+                                f"Unmatched {str(annotation)}: Add with ID={self._next_id}"
+                            )
+                        self._packed_arg_for_id[self._next_id] = (
+                            PackArgumentAsAnnotation(
+                                annot=self._transform_annotation(annotation, None),
+                                target_dtype=None,
+                            )
                         )
                         self._next_id += 1
         self._node_annotations.nodes.clear()
@@ -1238,7 +1320,8 @@ class CellComputationAutogradHooks(AutogradHooks):
 
     @staticmethod
     def _delta_for_pack_argument(
-        x: torch.Tensor, annotation: NodeAnnotation,
+        x: torch.Tensor,
+        annotation: NodeAnnotation,
     ) -> torch.Tensor:
         index = annotation.index
         if annotation.is_scatter:
@@ -1273,10 +1356,16 @@ class CellComputationAutogradHooks(AutogradHooks):
             # We store the full query (without padding) in `delta`. This is
             # different from what is stored there for matching
             q_len = annotation.extra_info.get("q_len")
-            assert q_len is not None and 0 < q_len <= x.shape[2], f"q_len={q_len}, x.shape[2]={x.shape[2]}"
+            assert (
+                q_len is not None and 0 < q_len <= x.shape[2]
+            ), f"q_len={q_len}, x.shape[2]={x.shape[2]}"
             return replace(annotation, delta=x[:, :, (-q_len):, :])
         elif annotation.is_scatter:
-            index_len = None if annotation.extra_info is None else annotation.extra_info.get("index_len")
+            index_len = (
+                None
+                if annotation.extra_info is None
+                else annotation.extra_info.get("index_len")
+            )
             if index_len is not None:
                 index = annotation.index[:, :, :index_len, :]
                 delta = annotation.delta[:, :, :index_len, :]
@@ -1307,7 +1396,8 @@ class CellComputationAutogradHooks(AutogradHooks):
         arg2 = arg1[:, 0].unsqueeze(-1).expand(-1, final_dim)
         if arg1.equal(arg2):
             return PackArgumentAsIndex(
-                index_3d=x[..., 0].clone(), final_dim=final_dim,
+                index_3d=x[..., 0].clone(),
+                final_dim=final_dim,
             )
         else:
             return None

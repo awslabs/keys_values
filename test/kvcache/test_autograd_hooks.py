@@ -11,7 +11,9 @@ from keys_values.kvcache.gradient.autograd_hooks import (
     MAX_DELTA_TRANS_LENGTH,
     create_random_index,
 )
-from keys_values.kvcache.gradient.train_attn_weights_replay_new import TrainingAttnWeightsReplayCacheNew
+from keys_values.kvcache.gradient.train_attn_weights_replay_new import (
+    TrainingAttnWeightsReplayCacheNew,
+)
 from keys_values.kvcache.test_utils import (
     random_tensor,
     available_backends,
@@ -50,17 +52,28 @@ def test_extract_delta(device, dtype):
         chunk_size = random.randint(1, cache_length // 2)
         input_pos = cache_length + 16
         token_positions = random_index(
-            params, 0, cache_length, device=device,
+            params,
+            0,
+            cache_length,
+            device=device,
         )
         delta_index = random_index(
-            params, 0, cache_length, num=chunk_size, device=device,
+            params,
+            0,
+            cache_length,
+            num=chunk_size,
+            device=device,
         )
         token_positions.scatter_(
             -1,
             delta_index,
             torch.arange(
-                input_pos, input_pos + chunk_size, **index_kwargs,
-            ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
+                input_pos,
+                input_pos + chunk_size,
+                **index_kwargs,
+            )
+            .view(1, 1, -1)
+            .expand(batch_size, n_query_groups, -1),
         )
         delta_index = expand_index(delta_index, head_size).to(dtype=torch.int32)
         # Transform as in `sdpa_wrapper.scaled_dot_product_attention`
@@ -73,7 +86,12 @@ def test_extract_delta(device, dtype):
         if index_len >= MAX_DELTA_TRANS_LENGTH:
             ext_index = delta_index[:, :, :MAX_DELTA_TRANS_LENGTH, :]
         else:
-            shape = (batch_size, n_query_groups, MAX_DELTA_TRANS_LENGTH - index_len, head_size)
+            shape = (
+                batch_size,
+                n_query_groups,
+                MAX_DELTA_TRANS_LENGTH - index_len,
+                head_size,
+            )
             index2 = create_random_index(
                 shape=shape,
                 length=cache_length,
@@ -85,7 +103,8 @@ def test_extract_delta(device, dtype):
         assert delta.shape == (batch_size, n_head, MAX_DELTA_TRANS_LENGTH, head_size)
         ext_index = repeat_interleave(
             TrainingAttnWeightsReplayCacheNew._transform_index(
-                index=ext_index, sort_index=sort_index,
+                index=ext_index,
+                sort_index=sort_index,
             ),
             n_head,
         )
@@ -100,6 +119,7 @@ def test_extract_delta(device, dtype):
             extra_info={"sort_index": sort_index},
         )
         parg_delta = CellComputationAutogradHooks._delta_for_pack_argument(
-            x=keys_after, annotation=annotation,
+            x=keys_after,
+            annotation=annotation,
         )
         torch.testing.assert_close(delta, parg_delta)

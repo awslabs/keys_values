@@ -73,10 +73,15 @@ class BitsAndBytesQuantizer(Quantizer):
 
         """
         super().__init__(
-            shape, source_dtype, blocks_over_heads, tmp_array_limit_gb,
+            shape,
+            source_dtype,
+            blocks_over_heads,
+            tmp_array_limit_gb,
         )
         if source_dtype not in self.supported_source_dtypes():
-            raise ValueError(f"source_dtype = {source_dtype} is not supported, must be in {self.supported_source_dtypes()}")
+            raise ValueError(
+                f"source_dtype = {source_dtype} is not supported, must be in {self.supported_source_dtypes()}"
+            )
         if num_bits not in (4, 8):
             raise ValueError(f"num_bits = {num_bits}, must be 4 or 8")
         self._four_bits = num_bits == 4
@@ -86,7 +91,9 @@ class BitsAndBytesQuantizer(Quantizer):
         if head_size % 2 == 1:
             raise ValueError(f"head_size {head_size}, must be even")
         bits_per_entry = num_bits + 2 * bits_for_torch_dtype(torch.float32)
-        self._bytes_per_entry = (batch_size * n_query_groups * head_size / 8) * bits_per_entry
+        self._bytes_per_entry = (
+            batch_size * n_query_groups * head_size / 8
+        ) * bits_per_entry
         self._init_blocksize_quant_shape()
         # Allocate buffers (optional)
         self.quant_buffer = None
@@ -116,15 +123,25 @@ class BitsAndBytesQuantizer(Quantizer):
                 # we keep the slots in the left-most dimension, where they are
                 # easiest to handle.
                 self.blocksize, reminder = self._determine_blocksize()
-                self._quant_shape = (cache_length, reminder, self.blocksize // fin_denom)
+                self._quant_shape = (
+                    cache_length,
+                    reminder,
+                    self.blocksize // fin_denom,
+                )
                 self.blocks_over_heads = True
             else:
                 self.blocksize = head_size
-                self._quant_shape = (batch_size * n_query_groups, cache_length, self.blocksize // fin_denom)
+                self._quant_shape = (
+                    batch_size * n_query_groups,
+                    cache_length,
+                    self.blocksize // fin_denom,
+                )
             if self.blocksize in ALLOWED_BLOCK_SIZE:
                 done = True
             elif not blocks_over_heads:
-                print(f"blocksize = {self.blocksize} not supported. Trying with blocks_over_heads=True.")
+                print(
+                    f"blocksize = {self.blocksize} not supported. Trying with blocks_over_heads=True."
+                )
                 blocks_over_heads = True
 
     def _determine_blocksize(self) -> Tuple[int, int]:
@@ -144,23 +161,33 @@ class BitsAndBytesQuantizer(Quantizer):
         device: Optional[torch.device] = None,
     ):
         if not (0 < batch_size <= self.max_batch_size):
-            raise ValueError(f"batch_size = {batch_size} must be in (0, {self.max_batch_size}]")
+            raise ValueError(
+                f"batch_size = {batch_size} must be in (0, {self.max_batch_size}]"
+            )
         if device is None:
             if self.buffers_are_allocated:
                 device = self.device
             else:
                 device = torch.get_default_device()
-        if not self.buffers_are_allocated or batch_size > self.shape[0] or device != self.device:
+        if (
+            not self.buffers_are_allocated
+            or batch_size > self.shape[0]
+            or device != self.device
+        ):
             if device is None:
                 raise ValueError("device is not set. Use device argument")
             self.shape = (batch_size,) + self.shape[1:]
             self._init_blocksize_quant_shape()
             shape = self._quant_shape
             self.quant_buffer = torch.zeros(
-                shape, dtype=self.target_dtype, device=device,
+                shape,
+                dtype=self.target_dtype,
+                device=device,
             )
             self.quant_absmax = torch.zeros(
-                shape[:-1], dtype=torch.float32, device=device,
+                shape[:-1],
+                dtype=torch.float32,
+                device=device,
             )
         self._batch_size = batch_size  # Effective batch size
 
@@ -191,7 +218,9 @@ class BitsAndBytesQuantizer(Quantizer):
         if not self.buffers_are_allocated:
             raise IndexError("Quantizer buffers are not allocated")
         if self.batch_size != values.shape[0]:
-            raise ValueError(f"batch_size = {self.batch_size}, values.shape[0] = {values.shape[0]}. Must be equal. Use `allocate_buffers` to adjust batch_size")
+            raise ValueError(
+                f"batch_size = {self.batch_size}, values.shape[0] = {values.shape[0]}. Must be equal. Use `allocate_buffers` to adjust batch_size"
+            )
         num_slots = end - start
         chunk_size = self._chunk_size(num_slots)
         quant_func = self._quantize_func()
@@ -212,20 +241,26 @@ class BitsAndBytesQuantizer(Quantizer):
                 _values = torch.cat(
                     (
                         values[:, :, lstart:lend, :],
-                        torch.zeros(add_shape, dtype=values.dtype, device=values.device),
+                        torch.zeros(
+                            add_shape, dtype=values.dtype, device=values.device
+                        ),
                     ),
                     dim=0,
                 )
             if self.blocks_over_heads:
                 _values = _values.transpose(0, 2)
             _values = _values.reshape(
-                -1, self.blocksize,
+                -1,
+                self.blocksize,
             ).contiguous()
             q_x, quant_state = quant_func(_values)
             curr_end = curr_start + csize
             if self.blocks_over_heads:
                 q_x = q_x.view(csize, -1, final_dim)
-                assert q_x.shape[1] == self.quant_buffer.shape[1], (q_x.shape, self.quant_buffer.shape)
+                assert q_x.shape[1] == self.quant_buffer.shape[1], (
+                    q_x.shape,
+                    self.quant_buffer.shape,
+                )
                 absmax = quant_state.absmax.view(csize, -1)
                 assert absmax.shape[-1] == self.quant_absmax.shape[-1]
                 # Look at [curr_start, curr_end)
@@ -233,7 +268,10 @@ class BitsAndBytesQuantizer(Quantizer):
                 self.quant_absmax[curr_start:curr_end, :] = absmax
             else:
                 q_x = q_x.view(-1, csize, final_dim)
-                assert q_x.shape[0] == self.quant_buffer.shape[0], (q_x.shape, self.quant_buffer.shape)
+                assert q_x.shape[0] == self.quant_buffer.shape[0], (
+                    q_x.shape,
+                    self.quant_buffer.shape,
+                )
                 absmax = quant_state.absmax.view(-1, csize)
                 assert absmax.shape[0] == self.quant_absmax.shape[0]
                 # Look at [curr_start, curr_end)
@@ -280,22 +318,25 @@ class BitsAndBytesQuantizer(Quantizer):
             del qq_x
             if self.blocks_over_heads:
                 _out = _out.reshape(
-                    csize, self.shape[1], self.shape[0], self.shape[3],
+                    csize,
+                    self.shape[1],
+                    self.shape[0],
+                    self.shape[3],
                 ).transpose(0, 2)
             else:
                 _out = _out.reshape(*self.shape[:2], csize, self.shape[3])
             if out is not None:
-                out[:, :, lstart:lend, :] = _out[:self.batch_size, ...]
+                out[:, :, lstart:lend, :] = _out[: self.batch_size, ...]
                 del _out
             else:
-                out_parts.append(_out[:self.batch_size, ...])
+                out_parts.append(_out[: self.batch_size, ...])
         if out is not None:
             return out
         else:
             return torch.cat(out_parts, dim=-2)
 
     def _chunk_size(self, num_slots: int) -> int:
-        max_tmp_sizes_bytes = self.tmp_array_limit_gb_value() * (2 ** 30)
+        max_tmp_sizes_bytes = self.tmp_array_limit_gb_value() * (2**30)
         return max(
             min(num_slots, int(max_tmp_sizes_bytes / self._bytes_per_entry)),
             1,
@@ -308,6 +349,7 @@ class BitsAndBytesQuantizer(Quantizer):
             quant_func = partial(quantize_4bit, blocksize=self.blocksize)
         else:
             from bitsandbytes.functional import quantize_blockwise
+
             quant_func = partial(quantize_blockwise, blocksize=self.blocksize)
 
         return quant_func
@@ -315,15 +357,19 @@ class BitsAndBytesQuantizer(Quantizer):
     def _dequantize_func(self) -> callable:
         if self._four_bits:
             from bitsandbytes.functional import dequantize_4bit
+
             dequant_func = partial(dequantize_4bit, blocksize=self.blocksize)
         else:
             from bitsandbytes.functional import dequantize_blockwise
+
             dequant_func = partial(dequantize_blockwise, blocksize=self.blocksize)
 
         return dequant_func
 
     def _get_quantstate(
-        self, absmax: torch.Tensor, shape: Tuple[int, ...],
+        self,
+        absmax: torch.Tensor,
+        shape: Tuple[int, ...],
     ):
         from bitsandbytes.functional import QuantState
 
@@ -345,7 +391,8 @@ class BitsAndBytesQuantizer(Quantizer):
 
     @staticmethod
     def size_estimate_apriori(
-        params: KVCacheBuffersParams, **kwargs,
+        params: KVCacheBuffersParams,
+        **kwargs,
     ) -> Tuple[int, Dict[str, int]]:
         cache_length = kwargs.get("cache_length")
         if cache_length is None:
@@ -420,17 +467,23 @@ class BitsAndBytesQuantizerState(QuantizerState):
         cache_length: Optional[int] = None,
     ):
         if not isinstance(quantizer, BitsAndBytesQuantizer):
-            raise ValueError(f"type(quantizer) = {type(quantizer)}, must be BitsAndBytesQuantizer")
+            raise ValueError(
+                f"type(quantizer) = {type(quantizer)}, must be BitsAndBytesQuantizer"
+            )
         super().__init__(quantizer, device, cache_length)
         # Create buffers
         shape = list(quantizer._quant_shape)
         pos = 0 if self.quantizer.blocks_over_heads else 1
         shape[pos] = self.cache_length
         self.quant_buffer = torch.zeros(
-            shape, dtype=quantizer.target_dtype, device=self.device,
+            shape,
+            dtype=quantizer.target_dtype,
+            device=self.device,
         )
         self.quant_absmax = torch.zeros(
-            shape[:-1], dtype=torch.float32, device=self.device,
+            shape[:-1],
+            dtype=torch.float32,
+            device=self.device,
         )
 
     def copy_(
@@ -444,12 +497,20 @@ class BitsAndBytesQuantizerState(QuantizerState):
         # Due to changing `batch_size`, the dimension may be smaller
         if self.quantizer.blocks_over_heads:
             dim1 = self.quantizer.quant_buffer.shape[1]
-            self.quant_buffer[start:end, :dim1, :] = self.quantizer.quant_buffer[start:end, :, :]
-            self.quant_absmax[start:end, :dim1] = self.quantizer.quant_absmax[start:end, :]
+            self.quant_buffer[start:end, :dim1, :] = self.quantizer.quant_buffer[
+                start:end, :, :
+            ]
+            self.quant_absmax[start:end, :dim1] = self.quantizer.quant_absmax[
+                start:end, :
+            ]
         else:
             dim0 = self.quantizer.quant_buffer.shape[0]
-            self.quant_buffer[:dim0, start:end, :] = self.quantizer.quant_buffer[:, start:end, :]
-            self.quant_absmax[:dim0, start:end] = self.quantizer.quant_absmax[:, start:end]
+            self.quant_buffer[:dim0, start:end, :] = self.quantizer.quant_buffer[
+                :, start:end, :
+            ]
+            self.quant_absmax[:dim0, start:end] = self.quantizer.quant_absmax[
+                :, start:end
+            ]
 
     def restore(
         self,
@@ -462,9 +523,17 @@ class BitsAndBytesQuantizerState(QuantizerState):
         # Due to changing `batch_size`, the 0 dimension may be smaller
         if self.quantizer.blocks_over_heads:
             dim1 = self.quantizer.quant_buffer.shape[1]
-            self.quantizer.quant_buffer[start:end, :, :] = self.quant_buffer[start:end, :dim1, :]
-            self.quantizer.quant_absmax[start:end, :] = self.quant_absmax[start:end, :dim1]
+            self.quantizer.quant_buffer[start:end, :, :] = self.quant_buffer[
+                start:end, :dim1, :
+            ]
+            self.quantizer.quant_absmax[start:end, :] = self.quant_absmax[
+                start:end, :dim1
+            ]
         else:
             dim0 = self.quantizer.quant_buffer.shape[0]
-            self.quantizer.quant_buffer[:, start:end, :] = self.quant_buffer[:dim0, start:end, :]
-            self.quantizer.quant_absmax[:, start:end] = self.quant_absmax[:dim0, start:end]
+            self.quantizer.quant_buffer[:, start:end, :] = self.quant_buffer[
+                :dim0, start:end, :
+            ]
+            self.quantizer.quant_absmax[:, start:end] = self.quant_absmax[
+                :dim0, start:end
+            ]

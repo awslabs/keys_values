@@ -95,9 +95,9 @@ def test_gradient_sharded(
     # Note: `lora_dropout = 0` essential here!
     config_dict.update(
         dict(
-            lora_r = 8,
-            lora_alpha = 16,
-            lora_dropout = 0.0,
+            lora_r=8,
+            lora_alpha=16,
+            lora_dropout=0.0,
             lora_query=True,
             lora_key=False,
             lora_value=True,
@@ -192,9 +192,7 @@ def test_gradient_sharded(
         loss = model(input_ids, targets)
         loss.backward()
         loss_values.append(loss.detach())
-        gradients.append(
-            copy_gradients(model.gpt_model, device=torch.device("cpu"))
-        )
+        gradients.append(copy_gradients(model.gpt_model, device=torch.device("cpu")))
         if debug_store_intermediates:
             debug_intermediates.append(model.debug_intermediates)
     # Compare the two
@@ -205,14 +203,18 @@ def test_gradient_sharded(
         for name, value in debug_intermediates[0].items():
             value_comp = debug_intermediates[1].get(name)
             if value_comp is None:
-                raise IndexError(f"name = {name} is in debug_intermediates[0], but not in debug_intermediates[1]")
+                raise IndexError(
+                    f"name = {name} is in debug_intermediates[0], but not in debug_intermediates[1]"
+                )
             print(name)
             torch.testing.assert_close(value, value_comp)
     print("\nComparing gradients:")
     for name, value in gradients[0].items():
         value_comp = gradients[1].get(name)
         if value_comp is None:
-            raise IndexError(f"name = {name} is in gradients[0], but not in gradients[1]")
+            raise IndexError(
+                f"name = {name} is in gradients[0], but not in gradients[1]"
+            )
         print(name)
         if use_debug_gpt_model:
             value_debug = debug_gpt_model.get_parameter(name).grad.data.to(
@@ -239,7 +241,8 @@ def compute_gradients_on_device(
         lm_head=head_model.needs_logits(),
     )
     gpt_model_on_device = clone_model_shard_via_flat_vectors(
-        shard_type=None, **cmsod_kwargs,
+        shard_type=None,
+        **cmsod_kwargs,
     )
     gpt_model_on_device.train()
     input_ids = input_ids.to(device=cpu_offload_device)
@@ -264,7 +267,8 @@ def compute_gradients_on_device(
         x = copy_requires_grad(layer_input)
         shard_type = f"h{layer_idx}:{layer_idx + 1}"
         shard_on_device = clone_model_shard_via_flat_vectors(
-            shard_type=shard_type, **cmsod_kwargs,
+            shard_type=shard_type,
+            **cmsod_kwargs,
         )
         model_part = GPTShardCellBlock(shard_on_device)
         output = model_part.forward(x, input_ids)
@@ -305,9 +309,9 @@ def test_gradient_sharded_simple():
     # Note: `lora_dropout = 0` essential here!
     config_dict.update(
         dict(
-            lora_r = 8,
-            lora_alpha = 16,
-            lora_dropout = 0.0,
+            lora_r=8,
+            lora_alpha=16,
+            lora_dropout=0.0,
             lora_query=True,
             lora_key=False,
             lora_value=True,
@@ -370,9 +374,7 @@ def test_gradient_sharded_simple():
             loss = head_model(outputs, targets, input_pos=0).mean()
             loss.backward()
             loss_values.append(loss.detach())
-            gradients.append(
-                copy_gradients(gpt_model, device=torch.device("cpu"))
-            )
+            gradients.append(copy_gradients(gpt_model, device=torch.device("cpu")))
     # Compare the two
     print("\nComparing loss values:")
     torch.testing.assert_close(loss_values[0], loss_values[1])
@@ -380,7 +382,9 @@ def test_gradient_sharded_simple():
     for name, value in gradients[0].items():
         value_comp = gradients[1].get(name)
         if value_comp is None:
-            raise IndexError(f"name = {name} is in gradients[0], but not in gradients[1]")
+            raise IndexError(
+                f"name = {name} is in gradients[0], but not in gradients[1]"
+            )
         print(f"Comparing gradient for {name}")
         torch.testing.assert_close(value, value_comp)
 

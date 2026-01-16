@@ -32,7 +32,8 @@ from keys_values.model import GPT
 
 def args_layer_input_quantized_checkpoints() -> List[tuple]:
     names_devices = [
-        tup for tup in cache_names_and_devices()
+        tup
+        for tup in cache_names_and_devices()
         if split_name(tup[0])[0] == "lastrec" and split_name(tup[0])[1] != "default"
     ]
     setups = [
@@ -42,12 +43,16 @@ def args_layer_input_quantized_checkpoints() -> List[tuple]:
     ]
     return [a + b for a, b in product(names_devices, setups)]
 
+
 @pytest.mark.parametrize(
     "cache_name, device, chunk_size, max_seq_length",
     args_layer_input_quantized_checkpoints(),
 )
 def test_layer_input_quantized_checkpoints(
-    cache_name, device, chunk_size, max_seq_length,
+    cache_name,
+    device,
+    chunk_size,
+    max_seq_length,
 ):
     seed = 31415927
     random.seed(seed)
@@ -117,11 +122,14 @@ def test_layer_input_quantized_checkpoints(
         # Modify and compare
         results = []
         for cp in checkpoints:
-            assert cp.set_checkpoint(
-                layer_idx=0,
-                buffers=buffers,
-                input_pos=set_input_pos,
-            ) == 0
+            assert (
+                cp.set_checkpoint(
+                    layer_idx=0,
+                    buffers=buffers,
+                    input_pos=set_input_pos,
+                )
+                == 0
+            )
             results.append(
                 cp.get_checkpoint(
                     layer_idx=0,

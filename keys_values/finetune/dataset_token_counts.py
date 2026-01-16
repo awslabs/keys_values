@@ -49,12 +49,12 @@ DATASETS = {
 def format_text(example: Dict[str, str], dataset: str) -> str:
     if dataset == "alpaca":
         text = f"Instruction: {example['instruction']}"
-        if example['input']:
+        if example["input"]:
             text += f"\nInput: {example['input']}"
         text += f"\nOutput: {example['output']}"
     else:
         # From https://huggingface.co/datasets/THUDM/LongBench-v2:
-        #{
+        # {
         #    "_id": "Unique identifier for each piece of data",
         #    "domain": "The primary domain category of the data",
         #    "sub_domain": "The specific sub-domain category within the domain",
@@ -64,7 +64,7 @@ def format_text(example: Dict[str, str], dataset: str) -> str:
         #    "choice_A": "Option A", "choice_B": "Option B", "choice_C": "Option C", "choice_D": "Option D",
         #    "answer": "The groundtruth answer, denoted as A, B, C, or D",
         #    "context": "The long context required for the task, such as documents, books, code repositories, etc."
-        #}
+        # }
         #
         # Prompt is from:
         # https://github.com/THUDM/LongBench/blob/main/prompts/0shot.txt
@@ -83,7 +83,7 @@ def format_text(example: Dict[str, str], dataset: str) -> str:
                 f"(C) {example['choice_C']}",
                 f"(D) {example['choice_D']}",
                 "",
-                "Format your response as follows: \"The correct answer is (insert answer here)\".",
+                'Format your response as follows: "The correct answer is (insert answer here)".',
                 "",
                 "Answer:",
                 f"The correct answer is {example['answer']}",
@@ -102,7 +102,7 @@ def count_tokens_in_alpaca(dataset: str):
         # Get the training split
         train_data = alpaca_dataset["train"]
     else:
-        train_data = load_dataset(DATASETS[dataset], split='train')
+        train_data = load_dataset(DATASETS[dataset], split="train")
 
     # Initialize a list to store token counts
     token_counts = []

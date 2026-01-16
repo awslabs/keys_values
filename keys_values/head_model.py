@@ -29,6 +29,7 @@ class HeadModel(torch.nn.Module):
     Supports computation in chunks, see :meth:`forward`.
 
     """
+
     def __init__(self):
         super().__init__()
 
@@ -70,9 +71,7 @@ class HeadModel(torch.nn.Module):
         """
         raise NotImplementedError()
 
-    def num_target_entries(
-        self, targets: Optional[torch.Tensor]
-    ) -> Optional[int]:
+    def num_target_entries(self, targets: Optional[torch.Tensor]) -> Optional[int]:
         """
         This is used in order to ensure correct combination of the loss value
         parts returned by :meth:`forward` over all chunks. Namely, if
@@ -93,14 +92,20 @@ class HeadModel(torch.nn.Module):
         final_dim: int,
     ) -> Optional[int]:
         if model_outputs.ndim != 3 or model_outputs.shape[-1] != final_dim:
-            raise ValueError(f"model_outputs.shape = {model_outputs.shape}, must be 3D and final size must be {final_dim}")
+            raise ValueError(
+                f"model_outputs.shape = {model_outputs.shape}, must be 3D and final size must be {final_dim}"
+            )
         if targets is None:
             return None
         if targets.ndim != 2 or targets.shape[0] != model_outputs.shape[0]:
-            raise ValueError(f"model_outputs.shape = {model_outputs.shape}, targets.shape = {targets.shape}: Not compatible")
+            raise ValueError(
+                f"model_outputs.shape = {model_outputs.shape}, targets.shape = {targets.shape}: Not compatible"
+            )
         diff = model_outputs.shape[-2] - targets.shape[-1]
         if diff < 0:
-            raise ValueError(f"model_outputs.length = {model_outputs.shape[-2]}, must not be smaller than targets.length = {targets.shape[-1]}")
+            raise ValueError(
+                f"model_outputs.length = {model_outputs.shape[-2]}, must not be smaller than targets.length = {targets.shape[-1]}"
+            )
         return diff
 
     def _empty_clone(self, device: Optional[torch.device] = None) -> "HeadModel":
@@ -154,6 +159,7 @@ class CrossEntropyOnLogits(HeadModel):
     prompt, we also mask out the tool outputs in `targets`.
 
     """
+
     NAME = "next_token_prediction"
 
     def __init__(
@@ -175,7 +181,9 @@ class CrossEntropyOnLogits(HeadModel):
         input_pos: int,
     ) -> torch.Tensor:
         diff = self._check_model_outputs_targets(
-            model_outputs, targets, final_dim=self._vocab_size,
+            model_outputs,
+            targets,
+            final_dim=self._vocab_size,
         )
         if diff is not None:
             logits = model_outputs[:, diff:, :]
@@ -193,15 +201,13 @@ class CrossEntropyOnLogits(HeadModel):
                 dtype=model_outputs.dtype,
             )
 
-    def num_target_entries(
-        self, targets: Optional[torch.Tensor]
-    ) -> Optional[int]:
+    def num_target_entries(self, targets: Optional[torch.Tensor]) -> Optional[int]:
         """
         This is the sum of entries not equal to `_ignore_index`.
 
         """
-        return 0 if targets is None else int(
-            targets.ne(self._ignore_index).sum().item()
+        return (
+            0 if targets is None else int(targets.ne(self._ignore_index).sum().item())
         )
 
     def _empty_clone(self, device: Optional[torch.device] = None) -> "HeadModel":
@@ -209,12 +215,14 @@ class CrossEntropyOnLogits(HeadModel):
         config.padded_vocab_size = self._vocab_size
         if device is None:
             model_copy = CrossEntropyOnLogits(
-                config, ignore_index=self._ignore_index,
+                config,
+                ignore_index=self._ignore_index,
             )
         else:
             with torch.device(device):
                 model_copy = CrossEntropyOnLogits(
-                    config, ignore_index=self._ignore_index,
+                    config,
+                    ignore_index=self._ignore_index,
                 )
         return model_copy
 
@@ -238,6 +246,7 @@ class SequenceClassificationOnLogits(HeadModel):
     vocabulary are determined.
 
     """
+
     NAME = "seq_classification_on_logits"
 
     def __init__(
@@ -249,11 +258,19 @@ class SequenceClassificationOnLogits(HeadModel):
         self._vocab_size = config.padded_vocab_size
         self.num_classes = len(class_label_tokens)
         if self.num_classes < 2:
-            raise ValueError(f"class_label_tokens = {class_label_tokens} must have at least 2 elements")
-        if not all(x == int(x) and 0 <= x < self._vocab_size for x in class_label_tokens):
-            raise ValueError(f"class_label_tokens = {class_label_tokens} must be in [0, {self._vocab_size})")
+            raise ValueError(
+                f"class_label_tokens = {class_label_tokens} must have at least 2 elements"
+            )
+        if not all(
+            x == int(x) and 0 <= x < self._vocab_size for x in class_label_tokens
+        ):
+            raise ValueError(
+                f"class_label_tokens = {class_label_tokens} must be in [0, {self._vocab_size})"
+            )
         if len(set(class_label_tokens)) != self.num_classes:
-            raise ValueError(f"class_label_tokens = {class_label_tokens} must not have duplicates")
+            raise ValueError(
+                f"class_label_tokens = {class_label_tokens} must not have duplicates"
+            )
         self.class_label_tokens = tuple(class_label_tokens)
 
     def needs_logits(self) -> bool:
@@ -274,7 +291,9 @@ class SequenceClassificationOnLogits(HeadModel):
         if targets.shape[-1] != 1:
             raise ValueError(f"targets.length = {targets.shape[-1]}, must be 1")
         diff = self._check_model_outputs_targets(
-            model_outputs, targets, final_dim=self._vocab_size,
+            model_outputs,
+            targets,
+            final_dim=self._vocab_size,
         )
         selected_logits = model_outputs[:, diff:, self.class_label_tokens]
         losses = F.cross_entropy(
@@ -284,9 +303,7 @@ class SequenceClassificationOnLogits(HeadModel):
         )
         return losses.view(*selected_logits.shape[:2]).mean(dim=-1)
 
-    def num_target_entries(
-        self, targets: Optional[torch.Tensor]
-    ) -> Optional[int]:
+    def num_target_entries(self, targets: Optional[torch.Tensor]) -> Optional[int]:
         return None
 
     def _empty_clone(self, device: Optional[torch.device] = None) -> "HeadModel":
@@ -294,12 +311,14 @@ class SequenceClassificationOnLogits(HeadModel):
         config.padded_vocab_size = self._vocab_size
         if device is None:
             model_copy = SequenceClassificationOnLogits(
-                config, class_label_tokens=list(self.class_label_tokens),
+                config,
+                class_label_tokens=list(self.class_label_tokens),
             )
         else:
             with torch.device(device):
                 model_copy = SequenceClassificationOnLogits(
-                    config, class_label_tokens=list(self.class_label_tokens),
+                    config,
+                    class_label_tokens=list(self.class_label_tokens),
                 )
         return model_copy
 
@@ -318,6 +337,7 @@ class SequenceClassification(HeadModel):
     - "mean": Mean of output embeddings for all tokens
 
     """
+
     NAME = "seq_classification"
 
     def __init__(
@@ -330,7 +350,9 @@ class SequenceClassification(HeadModel):
         if num_classes < 2:
             raise ValueError(f"num_classes = {num_classes} must be >= 2")
         if pool_type not in SUPPORTED_POOL_TYPES:
-            raise ValueError(f"pool_type = {pool_type} must be one of {SUPPORTED_POOL_TYPES}")
+            raise ValueError(
+                f"pool_type = {pool_type} must be one of {SUPPORTED_POOL_TYPES}"
+            )
         self.num_classes = num_classes
         self.n_embd = config.n_embd
         self.pool_type = pool_type
@@ -348,7 +370,9 @@ class SequenceClassification(HeadModel):
         input_pos: int,
     ) -> Union[torch.Tensor, float]:
         self._check_model_outputs_targets(
-            model_outputs, targets, final_dim=self.n_embd,
+            model_outputs,
+            targets,
+            final_dim=self.n_embd,
         )
         if targets is not None and targets.shape[-1] != 1:
             raise ValueError(f"targets.length = {targets.shape[-1]}, must be 1")
@@ -360,9 +384,13 @@ class SequenceClassification(HeadModel):
             self._num_tokens = 0
         else:
             assert self._num_tokens is not None, "First call must be with input_pos=0"
-            assert input_pos == self._num_tokens, f"input_pos = {input_pos} != {self._num_tokens} = num_tokens"
+            assert (
+                input_pos == self._num_tokens
+            ), f"input_pos = {input_pos} != {self._num_tokens} = num_tokens"
         if self.pool_type == "mean":
-            self._accumulated_state = model_outputs.sum(dim=-2) + self._accumulated_state
+            self._accumulated_state = (
+                model_outputs.sum(dim=-2) + self._accumulated_state
+            )
         self._num_tokens += num
         if targets is None:
             return 0
@@ -380,9 +408,7 @@ class SequenceClassification(HeadModel):
         )
         return losses.view(*logits.shape[:2]).mean(dim=-1)
 
-    def num_target_entries(
-        self, targets: Optional[torch.Tensor]
-    ) -> Optional[int]:
+    def num_target_entries(self, targets: Optional[torch.Tensor]) -> Optional[int]:
         return None
 
     def _empty_clone(self, device: Optional[torch.device] = None) -> "HeadModel":
@@ -390,11 +416,15 @@ class SequenceClassification(HeadModel):
         config.n_embd = self.n_embd
         if device is None:
             model_copy = SequenceClassification(
-                config, num_classes=self.num_classes, pool_type=self.pool_type,
+                config,
+                num_classes=self.num_classes,
+                pool_type=self.pool_type,
             )
         else:
             with torch.device(device):
                 model_copy = SequenceClassification(
-                    config, num_classes=self.num_classes, pool_type=self.pool_type,
+                    config,
+                    num_classes=self.num_classes,
+                    pool_type=self.pool_type,
                 )
         return model_copy

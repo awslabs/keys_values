@@ -38,6 +38,7 @@ class KVCacheParams:
     call, based on the input arguments.
 
     """
+
     max_batch_size: int
     n_query_groups: int
     cache_length: int
@@ -96,6 +97,7 @@ class KVCache(torch.nn.Module):
         a reference implementation of :meth:`forward` based on this.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -311,7 +313,9 @@ class KVCache(torch.nn.Module):
         raise NotImplementedError()
 
     @classmethod
-    def size_estimate_apriori(cls, params: KVCacheParams, **kwargs) -> Tuple[int, Dict[str, int]]:
+    def size_estimate_apriori(
+        cls, params: KVCacheParams, **kwargs
+    ) -> Tuple[int, Dict[str, int]]:
         """
         Same semantics as :meth:`size_estimate`, but can be called without a
         cache being created. Results may not be exactly the same, but should
@@ -395,6 +399,7 @@ class DefaultKVCache(KVCache):
     :class:`KVCacheWithBuffers`.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -424,7 +429,8 @@ class DefaultKVCache(KVCache):
         )
         if mha is None:
             self.mha = MultiHeadSelfAttention(
-                config, **transform_mha_kwargs(mha_kwargs, config),
+                config,
+                **transform_mha_kwargs(mha_kwargs, config),
             )
         else:
             self.mha = mha
@@ -466,14 +472,22 @@ class DefaultKVCache(KVCache):
         batch_size, _, num, _ = query.shape
         if for_prefill:
             if not (1 <= batch_size <= self.max_batch_size):
-                raise ValueError(f"query.shape[0] = {batch_size}, must be in [1, {self.max_batch_size}]")
+                raise ValueError(
+                    f"query.shape[0] = {batch_size}, must be in [1, {self.max_batch_size}]"
+                )
             if not (1 <= num <= self.max_prefill_length):
-                raise ValueError(f"query.shape[2] = {num}, must be in [1, {self.max_prefill_length}]")
+                raise ValueError(
+                    f"query.shape[2] = {num}, must be in [1, {self.max_prefill_length}]"
+                )
         else:
             if batch_size != self.batch_size:
-                raise ValueError(f"query.shape[0] = {batch_size} != batch_size = {self.batch_size}")
+                raise ValueError(
+                    f"query.shape[0] = {batch_size} != batch_size = {self.batch_size}"
+                )
             if not (1 <= num <= self.max_forward_length()):
-                raise ValueError(f"query.shape[2] = {num}, must be in [1, {self.max_forward_length()}]")
+                raise ValueError(
+                    f"query.shape[2] = {num}, must be in [1, {self.max_forward_length()}]"
+                )
         q_shape = (batch_size, self.n_head, num, self.head_size)
         if query.shape != q_shape:
             raise ValueError(f"query.shape = {query.shape}, must be {q_shape}")
@@ -508,11 +522,15 @@ class DefaultKVCache(KVCache):
                 x = getattr(self, name, None)
                 if x is not None:
                     if not isinstance(x, torch.Tensor):
-                        raise AssertionError(f"Internal error in _convert_or_check_device: {name} must be of type torch.Tensor")
+                        raise AssertionError(
+                            f"Internal error in _convert_or_check_device: {name} must be of type torch.Tensor"
+                        )
                     if x.device != new_device:
                         setattr(self, name, x.to(new_device))
         elif new_device != self._device:
-            raise ValueError(f"Arguments on device {new_device}, must be on {self._device}")
+            raise ValueError(
+                f"Arguments on device {new_device}, must be on {self._device}"
+            )
 
     @classmethod
     def _parameter_names(cls) -> List[str]:
@@ -693,6 +711,7 @@ class KVCacheReplayLog:
     Log information is stored on the same device as the cache supplying it.
 
     """
+
     @property
     def token_chunks(self) -> List[torch.Tensor]:
         """
@@ -757,21 +776,21 @@ class KVCacheReplayLog:
         **kwargs,
     ) -> torch.Tensor:
         """
-        Returns slice of the slot position index, of shape
-        `(batch_size, n_query_groups, num)` and values in
-        `[0, cache_length)`. The slot position index contains the slot
-        insert position for every token, which also depends on position in
-        batch and query group.
+                Returns slice of the slot position index, of shape
+                `(batch_size, n_query_groups, num)` and values in
+                `[0, cache_length)`. The slot position index contains the slot
+                insert position for every token, which also depends on position in
+                batch and query group.
 
-        Args:
-            token_pos: Token position where slice starts. Must be
--               `>= cache_length`.
-            num: Length of slice
-            **kwargs: Dtype and device for the returned tensor. The default
-                device is the one of the token chunks.
+                Args:
+                    token_pos: Token position where slice starts. Must be
+        -               `>= cache_length`.
+                    num: Length of slice
+                    **kwargs: Dtype and device for the returned tensor. The default
+                        device is the one of the token chunks.
 
-        Returns:
-            See above.
+                Returns:
+                    See above.
 
         """
         raise NotImplementedError
@@ -814,7 +833,11 @@ class DefaultKVCacheReplayLog(KVCacheReplayLog):
         if self.token_chunks:
             other = self.token_chunks[-1]
             if other.ndim != chunk.ndim or other.shape[:-1] != chunk.shape[:-1]:
-                raise ValueError(f"chunk has wrong shape: chunk.shape={chunk.shape}, other.shape={other.shape}")
+                raise ValueError(
+                    f"chunk has wrong shape: chunk.shape={chunk.shape}, other.shape={other.shape}"
+                )
             if other.device != chunk.device:
-                raise ValueError(f"chunk has wrong device: chunk.device={chunk.device}, other.device={other.device}")
+                raise ValueError(
+                    f"chunk has wrong device: chunk.device={chunk.device}, other.device={other.device}"
+                )
         self.token_chunks.append(chunk.detach().clone())

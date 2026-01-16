@@ -26,6 +26,7 @@ class PositionEncoding:
     context width.
 
     """
+
     def __call__(
         self,
         x: torch.Tensor,
@@ -89,6 +90,7 @@ class LinearPositionEncoding(PositionEncoding):
     attention scale factor, as used (for example) in Gemma-2 and Gemma-3.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -178,21 +180,25 @@ class LinearPositionEncoding(PositionEncoding):
         block_idx: int,
     ) -> torch.Tensor:
         if x.ndim < 2 or x.shape[-1] != self.n_elem:
-            raise ValueError(f"x.shape = {x.shape}, must be at least 2D, and last dimension must be {self.n_elem}")
+            raise ValueError(
+                f"x.shape = {x.shape}, must be at least 2D, and last dimension must be {self.n_elem}"
+            )
         x_len = x.shape[-2]
         if input_pos < 0 or input_pos + x_len > self.context_width:
-            raise ValueError(f"input_pos = {input_pos}, x_len = {x_len} (x.shape = {x.shape}), must have 0 <= input_pos, input_pos + x_len <= {self.context_width}")
+            raise ValueError(
+                f"input_pos = {input_pos}, x_len = {x_len} (x.shape = {x.shape}), must have 0 <= input_pos, input_pos + x_len <= {self.context_width}"
+            )
         if x.device != self._cos.device:
             self._device = x.device
             self._cos = self._cos.to(device=self._device)
             self._sin = self._sin.to(device=self._device)
         if self.rope_local_base_freq is None:
-            cos = self._cos[input_pos:(input_pos + x_len), :].unsqueeze(0)
-            sin = self._sin[input_pos:(input_pos + x_len), :].unsqueeze(0)
+            cos = self._cos[input_pos : (input_pos + x_len), :].unsqueeze(0)
+            sin = self._sin[input_pos : (input_pos + x_len), :].unsqueeze(0)
         else:
             ind = self.rope_indices[block_idx]
-            cos = self._cos[input_pos:(input_pos + x_len), :, ind].unsqueeze(0)
-            sin = self._sin[input_pos:(input_pos + x_len), :, ind].unsqueeze(0)
+            cos = self._cos[input_pos : (input_pos + x_len), :, ind].unsqueeze(0)
+            sin = self._sin[input_pos : (input_pos + x_len), :, ind].unsqueeze(0)
         return apply_rope(x=x, cos=cos, sin=sin)
 
 
@@ -209,6 +215,7 @@ class AdjustedPositionEncoding(LinearPositionEncoding):
     scale the encoding, different to :class:`YaRNPositionEncoding`.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -227,7 +234,9 @@ class AdjustedPositionEncoding(LinearPositionEncoding):
             raise ValueError("config.rope_adjustments must be given")
         self.train_context_width = config.rope_adjustments.get("original_max_seq_len")
         if self.train_context_width is None:
-            raise ValueError("Must have config.rope_adjustments['original_max_seq_len']")
+            raise ValueError(
+                "Must have config.rope_adjustments['original_max_seq_len']"
+            )
         assert self._fixed_factor is not None  # Sanity check
         alpha = config.rope_adjustments.get("low_freq_factor")
         beta = config.rope_adjustments.get("high_freq_factor")
@@ -236,7 +245,9 @@ class AdjustedPositionEncoding(LinearPositionEncoding):
         if beta is None:
             beta = DEFAULT_YARN_BETA
         if not (0 < alpha < beta):
-            raise ValueError(f"alpha = {alpha}, beta = {beta}: Must be 0 < alpha < beta")
+            raise ValueError(
+                f"alpha = {alpha}, beta = {beta}: Must be 0 < alpha < beta"
+            )
         self.alpha = alpha
         self.beta = beta
         if config.attention_scores_scalar is not None:
@@ -265,6 +276,7 @@ class YaRNPositionEncoding(LinearPositionEncoding):
         ICLR 2024
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -299,12 +311,16 @@ class YaRNPositionEncoding(LinearPositionEncoding):
             _alpha = config.rope_adjustments.get("low_freq_factor")
             if _alpha is not None:
                 if alpha is not None and alpha != _alpha:
-                    raise ValueError("Cannot have config.rope_adjustments['low_freq_factor'] and alpha")
+                    raise ValueError(
+                        "Cannot have config.rope_adjustments['low_freq_factor'] and alpha"
+                    )
                 alpha = _alpha
             _beta = config.rope_adjustments.get("high_freq_factor")
             if _beta is not None:
                 if beta is not None and beta != _beta:
-                    raise ValueError("Cannot have config.rope_adjustments['high_freq_factor'] and beta")
+                    raise ValueError(
+                        "Cannot have config.rope_adjustments['high_freq_factor'] and beta"
+                    )
                 beta = _beta
             train_context_width = config.rope_adjustments.get("original_max_seq_len")
             factor = config.rope_adjustments.get("factor")
@@ -324,7 +340,9 @@ class YaRNPositionEncoding(LinearPositionEncoding):
         if beta is None:
             beta = DEFAULT_YARN_BETA
         if not (0 < alpha < beta):
-            raise ValueError(f"alpha = {alpha}, beta = {beta}: Must be 0 < alpha < beta")
+            raise ValueError(
+                f"alpha = {alpha}, beta = {beta}: Must be 0 < alpha < beta"
+            )
         self.alpha = alpha
         self.beta = beta
         self._sdpa_scale_factor = None

@@ -33,7 +33,7 @@ from keys_values.kvcache.utils import (
 from keys_values.model import GPT
 
 
-HEAD_OR_INITIAL_TENSORS_MAX_BYTES = 2 ** 31
+HEAD_OR_INITIAL_TENSORS_MAX_BYTES = 2**31
 
 CLOSEBY_THRESHOLD = 4
 
@@ -86,7 +86,10 @@ def create_chunk_sizes(
             num_done += c_size
     assert sum(chunk_sizes) == seq_length  # Sanity check
     _assert_chunk_sizes(
-        chunk_sizes, gpt_model, chunk_size, randomize_chunk_sizes,
+        chunk_sizes,
+        gpt_model,
+        chunk_size,
+        randomize_chunk_sizes,
     )
     return chunk_sizes
 
@@ -97,9 +100,7 @@ def _assert_chunk_sizes(
     chunk_size: int,
     randomize_chunk_sizes: bool,
 ):
-    cache_lengths = [
-        cache.cache_length for cache in gpt_model.get_kv_caches()
-    ]
+    cache_lengths = [cache.cache_length for cache in gpt_model.get_kv_caches()]
     min_cat_length = chunk_sizes[0]
     shape_lengths: Set[int] = set()
     for cache_length in set(cache_lengths):
@@ -184,6 +185,7 @@ class ChunksForCell:
     Structure of grouping of chunks into a cell. :func:`get_chunks_for_cells`
     computes this from `chunks_per_cell` and `chunk_sizes`, over all cells.
     """
+
     input_range: Tuple[int, int]
     first_chunk_idx: int
     chunk_ranges: List[Tuple[int, int]]
@@ -192,9 +194,7 @@ class ChunksForCell:
         assert self.chunk_ranges[0][0] == 0
         assert all(a < b for a, b in self.chunk_ranges)
         assert all(
-            a[1] == b[0] for a, b in zip(
-                self.chunk_ranges[:-1], self.chunk_ranges[1:]
-            )
+            a[1] == b[0] for a, b in zip(self.chunk_ranges[:-1], self.chunk_ranges[1:])
         )
         assert self.chunk_ranges[-1][1] == self.input_range[1] - self.input_range[0]
 
@@ -225,7 +225,7 @@ def get_chunks_for_cells(
         ChunksForCell(
             input_range=input_range,
             first_chunk_idx=first,
-            chunk_ranges=get_chunk_ranges(chunk_sizes[first:(first + num)]),
+            chunk_ranges=get_chunk_ranges(chunk_sizes[first : (first + num)]),
         )
         for input_range, first, num in zip(
             input_ranges,
@@ -301,12 +301,14 @@ def compute_loss_with_limited_logits_tensor(
     config = gpt_model.config
     batch_size, chunk_size, _ = model_outputs_for_chunk.shape
     weights_dtype = gpt_model.transformer.wte.weight.dtype
-    bytes_per_token = batch_size * config.padded_vocab_size * bytes_for_torch_dtype(weights_dtype)
+    bytes_per_token = (
+        batch_size * config.padded_vocab_size * bytes_for_torch_dtype(weights_dtype)
+    )
     max_chunk_size = max(HEAD_OR_INITIAL_TENSORS_MAX_BYTES // bytes_per_token, 1)
     loss_all = 0
     for off in range(0, chunk_size, max_chunk_size):
         len = min(off + max_chunk_size, chunk_size) - off
-        x = gpt_model.lm_head(model_outputs_for_chunk[:, off:(off + len), :])
+        x = gpt_model.lm_head(model_outputs_for_chunk[:, off : (off + len), :])
         loss_part = compute_loss_for_chunk(
             head_model=head_model,
             model_outputs_for_chunk=x,
@@ -378,10 +380,14 @@ class GPTAndHeadModel(torch.nn.Module):
         assign: bool = False,
     ):
         self.gpt_model.load_state_dict(
-            state_dict["gpt_model"], strict=strict, assign=assign,
+            state_dict["gpt_model"],
+            strict=strict,
+            assign=assign,
         )
         self.head_model.load_state_dict(
-            state_dict["head_model"], strict=strict, assign=assign,
+            state_dict["head_model"],
+            strict=strict,
+            assign=assign,
         )
 
 
@@ -448,6 +454,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
     :class:`LongContextGradientModel`.
 
     """
+
     def __init__(
         self,
         gpt_model: GPT,
@@ -511,7 +518,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self.chunk_size = chunk_size
         self.randomize_chunk_sizes = randomize_chunk_sizes
         if chunks_per_cell_multiplier < 0.1:
-            raise ValueError(f"chunks_per_cell_multiplier = {chunks_per_cell_multiplier}, must be >=0.1")
+            raise ValueError(
+                f"chunks_per_cell_multiplier = {chunks_per_cell_multiplier}, must be >=0.1"
+            )
         self.chunks_per_cell_multiplier = chunks_per_cell_multiplier
         # Becomes an option in subclass for gradient computation:
         self.single_tokens_for_targets = False
@@ -549,18 +558,25 @@ class LongContextInferenceModel(GPTAndHeadModel):
             if mha.tmp_array_limit_gb is None:
                 mha.set_tmp_array_limit_gb(tmp_array_limit_gb)
             elif not (mha.tmp_array_limit_gb is tmp_array_limit_gb):
-                raise ValueError("tmp_array_limit_gb and gpt_model.mha.tmp_array_limit_gb must be the same object")
+                raise ValueError(
+                    "tmp_array_limit_gb and gpt_model.mha.tmp_array_limit_gb must be the same object"
+                )
 
         for block_idx, kv_cache in enumerate(gpt_model.get_kv_caches()):
             prefix = f"Block {block_idx} of model: "
             if kv_cache is None:
-                raise ValueError(prefix + "No KV cache assigned. Use 'model.assign_kv_caches'")
+                raise ValueError(
+                    prefix + "No KV cache assigned. Use 'model.assign_kv_caches'"
+                )
             if tmp_array_limit_gb is not None and isinstance(kv_cache, DefaultKVCache):
                 mha = kv_cache.mha
                 if mha.tmp_array_limit_gb is None:
                     mha.set_tmp_array_limit_gb(tmp_array_limit_gb)
                 elif not (mha.tmp_array_limit_gb is tmp_array_limit_gb):
-                    raise ValueError(prefix + "tmp_array_limit_gb and block.attn.kv_cache.mha.tmp_array_limit_gb must be the same object")
+                    raise ValueError(
+                        prefix
+                        + "tmp_array_limit_gb and block.attn.kv_cache.mha.tmp_array_limit_gb must be the same object"
+                    )
 
     def forward(
         self,
@@ -598,7 +614,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
             print("targets given, but head_model is not: targets are ignored")
             targets = None
         if not isinstance(self.gpt_model.mha, MultiHeadSelfAttention):
-            raise ValueError(f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention")
+            raise ValueError(
+                f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention"
+            )
         device = self.gpt_model.transformer.wte.weight.device
         input_ids = input_ids.to(device)
         if targets is not None:
@@ -628,7 +646,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self._record_gpu_memory_kind = None
 
     def _init_members_from_tokens(
-        self, input_ids: torch.Tensor, targets: Optional[torch.Tensor],
+        self,
+        input_ids: torch.Tensor,
+        targets: Optional[torch.Tensor],
     ):
         """
         Initialize members required for processing the current batch.
@@ -639,7 +659,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
             raise ValueError(f"input_ids.shape = {input_ids.shape}, must be 2D")
         batch_size, seq_length = input_ids.shape
         if not (1 <= batch_size <= self._max_batch_size):
-            raise ValueError(f"input_ids.batch_size = {batch_size}, must be in [1, {self._max_batch_size}]")
+            raise ValueError(
+                f"input_ids.batch_size = {batch_size}, must be in [1, {self._max_batch_size}]"
+            )
         self.batch_size = batch_size
         if seq_length > self.config.block_size:
             print(
@@ -653,8 +675,12 @@ class LongContextInferenceModel(GPTAndHeadModel):
             if targets.ndim != 2:
                 raise ValueError(f"targets.shape = {targets.shape}: Must be 2D")
             num_output_tokens = targets.shape[-1]
-            if self.batch_size != targets.shape[0] or not (1 <= num_output_tokens <= seq_length):
-                raise ValueError(f"targets.shape = {targets.shape}: Not compatible with batch_size = {self.batch_size} or num_input_tokens = {seq_length}")
+            if self.batch_size != targets.shape[0] or not (
+                1 <= num_output_tokens <= seq_length
+            ):
+                raise ValueError(
+                    f"targets.shape = {targets.shape}: Not compatible with batch_size = {self.batch_size} or num_input_tokens = {seq_length}"
+                )
             if self._set_max_seq_length:
                 # Adjust maximum sequence length, which may affect the position
                 # encoding
@@ -665,7 +691,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self._select_chunks_and_cells(num_output_tokens, seq_length)
 
     def _select_chunks_and_cells(
-        self, num_output_tokens: int, seq_length: int,
+        self,
+        num_output_tokens: int,
+        seq_length: int,
     ):
         # Select chunk sizes
         if self.single_tokens_for_targets:
@@ -676,7 +704,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
             chunk_size=self.chunk_size,
             randomize_chunk_sizes=self.randomize_chunk_sizes,
         )
-        assert all(x > 0 for x in chunk_sizes), f"chunk_sizes = {chunk_sizes}, must all be positive"
+        assert all(
+            x > 0 for x in chunk_sizes
+        ), f"chunk_sizes = {chunk_sizes}, must all be positive"
         if self.single_tokens_for_targets:
             chunk_sizes += [1] * num_output_tokens
         self.chunk_sizes = chunk_sizes
@@ -691,9 +721,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
             max_cache_length = max(
                 cache.cache_length for cache in self.gpt_model.get_kv_caches()
             )
-            max_cell_length = int(
-                max_cache_length * self.chunks_per_cell_multiplier
-            )
+            max_cell_length = int(max_cache_length * self.chunks_per_cell_multiplier)
             chunks_per_cell = []
             cell_length = 0
             num_chunks = 0
@@ -742,7 +770,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
         """
         if self._tmp_array_limit_gb is None:
             return self._forward_internal_no_check(
-                input_ids, targets, scale_factor,
+                input_ids,
+                targets,
+                scale_factor,
             )
         else:
             result = None
@@ -750,7 +780,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
             while result is None:
                 try:
                     result = self._forward_internal_no_check(
-                        input_ids, targets, scale_factor,
+                        input_ids,
+                        targets,
+                        scale_factor,
                     )
                 except RuntimeError as ex:
                     oom_exception_action(ex, self._tmp_array_limit_gb)
@@ -793,7 +825,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
         logits_final_chunk = None  # Only if no loss is computed
         # Need grouping of chunks into cells, for outermost loop
         chunks_for_cells = get_chunks_for_cells(
-            self.chunks_per_cell, self.chunk_sizes,
+            self.chunks_per_cell,
+            self.chunk_sizes,
         )
         if self.debug_intermediates is not None:
             self.debug_intermediates.clear()  # Reset
@@ -808,7 +841,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
             for idx in range(self.config.n_layer)
         ]
         wte = self.gpt_model.transformer.wte
-        alpha = self.config.n_embd ** 0.5
+        alpha = self.config.n_embd**0.5
         with torch.no_grad():
             # Outermost loop over cells (group of chunks)
             for chunks_for_cell in wrap_tqdm_if_verbose(
@@ -821,12 +854,15 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     embeddings = embeddings * alpha
                 if self.debug_intermediates is not None:
                     name = f"forward_wte_{start}:{end}"
-                    self.debug_intermediates[name] = embeddings.detach().clone().to(device=torch.device("cpu"))
+                    self.debug_intermediates[name] = (
+                        embeddings.detach().clone().to(device=torch.device("cpu"))
+                    )
                 # Loop over layers
                 for block_idx, block in enumerate(model_blocks):
                     # Layer input checkpointing
                     self._checkpoint_layer_input(
-                        x=embeddings, layer_idx=block_idx,
+                        x=embeddings,
+                        layer_idx=block_idx,
                     )
                     new_embed_parts = []
                     # Innermost loop over chunks per cell
@@ -834,11 +870,13 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         ch_size = rel_end - rel_start
                         x = embeddings[:, rel_start:rel_end, :]
                         abs_start = start + rel_start
-                        idx = input_ids[:, abs_start:(abs_start + ch_size)]
+                        idx = input_ids[:, abs_start : (abs_start + ch_size)]
                         y = block.forward(x=x, idx=idx)
                         if self.debug_intermediates is not None:
                             name = f"forward_block{block_idx}_{start}:{end}_{rel_start}:{rel_end}"
-                            self.debug_intermediates[name] = y.detach().clone().to(device=torch.device("cpu"))
+                            self.debug_intermediates[name] = (
+                                y.detach().clone().to(device=torch.device("cpu"))
+                            )
                         new_embed_parts.append(y)
                         if not compute_loss:
                             # We need the final layer output for the last chunk
@@ -847,7 +885,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     embeddings = torch.cat(new_embed_parts, dim=1)
                 # Layer input checkpointing
                 self._checkpoint_layer_input(
-                    x=embeddings, layer_idx=self.config.n_layer,
+                    x=embeddings,
+                    layer_idx=self.config.n_layer,
                 )
 
                 if compute_loss:
@@ -884,13 +923,15 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         input_pos += ch_size
                         if self.debug_intermediates is not None:
                             name = f"forward_loss_{start}:{end}_{rel_start}:{rel_end}"
-                            self.debug_intermediates[name] = loss_part.detach().clone().to(device=torch.device("cpu"))
+                            self.debug_intermediates[name] = (
+                                loss_part.detach()
+                                .clone()
+                                .to(device=torch.device("cpu"))
+                            )
                 else:
                     # `logits_final_chunk` has final layer outputs for last
                     # chunk. Map to logits
-                    logits_final_chunk = self.gpt_model.lm_head(
-                        logits_final_chunk
-                    )
+                    logits_final_chunk = self.gpt_model.lm_head(logits_final_chunk)
 
         write_back_cache_buffers(self.gpt_model)  # Just to be safe
         if not (targets is None or self._debug_no_deallocate_buffers):
@@ -909,7 +950,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
         for cache in self.gpt_model.get_kv_caches():
             cache.switch_replay_logging(False)
         if self.verbose is not VerbosityLevels.NONE:
-            print(f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode)")
+            print(
+                f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode)"
+            )
         loss_full = self._forward_internal(input_ids, targets, scale_factor)
         if not (targets is None or self._debug_no_deallocate_buffers):
             self.clear()

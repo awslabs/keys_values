@@ -68,7 +68,11 @@ def batched_sample(
     _kwargs = kwargs if isinstance(kwargs, list) else [kwargs] * len(logits)
     assert len(logits) == len(_kwargs), "logits and kwargs must have the same length."
     return torch.stack(
-        [sample(l, **sample_args).to(dtype=torch.int64) for sample_args, l in zip(_kwargs, logits)], dim=0
+        [
+            sample(l, **sample_args).to(dtype=torch.int64)
+            for sample_args, l in zip(_kwargs, logits)
+        ],
+        dim=0,
     )
 
 
@@ -138,9 +142,9 @@ def generate_fn(
         top_p=top_p,
     )
 
-    assert max_returned_tokens > prompt_size, (
-        f"Not enough space for {prompt_size} prompt tokens in a context length of {max_returned_tokens}."
-    )
+    assert (
+        max_returned_tokens > prompt_size
+    ), f"Not enough space for {prompt_size} prompt tokens in a context length of {max_returned_tokens}."
 
     # Yield the prompt if include_prompt is True
     if include_prompt:
@@ -168,7 +172,9 @@ def generate_fn(
             logits_final_chunk = None
         else:
             token = next_token(
-                gpt_model=gpt_model, x=token.view(1, -1), **sample_kwargs,
+                gpt_model=gpt_model,
+                x=token.view(1, -1),
+                **sample_kwargs,
             )
         tokens.append(token)
         int_token = token.item()
@@ -251,11 +257,13 @@ def batched_generate_fn(
     if isinstance(sample_args, dict):
         sample_args = [sample_args] * batch_size
     else:
-        assert len(sample_args) == batch_size, "sample_args must have the length as the batch size."
+        assert (
+            len(sample_args) == batch_size
+        ), "sample_args must have the length as the batch size."
 
-    assert max_returned_tokens > max_prompt_size, (
-        f"Not enough space for {max_prompt_size} prompt tokens in a context length of {max_returned_tokens}."
-    )
+    assert (
+        max_returned_tokens > max_prompt_size
+    ), f"Not enough space for {max_prompt_size} prompt tokens in a context length of {max_returned_tokens}."
 
     # Yield the prompts if include_prompt is True
     if include_prompt:
@@ -270,7 +278,9 @@ def batched_generate_fn(
     gpt_model = model.gpt_model
     logits_final_chunk = model(prompts, targets=None)
 
-    stop_progresses = [[0] * len(stop_tokens) for _ in range(batch_size)]  # [batch_size, ~len(stop_tokens)]
+    stop_progresses = [
+        [0] * len(stop_tokens) for _ in range(batch_size)
+    ]  # [batch_size, ~len(stop_tokens)]
     stop_idxes = [-1] * batch_size
     yielded_idx = 0
 
@@ -283,7 +293,9 @@ def batched_generate_fn(
             logits_final_chunk = None
         else:
             tokens = batched_next_token(
-                gpt_model=gpt_model, x=tokens, kwargs=sample_args,
+                gpt_model=gpt_model,
+                x=tokens,
+                kwargs=sample_args,
             )
         for i in range(batch_size):
             token_lists[i].append(tokens[i])
@@ -310,7 +322,9 @@ def batched_generate_fn(
         # Yield tokens that are not part of a stop sequence in progress.
         # If there are no stop sequences, then that's all of them.
         if len(stop_tokens) != 0:
-            safe_idxes = [len(token_lists[i]) - max(stop_progresses[i]) for i in range(batch_size)]
+            safe_idxes = [
+                len(token_lists[i]) - max(stop_progresses[i]) for i in range(batch_size)
+            ]
         else:
             safe_idxes = [current_idx + 1]  # include the token just generated
         safe_idx = min(safe_idxes)
@@ -318,7 +332,11 @@ def batched_generate_fn(
         if yielded_idx < safe_idx:
             for idx in range(yielded_idx, safe_idx):
                 y_tokens = [
-                    token_lists[i][idx] if (stop_idxes[i] == -1 or idx < stop_idxes[i]) else None
+                    (
+                        token_lists[i][idx]
+                        if (stop_idxes[i] == -1 or idx < stop_idxes[i])
+                        else None
+                    )
                     for i in range(batch_size)
                 ]
                 if all(y is None for y in y_tokens):
@@ -331,7 +349,12 @@ def batched_generate_fn(
     if yielded_idx < max_token_lists:
         for idx in range(yielded_idx, max_token_lists):
             y_tokens = [
-                token_lists[i][idx] if (stop_idxes[i] == -1 or idx < stop_idxes[i]) else None for i in range(batch_size)
+                (
+                    token_lists[i][idx]
+                    if (stop_idxes[i] == -1 or idx < stop_idxes[i])
+                    else None
+                )
+                for i in range(batch_size)
             ]
             if all(y is None for y in y_tokens):
                 return
@@ -439,7 +462,9 @@ def main(
     top_k: Optional[int] = 50,
     top_p: float = 1.0,
     temperature: float = 0.8,
-    quantize: Optional[Literal["bnb.nf4", "bnb.nf4-dq", "bnb.fp4", "bnb.fp4-dq", "bnb.int8"]] = None,
+    quantize: Optional[
+        Literal["bnb.nf4", "bnb.nf4-dq", "bnb.fp4", "bnb.fp4-dq", "bnb.int8"]
+    ] = None,
     precision: Optional[str] = None,
     compile: bool = False,
 ) -> None:
@@ -498,7 +523,11 @@ def main(
             warnings.warn(
                 "LitGPT only supports bitsandbytes v0.42.0. This may result in errors when using quantization."
             )
-        dtype = {"16-true": torch.float16, "bf16-true": torch.bfloat16, "32-true": torch.float32}[precision]
+        dtype = {
+            "16-true": torch.float16,
+            "bf16-true": torch.bfloat16,
+            "32-true": torch.float32,
+        }[precision]
         plugins = BitsandbytesPrecision(quantize[4:], dtype)
         precision = None
 
@@ -512,7 +541,9 @@ def main(
 
     tokenizer = Tokenizer(checkpoint_dir)
     prompt_style = (
-        load_prompt_style(checkpoint_dir) if has_prompt_style(checkpoint_dir) else PromptStyle.from_config(config)
+        load_prompt_style(checkpoint_dir)
+        if has_prompt_style(checkpoint_dir)
+        else PromptStyle.from_config(config)
     )
 
     prompt = prompt_style.apply(prompt, sys_prompt=sys_prompt)
@@ -520,7 +551,10 @@ def main(
     prompt_length = encoded.size(0)
     max_returned_tokens = prompt_length + max_new_tokens
 
-    fabric.print(f"Loading model {str(checkpoint_path)!r} with {config.__dict__}", file=sys.stderr)
+    fabric.print(
+        f"Loading model {str(checkpoint_path)!r} with {config.__dict__}",
+        file=sys.stderr,
+    )
     t0 = time.perf_counter()
     with fabric.init_module(empty_init=True):
         gpt_model = GPT(config)
@@ -531,7 +565,10 @@ def main(
             max_batch_size=1,
         )
     )
-    fabric.print(f"Time to instantiate model: {time.perf_counter() - t0:.02f} seconds.", file=sys.stderr)
+    fabric.print(
+        f"Time to instantiate model: {time.perf_counter() - t0:.02f} seconds.",
+        file=sys.stderr,
+    )
     with fabric.init_tensor():
         # set the max_seq_length to limit the memory usage to what we need
         gpt_model.max_seq_length = max_returned_tokens
@@ -553,7 +590,10 @@ def main(
 
     t0 = time.perf_counter()
     load_checkpoint(fabric, gpt_model, checkpoint_path)
-    fabric.print(f"Time to load the model weights: {time.perf_counter() - t0:.02f} seconds.", file=sys.stderr)
+    fabric.print(
+        f"Time to load the model weights: {time.perf_counter() - t0:.02f} seconds.",
+        file=sys.stderr,
+    )
 
     L.seed_everything(1234)
     for i in range(num_samples):
@@ -571,7 +611,11 @@ def main(
         fabric.print(tokenizer.decode(y))
         tokens_generated = y.size(0) - prompt_length
         fabric.print(
-            f"Time for inference {i + 1}: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec", file=sys.stderr
+            f"Time for inference {i + 1}: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec",
+            file=sys.stderr,
         )
     if fabric.device.type == "cuda":
-        fabric.print(f"Memory used: {torch.cuda.max_memory_allocated() / 1e9:.02f} GB", file=sys.stderr)
+        fabric.print(
+            f"Memory used: {torch.cuda.max_memory_allocated() / 1e9:.02f} GB",
+            file=sys.stderr,
+        )

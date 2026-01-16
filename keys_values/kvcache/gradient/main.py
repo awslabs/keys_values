@@ -51,7 +51,9 @@ from keys_values.kvcache.utils import (
     message_with_device_memory,
 )
 from keys_values.long_context import (
-    LongContextInferenceModel, GPTAndHeadModel, oom_exception_action,
+    LongContextInferenceModel,
+    GPTAndHeadModel,
+    oom_exception_action,
 )
 from keys_values.model import GPT
 from keys_values.optimize.clone_model import (
@@ -69,6 +71,7 @@ class LossValue(torch.Tensor):
     See :func:`long_context_loss_value`.
 
     """
+
     # See https://discuss.pytorch.org/t/subclassing-torch-tensor/23754
     @staticmethod
     def __new__(
@@ -81,7 +84,9 @@ class LossValue(torch.Tensor):
         return super().__new__(cls, data, *args, **kwargs)
 
     def __init__(
-        self, data: torch.Tensor, model: "LongContextGradientModel",
+        self,
+        data: torch.Tensor,
+        model: "LongContextGradientModel",
     ):
         super().__init__()
         self._model = model
@@ -123,7 +128,9 @@ def check_model_is_on_device(
 ):
     for name, param in model.named_parameters():
         if param.device != device:
-            raise ValueError(f"Model {model_name} must be on {device}, but device['{name}'] = {param.device}")
+            raise ValueError(
+                f"Model {model_name} must be on {device}, but device['{name}'] = {param.device}"
+            )
 
 
 def accumulate_gradients(
@@ -147,7 +154,8 @@ def accumulate_gradients(
     for (mod_from, mod_to), mod_debug in zip(module_pairs, debug_modules):
         access = AccessWeightsGradients(mod_from)
         flat_vectors = copy_flat_vectors_to(
-            access.get_gradients(), device=torch.device("cpu"),
+            access.get_gradients(),
+            device=torch.device("cpu"),
         )
         mod_from.zero_grad(set_to_none=True)
         AccessWeightsGradients(mod_to).accumulate_gradients(flat_vectors)
@@ -237,6 +245,7 @@ class LongContextGradientModel(LongContextInferenceModel):
       :class:`LongContextInferenceModel` copy on device `offload_device`.
 
     """
+
     def __init__(
         self,
         gpt_model: GPT,
@@ -347,22 +356,30 @@ class LongContextGradientModel(LongContextInferenceModel):
         if qname is None:
             qname = "torch-quantized8"
         elif qname not in SUPPORTED_QUANTIZERS:
-            raise ValueError(f"qname = {qname} is not supported, must be in {SUPPORTED_QUANTIZERS}")
+            raise ValueError(
+                f"qname = {qname} is not supported, must be in {SUPPORTED_QUANTIZERS}"
+            )
         if not (1 <= layers_per_cell <= gpt_model.config.n_layer):
-            raise ValueError(f"layers_per_cell = {layers_per_cell}, must be in [1, {gpt_model.config.n_layer}]")
+            raise ValueError(
+                f"layers_per_cell = {layers_per_cell}, must be in [1, {gpt_model.config.n_layer}]"
+            )
         self.layers_per_cell = layers_per_cell
         self.qname = qname
         if cache_kwargs is None:
             cache_kwargs = dict()
         elif "tmp_array_limit_gb" in cache_kwargs:
             del cache_kwargs["tmp_array_limit_gb"]
-            print("Use `backward_tmp_array_limit_gb` instead of `cache_kwargs['tmp_array_limit_gb']`")
+            print(
+                "Use `backward_tmp_array_limit_gb` instead of `cache_kwargs['tmp_array_limit_gb']`"
+            )
         self.cache_kwargs = cache_kwargs
         if train_cache_kwargs is None:
             train_cache_kwargs = dict()
         elif "tmp_array_limit_gb" in train_cache_kwargs:
             del train_cache_kwargs["tmp_array_limit_gb"]
-            print("Use `backward_tmp_array_limit_gb` instead of `train_cache_kwargs['tmp_array_limit_gb']`")
+            print(
+                "Use `backward_tmp_array_limit_gb` instead of `train_cache_kwargs['tmp_array_limit_gb']`"
+            )
         self._train_cache_kwargs = train_cache_kwargs
         if autograd_hooks_kwargs is None:
             autograd_hooks_kwargs = dict()
@@ -374,7 +391,9 @@ class LongContextGradientModel(LongContextInferenceModel):
         # Attention logit softcapping is not supported by the special operators
         # used during gradient computations
         if self.config.attention_logit_softcapping is not None:
-            raise ValueError("Long context gradient computation requires gpt_model.config.attention_logit_softcapping = None")
+            raise ValueError(
+                "Long context gradient computation requires gpt_model.config.attention_logit_softcapping = None"
+            )
         # Annotation usage logs
         self._annotation_usage_logs: Dict[Tuple[int, int], AnnotationUsageLog] = dict()
         # Status is "init" or "forward_done"
@@ -393,7 +412,9 @@ class LongContextGradientModel(LongContextInferenceModel):
         self.offload_device = offload_device
         self._init_cpu_offloading()
         if qname != "default" and layer_checkpoint_chunk_size is None:
-            raise ValueError("layer_checkpoint_chunk_size must be given if qname != 'default'")
+            raise ValueError(
+                "layer_checkpoint_chunk_size must be given if qname != 'default'"
+            )
         self._layer_checkpoint_chunk_size = layer_checkpoint_chunk_size
         self._work_device = None
         self._debug_gpt_model = debug_gpt_model
@@ -412,10 +433,14 @@ class LongContextGradientModel(LongContextInferenceModel):
     def _init_cpu_offloading(self):
         if self.offload_device is not None:
             check_model_is_on_device(
-                self.gpt_model, torch.device("cpu"),"gpt_model",
+                self.gpt_model,
+                torch.device("cpu"),
+                "gpt_model",
             )
             check_model_is_on_device(
-                self.head_model, self.offload_device, "head_model",
+                self.head_model,
+                self.offload_device,
+                "head_model",
             )
 
     def forward(
@@ -453,19 +478,27 @@ class LongContextGradientModel(LongContextInferenceModel):
         # Reset KV caches
         self.gpt_model.reset()
         if not isinstance(self.gpt_model.mha, MultiHeadSelfAttention):
-            raise ValueError(f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention")
+            raise ValueError(
+                f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention"
+            )
         if self._record_gpu_memory_snapshots is None:
-            self._record_gpu_memory_snapshots = kwargs.get("record_gpu_memory_snapshots")
+            self._record_gpu_memory_snapshots = kwargs.get(
+                "record_gpu_memory_snapshots"
+            )
             if self._record_gpu_memory_snapshots is not None:
                 self._record_gpu_memory_kind = kwargs.get("record_gpu_memory_kind")
         if self.training:
             self._timer_start = time.perf_counter()  # Start timer
             loss_value = self._inference_forward_pass(
-                input_ids, targets, scale_factor,
+                input_ids,
+                targets,
+                scale_factor,
             )
         else:
             loss_value = self._forward_only(
-                input_ids, targets, scale_factor,
+                input_ids,
+                targets,
+                scale_factor,
             )
         return loss_value
 
@@ -569,7 +602,9 @@ class LongContextGradientModel(LongContextInferenceModel):
         )
 
     def _init_members_from_tokens(
-        self, input_ids: torch.Tensor, targets: torch.Tensor,
+        self,
+        input_ids: torch.Tensor,
+        targets: torch.Tensor,
     ):
         """
         Initialize members required for processing the current batch.
@@ -600,7 +635,8 @@ class LongContextGradientModel(LongContextInferenceModel):
             # Checkpoints are quantized
             if self.offload_device is not None:
                 kwargs = dict(
-                    allocate_buffers=True, device=self.offload_device,
+                    allocate_buffers=True,
+                    device=self.offload_device,
                 )
             else:
                 kwargs = dict(allocate_buffers=False)
@@ -647,7 +683,8 @@ class LongContextGradientModel(LongContextInferenceModel):
         if self._use_arrays_cleanup:
             arrays_cleanup = ArraysForCleanup(
                 protected_ids=protect_named_params_buffers_of_model(
-                    self.gpt_model, map_names=True,
+                    self.gpt_model,
+                    map_names=True,
                 )
             )
         else:
@@ -709,7 +746,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         if self.verbose is not VerbosityLevels.NONE:
             lines = [
                 f"\nbatch_size      = {self.batch_size}",
-                f"seq_length      = {self.gpt_model.max_seq_length}"
+                f"seq_length      = {self.gpt_model.max_seq_length}",
             ]
             # Caches can have different lengths
             cache_lengths = [
@@ -717,7 +754,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 for l_ix, kv_cache in enumerate(self.gpt_model.get_kv_caches())
             ]
             cache_length = cache_lengths[0][1]
-            if all (x[1] == cache_length for x in cache_lengths):
+            if all(x[1] == cache_length for x in cache_lengths):
                 lines.append(f"cache_length    = {cache_length}")
             else:
                 cl_str = ", ".join(f"{i}:{j}" for i, j in cache_lengths)
@@ -727,7 +764,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                     f"chunk_sizes     = {self.chunk_sizes}",
                     f"layers_per_cell = {self.layers_per_cell}",
                     f"chunks_per_cell = {self.chunks_per_cell}\n",
-                    f"Forward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (training mode)"
+                    f"Forward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (training mode)",
                 ]
             )
             print("\n".join(lines))
@@ -764,7 +801,9 @@ class LongContextGradientModel(LongContextInferenceModel):
             # Run inference forward pass. Layer inputs are checkpointed.
             # Mean reduction over batch dimension.
             loss_full = self._forward_internal(
-                input_ids, targets, scale_factor,
+                input_ids,
+                targets,
+                scale_factor,
             ).mean()
         finally:
             # Restore
@@ -814,14 +853,14 @@ class LongContextGradientModel(LongContextInferenceModel):
         if self._profile_records is not None:
             if torch.cuda.is_available():
                 torch.cuda.current_stream().synchronize()
-            prof_record = {
-                "forward_time": time.perf_counter() - self._timer_start
-            }
+            prof_record = {"forward_time": time.perf_counter() - self._timer_start}
             self._timer_start = time.perf_counter()
         else:
             prof_record = None
         if self._replay_logs is None:
-            raise IndexError("No KV cache replay logs: Must call `forward` before `backward`")
+            raise IndexError(
+                "No KV cache replay logs: Must call `forward` before `backward`"
+            )
         if self.verbose is not VerbosityLevels.NONE:
             print("\nAllocate storage for backward computation")
 
@@ -850,7 +889,10 @@ class LongContextGradientModel(LongContextInferenceModel):
             self._profile_records.append(prof_record)
         self._status = "init"  # Reset
         # Summary of annotation usage logs
-        if not self._debug_dont_use_autograd_hooks and self.verbose is not VerbosityLevels.NONE:
+        if (
+            not self._debug_dont_use_autograd_hooks
+            and self.verbose is not VerbosityLevels.NONE
+        ):
             num_unmatched_args = [
                 (
                     idx,
@@ -866,13 +908,20 @@ class LongContextGradientModel(LongContextInferenceModel):
             if total_num_unmatched == 0:
                 print("\nSuccess: All pack arguments were matched in all cells.\n")
             else:
-                lines = [
-                            "\nThere were unmatched pack arguments in some cells. Use --kv_cache.verbose all for full information."
-                        ] + [
-                            f"{num} unmatched in ({fli},{fci}): {n_ma} matches, {n_cmp} comparisons, {n_unm} scatter/cat, {n_4d} 4D indexes"
-                            for (fli, fci), num, n_ma, n_cmp, n_4d, n_unm
-                            in num_unmatched_args if num > 0
-                        ] + [""]
+                lines = (
+                    [
+                        "\nThere were unmatched pack arguments in some cells. Use --kv_cache.verbose all for full information."
+                    ]
+                    + [
+                        f"{num} unmatched in ({fli},{fci}): {n_ma} matches, {n_cmp} comparisons, {n_unm} scatter/cat, {n_4d} 4D indexes"
+                        for (
+                            fli,
+                            fci,
+                        ), num, n_ma, n_cmp, n_4d, n_unm in num_unmatched_args
+                        if num > 0
+                    ]
+                    + [""]
+                )
                 print("\n".join(lines))
 
     def _backward_accumulate_gradients_nocheck(self, count: int):
@@ -886,8 +935,11 @@ class LongContextGradientModel(LongContextInferenceModel):
         OOM error.
 
         """
+
         def get_inputs_slice(
-            start: int, end: int, layer_idx: int,
+            start: int,
+            end: int,
+            layer_idx: int,
         ) -> torch.Tensor:
             return self.layer_checkpoints.get_checkpoint(
                 layer_idx=layer_idx,
@@ -906,7 +958,8 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
 
         def write_head_gradients_slice(
-            input_pos: int, value: torch.Tensor,
+            input_pos: int,
+            value: torch.Tensor,
         ) -> Optional[int]:
             n_layer = self.gpt_model.config.n_layer
             return self.layer_checkpoints.set_checkpoint(
@@ -916,13 +969,17 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
 
         # Sanity check:
-        assert self.layer_checkpoints.layer_numbers[-1] == self.gpt_model.config.n_layer + 1
+        assert (
+            self.layer_checkpoints.layer_numbers[-1]
+            == self.gpt_model.config.n_layer + 1
+        )
         if self._record_gpu_memory_kind in (0, 2):
             self._record_gpu_memory_snapshots.store_current_snapshot()
             if self._record_gpu_memory_kind == 2:
                 self._record_gpu_memory_snapshots.stop_recording()
                 self._record_gpu_memory_snapshots.set_path(
-                    self._record_gpu_memory_snapshots.path.parent / f"snapshot_backward{count}.pickle"
+                    self._record_gpu_memory_snapshots.path.parent
+                    / f"snapshot_backward{count}.pickle"
                 )
                 self._record_gpu_memory_snapshots.start_recording()
 
@@ -942,7 +999,9 @@ class LongContextGradientModel(LongContextInferenceModel):
         # head gradients for the final layer.
         if self.verbose is VerbosityLevels.SOME:
             num_rows = len(self.layer_checkpoints.layer_numbers) - 2
-            print(f"\nRunning backward pass over {num_rows} rows of cells, {self.config.n_layer} layers, using activation checkpointing")
+            print(
+                f"\nRunning backward pass over {num_rows} rows of cells, {self.config.n_layer} layers, using activation checkpointing"
+            )
         if self.offload_device is not None:
             shard_on_device = clone_model_shard_via_flat_vectors(
                 model=self.gpt_model,
@@ -969,9 +1028,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 )
             ]
             if self.head_model.needs_logits():
-                module_pairs.append(
-                    (shard_on_device.lm_head, self.gpt_model.lm_head)
-                )
+                module_pairs.append((shard_on_device.lm_head, self.gpt_model.lm_head))
             if self._debug_gpt_model is not None:
                 debug_modules = [self._debug_gpt_model.transformer.ln_f]
                 if self.head_model.needs_logits():
@@ -992,9 +1049,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         # for storing head gradients
         layer_numbers = self.layer_checkpoints.layer_numbers[:-1]
         for first_layer_idx, end_layer_idx in wrap_tqdm_if_verbose(
-            reversed(
-                list(zip(layer_numbers[:-1], layer_numbers[1:]))
-            ),
+            reversed(list(zip(layer_numbers[:-1], layer_numbers[1:]))),
             verbose=self.verbose is VerbosityLevels.SOME,
         ):
             if self._use_arrays_cleanup and self.autograd_hooks is not None:
@@ -1019,10 +1074,16 @@ class LongContextGradientModel(LongContextInferenceModel):
             # by `model_part`. Also,
             # `head_gradients` is overwritten by the "bottom gradients", which
             # are head gradients for the row of cells below.
-            record_path = None if self._record_gpu_memory_snapshots is None else self._record_gpu_memory_snapshots.path
+            record_path = (
+                None
+                if self._record_gpu_memory_snapshots is None
+                else self._record_gpu_memory_snapshots.path
+            )
             if record_path is not None and self._record_gpu_memory_kind == 1:
                 # Change path for storage
-                record_path = str(Path(record_path).parent / f"snapshot_layer{first_layer_idx}.pickle")
+                record_path = str(
+                    Path(record_path).parent / f"snapshot_layer{first_layer_idx}.pickle"
+                )
                 snapshots = RecordGPUMemory(
                     path=record_path,
                     max_entries=self._record_gpu_memory_snapshots.max_entries,
@@ -1057,10 +1118,13 @@ class LongContextGradientModel(LongContextInferenceModel):
                 del model_part
                 del shard_on_device
 
-            for first_chunk_idx, annot_log in self.accumulator.annotation_usage_logs().items():
-                self._annotation_usage_logs[
-                    (first_layer_idx, first_chunk_idx)
-                ] = annot_log
+            for (
+                first_chunk_idx,
+                annot_log,
+            ) in self.accumulator.annotation_usage_logs().items():
+                self._annotation_usage_logs[(first_layer_idx, first_chunk_idx)] = (
+                    annot_log
+                )
             if self._record_gpu_memory_kind in (0, 2):
                 # Store results up to now
                 self._record_gpu_memory_snapshots.store_current_snapshot()
@@ -1069,7 +1133,9 @@ class LongContextGradientModel(LongContextInferenceModel):
         if self._record_gpu_memory_kind == 1:
             # Start recording for final snapshot
             record_path = Path(self._record_gpu_memory_snapshots.path)
-            self._record_gpu_memory_snapshots.path = str(record_path.parent / "snapshot_final.pickle")
+            self._record_gpu_memory_snapshots.path = str(
+                record_path.parent / "snapshot_final.pickle"
+            )
             self._record_gpu_memory_snapshots.start_recording()
         if self.offload_device is not None:
             shard_on_device = clone_model_shard_via_flat_vectors(

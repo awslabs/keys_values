@@ -55,6 +55,7 @@ def _check_commands():
 
 class TeeOutput:
     """Utility class to duplicate output to both file and stream (stdout/stderr)"""
+
     def __init__(self, file_obj, stream):
         self.file = file_obj
         self.stream = stream
@@ -129,7 +130,10 @@ def main() -> None:
     warning_message = r"The epoch parameter in `scheduler.step\(\)` was not necessary and is being deprecated.*"
 
     warnings.filterwarnings(
-        action="ignore", message=warning_message, category=UserWarning, module=r".*torch\.optim\.lr_scheduler.*"
+        action="ignore",
+        message=warning_message,
+        category=UserWarning,
+        module=r".*torch\.optim\.lr_scheduler.*",
     )
 
     torch.set_float32_matmul_precision("high")

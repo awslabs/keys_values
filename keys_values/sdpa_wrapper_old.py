@@ -47,12 +47,16 @@ def _reorder(
         # outcome of `scatter` can be non-deterministic. Does this matter?
         # Does it make a difference time-wise?
         index_right = torch.arange(
-            kv_len - q_len, kv_len, dtype=index_gat.dtype, device=index_gat.device,
+            kv_len - q_len,
+            kv_len,
+            dtype=index_gat.dtype,
+            device=index_gat.device,
         )[None, None, :].expand(*x.shape[:2], -1)
         x = x.scatter(
             2,
             index=expand_index(
-                torch.cat((index_scat, index_right), dim=-1), head_size,
+                torch.cat((index_scat, index_right), dim=-1),
+                head_size,
             ),
             src=torch.cat((x_right, x_new), dim=2),
         )
@@ -100,29 +104,44 @@ def _extract_index_gather_scatter(
         dummy = new_entries_mask.sum(dim=-1)
         if not (dummy == q_len).all().item():
             raise ValueError(
-                f"token_positions must have entries [{input_pos}, {input_pos + q_len}) in every slice. dummy = {dummy}")
+                f"token_positions must have entries [{input_pos}, {input_pos + q_len}) in every slice. dummy = {dummy}"
+            )
     nz0, nz1, nz2 = new_entries_mask.nonzero(as_tuple=True)
     if check_token_pos:
         kwargs = dict(dtype=nz0.dtype, device=nz0.device)
-        nz0_should_be = torch.arange(batch_size, **kwargs)[:, None, None].expand(
-            -1, n_query_groups, q_len).flatten()
+        nz0_should_be = (
+            torch.arange(batch_size, **kwargs)[:, None, None]
+            .expand(-1, n_query_groups, q_len)
+            .flatten()
+        )
         if not nz0.equal(nz0_should_be):
             raise ValueError(f"nz0 = {nz0}, must equal to {nz0_should_be}")
-        nz1_should_be = torch.arange(n_query_groups, **kwargs)[None, :, None].expand(
-            batch_size, -1, q_len).flatten()
+        nz1_should_be = (
+            torch.arange(n_query_groups, **kwargs)[None, :, None]
+            .expand(batch_size, -1, q_len)
+            .flatten()
+        )
         if not nz1.equal(nz1_should_be):
             raise ValueError(f"nz1 = {nz1}, must equal to {nz1_should_be}")
     elif nz2.numel() != batch_size * n_query_groups * q_len:
         raise ValueError(
-            f"Invalid token_positions: Number of entries in [{input_pos}, {input_pos + q_len}) must be {batch_size * n_query_groups * q_len}, but is {nz2.numel()}")
+            f"Invalid token_positions: Number of entries in [{input_pos}, {input_pos + q_len}) must be {batch_size * n_query_groups * q_len}, but is {nz2.numel()}"
+        )
     index_sorted = nz2.view(batch_size, n_query_groups, q_len)
     # `index_gat`: Order in which entries `range(index_pos, index_pos + q_len)`
     # appear in `token_positions`.
-    new_positions = token_positions[nz0, nz1, nz2].view(
-        batch_size, n_query_groups, q_len,
-    ) - input_pos
+    new_positions = (
+        token_positions[nz0, nz1, nz2].view(
+            batch_size,
+            n_query_groups,
+            q_len,
+        )
+        - input_pos
+    )
     index_gat = torch.zeros_like(index_sorted).scatter(
-        -1, index=new_positions, src=index_sorted,
+        -1,
+        index=new_positions,
+        src=index_sorted,
     )
     # index_scat`: `index_sorted` is permuted by the inverse of the
     # permutation which sorts`token_positions[:, :, (-q_len):]`
@@ -131,8 +150,12 @@ def _extract_index_gather_scatter(
         -1,
         index=sort_final,
         src=torch.arange(
-            q_len, dtype=sort_final.dtype, device=sort_final.device,
-        )[None, None, :].expand(batch_size, n_query_groups, -1),
+            q_len,
+            dtype=sort_final.dtype,
+            device=sort_final.device,
+        )[
+            None, None, :
+        ].expand(batch_size, n_query_groups, -1),
     )
     index_scat = index_sorted.gather(-1, inv_sort_final)
     return index_gat, index_scat
@@ -205,10 +228,14 @@ def scaled_dot_product_attention(
         raise ValueError("key, value must have same shape")
     batch_size, n_head, q_len, head_size = query.shape
     if key.shape[0] != batch_size or key.shape[-1] != head_size:
-        raise ValueError(f"key.shape = {key.shape}, must be ({batch_size}, _, _, {head_size})")
+        raise ValueError(
+            f"key.shape = {key.shape}, must be ({batch_size}, _, _, {head_size})"
+        )
     _, n_query_groups, kv_len, _ = key.shape
     if not (0 < q_len < kv_len):
-        raise ValueError(f"Must have 0 < q_len = {q_len} < kv_len = {kv_len}. Don't use this for prefill")
+        raise ValueError(
+            f"Must have 0 < q_len = {q_len} < kv_len = {kv_len}. Don't use this for prefill"
+        )
     if kind not in (0, 1, 2):
         raise ValueError(f"kind = {kind}, must be 0, 1 or 2")
     if sdpa_kernels is None:
@@ -216,15 +243,22 @@ def scaled_dot_product_attention(
 
     if token_positions is None:
         if input_pos + q_len != kv_len:
-            raise ValueError(f"Without token_positions, must have input_pos + q_len = {input_pos + q_len} == {kv_len} = kv_len")
+            raise ValueError(
+                f"Without token_positions, must have input_pos + q_len = {input_pos + q_len} == {kv_len} = kv_len"
+            )
     else:
         # Reorder entries in `key`, `value`, so that new entries are on the
         # right. New entries are those with `token_positions >= input_pos`.
         if token_positions.shape != key.shape[:-1]:
-            raise ValueError(f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible")
+            raise ValueError(
+                f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
+            )
         if kind < 2:
             index_gat, index_scat = _extract_index_gather_scatter(
-                token_positions, input_pos, q_len, check_token_pos,
+                token_positions,
+                input_pos,
+                q_len,
+                check_token_pos,
             )
             do_single_step = kind == 1
             key = _reorder(key, index_gat, index_scat, do_single_step)
@@ -232,7 +266,8 @@ def scaled_dot_product_attention(
         else:
             # Alternative: Simpler, but
             sort_index = expand_index(
-                torch.argsort(token_positions, dim=-1), head_size,
+                torch.argsort(token_positions, dim=-1),
+                head_size,
             )
             key = key.gather(2, sort_index)
             value = value.gather(2, sort_index)
@@ -241,7 +276,9 @@ def scaled_dot_product_attention(
     # `query` tokens, are on the right end. Causal masking works if `query`
     # is zero-padded on the left
     fill_left = torch.zeros(
-        (1, 1, 1, 1), dtype=query.dtype, device=query.device,
+        (1, 1, 1, 1),
+        dtype=query.dtype,
+        device=query.device,
     ).expand(batch_size, n_head, kv_len - q_len, head_size)
     query = torch.cat((fill_left, query), dim=2)
     return pytorch_scaled_dot_product_attention(

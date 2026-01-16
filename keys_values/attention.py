@@ -27,7 +27,8 @@ from keys_values.attention_utils import (
     build_mask_slice,
     create_temp_array,
     sdpa_attention_weights,
-    slice_as_flat, pytorch_scaled_dot_product_attention,
+    slice_as_flat,
+    pytorch_scaled_dot_product_attention,
 )
 from keys_values.pos_encoding import position_encoding_factory, PositionEncoding
 from keys_values.sdpa_wrapper import scaled_dot_product_attention as qpadded_sdpa
@@ -62,7 +63,10 @@ class KeysAndValues:
 class DefaultKeysAndValues(KeysAndValues):
     def __init__(self, keys: torch.Tensor, values: torch.Tensor):
         # The final dimension of K and V can be different (in general)
-        assert keys.shape[:-1] == values.shape[:-1] and keys.ndim == 4, (keys.shape, values.shape)
+        assert keys.shape[:-1] == values.shape[:-1] and keys.ndim == 4, (
+            keys.shape,
+            values.shape,
+        )
         self._keys = keys
         self._values = values
 
@@ -156,6 +160,7 @@ class MultiHeadSelfAttention:
     Look at :class:`DefaultUseEagerKernel` for choosing `use_eager_kernel`.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -296,9 +301,12 @@ class MultiHeadSelfAttention:
 
     def _get_sliding_window_size(self, block_idx: int) -> Optional[int]:
         apply_sliding_window_attention = (
-            self.config.sliding_window_size is not None and self.config.sliding_window_indices[block_idx] == 1
+            self.config.sliding_window_size is not None
+            and self.config.sliding_window_indices[block_idx] == 1
         )
-        return self.config.sliding_window_size if apply_sliding_window_attention else None
+        return (
+            self.config.sliding_window_size if apply_sliding_window_attention else None
+        )
 
     def _sdpa_mode(
         self,
@@ -326,7 +334,11 @@ class MultiHeadSelfAttention:
             return SDPA_IMPL_EAGER_NO_BLOCKS
         must_eager = return_attn_weights or self.use_eager_sdpa_always
         if must_eager or not is_causal:
-            if must_eager or sliding_window_size is not None or self._use_eager_kernel(kv_len, q_len):
+            if (
+                must_eager
+                or sliding_window_size is not None
+                or self._use_eager_kernel(kv_len, q_len)
+            ):
                 return SDPA_IMPL_EAGER_BLOCKS
             else:
                 return SDPA_IMPL_QPADDED_PYTORCH
@@ -455,7 +467,10 @@ def eager_scaled_dot_product_attention(
             attn_weights = attn_weights.sum(dim=2)
             if n_head != n_query_groups:
                 attn_weights = attn_weights.view(
-                    batch_size, n_query_groups, -1, kv_len,
+                    batch_size,
+                    n_query_groups,
+                    -1,
+                    kv_len,
                 ).mean(dim=2)
         else:
             attn_weights = None
@@ -530,7 +545,11 @@ def scaled_dot_product_attention_in_blocks(
                 source = _tmp_array[:, :n_query_groups, :, :]
                 torch.mean(
                     attn_weights_part.view(
-                        batch_size, n_query_groups, -1, sz, kv_len,
+                        batch_size,
+                        n_query_groups,
+                        -1,
+                        sz,
+                        kv_len,
                     ),
                     dim=2,
                     out=source,
@@ -542,7 +561,8 @@ def scaled_dot_product_attention_in_blocks(
         # - output_part (bs, nh_q, sz, hs)
         output_parts.append(
             attention_compute_weighted_values(
-                scores=attn_weights_part, value=value32,
+                scores=attn_weights_part,
+                value=value32,
             ).to(dtype)
         )
         start = end

@@ -59,6 +59,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
     tensors properly.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -76,7 +77,9 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         **base_kwargs,
     ):
         if not (0 <= start_input_pos < len(replay_log)):
-            raise ValueError(f"start_input_pos {start_input_pos}, must be in [0, {len(replay_log)})")
+            raise ValueError(
+                f"start_input_pos {start_input_pos}, must be in [0, {len(replay_log)})"
+            )
         if layer_idx < 0:
             raise ValueError(f"layer_idx {layer_idx}, must be nonnegative")
         if num_chunks <= 0:
@@ -100,7 +103,9 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             raise ValueError("replay_log must not be empty")
         self._device = replay_log.device
         if self.mha.use_eager_sdpa_always:
-            raise ValueError("This replay cache does not support mha.use_eager_sdpa_always = True")
+            raise ValueError(
+                "This replay cache does not support mha.use_eager_sdpa_always = True"
+            )
         self.replay_log = replay_log
         self._batch_size = batch_size
         self.kv_buffers = None
@@ -115,7 +120,9 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         self._end_token_chunk_pos = None
         shape = (batch_size, config.n_query_groups, cache_length)
         self._token_positions = torch.zeros(
-            shape, dtype=torch.int, device=self._device,
+            shape,
+            dtype=torch.int,
+            device=self._device,
         )
         self.current_length = 0
         self._initialize_replay()
@@ -172,7 +179,10 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 if self._next_grace_pos is None:
                     # First chunk: prefill
                     self._next_grace_pos = prefix
-                elif self.current_length == self.cache_length and num <= self.grace_period:
+                elif (
+                    self.current_length == self.cache_length
+                    and num <= self.grace_period
+                ):
                     # Forward, cache is full, and chunk not larger than grace period
                     self._next_grace_pos = (
                         self._next_grace_pos - prefix + num
@@ -180,25 +190,38 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             if self.current_length < self.cache_length:
                 self.current_length += num
                 if self.current_length > self.cache_length:
-                    raise ValueError(f"current_length from {self.current_length - num} to {self.current_length}, jumps over cache_length = {self.cache_length}")
+                    raise ValueError(
+                        f"current_length from {self.current_length - num} to {self.current_length}, jumps over cache_length = {self.cache_length}"
+                    )
             if self.prefill_length is None:
                 self.prefill_length = num
         if not done:
-            raise ValueError(f"start_input_pos = {input_pos} does not map to start of a token chunk")
+            raise ValueError(
+                f"start_input_pos = {input_pos} does not map to start of a token chunk"
+            )
         self._start_token_chunk_pos = self._token_chunk_pos
         self._end_token_chunk_pos = self._token_chunk_pos + self.num_chunks
         if self._end_token_chunk_pos > len(self.replay_log.token_chunks):
-            raise ValueError(f"token_chunk_pos = {self._token_chunk_pos}, num_chunks = {self.num_chunks}, sum must be <= {len(self.replay_log.token_chunks)}")
+            raise ValueError(
+                f"token_chunk_pos = {self._token_chunk_pos}, num_chunks = {self.num_chunks}, sum must be <= {len(self.replay_log.token_chunks)}"
+            )
 
-    def initialize_buffers(
-        self, kv_buffers: KeysAndValues
-    ):
-        shape = (self.batch_size, self.n_query_groups, self.current_length, self.head_size)
+    def initialize_buffers(self, kv_buffers: KeysAndValues):
+        shape = (
+            self.batch_size,
+            self.n_query_groups,
+            self.current_length,
+            self.head_size,
+        )
         keys = kv_buffers.keys()
         if keys.shape != shape:
-            raise ValueError(f"kv_buffers.keys().shape = {kv_buffers.keys().shape}, must be {shape}")
+            raise ValueError(
+                f"kv_buffers.keys().shape = {kv_buffers.keys().shape}, must be {shape}"
+            )
         if keys.device != self._device:
-            raise ValueError(f"kv_buffers.device = {keys.device}, must be {self._device}")
+            raise ValueError(
+                f"kv_buffers.device = {keys.device}, must be {self._device}"
+            )
         self.kv_buffers = kv_buffers
 
     def deallocate_buffers(self):
@@ -215,7 +238,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         """
         # Note: The `clone` is necessary to avoid this error during backward:
         # RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation: [torch.IntTensor [5, 4, 512]] is at version 8; expected version 7 instead
-        return self._token_positions[:, :, :self.current_length].clone()
+        return self._token_positions[:, :, : self.current_length].clone()
 
     def max_forward_length(self) -> int:
         diff = self.cache_length - self.current_length
@@ -233,14 +256,19 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
     ) -> torch.Tensor:
         self._forward_check_args(query, key, value, token_idx)
         if query.shape[0] != self.batch_size:
-            raise ValueError(f"query.shape[0] = {query.shape[0]}, batch_size = {self.batch_size}, must be equal")
+            raise ValueError(
+                f"query.shape[0] = {query.shape[0]}, batch_size = {self.batch_size}, must be equal"
+            )
         # For prefill, we use the default implementation based on :meth:`_prefill`.
         input_pos = self._input_pos  # Value before update
         if input_pos == 0:
             attn_outputs = super().forward(query, key, value, token_idx)
         else:
             attn_outputs = self._forward_if_not_prefill(
-                query, key, value, token_idx,
+                query,
+                key,
+                value,
+                token_idx,
             )
             self._input_pos += key.shape[2]
         if self._debug_intermediates is not None:
@@ -314,7 +342,8 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 debug_msg="scatter-after",
             )
             self.kv_buffers = DefaultKeysAndValues(
-                key_buffer_new, value_buffer_new,
+                key_buffer_new,
+                value_buffer_new,
             )
             if update_result is not None and update_result.num1 == 0:
                 # Increment in round-robin fashion (only if num <= grace_period)
@@ -358,7 +387,8 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 debug_msg=debug_msg,
             )
             self.kv_buffers = DefaultKeysAndValues(
-                key_buffer_new, value_buffer_new,
+                key_buffer_new,
+                value_buffer_new,
             )
             self.current_length += num
 
@@ -388,7 +418,9 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             delta = torch.cat(
                 (
                     torch.zeros(
-                        (1, 1, 1, 1), dtype=query.dtype, device=query.device,
+                        (1, 1, 1, 1),
+                        dtype=query.dtype,
+                        device=query.device,
                     ).expand(*shape[:2], num_zeros, head_size),
                     query[:, :, :num_nonzeros, :],
                 ),
@@ -396,14 +428,22 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             )
             start = kv_len - q_len - num_zeros
             end = start + delta_len
-            index = torch.arange(
-                start, end, dtype=torch.int32, device=query.device,
-            ).view(1, 1, -1, 1).expand(*shape[:2], -1, head_size)
+            index = (
+                torch.arange(
+                    start,
+                    end,
+                    dtype=torch.int32,
+                    device=query.device,
+                )
+                .view(1, 1, -1, 1)
+                .expand(*shape[:2], -1, head_size)
+            )
             self._append_annotation(
                 NodeAnnotation(
                     kind="padded-query",
                     layer_idx=self.layer_idx,
-                    chunk_idx=self._token_chunk_pos - 1,  # `token_chunk_pos` has already been advanced
+                    chunk_idx=self._token_chunk_pos
+                    - 1,  # `token_chunk_pos` has already been advanced
                     shape=shape,
                     index=index,
                     delta=delta,
@@ -467,7 +507,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             # chunk index is `chunk_idx - 1`.
             is_keys = NodeAnnotation.kind_is_keys(kind)
             x = self.kv_buffers.keys() if is_keys else self.kv_buffers.values()
-            x = x.detach()[:, :, :self.current_length, :]
+            x = x.detach()[:, :, : self.current_length, :]
             index, extra_info = self._index_for_before(kind, index)
             delta = x.gather(2, index)
             if positions is not None:
@@ -492,20 +532,29 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
 
     @staticmethod
     def _transform_index(
-        index: torch.Tensor, sort_index: torch.Tensor,
+        index: torch.Tensor,
+        sort_index: torch.Tensor,
     ) -> torch.Tensor:
         batch_size, n_query_groups, num, head_size = index.shape
         si_len = sort_index.shape[-1]
         assert sort_index.shape == (batch_size, n_query_groups, si_len)
         sort_index = sort_index.to(dtype=index.dtype)
         index = index[:, :, :, 0]
-        result = torch.empty_like(sort_index).scatter_(
-            2,
-            sort_index,
-            torch.arange(
-                si_len, dtype=index.dtype, device=index.device,
-            ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
-        ).gather(2, index)
+        result = (
+            torch.empty_like(sort_index)
+            .scatter_(
+                2,
+                sort_index,
+                torch.arange(
+                    si_len,
+                    dtype=index.dtype,
+                    device=index.device,
+                )
+                .view(1, 1, -1)
+                .expand(batch_size, n_query_groups, -1),
+            )
+            .gather(2, index)
+        )
         return expand_index(result, head_size)
 
     def _create_node_after_creator(
@@ -537,7 +586,8 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 ext_kind = "ext-key" if is_keys else "ext-value"
                 # Used for reordering in padded-query SDPA
                 sort_index = torch.argsort(
-                    self.token_positions().detach(), dim=-1,
+                    self.token_positions().detach(),
+                    dim=-1,
                 ).to(dtype=torch.int32)
                 extra_info = {"sort_index": sort_index}
                 # `delta_index` is equal to initial slices of `index`.
@@ -547,11 +597,14 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 # `delta == gather(x1, ext_index)`. This means that
                 # `ext_index` can be used to extract `delta` from the pack
                 # argument, which is transformed by `sort_index`.
-                ext_index = self._append_random_index(index)[:, :, :MAX_DELTA_TRANS_LENGTH, :]
+                ext_index = self._append_random_index(index)[
+                    :, :, :MAX_DELTA_TRANS_LENGTH, :
+                ]
                 delta = x.gather(2, ext_index)
                 ext_index = repeat_interleave(
                     self._transform_index(
-                        index=ext_index, sort_index=sort_index,
+                        index=ext_index,
+                        sort_index=sort_index,
                     ),
                     self.n_head,
                 )
@@ -597,9 +650,13 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         token_idx: torch.Tensor,
     ):
         if self.input_pos != 0:
-            raise IndexError(f"input_pos = {self.input_pos}, can only be called if this is 0")
+            raise IndexError(
+                f"input_pos = {self.input_pos}, can only be called if this is 0"
+            )
         if key.shape[0] != self.batch_size:
-            raise ValueError(f"key.shape = {key.shape}, first dimension must be batch_size = {self.batch_size}")
+            raise ValueError(
+                f"key.shape = {key.shape}, first dimension must be batch_size = {self.batch_size}"
+            )
         # Sanity checks
         assert self.current_length == 0
         assert self._token_chunk_pos == 0
@@ -623,7 +680,8 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 self._debug_tensors[name] = node.detach().clone()
 
     def _process_token_chunk(
-        self, token_idx: torch.Tensor,
+        self,
+        token_idx: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], Optional[UpdateTokenPositionsGracePeriod]]:
         """
          Processes token chunk, comparing `token_idx` against the current chunk
@@ -642,7 +700,9 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         """
         other = self.replay_log.token_chunks[self._token_chunk_pos]
         if not token_idx.equal(other):
-            raise ValueError(f"token_idx:\n{token_idx}\nreplay_log.token_chunks[{self._token_chunk_pos}]:\n{other}\nShould be the same!")
+            raise ValueError(
+                f"token_idx:\n{token_idx}\nreplay_log.token_chunks[{self._token_chunk_pos}]:\n{other}\nShould be the same!"
+            )
         self._token_chunk_pos += 1
         num = token_idx.shape[-1]
         index = None

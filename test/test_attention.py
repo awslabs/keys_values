@@ -99,12 +99,16 @@ def test_scaled_dot_product_attention(device, n_head, n_query_groups):
             token_positions = None
         elif repeat % 4 == 1:
             len_query = random.randint(1, len_key // 2)
-            token_positions = torch.arange(
-                0,
-                len_key,
-                dtype=torch.int64,
-                device=device,
-            ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
+            token_positions = (
+                torch.arange(
+                    0,
+                    len_key,
+                    dtype=torch.int64,
+                    device=device,
+                )
+                .view(1, 1, -1)
+                .expand(batch_size, n_query_groups, -1)
+            )
             input_pos = len_key // 2
             mask = build_mask_slice(
                 input_pos=len_key - len_query,
@@ -151,11 +155,12 @@ def test_scaled_dot_product_attention(device, n_head, n_query_groups):
             mask=mask,
         )
         attn_weights_cmp = attn_weights_cmp.view(
-            batch_size, n_query_groups, -1, len_key,
+            batch_size,
+            n_query_groups,
+            -1,
+            len_key,
         ).mean(dim=2)
-        msg = (
-            f"bs={batch_size}, hs={head_size}, nh_q={n_head}, nh_k={n_query_groups}, len_q={len_query}, len_k={len_key}"
-        )
+        msg = f"bs={batch_size}, hs={head_size}, nh_q={n_head}, nh_k={n_query_groups}, len_q={len_query}, len_k={len_key}"
         torch.testing.assert_close(result, result_cmp, **assert_kwargs), msg
         torch.testing.assert_close(attn_weights, attn_weights_cmp, **assert_kwargs), msg
 
@@ -251,7 +256,9 @@ def test_mask_sliding_window(device, dtype):
     old_mask = torch.ones(T, T, dtype=dtype, device=device).triu(diagonal=1)
     old_mask.masked_fill_(old_mask.bool(), neg_infty)
     old_mask = old_mask.view(1, 1, *old_mask.shape)
-    sliding_window_bias = torch.ones_like(old_mask).tril(diagonal=-config.sliding_window_size)
+    sliding_window_bias = torch.ones_like(old_mask).tril(
+        diagonal=-config.sliding_window_size
+    )
     sliding_window_bias.masked_fill_(sliding_window_bias.bool(), neg_infty)
     old_mask += sliding_window_bias
     # Determine mask as in new code
@@ -271,16 +278,24 @@ class CausalSelfAttention_OLD(torch.nn.Module):
         # key, query and value projections for all heads, but in a batch
         self.qkv = torch.nn.Linear(
             config.n_embd,
-            (config.n_head + 2 * config.n_query_groups) * config.head_size,  # support for grouped/multi queries
+            (config.n_head + 2 * config.n_query_groups)
+            * config.head_size,  # support for grouped/multi queries
             bias=config.bias or config.attn_bias,
         )
         # output projection
-        self.proj = torch.nn.Linear(config.head_size * config.n_head, config.n_embd, bias=config.bias)
+        self.proj = torch.nn.Linear(
+            config.head_size * config.n_head, config.n_embd, bias=config.bias
+        )
         # disabled by default
         self.kv_cache: Optional[KVCache] = None
         self.apply_sliding_window_attention = False
-        if config.sliding_window_size is not None and config.sliding_window_indices is not None:
-            self.apply_sliding_window_attention = config.sliding_window_indices[block_idx]
+        if (
+            config.sliding_window_size is not None
+            and config.sliding_window_indices is not None
+        ):
+            self.apply_sliding_window_attention = config.sliding_window_indices[
+                block_idx
+            ]
 
         if config.norm_qk:
             self.norm_q = config.norm_class(config.head_size, eps=config.norm_eps)
@@ -311,7 +326,9 @@ class CausalSelfAttention_OLD(torch.nn.Module):
         n_head = self.config.n_head
         n_query_groups = self.config.n_query_groups
         rope_n_elem = self.config.rope_n_elem
-        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
+        B, T, C = (
+            x.size()
+        )  # batch size, sequence length, embedding dimensionality (n_embd)
 
         # Perform a single multiplication operation using a combined QKV matrix to calculate `query`, `key`, and `value`
         # instead of individually multiplying the input `x` with the respective weight matrices.
@@ -384,7 +401,9 @@ class CausalSelfAttention_OLD(torch.nn.Module):
                 mask = torch.ones(T, T, dtype=q.dtype, device=q.device).triu(diagonal=1)
                 mask.masked_fill_(mask.bool(), minus_infty)
                 mask = mask.view(1, 1, *mask.shape)
-            sliding_window_bias = torch.ones_like(mask).tril(diagonal=-self.config.sliding_window_size)
+            sliding_window_bias = torch.ones_like(mask).tril(
+                diagonal=-self.config.sliding_window_size
+            )
             sliding_window_bias.masked_fill_(sliding_window_bias.bool(), minus_infty)
             mask += sliding_window_bias
 
@@ -402,9 +421,15 @@ class CausalSelfAttention_OLD(torch.nn.Module):
     # Note: All internal computations are done in `float32`. This is also done
     # in `F.scaled_dot_product_attention`.
     def scaled_dot_product_attention(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor] = None
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        scale = 1.0 / math.sqrt(self.config.attention_scores_scalar or self.config.head_size)
+        scale = 1.0 / math.sqrt(
+            self.config.attention_scores_scalar or self.config.head_size
+        )
 
         # with softcapping we cannot use SDPA
         if self.config.attention_logit_softcapping is not None:
@@ -426,7 +451,13 @@ class CausalSelfAttention_OLD(torch.nn.Module):
             y = (scores @ v.to(dtype)).to(q.dtype)
         else:
             y = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=mask, dropout_p=0.0, scale=scale, is_causal=mask is None
+                q,
+                k,
+                v,
+                attn_mask=mask,
+                dropout_p=0.0,
+                scale=scale,
+                is_causal=mask is None,
             )
         return y.transpose(1, 2)
 
@@ -439,22 +470,37 @@ def rope_cache_OLD(
         extra_config = None
 
     else:
-        adjusted_params_required = ["factor", "low_freq_factor", "high_freq_factor", "original_max_seq_len"]
-        params_present = [param in config.rope_adjustments for param in adjusted_params_required]
+        adjusted_params_required = [
+            "factor",
+            "low_freq_factor",
+            "high_freq_factor",
+            "original_max_seq_len",
+        ]
+        params_present = [
+            param in config.rope_adjustments for param in adjusted_params_required
+        ]
         num_params_present = sum(params_present)
 
         if num_params_present == 0:
             extra_config = None  # uses standard RoPE
         elif num_params_present == 4:
             # These parameters should always be used together so that we don't interfere with standard rope
-            extra_config = {name: config.rope_adjustments[name] for name in adjusted_params_required}
+            extra_config = {
+                name: config.rope_adjustments[name] for name in adjusted_params_required
+            }
         elif "factor" in config.rope_adjustments:
             # linear RoPE
             adjusted_params_required = ["factor"]
-            extra_config = {name: config.rope_adjustments[name] for name in adjusted_params_required}
+            extra_config = {
+                name: config.rope_adjustments[name] for name in adjusted_params_required
+            }
         else:
             # Some but not all parameters are specified; raise an error
-            missing_params = [param for param, present in zip(adjusted_params_required, params_present) if not present]
+            missing_params = [
+                param
+                for param, present in zip(adjusted_params_required, params_present)
+                if not present
+            ]
             raise ValueError(
                 f"The following adjusted RoPE parameters are missing in rope_adjustments: {', '.join(missing_params)}. "
                 "All adjusted RoPE parameters must be specified together."
@@ -658,7 +704,9 @@ def test_build_mask(device, seq_len, sliding_window_size):
         "n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size",
     ),
 )
-def test_attention_in_blocks(device, n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size):
+def test_attention_in_blocks(
+    device, n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size
+):
     seed = 31415927
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -678,7 +726,9 @@ def test_attention_in_blocks(device, n_head, n_query_groups, q_len, kv_len, dtyp
         rotary_percentage=1.0,
     )
 
-    print(f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}, device={device}")
+    print(
+        f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}, device={device}"
+    )
     kwargs = dict(dtype=dtype, device=device)
     for repeat in range(num_repeats):
         head_size = 2 ** random.randint(3, 6)
@@ -724,7 +774,7 @@ def test_attention_in_blocks(device, n_head, n_query_groups, q_len, kv_len, dtyp
                 tmp_array_limit_gb=TemporaryArrayLimit(
                     init_val=2 * numel_tmp / ENTRIES_PER_GB,
                     name="bogus",
-                )
+                ),
             ),
         }
         for kind in ("no", "yes"):
@@ -742,7 +792,10 @@ def test_attention_in_blocks(device, n_head, n_query_groups, q_len, kv_len, dtyp
         for name, result in results.items():
             print(f"Compare gradients for {name}")
             torch.testing.assert_close(
-                result[0], result[1], atol=0.0005, rtol=0.05,
+                result[0],
+                result[1],
+                atol=0.0005,
+                rtol=0.05,
             )
 
 
@@ -824,7 +877,9 @@ def test_mha_is_passed_on(device):
     # After cloning
     gpt_model_clone = gpt_model.clone()
     _compare_mhas(
-        orig_caches, gpt_model_clone.get_kv_caches(), prefix="GPT.clone: ",
+        orig_caches,
+        gpt_model_clone.get_kv_caches(),
+        prefix="GPT.clone: ",
     )
     gpt_model_clone = clone_model_shard_via_flat_vectors(
         model=gpt_model,
@@ -832,7 +887,9 @@ def test_mha_is_passed_on(device):
         shard_type=None,
     )
     _compare_mhas(
-        orig_caches, gpt_model_clone.get_kv_caches(), prefix="GPT.clone: ",
+        orig_caches,
+        gpt_model_clone.get_kv_caches(),
+        prefix="GPT.clone: ",
     )
 
     # Inference replay caches
@@ -843,7 +900,8 @@ def test_mha_is_passed_on(device):
     lc_model._create_members_for_backward()
 
     def get_inputs_slice(
-        start: int, end: int,
+        start: int,
+        end: int,
     ) -> torch.Tensor:
         return lc_model.layer_checkpoints.get_checkpoint(
             layer_idx=n_layer,
@@ -853,7 +911,8 @@ def test_mha_is_passed_on(device):
         )
 
     def write_head_gradients_slice(
-        input_pos: int, value: torch.Tensor,
+        input_pos: int,
+        value: torch.Tensor,
     ) -> Optional[int]:
         return None
 
@@ -870,7 +929,9 @@ def test_mha_is_passed_on(device):
     model_part = DefaultCellBlocks(gpt_model, 0, n_layer)
     ir_caches = accumulator._create_inference_replay_caches(model_part)
     _compare_mhas(
-        orig_caches, ir_caches, prefix="Inference replay caches: ",
+        orig_caches,
+        ir_caches,
+        prefix="Inference replay caches: ",
     )
 
     # Training replay caches
@@ -883,5 +944,7 @@ def test_mha_is_passed_on(device):
     )
     tr_caches = cell._create_train_replay_caches(0, n_layer)
     _compare_mhas(
-        orig_caches, tr_caches, prefix="Training replay caches: ",
+        orig_caches,
+        tr_caches,
+        prefix="Training replay caches: ",
     )

@@ -56,6 +56,7 @@ class QuantizedH2OKVCache(H2OKVCache):
       is quite odd. We normalize both components in the same way.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -95,7 +96,9 @@ class QuantizedH2OKVCache(H2OKVCache):
         if not isinstance(buffers, QuantizedKVCacheBuffers):
             raise TypeError("buffers must be of type QuantizedKVCacheBuffers")
         if not (0 <= combination_constant <= 1):
-            raise ValueError(f"combination_constant = {combination_constant}, must be in [0, 1]")
+            raise ValueError(
+                f"combination_constant = {combination_constant}, must be in [0, 1]"
+            )
         if scratch_blocksize < 1:
             raise ValueError("scratch_blocksize must be positive int")
         scratch_blocksize = min(scratch_blocksize, buffers.cache_length)
@@ -165,7 +168,7 @@ class QuantizedH2OKVCache(H2OKVCache):
         self._compute_quantization_errors(
             key,
             value,
-            out=self.q_errors[:self.batch_size, :, :init_length],
+            out=self.q_errors[: self.batch_size, :, :init_length],
         )
 
     def _modify_scores(self, scores: torch.Tensor) -> torch.Tensor:
@@ -176,13 +179,11 @@ class QuantizedH2OKVCache(H2OKVCache):
         limit = self.cache_length - self.grace_period
         assert scores.shape[2] == limit  # Sanity check
         _scores = self._min_max_normalize(scores)
-        _q_errors = self._min_max_normalize(
-            self.q_errors[:self.batch_size, :, :limit]
-        )
+        _q_errors = self._min_max_normalize(self.q_errors[: self.batch_size, :, :limit])
         return (
-            self.combination_constant * _scores +
-            ((self.combination_constant - 1) / 2) * _q_errors +
-            (1 - self.combination_constant)
+            self.combination_constant * _scores
+            + ((self.combination_constant - 1) / 2) * _q_errors
+            + (1 - self.combination_constant)
         )
 
     @staticmethod
@@ -219,6 +220,7 @@ class QuantizedVLengthH2OKVCache(QuantizedH2OKVCache, VLengthInstantScoreMixin):
     way as :class:`VLengthH2OKVCache` is derived from :class:`H2OKVCache`.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -288,7 +290,7 @@ class QuantizedVLengthH2OKVCache(QuantizedH2OKVCache, VLengthInstantScoreMixin):
         VLengthInstantScoreMixin._initial_scores_in_prefill(self, key, value)
 
     def get_v_norm(self) -> torch.Tensor:
-        return self.v_norm[:self.batch_size, :, :self.current_length]
+        return self.v_norm[: self.batch_size, :, : self.current_length]
 
     def get_kv_buffers(self) -> KVCacheBuffers:
         return self.kv_buffers

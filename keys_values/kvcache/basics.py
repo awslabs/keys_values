@@ -69,6 +69,7 @@ class KVCacheWithBuffers(DefaultKVCache):
     for `max_batch_size`.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -304,6 +305,7 @@ class DenseKVCache(KVCacheWithBuffers):
     buffers are allocated up front and are not enlarged later on.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -363,7 +365,9 @@ class DenseKVCache(KVCacheWithBuffers):
     ) -> KeysAndValues:
         if self._replay_log is not None:
             if not isinstance(self._replay_log, DefaultKVCacheReplayLog):
-                raise IndexError("Cannot switch on replay logging in the middle of inference run. Call 'prefill'.")
+                raise IndexError(
+                    "Cannot switch on replay logging in the middle of inference run. Call 'prefill'."
+                )
             self._replay_log.append_token_chunk(token_idx)
         np = self.input_pos
         num = key.shape[2]
@@ -399,7 +403,9 @@ class DenseKVCache(KVCacheWithBuffers):
         return self.kv_buffers.size_estimate()
 
     @classmethod
-    def size_estimate_apriori(cls, params: KVCacheParams, **kwargs) -> Tuple[int, Dict[str, int]]:
+    def size_estimate_apriori(
+        cls, params: KVCacheParams, **kwargs
+    ) -> Tuple[int, Dict[str, int]]:
         """
         `cache_length` is required in `kwargs`. If `buffer_type` is given in
         `kwargs`, the size for this type is used, otherwise for the default
@@ -409,7 +415,9 @@ class DenseKVCache(KVCacheWithBuffers):
         buff_params = KVCacheBuffersParams.from_params(params)
         buffer_type = kwargs.get("buffer_type", DefaultKVCacheBuffers)
         return buffer_type.size_estimate_apriori(
-            buff_params, cache_length=params.cache_length, **kwargs,
+            buff_params,
+            cache_length=params.cache_length,
+            **kwargs,
         )
 
     def switch_replay_logging(self, status: bool):
@@ -435,6 +443,7 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
     Replay log for :class:`LastRecentlyInsertedKVCache`.
 
     """
+
     def __init__(
         self,
         token_chunks: List[torch.Tensor],
@@ -458,9 +467,13 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
     ) -> torch.Tensor:
         seq_length = self.__len__()
         if num <= 0 or input_pos < 0 or input_pos > seq_length - num:
-            raise ValueError(f"token_pos = {input_pos}, num = {num}, seq_length = {seq_length}: Out of range")
+            raise ValueError(
+                f"token_pos = {input_pos}, num = {num}, seq_length = {seq_length}: Out of range"
+            )
         if input_pos < self.cache_length:
-            raise ValueError(f"input_pos = {input_pos} must be >= {self.cache_length} = cache_length")
+            raise ValueError(
+                f"input_pos = {input_pos} must be >= {self.cache_length} = cache_length"
+            )
         device = kwargs.get("device", torch.get_default_device())
         return positions_wrap_around(
             num=num,
@@ -482,6 +495,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     longest time.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -536,7 +550,10 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             **buffers_kwargs,
         )
         return LastRecentlyInsertedKVCache(
-            config, buffers, block_idx, **base_kwargs,
+            config,
+            buffers,
+            block_idx,
+            **base_kwargs,
         )
 
     @classmethod
@@ -571,7 +588,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         num1 = min(num, self.cache_length - np)
         diff = num - num1
         ntp = self.input_pos
-        self.token_pos[np:(np + num1)] = torch.arange(
+        self.token_pos[np : (np + num1)] = torch.arange(
             ntp, ntp + num1, device=self.device, dtype=torch.int
         )
         if diff > 0:
@@ -581,7 +598,9 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         self.next_position = (np + num) % self.cache_length
         if self._replay_log is not None:
             if not isinstance(self._replay_log, DefaultKVCacheReplayLog):
-                raise IndexError("Cannot switch on replay logging in the middle of inference run. Call 'prefill'.")
+                raise IndexError(
+                    "Cannot switch on replay logging in the middle of inference run. Call 'prefill'."
+                )
             self._replay_log.append_token_chunk(token_idx)
         return k_and_v
 
@@ -609,7 +628,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
 
     def token_positions(self) -> torch.Tensor:
         return index_to_3d(
-            self.token_pos[:self.current_length],
+            self.token_pos[: self.current_length],
             self.batch_size,
             self.n_query_groups,
         )
@@ -620,7 +639,9 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         return sz_total + tk_p, {**dct_sz, "token_pos": tk_p}
 
     @classmethod
-    def size_estimate_apriori(cls, params: KVCacheParams, **kwargs) -> Tuple[int, Dict[str, int]]:
+    def size_estimate_apriori(
+        cls, params: KVCacheParams, **kwargs
+    ) -> Tuple[int, Dict[str, int]]:
         """
         `cache_length` is required in `kwargs`. If `buffer_type` is given in
         `kwargs`, the size for this type is used, otherwise for the default
@@ -630,7 +651,9 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         buff_params = KVCacheBuffersParams.from_params(params)
         buffer_type = kwargs.get("buffer_type", DefaultKVCacheBuffers)
         sz_total, dct_sz = buffer_type.size_estimate_apriori(
-            buff_params, cache_length=params.cache_length, **kwargs,
+            buff_params,
+            cache_length=params.cache_length,
+            **kwargs,
         )
         tk_p = params.cache_length * bits_for_torch_dtype(torch.int)
         return sz_total + tk_p, {**dct_sz, "token_pos": tk_p}

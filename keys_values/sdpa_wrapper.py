@@ -75,16 +75,22 @@ def scaled_dot_product_attention(
         raise ValueError("key, value must have same shape")
     batch_size, n_head, q_len, head_size = query.shape
     if key.shape[0] != batch_size or key.shape[-1] != head_size:
-        raise ValueError(f"key.shape = {key.shape}, must be ({batch_size}, _, _, {head_size})")
+        raise ValueError(
+            f"key.shape = {key.shape}, must be ({batch_size}, _, _, {head_size})"
+        )
     kv_len = key.shape[2]
     if not (0 < q_len <= kv_len):
-        raise ValueError(f"Must have 0 < q_len = {q_len} <= kv_len = {kv_len}. Don't use this for prefill")
+        raise ValueError(
+            f"Must have 0 < q_len = {q_len} <= kv_len = {kv_len}. Don't use this for prefill"
+        )
     if sdpa_kernels is None:
         sdpa_kernels = []
 
     if token_positions is None:
         if input_pos + q_len != kv_len:
-            raise ValueError(f"Without token_positions, must have input_pos + q_len = {input_pos + q_len} == {kv_len} = kv_len")
+            raise ValueError(
+                f"Without token_positions, must have input_pos + q_len = {input_pos + q_len} == {kv_len} = kv_len"
+            )
     else:
         # Reorder entries in `key`, `value`, so that new entries are on the
         # right. New entries are those with `token_positions >= input_pos`.
@@ -96,7 +102,9 @@ def scaled_dot_product_attention(
         if input_pos == 0:
             raise ValueError("For input_pos=0, token_positions must be None")
         if token_positions.shape != key.shape[:-1]:
-            raise ValueError(f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible")
+            raise ValueError(
+                f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
+            )
         sort_index = torch.argsort(token_positions.detach(), dim=-1)
         sort_index = expand_index(sort_index, head_size)
         key = torch.gather(key, 2, sort_index)
@@ -107,7 +115,9 @@ def scaled_dot_product_attention(
     # is zero-padded on the left
     if q_len < kv_len:
         fill_left = torch.zeros(
-            (1, 1, 1, 1), dtype=query.dtype, device=query.device,
+            (1, 1, 1, 1),
+            dtype=query.dtype,
+            device=query.device,
         ).expand(batch_size, n_head, kv_len - q_len, head_size)
         query = torch.cat((fill_left, query), dim=2)
     full_y, filtered_kernels = pytorch_scaled_dot_product_attention(

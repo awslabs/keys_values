@@ -33,7 +33,7 @@ from keys_values.kvcache.test_utils import (
     product(
         available_backends(),
         ["lastrec-default", "lastrec-torch-quantized8"],
-    )
+    ),
 )
 def test_last_recent(device, name):
     seed = 31415927
@@ -66,7 +66,11 @@ def test_last_recent(device, name):
     current_length = min(cache_length, num_insert)
     assert kv_cache.current_length == current_length
     token_positions = kv_cache.token_positions().to(dtype=torch.int64)
-    assert token_positions.shape == (params.max_batch_size, params.n_query_groups, current_length)
+    assert token_positions.shape == (
+        params.max_batch_size,
+        params.n_query_groups,
+        current_length,
+    )
     assert tensor_is_simple(token_positions)
     positions = token_positions[0, 0, :].tolist()
     assert len(set(positions)) == current_length
@@ -108,13 +112,22 @@ def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
     num_insert = max_prefill_length if max_prefill_length is not None else cache_length
 
     data = random_args_cache_forward(
-        params, num_insert, vocab_size, device=device,
+        params,
+        num_insert,
+        vocab_size,
+        device=device,
     )
     # Compute MHA in a single shot
     y_sshot = kv_cache(**data)
-    should_be = torch.arange(
-        num_insert, dtype=kv_cache.token_positions().dtype, device=device,
-    ).view(1, 1, -1).expand(params.max_batch_size, params.n_query_groups, -1)
+    should_be = (
+        torch.arange(
+            num_insert,
+            dtype=kv_cache.token_positions().dtype,
+            device=device,
+        )
+        .view(1, 1, -1)
+        .expand(params.max_batch_size, params.n_query_groups, -1)
+    )
     assert (should_be == kv_cache.token_positions()[:, :, :num_insert]).all().item()
     # Compute MHA in steps
     kv_cache.reset()
@@ -127,7 +140,9 @@ def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
     assert (should_be == kv_cache.token_positions()[:, :, :num_insert]).all().item()
     print(f"0:{num_prefill}")
     torch.testing.assert_close(
-        y_parts[0], y_sshot[:, :num_prefill, :], **tol_kwargs,
+        y_parts[0],
+        y_sshot[:, :num_prefill, :],
+        **tol_kwargs,
     )
     # Incremental computation is not very close to single-shot for 16-bit
     # data types. This is because different code is used (PyTorch kernels with
@@ -136,5 +151,7 @@ def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
         for pos, yp in zip(range(num_prefill, num_insert), y_parts[1:]):
             print(f"{pos}:{pos + 1}")
             torch.testing.assert_close(
-                yp, y_sshot[:, pos:(pos + 1), :], **tol_kwargs,
+                yp,
+                y_sshot[:, pos : (pos + 1), :],
+                **tol_kwargs,
             )

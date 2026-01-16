@@ -27,6 +27,7 @@ class CellBlocks:
     :class:`CellComputation`.
 
     """
+
     def __init__(self, config: Config):
         self.config = config
 
@@ -41,11 +42,17 @@ class CellBlocks:
     ) -> torch.Tensor:
         batch_size, chunk_len, n_embd = x.shape
         if n_embd != self.config.n_embd:
-            raise ValueError(f"x.shape[2] = {n_embd} != {self.config.n_embd} = config.n_embd")
+            raise ValueError(
+                f"x.shape[2] = {n_embd} != {self.config.n_embd} = config.n_embd"
+            )
         if idx.shape != (batch_size, chunk_len):
-            raise ValueError(f"idx.shape = {idx.shape}, must be {(batch_size, chunk_len)}")
+            raise ValueError(
+                f"idx.shape = {idx.shape}, must be {(batch_size, chunk_len)}"
+            )
         if chunk_len > self.max_seq_length:
-            raise ValueError(f"Cannot forward chunk of length {chunk_len}, max seq length is only {self.max_seq_length}")
+            raise ValueError(
+                f"Cannot forward chunk of length {chunk_len}, max seq length is only {self.max_seq_length}"
+            )
         for block_idx, cache in self.get_kv_caches():
             self._check_kv_cache(cache, block_idx, batch_size, chunk_len)
         # Loop over blocks
@@ -101,10 +108,13 @@ class CellBlocks:
                     )
 
     def assign_kv_caches(
-        self, kv_caches: Union[List[KVCache], List[Tuple[int, KVCache]]],
+        self,
+        kv_caches: Union[List[KVCache], List[Tuple[int, KVCache]]],
     ):
         if len(kv_caches) != self.num_layers:
-            raise ValueError(f"kv_caches must have one entry per layer, so {self.num_layers} entries")
+            raise ValueError(
+                f"kv_caches must have one entry per layer, so {self.num_layers} entries"
+            )
         if isinstance(kv_caches[0], KVCache):
             for cache, (_, block) in zip(kv_caches, self.blocks()):
                 block.attn.kv_cache = cache

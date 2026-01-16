@@ -36,6 +36,7 @@ class SFTDataset(Dataset):
     Avoids extra costs due to tokenization.
 
     """
+
     def __init__(
         self,
         data: List[Dict[str, str]],
@@ -49,7 +50,9 @@ class SFTDataset(Dataset):
         self.data = data
         self.tokenizer = tokenizer
         self.prompt_style = (
-            prompt_style if isinstance(prompt_style, PromptStyle) else PromptStyle.from_name(prompt_style)
+            prompt_style
+            if isinstance(prompt_style, PromptStyle)
+            else PromptStyle.from_name(prompt_style)
         )
         self.max_seq_length = max_seq_length
         self.mask_prompt = mask_prompt
@@ -65,12 +68,18 @@ class SFTDataset(Dataset):
             example = self.transform(example)
         prompt = self.prompt_style.apply(prompt=example["instruction"], **example)
         encoded_prompt = self.tokenizer.encode(
-            prompt, max_length=self.max_seq_length,
+            prompt,
+            max_length=self.max_seq_length,
         )
         encoded_response = self.tokenizer.encode(
-            example["output"], bos=False, eos=True, max_length=self.max_seq_length,
+            example["output"],
+            bos=False,
+            eos=True,
+            max_length=self.max_seq_length,
         )
-        encoded_prompt_and_response = torch.cat((encoded_prompt, encoded_response)).type(torch.int64)
+        encoded_prompt_and_response = torch.cat(
+            (encoded_prompt, encoded_response)
+        ).type(torch.int64)
         if 0 < self.max_seq_length < len(encoded_prompt_and_response):
             msl = self.max_seq_length
             encoded_prompt_and_response = encoded_prompt_and_response[:msl]
@@ -83,7 +92,11 @@ class SFTDataset(Dataset):
 
         token_counts = {"raw_plus_prompt_template": len(encoded_prompt_and_response)}
         raw_count = example.get("num_tokens_instruction")
-        if raw_count is None and self.transform is None and isinstance(self.prompt_style, Default):
+        if (
+            raw_count is None
+            and self.transform is None
+            and isinstance(self.prompt_style, Default)
+        ):
             raw_count = len(encoded_prompt)
         if raw_count is not None:
             token_counts["raw"] = raw_count + len(encoded_response)
@@ -125,7 +138,7 @@ def common_collate_fn(
                 dtype=torch.int64,
             ).unsqueeze(1)
             for name in names
-        }
+        },
     }
 
 

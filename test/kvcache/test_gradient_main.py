@@ -57,7 +57,11 @@ def args_complete_gradient_computation():
     args_complete_gradient_computation(),
 )
 def test_complete_gradient_computation(
-    cache_name, cache_kwargs, cache_lengths, use_new_cache, device,
+    cache_name,
+    cache_kwargs,
+    cache_lengths,
+    use_new_cache,
+    device,
 ):
     seed = 31415927
     random.seed(seed)
@@ -135,7 +139,9 @@ def test_complete_gradient_computation(
         if not debug_flag:
             print("\n*** Default computation of gradients ***")
         else:
-            print("\n*** Gradient computation with single cell per row and no autograd hooks ***")
+            print(
+                "\n*** Gradient computation with single cell per row and no autograd hooks ***"
+            )
         model = LongContextGradientModel(
             gpt_model=gpt_model,
             head_model=head_model,
@@ -165,7 +171,9 @@ def test_complete_gradient_computation(
             for (fli, fci), logs in model.annotation_usage_logs().items():
                 num_unmatched = len(logs.unmatched_pack_args)
                 if num_unmatched > 0:
-                    print(f"\nUnmatched pack arguments for first_layer_index={fli}, first_chunk_index={fci}")
+                    print(
+                        f"\nUnmatched pack arguments for first_layer_index={fli}, first_chunk_index={fci}"
+                    )
                     print(logs.report())
                     some_unmatched = True
             assert not some_unmatched
@@ -183,7 +191,9 @@ def test_complete_gradient_computation(
     for name, value in gradients[0].items():
         value_comp = gradients[1].get(name)
         if value_comp is None:
-            raise IndexError(f"name = {name} is in gradients[0], but not in gradients[1]")
+            raise IndexError(
+                f"name = {name} is in gradients[0], but not in gradients[1]"
+            )
         print(f"Comparing gradient for {name}")
         torch.testing.assert_close(value, value_comp, **kwargs)
 
@@ -202,8 +212,10 @@ def args_copy_model_to_device():
         )
     ]
 
+
 @pytest.mark.parametrize(
-    "cpu_offload_device, dtype, cache_name", args_copy_model_to_device(),
+    "cpu_offload_device, dtype, cache_name",
+    args_copy_model_to_device(),
 )
 def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
     seed = 31415927
@@ -276,10 +288,15 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
         assert name in state_dict, f"name='{name}' in original, but not copy"
         param_copy = state_dict[name]
         if param is None:
-            assert param_copy is None, f"name='{name}': param is None, param_copy is not None"
+            assert (
+                param_copy is None
+            ), f"name='{name}': param is None, param_copy is not None"
         else:
             assert param.data.device == device, (param.data.device, device)
-            assert param_copy.data.device == cpu_offload_device, (param_copy.data.device, cpu_offload_device)
+            assert param_copy.data.device == cpu_offload_device, (
+                param_copy.data.device,
+                cpu_offload_device,
+            )
             torch.testing.assert_close(param.data, param_copy.data.to(device=device))
     copy_names = _model_copy.state_dict().keys()
     names = _model.state_dict().keys()
@@ -294,9 +311,21 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
             model_copy.gpt_model.get_kv_caches(),
         )
     ):
-        assert kv_cache is not None and kv_cache_copy is not None, (l_ix, kv_cache, kv_cache_copy)
-        assert type(kv_cache) == type(kv_cache_copy), (l_ix, type(kv_cache), type(kv_cache_copy))
-        assert kv_cache_copy.device in (cpu_offload_device, None), (l_ix, kv_cache_copy.device, cpu_offload_device)
+        assert kv_cache is not None and kv_cache_copy is not None, (
+            l_ix,
+            kv_cache,
+            kv_cache_copy,
+        )
+        assert type(kv_cache) == type(kv_cache_copy), (
+            l_ix,
+            type(kv_cache),
+            type(kv_cache_copy),
+        )
+        assert kv_cache_copy.device in (cpu_offload_device, None), (
+            l_ix,
+            kv_cache_copy.device,
+            cpu_offload_device,
+        )
 
 
 if __name__ == "__main__":
