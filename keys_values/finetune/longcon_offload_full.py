@@ -24,7 +24,6 @@ from typing import Dict, Literal, Optional, Any, Tuple
 
 import torch
 from torch.utils.data import DataLoader
-from torch.nn.attention import SDPBackend
 from torchmetrics import RunningMean
 from lightning.fabric.utilities.load import _lazy_load as lazy_load
 
