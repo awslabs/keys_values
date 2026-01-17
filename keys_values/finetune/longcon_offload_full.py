@@ -46,7 +46,10 @@ from litgpt.utils import (
 )
 
 from keys_values.array_limit import TemporaryArrayLimit
-from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
+from keys_values.attention_utils import (
+    DEFAULT_TMP_ARRAY_LIMIT_GB,
+    SDPA_KERNELS_BEST_ORDERING,
+)
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME
 from keys_values.finetune.args import (
     EvalArgs,
@@ -384,12 +387,6 @@ def main(
 
     os.makedirs(out_dir, exist_ok=True)
     # Order of preference for SDPA kernels
-    sdpa_kernels = [
-        SDPBackend.FLASH_ATTENTION,
-        SDPBackend.EFFICIENT_ATTENTION,
-        SDPBackend.CUDNN_ATTENTION,
-        SDPBackend.MATH,
-    ]
     limit_gb = attention_forward_temp_size_gb
     if limit_gb is None:
         limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
@@ -399,12 +396,12 @@ def main(
         name="attention_forward_temp_size_gb",
     )
     mha_kwargs = dict(
-        sdpa_kernels=sdpa_kernels,
+        sdpa_kernels=SDPA_KERNELS_BEST_ORDERING,
         tmp_array_limit_gb=tmp_array_limit_forward,
         pos_encoding=position_encoding_factory(config, do_yarn=yarn_rope),
     )
     if "sdpa_kernels" not in kv_cache.cache_kwargs:
-        kv_cache.cache_kwargs["sdpa_kernels"] = sdpa_kernels
+        kv_cache.cache_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
     kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
     kv_cache.cache_kwargs["pos_encoding"] = mha_kwargs["pos_encoding"]
     # We create the GPT model on the device, then copy. This is faster

@@ -20,7 +20,6 @@ from typing import List, Dict, Any, Tuple, Set
 
 from scipy.optimize import root_scalar
 import torch
-from torch.nn.attention import SDPBackend
 
 from litgpt.config import Config
 
@@ -28,6 +27,7 @@ from keys_values.attention import (
     scaled_dot_product_attention_in_blocks,
     DefaultKeysAndValues,
 )
+from keys_values.attention_utils import SDPA_KERNELS_BEST_ORDERING
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.test_utils import random_keys_values, random_tensor
 from keys_values.sdpa_wrapper import scaled_dot_product_attention
@@ -38,13 +38,14 @@ def sample_inputs(
     params: KVCacheParams,
     chunk_size: int,
     input_pos: int,
+    device: torch.device,
 ) -> Dict[str, torch.Tensor]:
     batch_size = params.max_batch_size
     cache_length = params.cache_length
     n_query_groups = params.n_query_groups
     query = random_tensor(params, num=chunk_size, is_query=True)
     key, value = random_keys_values(params, num=cache_length)
-    index_kwargs = dict(dtype=torch.int64, device=params.device)
+    index_kwargs = dict(dtype=torch.int64, device=device)
     token_positions = torch.randint(
         low=0,
         high=input_pos - 1,
@@ -75,6 +76,7 @@ def measure_naive_time(
     records: List[dict],
     tmp_array_limit_gb: float,
     fval: float,
+    device: torch.device,
 ) -> float:
     chunk_size = round(chunk_size)
     input_pos = 2 * params.cache_length  # Value should not matter
@@ -82,7 +84,7 @@ def measure_naive_time(
     sum_time_in_ms = 0
     try:
         for repeat in range(num_repeats):
-            data = sample_inputs(params, chunk_size, input_pos)
+            data = sample_inputs(params, chunk_size, input_pos, device)
             torch.cuda.current_stream().synchronize()
             forward_time = time.perf_counter()
             y, _ = scaled_dot_product_attention_in_blocks(
@@ -119,6 +121,7 @@ def find_chunk_size(
     params: KVCacheParams,
     num_repeats: int,
     tmp_array_limit_gb: float,
+    device: torch.device,
     warmup_steps: int = 2,
     xtol: float = 1,
     maxiter: int = 100,
@@ -139,16 +142,11 @@ def find_chunk_size(
     # Measure time for query-padded SDPA
     chunk_size = params.cache_length // 64  # Should not matter
     input_pos = 2 * params.cache_length
-    sdpa_kernels = [
-        SDPBackend.FLASH_ATTENTION,
-        SDPBackend.EFFICIENT_ATTENTION,
-        SDPBackend.CUDNN_ATTENTION,
-        SDPBackend.MATH,
-    ]
+    sdpa_kernels = SDPA_KERNELS_BEST_ORDERING.copy()
     scale_factor = 1.0 / math.sqrt(params.head_size)
     sum_time_in_ms = 0
     for repeat in [None] * warmup_steps + list(range(num_repeats)):
-        data = sample_inputs(params, chunk_size, input_pos)
+        data = sample_inputs(params, chunk_size, input_pos, device)
         torch.cuda.current_stream().synchronize()
         forward_time = time.perf_counter()
         y, _ = scaled_dot_product_attention(
@@ -177,6 +175,7 @@ def find_chunk_size(
         records=records,
         tmp_array_limit_gb=tmp_array_limit_gb,
         fval=time_padded_query,
+        device=device,
     )
     # Warm-up:
     for _ in range(warmup_steps):
@@ -279,6 +278,7 @@ def main(
             num_repeats=num_repeats,
             tmp_array_limit_gb=tmp_array_limit_gb,
             warmup_steps=warmup_steps,
+            device=device,
         )
         new_result = {
             **{k: v for k, v in root.items() if k != "records"},
@@ -325,8 +325,6 @@ if __name__ == "__main__":
         "Llama-3.2-1B",  # (32, 8, 64)
         "Llama-3.2-3B",  # (24, 8, 128)
     ]
-    config_names = ["Llama-2-13b-hf"]
-    batch_sizes = [8]
     result_path = Path("./qlen_thresholds_extra.csv")
     all_evals_path = Path("./qlen_thresholds_all_evals_extra.csv")
     fingerprints_done: Set[Tuple[int, int, int]] = set()

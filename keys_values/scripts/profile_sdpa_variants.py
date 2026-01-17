@@ -17,11 +17,11 @@ import time
 from typing import List
 
 import torch
-from torch.nn.attention import SDPBackend
 import numpy as np
 
 from litgpt.config import Config
 
+from keys_values.attention_utils import SDPA_KERNELS_BEST_ORDERING
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.test_utils import random_args_cache_forward
 from keys_values.sdpa_wrapper import scaled_dot_product_attention
@@ -45,12 +45,7 @@ def main(
     device = torch.device("cuda", 0) if on_gpu else torch.device("cpu")
 
     index_kwargs = dict(dtype=torch.int64, device=device)
-    sdpa_kernels = [
-        SDPBackend.FLASH_ATTENTION,
-        SDPBackend.EFFICIENT_ATTENTION,
-        SDPBackend.CUDNN_ATTENTION,
-        SDPBackend.MATH,
-    ]
+    sdpa_kernels = SDPA_KERNELS_BEST_ORDERING.copy()
     params = KVCacheParams(
         max_batch_size=batch_size,
         n_query_groups=config.n_query_groups,

@@ -24,14 +24,12 @@ from typing import Dict, Literal, Optional, Any
 
 import torch
 from torch.utils.data import DataLoader
-from torch.nn.attention import SDPBackend
 from torchmetrics import RunningMean
 
 from litgpt.args import TrainArgs
 from litgpt.data import DataModule
 from litgpt.lora import Config, mark_only_lora_as_trainable, lora_filter
 from litgpt.prompts import save_prompt_style
-from litgpt.scripts.merge_lora import merge_lora
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     CycleIterator,
@@ -46,7 +44,10 @@ from litgpt.utils import (
 )
 
 from keys_values.array_limit import TemporaryArrayLimit
-from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
+from keys_values.attention_utils import (
+    DEFAULT_TMP_ARRAY_LIMIT_GB,
+    SDPA_KERNELS_BEST_ORDERING,
+)
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME
 from keys_values.finetune.args import (
     EvalArgs,
@@ -415,12 +416,6 @@ def main(
 
     os.makedirs(out_dir, exist_ok=True)
     # Order of preference for SDPA kernels
-    sdpa_kernels = [
-        SDPBackend.FLASH_ATTENTION,
-        SDPBackend.EFFICIENT_ATTENTION,
-        SDPBackend.CUDNN_ATTENTION,
-        SDPBackend.MATH,
-    ]
     limit_gb = attention_forward_temp_size_gb
     if limit_gb is None:
         limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
@@ -430,12 +425,12 @@ def main(
         name="attention_forward_temp_size_gb",
     )
     mha_kwargs = dict(
-        sdpa_kernels=sdpa_kernels,
+        sdpa_kernels=SDPA_KERNELS_BEST_ORDERING,
         tmp_array_limit_gb=tmp_array_limit_forward,
         pos_encoding=position_encoding_factory(config, do_yarn=yarn_rope),
     )
     if "sdpa_kernels" not in kv_cache.cache_kwargs:
-        kv_cache.cache_kwargs["sdpa_kernels"] = sdpa_kernels
+        kv_cache.cache_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
     kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
     kv_cache.cache_kwargs["pos_encoding"] = mha_kwargs["pos_encoding"]
     # We create the GPT model on the device, then copy. This is faster
@@ -600,11 +595,6 @@ def main(
     save_hyperparameters(setup, save_dir)
     if hasattr(data, "prompt_style"):
         save_prompt_style(data.prompt_style, save_dir)
-    merge_lora(
-        checkpoint_dir=save_dir,
-        lora_fname=LORA_WEIGHTS_FNAME,
-        pretrained_fname=LIT_MODEL_FNAME,
-    )
 
 
 def fit(

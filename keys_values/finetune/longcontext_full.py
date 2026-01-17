@@ -27,7 +27,6 @@ import torch
 from lightning.fabric.strategies import DDPStrategy
 from torch.utils.data import DataLoader
 from torchmetrics import RunningMean
-from torch.nn.attention import SDPBackend
 
 from keys_values.utils import flush_io_streams
 from litgpt.args import TrainArgs
@@ -53,7 +52,10 @@ from litgpt.utils import (
 )
 
 from keys_values.array_limit import TemporaryArrayLimit
-from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
+from keys_values.attention_utils import (
+    DEFAULT_TMP_ARRAY_LIMIT_GB,
+    SDPA_KERNELS_BEST_ORDERING,
+)
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME
 from keys_values.finetune.args import (
     EvalArgs,
@@ -436,12 +438,6 @@ def main(
 
     with fabric.init_module(empty_init=(fabric.world_size > 1)):
         # Order of preference for SDPA kernels
-        sdpa_kernels = [
-            SDPBackend.FLASH_ATTENTION,
-            SDPBackend.EFFICIENT_ATTENTION,
-            SDPBackend.CUDNN_ATTENTION,
-            SDPBackend.MATH,
-        ]
         limit_gb = attention_forward_temp_size_gb
         if limit_gb is None:
             limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
@@ -454,12 +450,12 @@ def main(
             name="attention_forward_temp_size_gb",
         )
         mha_kwargs = dict(
-            sdpa_kernels=sdpa_kernels,
+            sdpa_kernels=SDPA_KERNELS_BEST_ORDERING,
             tmp_array_limit_gb=tmp_array_limit_forward,
             pos_encoding=position_encoding_factory(config, do_yarn=yarn_rope),
         )
         if "sdpa_kernels" not in kv_cache.cache_kwargs:
-            kv_cache.cache_kwargs["sdpa_kernels"] = sdpa_kernels
+            kv_cache.cache_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
         kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
         kv_cache.cache_kwargs["pos_encoding"] = mha_kwargs["pos_encoding"]
         gpt_model = GPT(config, **mha_kwargs)
@@ -606,17 +602,17 @@ def wrap_gpt_model(
     gpt_model: GPT,
     head_model: HeadModel,
     kv_cache: KVCacheArgs,
-    grad: GradientArgs,
+    grad: Optional[GradientArgs],
     verbose: VerbosityLevels,
-    attention_backward_temp_size_gb: float,
+    attention_backward_temp_size_gb: Optional[float],
     max_batch_size: int,
     dtype: torch.dtype,
-    model_for_training: bool = True,
     profile_grad_times: bool = False,
     profile_parts: Optional[str] = None,
     cpu_offload_device: Optional[torch.device] = None,
     fabric: Optional[L.Fabric] = None,
-) -> LongContextGradientModel:
+) -> Union[LongContextGradientModel, LongContextInferenceModel]:
+    model_for_training = grad is not None
     print_message(
         "Assigning KV caches to layers of model:\n"
         f"name:           {kv_cache.name}\n"
@@ -646,12 +642,13 @@ def wrap_gpt_model(
         cache_kwargs=cache_kwargs,
     )
     gpt_model.assign_kv_caches(kv_caches)
+    multiplier = 1.0 if grad is None else grad.chunks_per_cell_multiplier
     common_kwargs = dict(
         gpt_model=gpt_model,
         head_model=head_model,
         chunk_size=kv_cache.chunk_size,
         randomize_chunk_sizes=kv_cache.randomize_chunk_sizes,
-        chunks_per_cell_multiplier=grad.chunks_per_cell_multiplier,
+        chunks_per_cell_multiplier=multiplier,
         verbose=verbose,
         tmp_array_limit_gb=tmp_array_limit_gb,
     )

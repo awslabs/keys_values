@@ -17,7 +17,6 @@ import random
 
 import pytest
 import torch
-from torch.nn.attention import SDPBackend
 
 from litgpt.config import Config
 
@@ -25,6 +24,7 @@ from keys_values.attention import (
     DefaultKeysAndValues,
     scaled_dot_product_attention_in_blocks,
 )
+from keys_values.attention_utils import SDPA_KERNELS_BEST_ORDERING
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.test_utils import (
@@ -65,12 +65,7 @@ def test_sdpa_wrapper(device, n_head, n_query_groups):
         assert_kwargs = dict(atol=0.0005, rtol=0.05)
     else:
         assert_kwargs = dict(atol=0.0015, rtol=0.05)
-    sdpa_kernels = [
-        SDPBackend.FLASH_ATTENTION,
-        SDPBackend.EFFICIENT_ATTENTION,
-        SDPBackend.CUDNN_ATTENTION,
-        SDPBackend.MATH,
-    ]
+    sdpa_kernels = SDPA_KERNELS_BEST_ORDERING.copy()
 
     print(f"n_head={n_head}, n_query_groups={n_query_groups}, device={device}")
     for repeat in range(num_repeats):

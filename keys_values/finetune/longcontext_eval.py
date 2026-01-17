@@ -23,7 +23,6 @@ import torch
 from lightning.fabric.plugins import BitsandbytesPrecision
 from lightning.fabric.strategies import DDPStrategy
 from torch.utils.data import DataLoader
-from torch.nn.attention import SDPBackend
 import yaml
 
 from litgpt.config import Config as ConfigFull
@@ -39,7 +38,10 @@ from litgpt.utils import (
 )
 
 from keys_values.array_limit import TemporaryArrayLimit
-from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
+from keys_values.attention_utils import (
+    DEFAULT_TMP_ARRAY_LIMIT_GB,
+    SDPA_KERNELS_BEST_ORDERING,
+)
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME
 from keys_values.data.evaluation import (
     TASK_NAME,
@@ -47,26 +49,28 @@ from keys_values.data.evaluation import (
     EvaluationTasks,
     EvaluationWithTasksHelper,
 )
+from keys_values.finetune.args import KVCacheArgs
 from keys_values.finetune.batch_transform import BatchTransformFactory
 from keys_values.finetune.longcontext_full import (
     wrap_gpt_model,
 )
-from keys_values.utils import flush_io_streams
 from keys_values.finetune.utils import (
     LIT_MODEL_FNAME,
     HEAD_MODEL_FNAME,
     LORA_WEIGHTS_FNAME,
     LORA_WEIGHTS_FNAME_OLD,
     check_kv_cache,
+    adapt_requires_grad,
 )
 from keys_values.head_model_factory import HeadModelFactory
-from keys_values.kvcache.utils import VerbosityLevels
+from keys_values.kvcache.utils import VerbosityLevels, fabric_precision_to_dtype
 from keys_values.long_context import (
     LongContextInferenceModel,
 )
-from keys_values.finetune.args import KVCacheArgs
 from keys_values.lora import GPT as GPTLoRA
 from keys_values.model import GPT as GPTFull
+from keys_values.pos_encoding import position_encoding_factory
+from keys_values.utils import flush_io_streams
 
 
 @dataclass(frozen=True)
@@ -96,19 +100,19 @@ def setup(
     batch_size: Optional[int] = None,
     kv_cache: KVCacheArgs = KVCacheArgs(
         name="h2o-torch-quantized8",
-        cache_length=8192,
-        layers_per_cell=1,
-        chunk_size=256,
+        cache_length=16384,
+        chunk_size=1024,
         cache_kwargs={
             "replay_log_blocksize": 1024,
             "allocate_buffers": False,
             "max_num_ranges": 4,
         },
         randomize_chunk_sizes=False,
-        single_tokens_for_targets=False,
-        verbose=VerbosityLevels.SOME.value,
-        attention_forward_temp_size_gb=4,
+        allocate_buffers=False,
     ),
+    verbose: Optional[str] = None,
+    attention_forward_temp_size_gb: Optional[float] = None,
+    yarn_rope: bool = True,
 ) -> None:
     """Evaluate a range of model checkpoints on a test set
 
@@ -121,8 +125,19 @@ def setup(
         seed: The random seed to use for reproducibility.
         access_token: Optional API token to access models with restrictions.
         batch_size: Size for test set batches
-        kv_cache: Configuration for the KV caches. If not given, the configuration
-            of the checkpoints is being used.
+        kv_cache: Configuration for the KV caches. See
+            ``keys_values.finetune.args.KVCacheArgs`` for details. Defaults to
+            H2O with PyTorch 8-bit quantization. Make sure to adjust
+            `kv_cache.cache_length`.
+        verbose: Verbosity level for logging outputs.
+        attention_forward_temp_size_gb: Size of GPU memory buffers (in GB) used
+            in naive SDPA. At present, naive SDPA is used with KV caches which
+            require attention weights (e.g., H2O).
+        yarn_rope: Should YaRN be used to adjust RoPE (position encoding) to the
+            sequence length for each batch? Defaults to `True`. If not, RoPE is
+            determined by the model configuration, and is static (no dependence
+            on sequence length).
+            TODO: Should be stored as hyperparameter and loaded with checkpoint!
 
     """
     # Collect evaluation tasks
@@ -163,6 +178,20 @@ def setup(
         kv_cache = KVCacheArgs(**hyp_pars["kv_cache"])
     check_kv_cache(kv_cache)
     check_valid_checkpoint_dir(checkpoint_dir)
+    # Legacy arguments
+    if verbose is None:
+        if kv_cache.verbose is not None:
+            verbose = kv_cache.verbose
+            kv_cache.verbose = None
+        else:
+            verbose = VerbosityLevels.SOME.value
+    verbose = VerbosityLevels(verbose)
+    if attention_forward_temp_size_gb is None:
+        if kv_cache.attention_forward_temp_size_gb is not None:
+            attention_forward_temp_size_gb = kv_cache.attention_forward_temp_size_gb
+            kv_cache.attention_forward_temp_size_gb = None
+        else:
+            attention_forward_temp_size_gb = 4
 
     precision = hyp_pars["precision"] or get_default_supported_precision(training=True)
     if devices * num_nodes > 1:
@@ -189,6 +218,9 @@ def setup(
         model_config=model_config,
         eval_tasks=eval.tasks,
         devices=devices,
+        verbose=verbose,
+        attention_forward_temp_size_gb=attention_forward_temp_size_gb,
+        yarn_rope=yarn_rope,
     )
 
 
@@ -204,6 +236,9 @@ def main(
     model_config: ModelConfiguration,
     eval_tasks: List[str],
     devices: int,
+    verbose: VerbosityLevels,
+    attention_forward_temp_size_gb: float,
+    yarn_rope: bool,
 ) -> None:
     tokenizer = Tokenizer(checkpoint_dir)
     # Test dataloader is over cross product of test dataset and evaluation
@@ -229,15 +264,6 @@ def main(
 
     with fabric.init_module(empty_init=(fabric.world_size > 1)):
         # Order of preference for SDPA kernels
-        sdpa_kernels = [
-            SDPBackend.FLASH_ATTENTION,
-            SDPBackend.EFFICIENT_ATTENTION,
-            SDPBackend.CUDNN_ATTENTION,
-            SDPBackend.MATH,
-        ]
-        mha_kwargs = {"sdpa_kernels": sdpa_kernels}
-        if "sdpa_kernels" not in kv_cache.cache_kwargs:
-            kv_cache.cache_kwargs["sdpa_kernels"] = sdpa_kernels
         limit_gb = kv_cache.attention_forward_temp_size_gb
         if limit_gb is None:
             limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
@@ -246,8 +272,17 @@ def main(
             init_val=limit_gb,
             name="attention_forward_temp_size_gb",
         )
-        mha_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
+        mha_kwargs = {
+            "sdpa_kernels": SDPA_KERNELS_BEST_ORDERING,
+            "tmp_array_limit_gb": tmp_array_limit_forward,
+            "pos_encoding": position_encoding_factory(
+                model_config.config, do_yarn=yarn_rope,
+            ),
+        }
+        if "sdpa_kernels" not in kv_cache.cache_kwargs:
+            kv_cache.cache_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
         kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
+        kv_cache.cache_kwargs["pos_encoding"] = mha_kwargs["pos_encoding"]
         if model_type == "full":
             gpt_model = GPTFull(model_config.config, **mha_kwargs)
         else:
@@ -272,16 +307,20 @@ def main(
             data=data,
             **model_config.head_model_kwargs,
         )
+        if model_type == "lora":
+            mark_only_lora_as_trainable(gpt_model)
+        adapt_requires_grad(gpt_model, head_model)
         model = wrap_gpt_model(
-            fabric=fabric,
             gpt_model=gpt_model,
             head_model=head_model,
             kv_cache=kv_cache,
+            grad=None,
+            verbose=verbose,
+            attention_backward_temp_size_gb=None,
             max_batch_size=batch_size,
-            model_for_training=False,
+            dtype=fabric_precision_to_dtype(fabric._precision.precision),
+            fabric=fabric,
         )
-    if model_type == "lora":
-        mark_only_lora_as_trainable(model.gpt_model)
     model = fabric.setup_module(model)
 
     # Load base model

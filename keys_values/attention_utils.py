@@ -26,6 +26,14 @@ from torch.nn.attention import SDPAParams, SDPBackend, sdpa_kernel
 from keys_values.utils import repeat_interleave, index_to_3d
 
 
+SDPA_KERNELS_BEST_ORDERING = [
+        SDPBackend.FLASH_ATTENTION,
+        SDPBackend.EFFICIENT_ATTENTION,
+        SDPBackend.CUDNN_ATTENTION,
+        SDPBackend.MATH,
+    ]
+
+
 def filter_sdpa_kernels(
     sdpa_kernels: List[SDPBackend],
     query: torch.Tensor,
@@ -40,7 +48,9 @@ def filter_sdpa_kernels(
     params = SDPAParams(query, key, value, attn_mask, dropout_p, is_causal, enable_gqa)
     new_kernels = []
     for kernel in sdpa_kernels:
-        if kernel == SDPBackend.FLASH_ATTENTION and not can_use_flash_attention(params):
+        if not torch.cuda.is_available() and kernel != SDPBackend.MATH:
+            continue
+        elif kernel == SDPBackend.FLASH_ATTENTION and not can_use_flash_attention(params):
             continue
         elif (
             kernel == SDPBackend.EFFICIENT_ATTENTION

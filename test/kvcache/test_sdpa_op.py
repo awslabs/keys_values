@@ -19,7 +19,6 @@ import random
 import torch
 from torch.nn import functional as F
 import pytest
-from torch.nn.attention import SDPBackend
 
 from litgpt.config import Config
 
@@ -28,6 +27,7 @@ from keys_values.attention_utils import (
     build_mask_slice,
     sample_token_positions,
     ENTRIES_PER_GB,
+    SDPA_KERNELS_BEST_ORDERING,
 )
 from keys_values.kvcache.attn_weights import (
     update_token_positions,
@@ -433,12 +433,7 @@ def test_gradient_new_and_old_spda(
     head_size = 64
     vocab_size = 48
     grace_period = cache_kwargs.get("grace_period", 0)
-    sdpa_kernels = [
-        SDPBackend.FLASH_ATTENTION,
-        SDPBackend.EFFICIENT_ATTENTION,
-        SDPBackend.CUDNN_ATTENTION,
-        SDPBackend.MATH,
-    ]
+    sdpa_kernels = SDPA_KERNELS_BEST_ORDERING.copy()
     num_chunks = len(tokens_per_chunk)
     block_size = sum(tokens_per_chunk) + 16
     assert sum(chunks_per_cell) == num_chunks
