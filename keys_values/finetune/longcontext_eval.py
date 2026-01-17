@@ -276,7 +276,8 @@ def main(
             "sdpa_kernels": SDPA_KERNELS_BEST_ORDERING,
             "tmp_array_limit_gb": tmp_array_limit_forward,
             "pos_encoding": position_encoding_factory(
-                model_config.config, do_yarn=yarn_rope,
+                model_config.config,
+                do_yarn=yarn_rope,
             ),
         }
         if "sdpa_kernels" not in kv_cache.cache_kwargs:

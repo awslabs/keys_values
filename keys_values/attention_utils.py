@@ -27,11 +27,11 @@ from keys_values.utils import repeat_interleave, index_to_3d
 
 
 SDPA_KERNELS_BEST_ORDERING = [
-        SDPBackend.FLASH_ATTENTION,
-        SDPBackend.EFFICIENT_ATTENTION,
-        SDPBackend.CUDNN_ATTENTION,
-        SDPBackend.MATH,
-    ]
+    SDPBackend.FLASH_ATTENTION,
+    SDPBackend.EFFICIENT_ATTENTION,
+    SDPBackend.CUDNN_ATTENTION,
+    SDPBackend.MATH,
+]
 
 
 def filter_sdpa_kernels(
@@ -50,7 +50,9 @@ def filter_sdpa_kernels(
     for kernel in sdpa_kernels:
         if not torch.cuda.is_available() and kernel != SDPBackend.MATH:
             continue
-        elif kernel == SDPBackend.FLASH_ATTENTION and not can_use_flash_attention(params):
+        elif kernel == SDPBackend.FLASH_ATTENTION and not can_use_flash_attention(
+            params
+        ):
             continue
         elif (
             kernel == SDPBackend.EFFICIENT_ATTENTION
