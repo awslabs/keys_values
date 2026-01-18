@@ -60,12 +60,11 @@ class MyPerChannelMinMaxObserver(PerChannelMinMaxObserver):
         members from `base_observer`.
 
         Args:
-            base_observer: We initialize members from this one, except for
-                `eps`
+            dtype: Quantization dtype
+            quant_min: Minimum value internal data
+            quant_max: Maximum value internal data
 
         """
-        # We do not call the superclass constructor. They create
-        # registered buffers on CPU, which we want to avoid here.
         ObserverBase.__init__(
             self,
             dtype=dtype,
@@ -87,9 +86,7 @@ class MyPerChannelMinMaxObserver(PerChannelMinMaxObserver):
             return x_orig
         if self.min_val is not None:
             raise IndexError("Cannot call more than once")
-        x = x_orig.detach()  # avoid keeping autograd tape
-        # Don't need permute, since ch_axis == 0
-        y = torch.flatten(x, start_dim=1)
+        y = torch.flatten(x_orig.detach(), start_dim=1)
         min_val, max_val = torch.aminmax(y, dim=1)
         # dtype casting only here, not on `y`
         self.min_val = min_val.to(dtype=self._target_dtype)
@@ -113,10 +110,46 @@ class MyPerChannelMinMaxObserver(PerChannelMinMaxObserver):
         )
         zero_point = torch.clamp(
             quant_min - torch.round(min_val_neg / scale).to(torch.int),
-            quant_min,
-            quant_max,
+            min=quant_min,
+            max=quant_max,
         )
         return scale, zero_point
+
+
+# Adapted from PyTorch: torch/ao/quantization/fx/_decomposed.py
+def quantize_per_channel(
+    input: torch.Tensor,
+    scales: torch.Tensor,
+    zero_points: torch.Tensor,
+    quant_min: int,
+    quant_max: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    assert input.dtype == torch.float32
+    assert input.ndim == 2
+    num_channels = input.shape[0]
+    assert scales.numel() == num_channels and zero_points.numel() == num_channels
+    scales = scales.view(-1, 1)
+    zero_points = zero_points.view(-1, 1)
+    res = torch.clamp(
+        torch.round(input * (1.0 / scales)) + zero_points, quant_min, quant_max,
+    )
+    return res.to(dtype)
+
+
+# Adapted from PyTorch: torch/ao/quantization/fx/_decomposed.py
+def dequantize_per_channel(
+    input: torch.Tensor,
+    scales: torch.Tensor,
+    zero_points: torch.Tensor,
+) -> torch.Tensor:
+    assert input.ndim == 2
+    num_channels = input.shape[0]
+    assert scales.numel() == num_channels and zero_points.numel() == num_channels
+    scales = scales.view(-1, 1)
+    zero_points = zero_points.view(-1, 1)
+    res = (input - zero_points) * scales
+    return res.to(dtype=torch.float32)
 
 
 class TorchBasicQuantizer(Quantizer):
@@ -172,7 +205,6 @@ class TorchBasicQuantizer(Quantizer):
                 f"target_dtype = {target_dtype} is not supported, must be in {self.supported_target_dtypes()}"
             )
         self.target_dtype = target_dtype
-        self._quant_dtype = torch.qint8 if target_dtype == torch.int8 else torch.quint8
         batch_size, n_query_groups, cache_length, head_size = shape
         self.max_batch_size = batch_size
         self.n_query_groups = n_query_groups
@@ -374,14 +406,14 @@ class TorchBasicQuantizer(Quantizer):
         if TorchBasicQuantizer.quant_minmax_for_observer is None:
             base_observer = PerChannelMinMaxObserver(
                 ch_axis=0,
-                dtype=self._quant_dtype,
+                dtype=self.target_dtype,
             )
             TorchBasicQuantizer.quant_minmax_for_observer = (
                 base_observer.quant_min,
                 base_observer.quant_max,
             )
         obs = MyPerChannelMinMaxObserver(
-            dtype=self._quant_dtype,
+            dtype=self.target_dtype,
             quant_min=TorchBasicQuantizer.quant_minmax_for_observer[0],
             quant_max=TorchBasicQuantizer.quant_minmax_for_observer[1],
         )
@@ -396,13 +428,15 @@ class TorchBasicQuantizer(Quantizer):
         scales: torch.Tensor,
         zero_points: torch.Tensor,
     ) -> torch.Tensor:
-        return torch.quantize_per_channel(
+        assert TorchBasicQuantizer.quant_minmax_for_observer is not None
+        return quantize_per_channel(
             input=input_float,
             scales=scales,
             zero_points=zero_points,
-            axis=0,
-            dtype=self._quant_dtype,
-        ).int_repr()
+            quant_min=TorchBasicQuantizer.quant_minmax_for_observer[0],
+            quant_max=TorchBasicQuantizer.quant_minmax_for_observer[1],
+            dtype=self.target_dtype,
+        )
 
     def _dequantize(
         self,
@@ -456,16 +490,11 @@ class TorchBasicQuantizer(Quantizer):
         scales: torch.Tensor,
         zero_points: torch.Tensor,
     ) -> torch.Tensor:
-        # Need to map q_x and quant_state to quantized tensor, before
-        # torch.dequantize applies. This is hard to find:
-        # https://github.com/pytorch/pytorch/wiki/Introducing-Quantized-Tensor
-        qq_x = torch._make_per_channel_quantized_tensor(
-            int_data,
-            scales,
-            zero_points,
-            axis=0,
-        )
-        return torch.dequantize(qq_x).to(dtype=self.source_dtype)
+        return dequantize_per_channel(
+            input=int_data,
+            scales=scales,
+            zero_points=zero_points,
+        ).to(dtype=self.source_dtype)
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         if not self.buffers_are_allocated:
@@ -610,13 +639,17 @@ class TorchBasicQuantizerState(QuantizerState):
         start, end = self._check_range(start, end)
         # Due to changing `batch_size`, the 0 dimension may be smaller
         dim0 = self.quantizer.quant_buffer.shape[0]
-        self.quant_buffer[:dim0, start:end, :] = self.quantizer.quant_buffer[
-            :, start:end, :
-        ]
-        self.quant_scales[:dim0, start:end] = self.quantizer.quant_scales[:, start:end]
-        self.quant_zero_points[:dim0, start:end] = self.quantizer.quant_zero_points[
-            :, start:end
-        ]
+        self.quant_buffer[:dim0, start:end, :].copy_(
+            self.quantizer.quant_buffer[:, start:end, :],
+            non_blocking=True,
+        )
+        self.quant_scales[:dim0, start:end].copy_(
+            self.quantizer.quant_scales[:, start:end], non_blocking=True,
+        )
+        self.quant_zero_points[:dim0, start:end].copy_(
+            self.quantizer.quant_zero_points[:, start:end],
+            non_blocking=True,
+        )
 
     def restore(
         self,
@@ -628,10 +661,12 @@ class TorchBasicQuantizerState(QuantizerState):
         start, end = self._check_range(start, end)
         # Due to changing `batch_size`, the 0 dimension may be smaller
         dim0 = self.quantizer.quant_buffer.shape[0]
-        self.quantizer.quant_buffer[:, start:end, :] = self.quant_buffer[
-            :dim0, start:end, :
-        ]
-        self.quantizer.quant_scales[:, start:end] = self.quant_scales[:dim0, start:end]
-        self.quantizer.quant_zero_points[:, start:end] = self.quant_zero_points[
-            :dim0, start:end
-        ]
+        self.quantizer.quant_buffer[:, start:end, :].copy_(
+            self.quant_buffer[:dim0, start:end, :], non_blocking=True,
+        )
+        self.quantizer.quant_scales[:, start:end].copy_(
+            self.quant_scales[:dim0, start:end], non_blocking=True,
+        )
+        self.quantizer.quant_zero_points[:, start:end].copy_(
+            self.quant_zero_points[:dim0, start:end], non_blocking=True,
+        )
