@@ -497,20 +497,24 @@ class BitsAndBytesQuantizerState(QuantizerState):
         # Due to changing `batch_size`, the dimension may be smaller
         if self.quantizer.blocks_over_heads:
             dim1 = self.quantizer.quant_buffer.shape[1]
-            self.quant_buffer[start:end, :dim1, :] = self.quantizer.quant_buffer[
-                start:end, :, :
-            ]
-            self.quant_absmax[start:end, :dim1] = self.quantizer.quant_absmax[
-                start:end, :
-            ]
+            self.quant_buffer[start:end, :dim1, :].copy_(
+                self.quantizer.quant_buffer[start:end, :, :],
+                non_blocking=True,
+            )
+            self.quant_absmax[start:end, :dim1].copy_(
+                self.quantizer.quant_absmax[start:end, :],
+                non_blocking=True,
+            )
         else:
             dim0 = self.quantizer.quant_buffer.shape[0]
-            self.quant_buffer[:dim0, start:end, :] = self.quantizer.quant_buffer[
-                :, start:end, :
-            ]
-            self.quant_absmax[:dim0, start:end] = self.quantizer.quant_absmax[
-                :, start:end
-            ]
+            self.quant_buffer[:dim0, start:end, :].copy_(
+                self.quantizer.quant_buffer[:, start:end, :],
+                non_blocking=True,
+            )
+            self.quant_absmax[:dim0, start:end].copy_(
+                self.quantizer.quant_absmax[:, start:end],
+                non_blocking=True,
+            )
 
     def restore(
         self,
@@ -523,17 +527,21 @@ class BitsAndBytesQuantizerState(QuantizerState):
         # Due to changing `batch_size`, the 0 dimension may be smaller
         if self.quantizer.blocks_over_heads:
             dim1 = self.quantizer.quant_buffer.shape[1]
-            self.quantizer.quant_buffer[start:end, :, :] = self.quant_buffer[
-                start:end, :dim1, :
-            ]
-            self.quantizer.quant_absmax[start:end, :] = self.quant_absmax[
-                start:end, :dim1
-            ]
+            self.quantizer.quant_buffer[start:end, :, :].copy_(
+                self.quant_buffer[start:end, :dim1, :],
+                non_blocking=True,
+            )
+            self.quantizer.quant_absmax[start:end, :].copy_(
+                self.quant_absmax[start:end, :dim1],
+                non_blocking=True,
+            )
         else:
             dim0 = self.quantizer.quant_buffer.shape[0]
-            self.quantizer.quant_buffer[:, start:end, :] = self.quant_buffer[
-                :dim0, start:end, :
-            ]
-            self.quantizer.quant_absmax[:, start:end] = self.quant_absmax[
-                :dim0, start:end
-            ]
+            self.quantizer.quant_buffer[:, start:end, :].copy_(
+                self.quant_buffer[:dim0, start:end, :],
+                non_blocking=True,
+            )
+            self.quantizer.quant_absmax[:, start:end].copy_(
+                self.quant_absmax[:dim0, start:end],
+                non_blocking=True,
+            )

@@ -714,7 +714,20 @@ relevant when CPU offloading of the weights is used as well (so
 `finetune_offload_lora`, `finetune_offload_full` modes). In that case, we free
 up GPU memory specifically during the second phase by keeping only model weights
 for the layers in the current row of cells in GPU memory: all this memory should
-be used to increase cell size, which speeds up computations. From this
+be used to increase cell size, which speeds up computations. We can increase cell
+width by `chunks_per_cell_multiplier`, cell height by `layers_per_cell`. The
+trade-off is:
+
+* Maximize `chunks_per_cell_multiplier`, keep `layers_per_cell=1`: Most weights
+  are offloaded, leaving most GPU memory for cells. Fewer cells run faster, less
+  GPU memory for KV cache checkpoints.But more activation checkpoints are written
+  and read, which is slower due to GPU-CPU synchronization.
+* Maximize `layers_per_cell`, keep `chunks_per_cell_multiplier=1` (or even
+  below): More weights are kept on GPU in `backward`, and there are more KV cache
+  checkpoints, but less activation checkpoints are written and read.
+
+
+From this
 perspective, it may be advantageous to keep `layers_per_cell=1` and maximize
 `chunks_per_cell_multiplier`, since most weights are offloaded then. On the other
 hand, this requires more activation checkpoints to be written, which can be
