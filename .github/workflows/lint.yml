@@ -33,4 +33,4 @@ jobs:
         echo "Black should pass before commit! If this fails, run the command on the next line to fix the errors, then commit the changes"
         echo "git ls-files | grep \"\.py\$\" |  xargs black"
         echo "Run 'pip install -e .' if you do not have Black installed locally."
-        git ls-files | grep "\.py$" |  xargs black --diff
+        git ls-files | grep "\.py$" |  xargs python3 -m black --check
