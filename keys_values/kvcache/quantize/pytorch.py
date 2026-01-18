@@ -132,7 +132,9 @@ def quantize_per_channel(
     scales = scales.view(-1, 1)
     zero_points = zero_points.view(-1, 1)
     res = torch.clamp(
-        torch.round(input * (1.0 / scales)) + zero_points, quant_min, quant_max,
+        torch.round(input * (1.0 / scales)) + zero_points,
+        quant_min,
+        quant_max,
     )
     return res.to(dtype)
 
@@ -644,7 +646,8 @@ class TorchBasicQuantizerState(QuantizerState):
             non_blocking=True,
         )
         self.quant_scales[:dim0, start:end].copy_(
-            self.quantizer.quant_scales[:, start:end], non_blocking=True,
+            self.quantizer.quant_scales[:, start:end],
+            non_blocking=True,
         )
         self.quant_zero_points[:dim0, start:end].copy_(
             self.quantizer.quant_zero_points[:, start:end],
@@ -662,11 +665,14 @@ class TorchBasicQuantizerState(QuantizerState):
         # Due to changing `batch_size`, the 0 dimension may be smaller
         dim0 = self.quantizer.quant_buffer.shape[0]
         self.quantizer.quant_buffer[:, start:end, :].copy_(
-            self.quant_buffer[:dim0, start:end, :], non_blocking=True,
+            self.quant_buffer[:dim0, start:end, :],
+            non_blocking=True,
         )
         self.quantizer.quant_scales[:, start:end].copy_(
-            self.quant_scales[:dim0, start:end], non_blocking=True,
+            self.quant_scales[:dim0, start:end],
+            non_blocking=True,
         )
         self.quantizer.quant_zero_points[:, start:end].copy_(
-            self.quant_zero_points[:dim0, start:end], non_blocking=True,
+            self.quant_zero_points[:dim0, start:end],
+            non_blocking=True,
         )
