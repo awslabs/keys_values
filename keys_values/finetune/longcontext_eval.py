@@ -98,21 +98,9 @@ def setup(
     seed: int = 1337,
     access_token: Optional[str] = None,
     batch_size: Optional[int] = None,
-    kv_cache: KVCacheArgs = KVCacheArgs(
-        name="h2o-torch-quantized8",
-        cache_length=16384,
-        chunk_size=1024,
-        cache_kwargs={
-            "replay_log_blocksize": 1024,
-            "allocate_buffers": False,
-            "max_num_ranges": 4,
-        },
-        randomize_chunk_sizes=False,
-        allocate_buffers=False,
-    ),
+    kv_cache: Optional[KVCacheArgs] = None,
     verbose: Optional[str] = None,
     attention_forward_temp_size_gb: Optional[float] = None,
-    yarn_rope: bool = True,
 ) -> None:
     """Evaluate a range of model checkpoints on a test set
 
@@ -124,20 +112,15 @@ def setup(
         num_nodes: How many nodes the code is being run on.
         seed: The random seed to use for reproducibility.
         access_token: Optional API token to access models with restrictions.
-        batch_size: Size for test set batches
-        kv_cache: Configuration for the KV caches. See
-            ``keys_values.finetune.args.KVCacheArgs`` for details. Defaults to
-            H2O with PyTorch 8-bit quantization. Make sure to adjust
-            `kv_cache.cache_length`.
-        verbose: Verbosity level for logging outputs.
+        batch_size: Size for test set batches. Only if you like to overwrite
+            the configuration stored with the checkpoints
+        kv_cache: Configuration for the KV caches. Only if you like to overwrite
+            the configuration stored with the checkpoints
+        verbose: Verbosity level for logging outputs. Only if you like to
+            overwrite the configuration stored with the checkpoints
         attention_forward_temp_size_gb: Size of GPU memory buffers (in GB) used
-            in naive SDPA. At present, naive SDPA is used with KV caches which
-            require attention weights (e.g., H2O).
-        yarn_rope: Should YaRN be used to adjust RoPE (position encoding) to the
-            sequence length for each batch? Defaults to `True`. If not, RoPE is
-            determined by the model configuration, and is static (no dependence
-            on sequence length).
-            TODO: Should be stored as hyperparameter and loaded with checkpoint!
+            in naive SDPA. Only if you like to overwrite the configuration
+            stored with the checkpoints
 
     """
     # Collect evaluation tasks
@@ -173,25 +156,25 @@ def setup(
         print(f"Setting LongBenchV2.test_set_tag to {data.test_set_tag}")
     devices = parse_devices(devices)
     if batch_size is None:
-        batch_size = 8
+        batch_size = hyp_pars["evals"]["micro_batch_size"]
+        if batch_size is None:
+            batch_size = 8
     if kv_cache is None:
         kv_cache = KVCacheArgs(**hyp_pars["kv_cache"])
     check_kv_cache(kv_cache)
     check_valid_checkpoint_dir(checkpoint_dir)
-    # Legacy arguments
     if verbose is None:
-        if kv_cache.verbose is not None:
-            verbose = kv_cache.verbose
-            kv_cache.verbose = None
-        else:
+        verbose = hyp_pars["verbose"]
+        if verbose is None:
             verbose = VerbosityLevels.SOME.value
     verbose = VerbosityLevels(verbose)
     if attention_forward_temp_size_gb is None:
-        if kv_cache.attention_forward_temp_size_gb is not None:
-            attention_forward_temp_size_gb = kv_cache.attention_forward_temp_size_gb
-            kv_cache.attention_forward_temp_size_gb = None
-        else:
-            attention_forward_temp_size_gb = 4
+        attention_forward_temp_size_gb = hyp_pars["attention_forward_temp_size_gb"]
+        if attention_forward_temp_size_gb is None:
+            attention_forward_temp_size_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
+    yarn_rope = hyp_pars["yarn_rope"]
+    if yarn_rope is None:
+        yarn_rope = True
 
     precision = hyp_pars["precision"] or get_default_supported_precision(training=True)
     if devices * num_nodes > 1:
@@ -264,12 +247,11 @@ def main(
 
     with fabric.init_module(empty_init=(fabric.world_size > 1)):
         # Order of preference for SDPA kernels
-        limit_gb = kv_cache.attention_forward_temp_size_gb
-        if limit_gb is None:
-            limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
-        fabric.print(f"Setting limit attention_forward_temp_size_gb to {limit_gb} GB")
+        fabric.print(
+            f"Setting limit attention_forward_temp_size_gb to {attention_forward_temp_size_gb} GB"
+        )
         tmp_array_limit_forward = TemporaryArrayLimit(
-            init_val=limit_gb,
+            init_val=attention_forward_temp_size_gb,
             name="attention_forward_temp_size_gb",
         )
         mha_kwargs = {

@@ -158,7 +158,7 @@ def setup(
     profile_grad_times: int = 0,
     profile_parts: Optional[str] = None,
 ) -> None:
-    """Finetune a model using the LoRA method, with CPU offloading (single GPU)
+    """Finetune a model with CPU offloading (single GPU)
 
     Arguments:
         checkpoint_dir: The path to the base model's checkpoint directory to load for finetuning.
@@ -479,10 +479,9 @@ def main(
         state["gpu_optimizer"] = gpu_optimizer
         state["gpu_scheduler"] = gpu_scheduler
 
-    # strict=False because missing keys due to LoRA weights not contained in state dict
     print(f"Loading model checkpoint: {checkpoint_dir}")
     file_path = checkpoint_dir / LIT_MODEL_FNAME
-    load_checkpoint(model.gpt_model, file_path, strict=False)
+    load_checkpoint(model.gpt_model, file_path, strict=True)
     # If there are head model weights, load them as well. Otherwise, we use
     # random initialization (or the head model may not have weights)
     file_path = checkpoint_dir / HEAD_MODEL_FNAME
@@ -553,7 +552,7 @@ def main(
         del valid_model
         flush_io_streams()
 
-    # Save the final LoRA checkpoint at the end of training
+    # Save the final checkpoint at the end of training
     save_dir = out_dir / "final"
     save_model_checkpoint(model, save_dir)
     # Copy checkpoint files from original checkpoint dir
