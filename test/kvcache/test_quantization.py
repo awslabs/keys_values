@@ -14,7 +14,7 @@
 import random
 from functools import partial
 from itertools import product
-from typing import List
+from typing import List, Optional
 
 import torch
 from torch.linalg import vector_norm
@@ -44,11 +44,16 @@ from keys_values.kvcache.test_utils import (
 from keys_values.model import GPT
 
 
-def args_for_one_cache(cname: str) -> List[tuple]:
+def args_for_one_cache(
+    cname: str,
+    dtypes: Optional[List[torch.dtype]] = None,
+) -> List[tuple]:
+    if dtypes is None:
+        dtypes = [torch.float32, torch.float16, torch.bfloat16]
     return [
         (a, b) + c
         for a, b, c in product(
-            [torch.float32, torch.float16, torch.bfloat16],
+            dtypes,
             [False, True],
             cache_names_and_devices(
                 filter_name=lambda name: name.startswith(cname)
@@ -626,3 +631,122 @@ def test_quantized_buffers_write_back(dtype, name, device):
         write_back_all(caches_separate)
         check_same_events(caches_common[0], caches_separate)
         compare_buffers(caches_common, caches_separate)
+
+
+@pytest.mark.parametrize(
+    "dtype, blocks_over_heads, name, device",
+    args_for_one_cache("dense", dtypes=[torch.float32, torch.float16]),
+)
+def test_no_error(dtype, blocks_over_heads, name, device):
+    seed = 31415927
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    if not ("bnb" in name and blocks_over_heads):
+        print(
+            f"dtype={dtype}, blocks_over_heads={blocks_over_heads}, name={name}, device={device}"
+        )
+        head_size = 64
+        batch_size = 3
+        n_query_groups = 4
+        cache_length = 32
+        params = KVCacheParams(
+            max_batch_size=batch_size,
+            n_query_groups=n_query_groups,
+            cache_length=cache_length,
+            head_size=head_size,
+            n_head=4,
+            dtype=dtype,
+        )
+        is_4bit = name[-1] == "4"
+        assert is_4bit or name[-1] == "8"
+        kinds = ("as_is", "shift", "scale", "shift_scale")
+        if dtype == torch.float32:
+            tol_shift_scale = dict(rtol=1e-5, atol=0.025)
+        else:
+            tol_shift_scale = dict(rtol=0.005, atol=0.1)
+        tol_kwargss = (dict(),) * 3 + (tol_shift_scale,)
+
+        kv_cache = create_kv_cache(
+            name, params, blocks_over_heads=blocks_over_heads,
+        )
+        kv_buffers = kv_cache.kv_buffers
+        # Sample internal data: Must contain smallest and largest along final
+        # dim
+        low = 0
+        high = 16 if is_4bit else 256
+        shape = (batch_size, n_query_groups, cache_length, head_size)
+        int_data = {
+            name: torch.randint(low=low, high=high, size=shape, device=device)
+            for name in ("key", "value")
+        }
+        kwargs = dict(dtype=int_data["key"].dtype, device=device)
+        vals = [low, high - 1]
+        srcs = [
+            torch.tensor([val], **kwargs).view(1, 1, 1, 1).expand(
+                *shape[:-1], 1,
+            )
+            for val in vals
+        ]
+        for arr in int_data.values():
+            indexes = [
+                torch.randint(0, head_size, size=shape[:-1], device=device)
+                for _ in vals
+            ]
+            equal_ind = indexes[0] == indexes[1]
+            if equal_ind.any().item():
+                current = indexes[1][equal_ind]
+                indexes[1][equal_ind] = torch.remainder(current + 1, head_size)
+            assert not (indexes[0] == indexes[1]).any().item()
+            for index, src in zip(indexes, srcs):
+                arr.scatter_(dim=-1, index=index.unsqueeze(-1), src=src)
+
+        print(int_data["key"][0, 0, 0, :])
+        if blocks_over_heads:
+            orig_shape = (batch_size, cache_length)
+            view_shape = (batch_size, 1, cache_length, 1)
+        else:
+            orig_shape = (batch_size, n_query_groups, cache_length)
+            view_shape = orig_shape + (1,)
+        for kind, tol_kwargs in zip(kinds, tol_kwargss):
+            print(f"\nkind = {kind}")
+            if "shift" in kind:
+                shifts = {
+                    k: torch.randint(
+                        -1024, 1024, orig_shape, device=device,
+                    ).view(*view_shape)
+                    for k in int_data.keys()
+                }
+            if "scale" in kind:
+                scales = {
+                    k: torch.randn(
+                        *orig_shape, dtype=torch.float32, device=device,
+                    ).exp().view(*view_shape)
+                    for k in int_data.keys()
+                }
+            if kind == "as_is":
+                data = {k: v.to(dtype=dtype) for k, v in int_data.items()}
+            elif kind == "shift":
+                data = {
+                    k: (v + shifts[k]).to(dtype=dtype)
+                    for k, v in int_data.items()
+                }
+            elif kind == "scale":
+                data = {
+                    k: (v * scales[k]).to(dtype=dtype)
+                    for k, v in int_data.items()
+                }
+            else:
+                data = {
+                    k: ((v + shifts[k]) * scales[k]).to(dtype=dtype)
+                    for k, v in int_data.items()
+                }
+            if kind == "shift_scale":
+                print(f"shift = {shifts['key'][0, 0, 0, 0]}, scale = {scales['key'][0, 0, 0, 0]}")
+                print(data["key"][0, 0, 0, :])
+            kv_buffers.prefill(**data)
+            kv_buffers.drop_association()  # Triggers write back
+            k_and_v = kv_buffers.get_keys_values()
+            if kind == "shift_scale":
+                print(k_and_v.keys()[0, 0, 0, :])
+            torch.testing.assert_close(data["key"], k_and_v.keys(), **tol_kwargs)
+            torch.testing.assert_close(data["value"], k_and_v.values(), **tol_kwargs)

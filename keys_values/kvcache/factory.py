@@ -34,7 +34,6 @@ from keys_values.kvcache.quant_buffers import (
 from keys_values.kvcache.quantize import (
     Quantizer,
     TorchBasicQuantizer,
-    TorchAOQuantizer,
     BitsAndBytesQuantizer,
 )
 from keys_values.model import GPT
@@ -53,9 +52,8 @@ _SUPPORTED_CACHES = (
 
 SUPPORTED_QUANTIZERS = {
     "default": None,
+    "torch-quantized4": TorchBasicQuantizer,
     "torch-quantized8": TorchBasicQuantizer,
-    "ao-quantized4": TorchAOQuantizer,
-    "ao-quantized8": TorchAOQuantizer,
     "bnb-quantized4": BitsAndBytesQuantizer,
     "bnb-quantized8": BitsAndBytesQuantizer,
 }
@@ -85,6 +83,7 @@ class KVCacheFactory:
     determines the type of buffers:
 
     - "default": Normal storage, no quantization
+    - "torch-quantized4": Default PyTorch 4-bit quantization
     - "torch-quantized8": Default PyTorch 8-bit quantization
     - "ao-quantized4": Torch AO 4-bit quantization
     - "ao-quantized8": Torch AO 8-bit quantization
@@ -468,13 +467,10 @@ class KVCacheFactory:
         quant_kwargs = {
             "shape": shape,
             "source_dtype": params.dtype,
+            "num_bits": int(qname[-1]),
             "blocks_over_heads": blocks_over_heads,
             "tmp_array_limit_gb": cache_kwargs.get("tmp_array_limit_gb"),
         }
-        if qname.endswith("torch-quantized8"):
-            quant_kwargs["target_dtype"] = torch.int8
-        else:
-            quant_kwargs["num_bits"] = int(qname[-1])
         return quant_kwargs, quantizer_type, cache_kwargs
 
 

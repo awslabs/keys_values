@@ -31,8 +31,6 @@ from keys_values.kvcache.utils import bitsize_of, bits_for_torch_dtype
 
 ALLOWED_SOURCE_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 
-ALLOWED_TARGET_DTYPES = (torch.int8, torch.uint8)
-
 MIN_BLOCKSIZE = 16
 
 
@@ -40,11 +38,12 @@ MIN_BLOCKSIZE = 16
 class MyPerChannelMinMaxObserver(PerChannelMinMaxObserver):
     """
     Computing quantization statistics with the original
-    :class:`PerChannelMinMaxObserver` are very slow. This is because
-    computations are done on CPU, due to registered buffers being allocated
-    there. The version here does not allow calling :meth:`_forward` more
-    than once, which is all we need. We also overwrite the constructor not
-    to create any registered buffers.
+    :class:`PerChannelMinMaxObserver` can be slow. The version here does not
+    allow calling :meth:`_forward` more than once, which is all we need. We
+    also overwrite the constructor not to create any registered buffers.
+
+    For our application, both quantization and in particular de-quantization
+    must be very fast, which justifies pulling the basics out here.
 
     """
 
@@ -102,17 +101,19 @@ class MyPerChannelMinMaxObserver(PerChannelMinMaxObserver):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         quant_min, quant_max = self.quant_min, self.quant_max
         assert len(min_val.shape) > 0
-        min_val_neg = torch.clamp(min_val, max=0)
-        max_val_pos = torch.clamp(max_val, min=0)
+        print(f"min_val = {min_val[0]}, max_val = {max_val[0]}")
+        print(f"quant_min = {quant_min}, quant_max = {quant_max}")
+        # Original code has this and
+        #   scale = (max_val_pos - min_val_neg) / float(quant_max - quant_min)
+        # Makes no sense to me!
+        # https://github.com/pytorch/pytorch/issues/173075
+        #min_val_neg = torch.clamp(min_val, max=0)
+        #max_val_pos = torch.clamp(max_val, min=0)
         scale = torch.clamp(
-            (max_val_pos - min_val_neg) / float(quant_max - quant_min),
+            (max_val - min_val) / float(quant_max - quant_min),
             min=self.eps,
         )
-        zero_point = torch.clamp(
-            quant_min - torch.round(min_val_neg / scale).to(torch.int),
-            min=quant_min,
-            max=quant_max,
-        )
+        zero_point = quant_min - torch.round(min_val / scale).to(torch.int32)
         return scale, zero_point
 
 
@@ -132,9 +133,7 @@ def quantize_per_channel(
     scales = scales.view(-1, 1)
     zero_points = zero_points.view(-1, 1)
     res = torch.clamp(
-        torch.round(input * (1.0 / scales)) + zero_points,
-        quant_min,
-        quant_max,
+        torch.round(input * (1.0 / scales)) + zero_points, quant_min, quant_max,
     )
     return res.to(dtype)
 
@@ -157,36 +156,21 @@ def dequantize_per_channel(
 class TorchBasicQuantizer(Quantizer):
     """
     The quantized content is represented internally as `quant_buffer`, along
-    with quantization statistics `quant_scales`, `quant_zero_points`.
-    In the default case, `quant_buffer.dtype == target_dtype` and
-    `quant_buffers.shape[-1] == blocksize`.
+    with quantization statistics `quant_scales`, `quant_zero_points`. Here,
+    `quant_buffer` uses a 8-bit or 4-bit storage type.
 
-    However, subclasses may use a different `quant_buffer.dtype` and
-    `quant_buffers.shape[-1]`. See :class:`TorchAOQuantizer` with
-    `target_dtype == torch.uint4` as example. This is dealt with by the
-    properties `_quant_buffer_blocksize` and `_quant_buffer_dtype`.
+    Internally, 4-bit storage is implemented as 8-bit storage with half the
+    blocksize, which is why the blocksize must be even in this case.
 
     `tmp_array_limit_gb` provides access to the maximum size of temporary
     buffers which can be used here.
 
-    Details for :meth:`_quantization_states`:
-
-    It turns out that using the `torch.ao.quantization.observer` observers
-    with tensors on GPU is very slow. This seems because they use registered
-    buffers created on the CPU (default), and then all computations are done
-    on CPU. It is a bit tricky to get around these shortcomings, see also
-    :class:`MyPerChannelMinMaxObserver`. We must avoid creating any
-    registered buffers per :meth:`_quantization_states` call.
-
     """
-
-    quant_minmax_for_observer: Optional[Tuple[int, int]] = None
-
     def __init__(
         self,
         shape: Tuple[int, int, int, int],
         source_dtype: torch.dtype,
-        target_dtype: torch.dtype,
+        num_bits: int,
         blocks_over_heads: bool = False,
         allocate_buffers: bool = False,
         device: Optional[torch.device] = None,
@@ -202,17 +186,20 @@ class TorchBasicQuantizer(Quantizer):
             raise ValueError(
                 f"source_dtype = {source_dtype} is not supported, must be in {self.supported_source_dtypes()}"
             )
-        if target_dtype not in self.supported_target_dtypes():
-            raise ValueError(
-                f"target_dtype = {target_dtype} is not supported, must be in {self.supported_target_dtypes()}"
-            )
-        self.target_dtype = target_dtype
+        if num_bits not in (4, 8):
+            raise ValueError(f"num_bits = {num_bits}, must be 4 or 8")
+        self._is_4bit = num_bits == 4
+        self._quant_buffer_dtype = torch.uint8
+        self._quant_min = 0
+        self._quant_max = 2 ** num_bits - 1
         batch_size, n_query_groups, cache_length, head_size = shape
         self.max_batch_size = batch_size
         self.n_query_groups = n_query_groups
-        bits_per_entry = bits_for_torch_dtype(self.target_dtype) + bits_for_torch_dtype(
-            torch.float32
-        )
+        # This is not for storage, but temporary memory for quant / de-quant:
+        bits_per_entry = num_bits + bits_for_torch_dtype(torch.float32)
+        if self._is_4bit:
+            # Need another intermediate array
+            bits_per_entry += bits_for_torch_dtype(torch.uint8)
         self._bytes_per_entry = (
             batch_size * n_query_groups * head_size / 8
         ) * bits_per_entry
@@ -233,32 +220,22 @@ class TorchBasicQuantizer(Quantizer):
     def batch_size(self) -> Optional[int]:
         return self._batch_size
 
-    @staticmethod
-    def _validate_blocksize(blocksize):
-        if blocksize < MIN_BLOCKSIZE:
+    def _validate_blocksize(self):
+        if self.blocksize < MIN_BLOCKSIZE:
             raise ValueError(
-                f"blocksize = {blocksize} is too small, must be at least {MIN_BLOCKSIZE}"
+                f"blocksize = {self.blocksize}, must be at least {MIN_BLOCKSIZE}"
             )
+        if self._is_4bit and self.blocksize % 2 == 1:
+            raise ValueError(f"blocksize = {self.blocksize}, must be even for 4-bit quantization")
 
     def _init_blocksize_quant_shape(self):
         batch_size, n_query_groups, cache_length, head_size = self.shape
-        if self.blocks_over_heads:
-            self.blocksize = n_query_groups * head_size
-            self._quant_shape = (
-                batch_size,
-                cache_length,
-                self._quant_buffer_blocksize(),
-            )
-        else:
-            self.blocksize = head_size
-            self._quant_shape = (
-                batch_size * n_query_groups,
-                cache_length,
-                self._quant_buffer_blocksize(),
-            )
-        self._validate_blocksize(self.blocksize)
+        self.blocksize = n_query_groups * head_size if self.blocks_over_heads else head_size
+        self._validate_blocksize()
+        first_dim = batch_size if self.blocks_over_heads else batch_size * n_query_groups
+        final_dim = self.blocksize if not self._is_4bit else self.blocksize // 2
+        self._quant_shape = (first_dim, cache_length, final_dim)
 
-    @property
     def _buffer_dim0(self) -> Optional[int]:
         if self.blocks_over_heads:
             return self._batch_size
@@ -268,28 +245,6 @@ class TorchBasicQuantizer(Quantizer):
                 if self._batch_size is None
                 else self.batch_size * self.n_query_groups
             )
-
-    def _quant_buffer_blocksize(self) -> int:
-        """
-        Some subclasses may represent `quant_buffer` with a different
-        block size and target dtype than the default here.
-
-        Returns:
-            Size of final dimension for `quant_buffer`
-
-        """
-        return self.blocksize
-
-    def _quant_buffer_dtype(self) -> torch.dtype:
-        """
-        Some subclasses may represent `quant_buffer` with a different
-        block size and target dtype than the default here.
-
-        Returns:
-            Data type for `quant_buffer`
-
-        """
-        return self.target_dtype
 
     def allocate_buffers(
         self,
@@ -317,7 +272,7 @@ class TorchBasicQuantizer(Quantizer):
             shape = self._quant_shape
             self.quant_buffer = torch.empty(
                 shape,
-                dtype=self._quant_buffer_dtype(),
+                dtype=self._quant_buffer_dtype,
                 device=device,
             )
             self.quant_scales = torch.zeros(
@@ -327,7 +282,7 @@ class TorchBasicQuantizer(Quantizer):
             )
             self.quant_zero_points = torch.zeros(
                 shape[:-1],
-                dtype=torch.float32,
+                dtype=torch.int32,
                 device=device,
             )
         self._batch_size = batch_size  # Effective batch size
@@ -372,14 +327,15 @@ class TorchBasicQuantizer(Quantizer):
                 _values = _values.transpose(1, 2)
             _values = _values.reshape(-1, self.blocksize)
             scales, zero_points = self._quantization_states(_values)
+            print(f"scale = {scales[0]}, zero_point = {zero_points[0]}")
             q_x = self._quantize_internal(
                 input_float=_values,
                 scales=scales,
                 zero_points=zero_points,
-            ).view(-1, csize, self._quant_buffer_blocksize())
+            ).view(-1, csize, self._quant_shape[-1])
             scales = scales.view(-1, csize)
             zero_points = zero_points.view(-1, csize)
-            dim0 = self._buffer_dim0
+            dim0 = self._buffer_dim0()
             assert q_x.shape[0] == dim0  # Sanity check
             assert scales.shape[0] == dim0
             assert zero_points.shape[0] == dim0
@@ -405,24 +361,29 @@ class TorchBasicQuantizer(Quantizer):
         assert (
             values.ndim == 2 and values.shape[1] == self.blocksize
         ), f"values.shape = {values.shape}, blocksize = {self.blocksize}"
-        if TorchBasicQuantizer.quant_minmax_for_observer is None:
-            base_observer = PerChannelMinMaxObserver(
-                ch_axis=0,
-                dtype=self.target_dtype,
-            )
-            TorchBasicQuantizer.quant_minmax_for_observer = (
-                base_observer.quant_min,
-                base_observer.quant_max,
-            )
         obs = MyPerChannelMinMaxObserver(
-            dtype=self.target_dtype,
-            quant_min=TorchBasicQuantizer.quant_minmax_for_observer[0],
-            quant_max=TorchBasicQuantizer.quant_minmax_for_observer[1],
+            dtype=self._quant_buffer_dtype,
+            quant_min=self._quant_min,
+            quant_max=self._quant_max,
         )
         obs(values)
         scales, zero_points = obs.calculate_qparams()
         device = values.device
-        return scales.to(device=device), zero_points.to(device=device)
+        return (
+            scales.to(device=device),
+            zero_points.to(device=device, dtype=torch.int32),
+        )
+
+    @staticmethod
+    def _compress_internal(x: torch.Tensor, is_4bit: bool) -> torch.Tensor:
+        if is_4bit:
+            blocksize_half = x.shape[-1] // 2
+            return torch.bitwise_or(
+                torch.bitwise_left_shift(x[:, :blocksize_half], 4),
+                x[:, blocksize_half:],
+            )
+        else:
+            return x
 
     def _quantize_internal(
         self,
@@ -430,15 +391,15 @@ class TorchBasicQuantizer(Quantizer):
         scales: torch.Tensor,
         zero_points: torch.Tensor,
     ) -> torch.Tensor:
-        assert TorchBasicQuantizer.quant_minmax_for_observer is not None
-        return quantize_per_channel(
+        int_data = quantize_per_channel(
             input=input_float,
             scales=scales,
             zero_points=zero_points,
-            quant_min=TorchBasicQuantizer.quant_minmax_for_observer[0],
-            quant_max=TorchBasicQuantizer.quant_minmax_for_observer[1],
-            dtype=self.target_dtype,
+            quant_min=self._quant_min,
+            quant_max=self._quant_max,
+            dtype=self._quant_buffer_dtype,
         )
+        return self._compress_internal(int_data, is_4bit=self._is_4bit)
 
     def _dequantize(
         self,
@@ -448,9 +409,9 @@ class TorchBasicQuantizer(Quantizer):
     ) -> torch.Tensor:
         if not self.buffers_are_allocated:
             raise IndexError("Quantizer buffers are not allocated")
-        dim0 = self._buffer_dim0
+        dim0 = self._buffer_dim0()
         q_x = self.quant_buffer[:dim0, start:end, :]
-        q_blocksize = self._quant_buffer_blocksize()
+        q_blocksize = self._quant_shape[-1]
         assert q_x.shape[-1] == q_blocksize  # Sanity check
         scales = self.quant_scales[:dim0, start:end]
         zero_points = self.quant_zero_points[:dim0, start:end]
@@ -486,12 +447,23 @@ class TorchBasicQuantizer(Quantizer):
         else:
             return torch.cat(out_parts, dim=-2)
 
+    @staticmethod
+    def _uncompress_internal(x: torch.Tensor, is_4bit: bool) -> torch.Tensor:
+        if is_4bit:
+            return torch.cat(
+                (torch.bitwise_right_shift(x, 4), torch.bitwise_and(x, 15)),
+                dim=-1,
+            )
+        else:
+            return x
+
     def _dequantize_internal(
         self,
         int_data: torch.Tensor,
         scales: torch.Tensor,
         zero_points: torch.Tensor,
     ) -> torch.Tensor:
+        int_data = self._uncompress_internal(int_data, is_4bit=self._is_4bit)
         return dequantize_per_channel(
             input=int_data,
             scales=scales,
@@ -529,13 +501,6 @@ class TorchBasicQuantizer(Quantizer):
         return blocksize, num_channels
 
     @staticmethod
-    def _quant_buffer_dtype_bits_apriori(
-        params: KVCacheBuffersParams,
-        **kwargs,
-    ) -> int:
-        return 8
-
-    @staticmethod
     def size_estimate_apriori(
         params: KVCacheBuffersParams,
         **kwargs,
@@ -546,15 +511,13 @@ class TorchBasicQuantizer(Quantizer):
                 **kwargs,
             )
         )
-        sz_buffer = (
-            blocksize
-            * num_channels
-            * TorchBasicQuantizer._quant_buffer_dtype_bits_apriori(
-                params,
-                **kwargs,
-            )
+        num_bits = kwargs.get("num_bits")
+        if num_bits not in (4, 8):
+            raise ValueError(f"num_bits = {num_bits}, must be in (4, 8)")
+        sz_buffer = blocksize * num_channels * num_bits
+        sz_states = num_channels * (
+            bits_for_torch_dtype(torch.float32) + bits_for_torch_dtype(torch.int32)
         )
-        sz_states = 2 * num_channels * bits_for_torch_dtype(torch.float32)
         return sz_buffer + sz_states, dict(buffer=sz_buffer, q_states=sz_states)
 
     def quantization_error(self, x: torch.Tensor) -> torch.Tensor:
@@ -589,10 +552,6 @@ class TorchBasicQuantizer(Quantizer):
         return ALLOWED_SOURCE_DTYPES
 
     @staticmethod
-    def supported_target_dtypes() -> Tuple[torch.dtype, ...]:
-        return ALLOWED_TARGET_DTYPES
-
-    @staticmethod
     def minimum_blocksize() -> int:
         return MIN_BLOCKSIZE
 
@@ -617,7 +576,7 @@ class TorchBasicQuantizerState(QuantizerState):
         )
         self.quant_buffer = torch.zeros(
             shape,
-            dtype=quantizer._quant_buffer_dtype(),
+            dtype=quantizer._quant_buffer_dtype,
             device=self.device,
         )
         self.quant_scales = torch.zeros(
@@ -627,7 +586,7 @@ class TorchBasicQuantizerState(QuantizerState):
         )
         self.quant_zero_points = torch.zeros(
             shape[:-1],
-            dtype=torch.float32,
+            dtype=quantizer._quant_buffer_dtype,
             device=self.device,
         )
 

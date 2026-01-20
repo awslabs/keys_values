@@ -163,7 +163,8 @@ class GPT(nn.Module):
         elif num_none != num_layers:
             raise ValueError(f"kv_caches must not contain None or all be None")
         for kv_cache, block in zip(kv_caches, self.transformer.h):
-            kv_cache.set_seq_length(self.max_seq_length)
+            if kv_cache is not None:
+                kv_cache.set_seq_length(self.max_seq_length)
             block.attn.kv_cache = kv_cache
 
     def set_kv_caches(

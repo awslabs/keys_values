@@ -444,12 +444,9 @@ weigths, so typically `float16` or `bfloat16`. Buffer strategies are:
 * `default`: [DefaultKVCacheBuffers](./keys_values/kvcache/buffers.py#L390).
   Buffers are stored as is, no compression. This is fastest, but needs the most
   GPU memory.
-* `torch-quantized8`:
+* `torch-quantized4`, `torch-quantized8`:
   [TorchBasicQuantizer](./keys_values/kvcache/quantize/pytorch.py#L119). Default
-  `PyTorch` quantization to 8 bits. This quantizer works on CPU as well.
-* `ao-quantized4`, `ao-quantized8`:
-  [TorchAOQuantizer](./keys_values/kvcache/quantize/torch_ao.py#L27). `torchao`
-  quantization to 4 or 8 bits. GPU only.
+  `PyTorch` quantization to 4 or 8 bits. This quantizer works on CPU as well.
 * `bnb-quantized4`, `bnb-quantized8`:
   [BitsAndBytesQuantizer](./keys_values/kvcache/quantize/bitsandbytes.py#L48).
   `bitsandbytes` quantization to 4 or 8 bits. GPU only.

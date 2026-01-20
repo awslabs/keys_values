@@ -14,11 +14,9 @@
 from keys_values.kvcache.quantize.quantization import Quantizer
 from keys_values.kvcache.quantize.pytorch import TorchBasicQuantizer
 from keys_values.kvcache.quantize.bitsandbytes import BitsAndBytesQuantizer
-from keys_values.kvcache.quantize.torch_ao import TorchAOQuantizer
 
 __all__ = [
     "BitsAndBytesQuantizer",
     "Quantizer",
-    "TorchAOQuantizer",
     "TorchBasicQuantizer",
 ]

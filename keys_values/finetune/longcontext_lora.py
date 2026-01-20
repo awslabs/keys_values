@@ -178,6 +178,7 @@ def setup(
     record_gpu_memory_period: int = 0,
     generate_with_eval: bool = False,
     profile_grad_times: int = 0,
+    profile_skip_steps: int = 0,
     profile_parts: Optional[str] = None,
 ) -> None:
     """Finetune a model using the LoRA method.
@@ -253,6 +254,9 @@ def setup(
             Defaults to 0.
         profile_grad_times: If given, we profile complete gradient computation
             for this many steps, then stop. Results are written to CSV file.
+        profile_skip_steps: Only with `profile_grad_times`. This many steps are
+            skipped (but batches drawn from data iterator) before training
+            starts. Allows to run profiling on different batches in parallel.
         profile_parts: If given, we use `cProfile` to profile the first forward
             (if "forward") or first backward (if "backward") pass. Results are
             printed, then the program stops.
@@ -415,6 +419,7 @@ def setup(
         record_gpu_memory_period=record_gpu_memory_period,
         generate_with_eval=generate_with_eval,
         profile_grad_times=profile_grad_times,
+        profile_skip_steps=profile_skip_steps,
         profile_parts=profile_parts,
     )
 
@@ -444,6 +449,7 @@ def main(
     record_gpu_memory_period: int,
     generate_with_eval: bool,
     profile_grad_times: int,
+    profile_skip_steps: int,
     profile_parts: Optional[str],
 ) -> None:
     validate_args(train, eval)
@@ -577,12 +583,14 @@ def main(
     if profile_grad_times > 0:
         thresh = grad.max_match_trials_pack_arg
         name = "new" if grad.use_new_cache else "old"
+        assert profile_skip_steps >= 0
         profile_grad_params = {
             "path": Path(out_dir) / f"profile_grad_times_{name}_{thresh}.csv",
             "use_new_cache": grad.use_new_cache,
             "max_match_trials_pack_arg": thresh,
             "profile_grad_times": profile_grad_times,
             "cache_name": kv_cache.name,
+            "skip_steps": profile_skip_steps,
         }
     else:
         profile_grad_params = None
@@ -743,6 +751,7 @@ def fit(
         fabric,
     )
     total_t0 = time.perf_counter()
+    profile_skip_steps = None if profile_grad_params is None else profile_grad_params["skip_steps"]
 
     while state["step_count"] < max_steps:
         state["iter_num"] += 1
@@ -750,6 +759,9 @@ def fit(
         batch = batch_transform(next(train_iterator))
         if train_iterator.epoch >= train.epochs:
             break
+        if profile_skip_steps is not None and state["iter_num"] <= profile_skip_steps:
+            print(f"Skipping initial {profile_skip_steps} steps")
+            continue
 
         if record_gpu_memory_snapshots is not None:
             if not (0 <= record_gpu_memory_kind <= 2):
