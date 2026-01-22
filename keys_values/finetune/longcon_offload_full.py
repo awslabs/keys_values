@@ -18,7 +18,6 @@ import gc
 import os
 from pathlib import Path
 from pprint import pprint
-import random
 import time
 from typing import Dict, Literal, Optional, Any, Tuple
 
@@ -380,7 +379,6 @@ def main(
         train.epochs * steps_per_epoch, (train.max_steps or float("inf"))
     )
     print(f"Number of optimizer steps per epoch: {lr_max_steps}")
-    random.seed(seed)
     torch.random.manual_seed(seed)
     optim_device = torch.device("cpu")
 

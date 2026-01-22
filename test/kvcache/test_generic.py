@@ -13,7 +13,6 @@
 # limitations under the License.
 from typing import List, Tuple
 from itertools import product
-import random
 import re
 
 import torch
@@ -33,6 +32,7 @@ from keys_values.kvcache.test_utils import (
     random_args_cache_forward,
     range_from_args,
 )
+from keys_values.utils import randint_torch
 
 
 def args_store_retrieve() -> Tuple[str, List[tuple]]:
@@ -50,7 +50,6 @@ def args_store_retrieve() -> Tuple[str, List[tuple]]:
 @pytest.mark.parametrize(*args_store_retrieve())
 def test_store_retrieve(device, name, kwargs):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
     dtype = torch.bfloat16
@@ -66,11 +65,11 @@ def test_store_retrieve(device, name, kwargs):
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params, **kwargs)
     if name.startswith("dense"):
-        num_insert = random.randint(cache_length // 2, cache_length)
+        num_insert = randint_torch(cache_length // 2, cache_length)
     else:
-        num_insert = random.randint(cache_length, 3 * cache_length)
+        num_insert = randint_torch(cache_length, 3 * cache_length)
     num_prefill = min(
-        random.randint(num_insert // 3, int(num_insert * 0.75)),
+        randint_torch(num_insert // 3, int(num_insert * 0.75)),
         kv_cache.max_prefill_length,
     )
 
@@ -111,7 +110,6 @@ def test_store_retrieve(device, name, kwargs):
 @pytest.mark.parametrize("name, device", cache_names_and_devices())
 def test_prefill(name, device):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     num_compares = 3
     vocab_size = 128
@@ -134,7 +132,7 @@ def test_prefill(name, device):
     for _ in range(num_compares):
         kv_cache.reset()
         num_prefill = min(
-            random.randint(cache_length // 8, cache_length),
+            randint_torch(cache_length // 8, cache_length),
             kv_cache.max_prefill_length,
         )
         kv_cache(**range_from_args(data, 0, num_prefill))
@@ -217,7 +215,6 @@ def test_size_estimate(
     blocks_over_heads,
 ):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
     n_layer = 4

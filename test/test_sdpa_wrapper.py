@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-import random
 
 import pytest
 import torch
@@ -33,6 +32,7 @@ from keys_values.kvcache.test_utils import (
     range_from_args,
 )
 from keys_values.sdpa_wrapper import scaled_dot_product_attention as wrapper_sdpa
+from keys_values.utils import randint_torch
 
 
 @pytest.mark.parametrize(
@@ -51,7 +51,6 @@ from keys_values.sdpa_wrapper import scaled_dot_product_attention as wrapper_sdp
 @torch.inference_mode()
 def test_sdpa_wrapper(device, n_head, n_query_groups):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
 
     num_repeats = 32
@@ -69,10 +68,10 @@ def test_sdpa_wrapper(device, n_head, n_query_groups):
 
     print(f"n_head={n_head}, n_query_groups={n_query_groups}, device={device}")
     for repeat in range(num_repeats):
-        head_size = 2 ** random.randint(3, 6)
-        batch_size = random.randint(1, 5)
-        kv_len = random.randint(64, 256)
-        input_pos = random.randint(kv_len, 2 * kv_len)
+        head_size = 2 ** randint_torch(3, 6)
+        batch_size = randint_torch(1, 5)
+        kv_len = randint_torch(64, 256)
+        input_pos = randint_torch(kv_len, 2 * kv_len)
         # Sample data: For `token_positions`, we iterate between two
         # cases: Overlap / no overlap between the two parts which are
         # exchanged
@@ -82,7 +81,7 @@ def test_sdpa_wrapper(device, n_head, n_query_groups):
         )
         if repeat % 2 == 0:
             # No overlap case
-            q_len = random.randint(1, kv_len // 2)
+            q_len = randint_torch(1, kv_len // 2)
             left_sz = kv_len - q_len
             s1 = input_pos + q_len - left_sz
             l1 = left_sz
@@ -102,7 +101,7 @@ def test_sdpa_wrapper(device, n_head, n_query_groups):
                     )[:q_len]
         else:
             # Overlap case
-            q_len = random.randint(kv_len // 10, kv_len // 2)
+            q_len = randint_torch(kv_len // 10, kv_len // 2)
             s1 = input_pos + q_len - kv_len
             done = False
             for _ in range(50):
@@ -164,7 +163,6 @@ def test_sdpa_wrapper(device, n_head, n_query_groups):
 @torch.inference_mode()
 def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
 
     torch.set_default_dtype(dtype)  # Set default dtype

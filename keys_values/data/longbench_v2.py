@@ -16,7 +16,6 @@ from typing import List, Optional, Dict, Any, Tuple
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 import json
-import random
 from heapq import nlargest
 
 import torch
@@ -78,16 +77,15 @@ class LongestFirstIterator(Iterator):
         self.batch_size = batch_size
         remainder = list(set(range(dataset_size)) - set(inds_longest))
         assert len(remainder) == dataset_size - batch_size
-        random.shuffle(remainder)
-        self._permutation = inds_longest + remainder
+        remainder = torch.tensor(remainder)[torch.randperm(len(remainder))]
+        self._permutation = torch.cat((torch.tensor(inds_longest), remainder))
         self._pos = 0
 
     def __next__(self) -> int:
         if self._pos >= self.dataset_size:
-            self._permutation = list(range(self.dataset_size))
-            random.shuffle(self._permutation)
+            self._permutation = torch.randperm(self.dataset_size)
             self._pos = 0
-        result = self._permutation[self._pos]
+        result = self._permutation[self._pos].item()
         self._pos += 1
         return result
 
@@ -375,8 +373,7 @@ class LongBenchV2(DataModule):
                     key=lambda y: y[0],
                 )
             ]
-            # TODO: Better use torch random here
-            random.seed(self.seed)
+            torch.random.manual_seed(self.seed)
             return DataLoader(
                 self.train_dataset,
                 batch_size=self.batch_size,

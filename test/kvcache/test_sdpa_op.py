@@ -14,7 +14,6 @@
 from itertools import product
 from typing import Optional
 import math
-import random
 
 import torch
 from torch.nn import functional as F
@@ -55,7 +54,7 @@ from keys_values.kvcache.test_utils import (
 )
 from keys_values.model import GPT
 from keys_values.sdpa_wrapper import scaled_dot_product_attention
-from keys_values.utils import repeat_interleave
+from keys_values.utils import repeat_interleave, randint_torch
 
 
 @pytest.mark.parametrize(
@@ -79,7 +78,6 @@ def test_sdpa_op_gradients(
     device, n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size
 ):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     num_repeats = 32
     seq_len = 2 * kv_len
@@ -92,8 +90,8 @@ def test_sdpa_op_gradients(
     )
     kwargs = dict(device=device, dtype=dtype)
     for repeat in range(num_repeats):
-        head_size = 2 ** random.randint(3, 6)
-        batch_size = random.randint(1, 5)
+        head_size = 2 ** randint_torch(3, 6)
+        batch_size = randint_torch(1, 5)
         print(f"repeat={repeat}, head_size={head_size}, batch_size={batch_size}")
         config = Config(
             n_layer=1,
@@ -216,7 +214,6 @@ def test_sdpa_backward(
     device, n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size
 ):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     num_repeats = 32
     seq_len = 2 * kv_len
@@ -228,8 +225,8 @@ def test_sdpa_backward(
     )
     kwargs = dict(device=device, dtype=dtype)
     for repeat in range(num_repeats):
-        head_size = 2 ** random.randint(3, 6)
-        batch_size = random.randint(1, 5)
+        head_size = 2 ** randint_torch(3, 6)
+        batch_size = randint_torch(1, 5)
         if q_len % 2 != 0 and batch_size % 2 != 0:
             batch_size += 1
         print(f"repeat={repeat}, head_size={head_size}, batch_size={batch_size}")
@@ -416,7 +413,6 @@ def test_gradient_new_and_old_spda(
     device,
 ):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     print(f"cache_name={cache_name}, cache_kwargs={cache_kwargs}")
     print(

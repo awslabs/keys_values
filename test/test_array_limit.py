@@ -11,8 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import random
-
 import torch
 
 from litgpt.config import Config
@@ -25,6 +23,7 @@ from keys_values.finetune.args import KVCacheArgs, GradientArgs
 from keys_values.kvcache.gradient.main import LongContextGradientModel
 from keys_values.kvcache.utils import VerbosityLevels
 from keys_values.model import GPT
+from keys_values.utils import randint_torch
 
 
 def test_tmp_array_limit_object():
@@ -132,7 +131,7 @@ def test_tmp_array_limit_object():
         high=config.vocab_size,
         size=(batch_size, seq_length),
     )
-    num_output_tokens = random.randint(4, int(seq_length * 0.75))
+    num_output_tokens = randint_torch(4, int(seq_length * 0.75))
     targets = token_ids[:, (-num_output_tokens):]
     model.train()
     loss = model(token_ids, targets)

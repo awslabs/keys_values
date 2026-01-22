@@ -119,3 +119,7 @@ def copy_parameters(
 def flush_io_streams():
     sys.stdout.flush()
     sys.stderr.flush()
+
+
+def randint_torch(a: int, b: int) -> int:
+    return torch.randint(a, b + 1, (1,)).item()

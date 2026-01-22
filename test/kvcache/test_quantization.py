@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import random
 from functools import partial
 from itertools import product
 from typing import List, Optional
@@ -42,6 +41,7 @@ from keys_values.kvcache.test_utils import (
     random_index,
 )
 from keys_values.model import GPT
+from keys_values.utils import randint_torch
 
 
 def args_for_one_cache(
@@ -73,7 +73,6 @@ def args_for_one_cache(
 )
 def test_quantization_error(dtype, blocks_over_heads, name, device):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     if not ("bnb" in name and blocks_over_heads):
         print(
@@ -167,7 +166,6 @@ def test_quantization_error(dtype, blocks_over_heads, name, device):
 )
 def test_concatenation(dtype, blocks_over_heads, name, device):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     print(
         f"name={name}, dtype={dtype}, blocks_over_heads={blocks_over_heads}, device={device}"
@@ -205,7 +203,6 @@ def test_concatenation(dtype, blocks_over_heads, name, device):
 )
 def test_quantizer_states(dtype, blocks_over_heads, name, device):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
 
     vocab_size = 128
@@ -237,8 +234,8 @@ def test_quantizer_states(dtype, blocks_over_heads, name, device):
         before_k = k_and_v.keys().clone()
         before_v = k_and_v.values().clone()
         # Copy certain range into checkpoint
-        start = random.randint(0, 3 * cache_length // 4)
-        end = random.randint(start + 1, cache_length)
+        start = randint_torch(0, 3 * cache_length // 4)
+        end = randint_torch(start + 1, cache_length)
         checkpoint[0].copy_()
         checkpoint[1].copy_()
         # Overwrite this range with new values
@@ -275,7 +272,6 @@ def test_explore_bitsandbytes():
     from bitsandbytes.functional import quantize_4bit, quantize_blockwise
 
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
 
     device = torch.device("cuda:0")
@@ -285,7 +281,7 @@ def test_explore_bitsandbytes():
     code_4 = None
     code_8 = None
     for rep in range(num_repeats):
-        blocksize = ALLOWED_BLOCK_SIZE[random.randint(0, len(ALLOWED_BLOCK_SIZE) - 1)]
+        blocksize = ALLOWED_BLOCK_SIZE[randint_torch(0, len(ALLOWED_BLOCK_SIZE) - 1)]
         if rep % 2 == 0:
             quant_func = partial(quantize_4bit, blocksize=blocksize)
             num_bits = 4
@@ -293,11 +289,11 @@ def test_explore_bitsandbytes():
             quant_func = partial(quantize_blockwise, blocksize=blocksize)
             num_bits = 8
         dtype = ALLOWED_SOURCE_DTYPES[rep % num_dtypes]
-        n_query_groups = random.randint(1, 4)
+        n_query_groups = randint_torch(1, 4)
         params = KVCacheParams(
-            max_batch_size=random.randint(1, 4),
+            max_batch_size=randint_torch(1, 4),
             n_query_groups=n_query_groups,
-            cache_length=random.randint(16, 64),
+            cache_length=randint_torch(16, 64),
             head_size=blocksize,
             n_head=n_query_groups,
             dtype=dtype,
@@ -348,8 +344,8 @@ def test_explore_bitsandbytes():
             assert state.shape is None
             assert state.quant_type is None
         # Test memory layout for `q_x`
-        start = random.randint(0, params.cache_length // 2)
-        end = random.randint(start + 1, params.cache_length)
+        start = randint_torch(0, params.cache_length // 2)
+        end = randint_torch(start + 1, params.cache_length)
         # Note: Without `contiguous`, this fails! Apparently, `quant_func`
         # needs contiguous memory, fails otherwise
         xpart = x[:, :, start:end, :].contiguous()
@@ -541,7 +537,6 @@ def args_quantized_buffers_write_back() -> List[tuple]:
 )
 def test_quantized_buffers_write_back(dtype, name, device):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     batch_size = 4
     cache_length = 64
@@ -612,7 +607,7 @@ def test_quantized_buffers_write_back(dtype, name, device):
     # Several updates
     for n_upd in range(5):
         q_len = min(
-            random.randint(1, cache_length // 2),
+            randint_torch(1, cache_length // 2),
             caches_common[0].max_forward_length(),
         )
         print(f"Update {n_upd}: {q_len}")
@@ -639,7 +634,6 @@ def test_quantized_buffers_write_back(dtype, name, device):
 )
 def test_no_error(dtype, blocks_over_heads, name, device):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     if not ("bnb" in name and blocks_over_heads):
         print(

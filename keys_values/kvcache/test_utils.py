@@ -288,12 +288,8 @@ def cache_name_is_bitsandbytes(name: str) -> bool:
     return name[:-1].endswith("bnb-quantized")
 
 
-def cache_name_is_ao(name: str) -> bool:
-    return name[:-1].endswith("ao-quantized")
-
-
 def cache_name_gpu_only(name: str) -> bool:
-    return cache_name_is_bitsandbytes(name) or cache_name_is_ao(name)
+    return cache_name_is_bitsandbytes(name)
 
 
 def device_for_cache_name(name: str) -> torch.device:

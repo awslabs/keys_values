@@ -14,7 +14,6 @@
 from dataclasses import replace
 from itertools import product
 import math
-import random
 
 import torch
 import pytest
@@ -121,7 +120,6 @@ def test_gradient_row_of_cells(
     device,
 ):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     print(f"cache_name={cache_name}, cache_kwargs={cache_kwargs}")
     print(

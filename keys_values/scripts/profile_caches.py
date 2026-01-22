@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import replace
-import random
 from pathlib import Path
 import time
 from typing import List, Tuple
@@ -25,7 +24,7 @@ from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.test_utils import random_args_cache_forward
-from keys_values.utils import append_results_to_csv
+from keys_values.utils import append_results_to_csv, randint_torch
 
 
 def main(
@@ -44,7 +43,6 @@ def main(
 
     """
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     on_gpu = torch.cuda.is_available()
 
@@ -96,7 +94,7 @@ def main(
         ]
         rows = []
         for repeat in [None] * warmup_repeats + list(range(num_repeats)):
-            next_pos = random.randint(0, cache_length - 1)
+            next_pos = randint_torch(0, cache_length - 1)
             if repeat is not None:
                 result = dict(
                     result_fixed,

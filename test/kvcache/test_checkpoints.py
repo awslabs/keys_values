@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from itertools import product
-import random
 from typing import List
 
 import torch
@@ -28,6 +27,7 @@ from keys_values.kvcache.test_utils import (
     cache_names_and_devices,
 )
 from keys_values.model import GPT
+from keys_values.utils import randint_torch
 
 
 def args_layer_input_quantized_checkpoints() -> List[tuple]:
@@ -55,7 +55,6 @@ def test_layer_input_quantized_checkpoints(
     max_seq_length,
 ):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
 
     num_set_calls = 20
@@ -114,11 +113,11 @@ def test_layer_input_quantized_checkpoints(
             set_num = max_seq_length
             set_input_pos = 0
         else:
-            set_num = random.randint(1, max_seq_length // 2)
-            set_input_pos = random.randint(0, max_seq_length - set_num)
+            set_num = randint_torch(1, max_seq_length // 2)
+            set_input_pos = randint_torch(0, max_seq_length - set_num)
         buffers = torch.randn(batch_size, set_num, config.n_embd, **kwargs)
-        get_num = random.randint(chunk_size, max_seq_length)
-        get_input_pos = random.randint(0, max_seq_length - get_num)
+        get_num = randint_torch(chunk_size, max_seq_length)
+        get_input_pos = randint_torch(0, max_seq_length - get_num)
         # Modify and compare
         results = []
         for cp in checkpoints:

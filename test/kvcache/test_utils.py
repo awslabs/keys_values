@@ -11,24 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import random
-
 import torch
 
 from keys_values.kvcache.utils import smallest_covering_ranges
+from keys_values.utils import randint_torch
 
 
 def test_smallest_covering_ranges():
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
 
     num_repeats = 100
     cache_length = 2**14
     for _ in range(num_repeats):
-        num = random.randint(32, 1024)
+        num = randint_torch(32, 1024)
         slots = torch.randperm(cache_length)[:num].tolist()
-        max_num_ranges = random.randint(1, 8)
+        max_num_ranges = randint_torch(1, 8)
         ranges = smallest_covering_ranges(slots, max_num_ranges)
         assert 1 <= len(ranges) <= max_num_ranges
         # Test cover property

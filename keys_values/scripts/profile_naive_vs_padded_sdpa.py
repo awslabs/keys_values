@@ -14,7 +14,6 @@
 from functools import partial
 import math
 from pathlib import Path
-import random
 import time
 from typing import List, Dict, Any, Tuple, Set
 
@@ -31,7 +30,7 @@ from keys_values.attention_utils import SDPA_KERNELS_BEST_ORDERING
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.test_utils import random_keys_values, random_tensor
 from keys_values.sdpa_wrapper import scaled_dot_product_attention
-from keys_values.utils import append_results_to_csv
+from keys_values.utils import append_results_to_csv, randint_torch
 
 
 def sample_inputs(
@@ -179,7 +178,7 @@ def find_chunk_size(
     )
     # Warm-up:
     for _ in range(warmup_steps):
-        root_func(random.randint(1, params.cache_length))
+        root_func(randint_torch(1, params.cache_length))
     x0 = max(params.cache_length // 64, 8)
     bracket = (1, params.cache_length)
     try:
@@ -251,7 +250,6 @@ def main(
     tmp_array_limit_gb: float = 4,
 ):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     if not torch.cuda.is_available():
         raise RuntimeError("This script needs to be run on a GPU instance")

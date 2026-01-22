@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from itertools import product
-import random
 
 import torch
 import pytest
@@ -26,6 +25,7 @@ from keys_values.kvcache.test_utils import (
     available_backends,
     product_with_devices,
 )
+from keys_values.utils import randint_torch
 
 
 @pytest.mark.parametrize(
@@ -37,7 +37,6 @@ from keys_values.kvcache.test_utils import (
 )
 def test_last_recent(device, name):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
     dtype = torch.bfloat16
@@ -52,9 +51,9 @@ def test_last_recent(device, name):
     )
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params)
-    num_insert = random.randint(cache_length, 3 * cache_length)
+    num_insert = randint_torch(cache_length, 3 * cache_length)
     max_prefill_length = kv_cache.max_prefill_length
-    num_prefill = random.randint(num_insert // 3, int(num_insert * 0.75))
+    num_prefill = randint_torch(num_insert // 3, int(num_insert * 0.75))
     if max_prefill_length is not None and num_prefill > max_prefill_length:
         num_prefill = max_prefill_length
 
@@ -89,7 +88,6 @@ def test_last_recent(device, name):
 )
 def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
     name = "dense-default"
@@ -105,7 +103,7 @@ def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
     )
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params)
-    num_prefill = random.randint(cache_length // 3, int(cache_length * 0.75))
+    num_prefill = randint_torch(cache_length // 3, int(cache_length * 0.75))
     max_prefill_length = kv_cache.max_prefill_length
     if max_prefill_length is not None and num_prefill > max_prefill_length:
         num_prefill = max_prefill_length

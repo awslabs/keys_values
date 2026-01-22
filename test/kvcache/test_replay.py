@@ -13,7 +13,6 @@
 # limitations under the License.
 from functools import partial
 from itertools import product
-import random
 from typing import Dict, Any
 
 import torch
@@ -90,7 +89,6 @@ def args_inference_replay():
 )
 def test_inference_replay(cache_name, device, cache_kwargs):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     dtype = torch.bfloat16
     torch.set_default_dtype(dtype)  # Set default dtype
@@ -232,7 +230,6 @@ def args_training_replay():
 )
 def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_new_cache):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
 
     dtype = torch.bfloat16

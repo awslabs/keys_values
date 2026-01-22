@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-import random
 import time
 from typing import List
 
@@ -39,7 +38,6 @@ def main(
     warmup_repeats: int = 2,
 ):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     on_gpu = torch.cuda.is_available()
     device = torch.device("cuda", 0) if on_gpu else torch.device("cpu")

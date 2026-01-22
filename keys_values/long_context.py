@@ -11,10 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import random
+from dataclasses import dataclass, replace
 from itertools import accumulate
 from typing import Optional, Any, Mapping, List, Set, Tuple
-from dataclasses import dataclass, replace
 
 import torch
 
@@ -31,6 +30,7 @@ from keys_values.kvcache.utils import (
     bytes_for_torch_dtype,
 )
 from keys_values.model import GPT
+from keys_values.utils import randint_torch
 
 
 HEAD_OR_INITIAL_TENSORS_MAX_BYTES = 2**31
@@ -74,7 +74,7 @@ def create_chunk_sizes(
         max_val = min(chunk_size + step, points_to_cover[0])
         while num_done < seq_length:
             if randomize_chunk_sizes:
-                c_size = random.randint(min_val, max_val)
+                c_size = randint_torch(min_val, max_val)
             else:
                 c_size = chunk_size
             c_size = min(c_size, seq_length - num_done)

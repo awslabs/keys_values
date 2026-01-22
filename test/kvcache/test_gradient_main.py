@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import random
 from itertools import product
 from dataclasses import replace
 
@@ -31,6 +30,7 @@ from keys_values.kvcache.test_utils import (
     cache_names_and_devices,
 )
 from keys_values.model import GPT
+from keys_values.utils import randint_torch
 
 
 def args_complete_gradient_computation():
@@ -64,7 +64,6 @@ def test_complete_gradient_computation(
     device,
 ):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
 
     dtype = torch.float32
@@ -118,14 +117,14 @@ def test_complete_gradient_computation(
     all_input_ids = []
     all_targets = []
     for batch_size in batch_sizes:
-        seq_length = random.randint(min_sequence_length, max_sequence_length)
+        seq_length = randint_torch(min_sequence_length, max_sequence_length)
         token_ids = torch.randint(
             low=0,
             high=config.vocab_size,
             size=(batch_size, seq_length),
             device=device,
         )
-        num_output_tokens = random.randint(4, int(seq_length * 0.75))
+        num_output_tokens = randint_torch(4, int(seq_length * 0.75))
         all_input_ids.append(token_ids[:, :-1])
         all_targets.append(token_ids[:, (-num_output_tokens):])
     head_model = HeadModelFactory.create(name=head_model_name, config=config)
@@ -219,7 +218,6 @@ def args_copy_model_to_device():
 )
 def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     torch.set_default_dtype(dtype)
 

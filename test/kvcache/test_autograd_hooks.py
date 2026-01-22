@@ -1,5 +1,4 @@
 from itertools import product
-import random
 
 import torch
 import pytest
@@ -19,7 +18,7 @@ from keys_values.kvcache.test_utils import (
     available_backends,
     random_index,
 )
-from keys_values.utils import expand_index, repeat_interleave
+from keys_values.utils import expand_index, repeat_interleave, randint_torch
 
 
 @pytest.mark.parametrize(
@@ -28,7 +27,6 @@ from keys_values.utils import expand_index, repeat_interleave
 )
 def test_extract_delta(device, dtype):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
 
     n_head = 32
@@ -49,7 +47,7 @@ def test_extract_delta(device, dtype):
     index_kwargs = dict(dtype=torch.int64, device=device)
     for _ in range(num_repeats):
         keys = random_tensor(params, device=device)
-        chunk_size = random.randint(1, cache_length // 2)
+        chunk_size = randint_torch(1, cache_length // 2)
         input_pos = cache_length + 16
         token_positions = random_index(
             params,

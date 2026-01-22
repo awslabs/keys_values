@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import random
 from itertools import product
 from typing import Dict, Tuple
 
@@ -74,7 +73,6 @@ def test_gradient_sharded(
     layers_per_cell,
 ):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
 
     device = torch.device("cpu")
@@ -289,7 +287,6 @@ def compute_gradients_on_device(
 @_RunIf(min_cuda_gpus=1)
 def test_gradient_sharded_simple():
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
 
     seq_length = 128

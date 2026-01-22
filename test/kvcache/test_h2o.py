@@ -13,7 +13,6 @@
 # limitations under the License.
 from dataclasses import replace
 from itertools import product
-import random
 
 import torch
 from torch.linalg import vector_norm
@@ -37,7 +36,7 @@ from keys_values.kvcache.test_utils import (
     range_from_args,
 )
 from keys_values.model import GPT
-from keys_values.utils import expand_index, copy_parameters
+from keys_values.utils import expand_index, copy_parameters, randint_torch
 
 
 @pytest.mark.parametrize(
@@ -49,7 +48,6 @@ from keys_values.utils import expand_index, copy_parameters
 )
 def test_grace_period(device, name):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
 
@@ -64,9 +62,9 @@ def test_grace_period(device, name):
     cache_length = params.cache_length
     grace_period = 13
     kv_cache = create_kv_cache(name, params, grace_period=grace_period)
-    num_insert = random.randint(cache_length, 3 * cache_length)
+    num_insert = randint_torch(cache_length, 3 * cache_length)
     num_prefill = min(
-        random.randint(num_insert // 3, int(num_insert * 0.75)),
+        randint_torch(num_insert // 3, int(num_insert * 0.75)),
         kv_cache.max_prefill_length,
     )
 
@@ -149,7 +147,6 @@ def compute_scores(
 )
 def test_h2o_scores(device, name, dtype):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
 
@@ -165,7 +162,7 @@ def test_h2o_scores(device, name, dtype):
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params)
     num_prefill = min(
-        random.randint(cache_length // 3, cache_length // 2),
+        randint_torch(cache_length // 3, cache_length // 2),
         kv_cache.max_prefill_length,
     )
     step = (cache_length - num_prefill) // 3
@@ -229,7 +226,6 @@ def test_h2o_scores(device, name, dtype):
 )
 def test_token_pos_and_pos_log(device, dtype):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
     replay_log_blocksize = 10
@@ -344,7 +340,6 @@ def test_token_pos_and_pos_log(device, dtype):
 
 def test_max_chunk_size():
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
 
     dtype = torch.bfloat16
@@ -368,11 +363,11 @@ def test_max_chunk_size():
     )
 
     for repeat in range(num_repeats):
-        cache_length = random.randint(128, 256)
-        chunk_size = random.randint(8, cache_length // 2)
-        num_chunks = random.randint(2, 8)
+        cache_length = randint_torch(128, 256)
+        chunk_size = randint_torch(8, cache_length // 2)
+        num_chunks = randint_torch(2, 8)
         seq_length = (
-            cache_length + (num_chunks - 2) * chunk_size + random.randint(1, chunk_size)
+            cache_length + (num_chunks - 2) * chunk_size + randint_torch(1, chunk_size)
         )
         max_chunk_size = chunk_size
         print(

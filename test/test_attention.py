@@ -15,7 +15,6 @@
 from dataclasses import replace
 from itertools import product
 import math
-import random
 from typing import Optional, Tuple, List
 
 import pytest
@@ -56,7 +55,7 @@ from keys_values.kvcache.test_utils import (
 from keys_values.model import GPT, CausalSelfAttention
 from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
 from keys_values.pos_encoding import LinearPositionEncoding
-from keys_values.utils import repeat_interleave
+from keys_values.utils import repeat_interleave, randint_torch
 
 
 @pytest.mark.parametrize(
@@ -75,7 +74,6 @@ from keys_values.utils import repeat_interleave
 @torch.inference_mode()
 def test_scaled_dot_product_attention(device, n_head, n_query_groups):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     num_repeats = 32
     dtype = torch.bfloat16
@@ -84,9 +82,9 @@ def test_scaled_dot_product_attention(device, n_head, n_query_groups):
     sliding_window_size = None
 
     for repeat in range(num_repeats):
-        head_size = 2 ** random.randint(3, 6)
-        batch_size = random.randint(1, 5)
-        len_key = random.randint(16, 128)
+        head_size = 2 ** randint_torch(3, 6)
+        batch_size = randint_torch(1, 5)
+        len_key = randint_torch(16, 128)
         mask = None
         if repeat % 2 == 0:
             len_query = len_key
@@ -98,7 +96,7 @@ def test_scaled_dot_product_attention(device, n_head, n_query_groups):
             input_pos = 0
             token_positions = None
         elif repeat % 4 == 1:
-            len_query = random.randint(1, len_key // 2)
+            len_query = randint_torch(1, len_key // 2)
             token_positions = (
                 torch.arange(
                     0,
@@ -186,17 +184,16 @@ def test_build_mask_slice(
     n_query_groups: int,
 ):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     num_repeats = 30
     dtype = torch.bfloat16
 
     for _ in range(num_repeats):
-        seq_len = random.randint(16, 256)
+        seq_len = randint_torch(16, 256)
         full_mask = build_mask_cache(seq_len, sliding_window_size, device, dtype)
-        input_pos = random.randint(1, seq_len - 1)
-        num = random.randint(1, min(16, seq_len - input_pos))
-        cache_length = random.randint(8, seq_len - 4)
+        input_pos = randint_torch(1, seq_len - 1)
+        num = randint_torch(1, min(16, seq_len - input_pos))
+        cache_length = randint_torch(8, seq_len - 4)
         token_positions = torch.zeros(
             (batch_size, n_query_groups, cache_length),
             dtype=torch.int64,
@@ -642,7 +639,6 @@ def _get_token_positions(
 )
 def test_build_mask(device, seq_len, sliding_window_size):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     num_repeats = 4
     batch_size = 2
@@ -662,7 +658,7 @@ def test_build_mask(device, seq_len, sliding_window_size):
     token_positions = _get_token_positions(0, seq_len, **tp_kwargs)
     for _ in range(num_repeats):
         mask_parts = []
-        num_prefill = random.randint(1, seq_len - 1)
+        num_prefill = randint_torch(1, seq_len - 1)
         mask_parts.append(
             build_mask_slice(
                 input_pos=0,
@@ -708,7 +704,6 @@ def test_attention_in_blocks(
     device, n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size
 ):
     seed = 31415927
-    random.seed(seed)
     torch.random.manual_seed(seed)
     num_repeats = 32
     seq_len = 2 * kv_len
@@ -731,8 +726,8 @@ def test_attention_in_blocks(
     )
     kwargs = dict(dtype=dtype, device=device)
     for repeat in range(num_repeats):
-        head_size = 2 ** random.randint(3, 6)
-        batch_size = random.randint(1, 5)
+        head_size = 2 ** randint_torch(3, 6)
+        batch_size = randint_torch(1, 5)
         if q_len % 2 != 0 and batch_size % 2 != 0:
             batch_size += 1
         print(f"repeat={repeat}, head_size={head_size}, batch_size={batch_size}")
@@ -870,7 +865,7 @@ def test_mha_is_passed_on(device):
         size=(batch_size, seq_length),
         device=device,
     )
-    num_output_tokens = random.randint(4, int(seq_length * 0.75))
+    num_output_tokens = randint_torch(4, int(seq_length * 0.75))
     input_ids = token_ids[:, :-1]
     targets = token_ids[:, (-num_output_tokens):]
 

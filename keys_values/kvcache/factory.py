@@ -85,8 +85,6 @@ class KVCacheFactory:
     - "default": Normal storage, no quantization
     - "torch-quantized4": Default PyTorch 4-bit quantization
     - "torch-quantized8": Default PyTorch 8-bit quantization
-    - "ao-quantized4": Torch AO 4-bit quantization
-    - "ao-quantized8": Torch AO 8-bit quantization
     - "bnb-quantized4": Bitsandbytes 4-bit quantization (does not work for
       every hardware)
     - "bnb-quantized8": Bitsandbytes 8-bit quantization (does not work for
