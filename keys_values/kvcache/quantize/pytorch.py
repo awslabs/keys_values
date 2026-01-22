@@ -107,8 +107,8 @@ class MyPerChannelMinMaxObserver(PerChannelMinMaxObserver):
         #   scale = (max_val_pos - min_val_neg) / float(quant_max - quant_min)
         # Makes no sense to me!
         # https://github.com/pytorch/pytorch/issues/173075
-        #min_val_neg = torch.clamp(min_val, max=0)
-        #max_val_pos = torch.clamp(max_val, min=0)
+        # min_val_neg = torch.clamp(min_val, max=0)
+        # max_val_pos = torch.clamp(max_val, min=0)
         scale = torch.clamp(
             (max_val - min_val) / float(quant_max - quant_min),
             min=self.eps,
@@ -133,7 +133,9 @@ def quantize_per_channel(
     scales = scales.view(-1, 1)
     zero_points = zero_points.view(-1, 1)
     res = torch.clamp(
-        torch.round(input * (1.0 / scales)) + zero_points, quant_min, quant_max,
+        torch.round(input * (1.0 / scales)) + zero_points,
+        quant_min,
+        quant_max,
     )
     return res.to(dtype)
 
@@ -166,6 +168,7 @@ class TorchBasicQuantizer(Quantizer):
     buffers which can be used here.
 
     """
+
     def __init__(
         self,
         shape: Tuple[int, int, int, int],
@@ -191,7 +194,7 @@ class TorchBasicQuantizer(Quantizer):
         self._is_4bit = num_bits == 4
         self._quant_buffer_dtype = torch.uint8
         self._quant_min = 0
-        self._quant_max = 2 ** num_bits - 1
+        self._quant_max = 2**num_bits - 1
         batch_size, n_query_groups, cache_length, head_size = shape
         self.max_batch_size = batch_size
         self.n_query_groups = n_query_groups
@@ -226,13 +229,19 @@ class TorchBasicQuantizer(Quantizer):
                 f"blocksize = {self.blocksize}, must be at least {MIN_BLOCKSIZE}"
             )
         if self._is_4bit and self.blocksize % 2 == 1:
-            raise ValueError(f"blocksize = {self.blocksize}, must be even for 4-bit quantization")
+            raise ValueError(
+                f"blocksize = {self.blocksize}, must be even for 4-bit quantization"
+            )
 
     def _init_blocksize_quant_shape(self):
         batch_size, n_query_groups, cache_length, head_size = self.shape
-        self.blocksize = n_query_groups * head_size if self.blocks_over_heads else head_size
+        self.blocksize = (
+            n_query_groups * head_size if self.blocks_over_heads else head_size
+        )
         self._validate_blocksize()
-        first_dim = batch_size if self.blocks_over_heads else batch_size * n_query_groups
+        first_dim = (
+            batch_size if self.blocks_over_heads else batch_size * n_query_groups
+        )
         final_dim = self.blocksize if not self._is_4bit else self.blocksize // 2
         self._quant_shape = (first_dim, cache_length, final_dim)
 

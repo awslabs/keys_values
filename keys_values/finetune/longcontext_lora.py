@@ -751,7 +751,9 @@ def fit(
         fabric,
     )
     total_t0 = time.perf_counter()
-    profile_skip_steps = None if profile_grad_params is None else profile_grad_params["skip_steps"]
+    profile_skip_steps = (
+        None if profile_grad_params is None else profile_grad_params["skip_steps"]
+    )
 
     while state["step_count"] < max_steps:
         state["iter_num"] += 1

@@ -667,7 +667,9 @@ def test_no_error(dtype, blocks_over_heads, name, device):
         tol_kwargss = (dict(),) * 3 + (tol_shift_scale,)
 
         kv_cache = create_kv_cache(
-            name, params, blocks_over_heads=blocks_over_heads,
+            name,
+            params,
+            blocks_over_heads=blocks_over_heads,
         )
         kv_buffers = kv_cache.kv_buffers
         # Sample internal data: Must contain smallest and largest along final
@@ -682,8 +684,11 @@ def test_no_error(dtype, blocks_over_heads, name, device):
         kwargs = dict(dtype=int_data["key"].dtype, device=device)
         vals = [low, high - 1]
         srcs = [
-            torch.tensor([val], **kwargs).view(1, 1, 1, 1).expand(
-                *shape[:-1], 1,
+            torch.tensor([val], **kwargs)
+            .view(1, 1, 1, 1)
+            .expand(
+                *shape[:-1],
+                1,
             )
             for val in vals
         ]
@@ -712,36 +717,39 @@ def test_no_error(dtype, blocks_over_heads, name, device):
             if "shift" in kind:
                 shifts = {
                     k: torch.randint(
-                        -1024, 1024, orig_shape, device=device,
+                        -1024,
+                        1024,
+                        orig_shape,
+                        device=device,
                     ).view(*view_shape)
                     for k in int_data.keys()
                 }
             if "scale" in kind:
                 scales = {
                     k: torch.randn(
-                        *orig_shape, dtype=torch.float32, device=device,
-                    ).exp().view(*view_shape)
+                        *orig_shape,
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    .exp()
+                    .view(*view_shape)
                     for k in int_data.keys()
                 }
             if kind == "as_is":
                 data = {k: v.to(dtype=dtype) for k, v in int_data.items()}
             elif kind == "shift":
-                data = {
-                    k: (v + shifts[k]).to(dtype=dtype)
-                    for k, v in int_data.items()
-                }
+                data = {k: (v + shifts[k]).to(dtype=dtype) for k, v in int_data.items()}
             elif kind == "scale":
-                data = {
-                    k: (v * scales[k]).to(dtype=dtype)
-                    for k, v in int_data.items()
-                }
+                data = {k: (v * scales[k]).to(dtype=dtype) for k, v in int_data.items()}
             else:
                 data = {
                     k: ((v + shifts[k]) * scales[k]).to(dtype=dtype)
                     for k, v in int_data.items()
                 }
             if kind == "shift_scale":
-                print(f"shift = {shifts['key'][0, 0, 0, 0]}, scale = {scales['key'][0, 0, 0, 0]}")
+                print(
+                    f"shift = {shifts['key'][0, 0, 0, 0]}, scale = {scales['key'][0, 0, 0, 0]}"
+                )
                 print(data["key"][0, 0, 0, :])
             kv_buffers.prefill(**data)
             kv_buffers.drop_association()  # Triggers write back
