@@ -21,7 +21,6 @@ urls.homepage = "https://github.com/awslabs/keys_values"
 scripts.keys_values = "keys_values.__main__:main"
 
 dependencies = [
-    "torchao",
     "filelock",
     "black==25.12.0",
     "flake8",
