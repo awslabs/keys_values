@@ -146,6 +146,7 @@ class LongBenchV2(DataModule):
         max_seq_length: Optional[int] = None,
         seed: int = 42,
         num_workers: int = 4,
+        pin_memory: bool = False,
         include_multiturn_conversations: bool = False,
         repo_id: str = "THUDM/LongBench-v2",
         access_token: Optional[str] = None,
@@ -166,7 +167,10 @@ class LongBenchV2(DataModule):
                 filtered out. Defaults to 100000.
             seed: The random seed for creating the train/val splits and shuffling
                 the dataset.
-            num_workers: How many DataLoader processes to use for loading.
+            num_workers: Option of `torch.utils.data.DataLoader`. How many
+                processes to use for loading.
+            pin_memory: Option of `torch.utils.data.DataLoader`. If `True`, data
+                loading may be faster.
             include_multiturn_conversations: Whether to include multi-turn
                 conversations in the dataset.
             repo_id: The Hugging Face dataset repository ID from where to
@@ -197,7 +201,10 @@ class LongBenchV2(DataModule):
         self.ignore_index = ignore_index
         self.max_seq_length = 100000 if max_seq_length is None else max_seq_length
         self.seed = seed
-        self.num_workers = num_workers
+        self._dataloader_kwargs = {
+            "num_workers": num_workers,
+            "pin_memory": pin_memory,
+        }
         self.include_multiturn_conversations = include_multiturn_conversations
         self.repo_id = repo_id
         self.access_token = (
@@ -382,8 +389,8 @@ class LongBenchV2(DataModule):
                     batch_size=self.batch_size,
                     inds_longest=inds_longest,
                 ),
-                num_workers=self.num_workers,
                 collate_fn=self._get_collate_fn(),
+                **self._dataloader_kwargs,
             )
         else:
             return DataLoader(
@@ -391,8 +398,8 @@ class LongBenchV2(DataModule):
                 batch_size=self.batch_size,
                 shuffle=True,
                 generator=torch.Generator().manual_seed(self.seed),
-                num_workers=self.num_workers,
                 collate_fn=self._get_collate_fn(),
+                **self._dataloader_kwargs,
             )
 
     def val_dataloader(self) -> DataLoader:
@@ -400,8 +407,8 @@ class LongBenchV2(DataModule):
             self.val_dataset,
             batch_size=self.val_batch_size,
             shuffle=False,
-            num_workers=self.num_workers,
             collate_fn=self._get_collate_fn(),
+            **self._dataloader_kwargs,
         )
 
     def test_dataloader(self, num_devices: int = 1) -> DataLoader:
@@ -416,8 +423,8 @@ class LongBenchV2(DataModule):
                 ),
                 batch_size=self.test_batch_size,
                 shuffle=False,
-                num_workers=self.num_workers,
                 collate_fn=self._get_collate_fn(),
+                **self._dataloader_kwargs,
             )
         else:
             # Cross product between test dataset and evaluation tasks (these
@@ -437,8 +444,8 @@ class LongBenchV2(DataModule):
                 ),
                 batch_size=self.test_batch_size,
                 shuffle=False,
-                num_workers=self.num_workers,
                 collate_fn=collate_fn,
+                **self._dataloader_kwargs,
             )
 
     def head_model_kwargs(self, name: str) -> Dict[str, Any]:
@@ -695,6 +702,7 @@ class LongBenchV2Truncated(LongBenchV2):
         max_seq_length: Optional[int] = None,
         seed: int = 42,
         num_workers: int = 4,
+        pin_memory: bool = False,
         include_multiturn_conversations: bool = False,
         repo_id: str = "THUDM/LongBench-v2",
         access_token: Optional[str] = None,
@@ -712,6 +720,7 @@ class LongBenchV2Truncated(LongBenchV2):
             max_seq_length=max_seq_length,
             seed=seed,
             num_workers=num_workers,
+            pin_memory=pin_memory,
             include_multiturn_conversations=include_multiturn_conversations,
             repo_id=repo_id,
             access_token=access_token,

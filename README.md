@@ -293,8 +293,10 @@ Relevant arguments for `LongBenchV2` (which is the default dataset):
   out of memory errors early.<br>
   Note that the current implementation does not otherwise cluster the cases so
   that sequences in a batch are most similar in length.
-* `test_set_tag`: If this is given, we also maintain a test dataset and serve a
-  test dataloader. The tag determines how the test set is chosen. Current
+* `data.num_workers`, `data.pin_memory`: Arguments passed to
+  `torch.utils.data.DataLoader`.
+* `data.test_set_tag`: If this is given, we also maintain a test dataset and
+  serve a test dataloader. The tag determines how the test set is chosen. Current
   choices:
   - "rest": All cases with sequence length > `data.max_seq_length`, sorted by
     token sequence length (non-decreasing).
