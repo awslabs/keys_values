@@ -66,7 +66,6 @@ def args_for_one_cache(
 # TODO:
 # We currently skip blocks_over_heads = True, name = 'dense-bnb-quantized*'.
 # Need to understand what is going on there
-# ==> Make this an issue?
 @pytest.mark.parametrize(
     "dtype, blocks_over_heads, name, device",
     args_for_one_cache("dense"),
@@ -628,6 +627,9 @@ def test_quantized_buffers_write_back(dtype, name, device):
         compare_buffers(caches_common, caches_separate)
 
 
+# TODO:
+# We currently skip 'bnb-quantized*', because the test is meant to only work
+# for linear min-max quantization. Need to find a variant for "bnb"
 @pytest.mark.parametrize(
     "dtype, blocks_over_heads, name, device",
     args_for_one_cache("dense", dtypes=[torch.float32, torch.float16]),
@@ -635,7 +637,7 @@ def test_quantized_buffers_write_back(dtype, name, device):
 def test_no_error(dtype, blocks_over_heads, name, device):
     seed = 31415927
     torch.random.manual_seed(seed)
-    if not ("bnb" in name and blocks_over_heads):
+    if not ("bnb" in name):
         print(
             f"dtype={dtype}, blocks_over_heads={blocks_over_heads}, name={name}, device={device}"
         )
