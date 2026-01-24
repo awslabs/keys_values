@@ -287,6 +287,7 @@ class InferenceLastRecentlyInsertedReplayCache(
             config=config,
             buffers=buffers,
             block_idx=block_idx,
+            init_grace_tokens=replay_log.init_grace_tokens,
             **base_kwargs,
         )
         InferenceReplayCacheMixin.__init__(self)

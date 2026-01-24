@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from itertools import product
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 import torch
 import pytest
@@ -25,17 +25,17 @@ from keys_values.head_model import HeadModel
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.gradient.accumulate import copy_requires_grad
-from keys_values.kvcache.gradient.main import (
-    LongContextGradientModel,
-    accumulate_gradients,
-)
-from keys_values.kvcache.test_utils import (
-    create_kv_cache,
-    copy_gradients,
-)
+from keys_values.kvcache.gradient.main import LongContextGradientModel
+from keys_values.kvcache.test_utils import create_kv_cache, copy_gradients
 from keys_values.lora import GPT
-from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
-from keys_values.optimize.model_factory import GPTShardCellBlock
+from keys_values.optimize.clone_model import (
+    clone_model_shard_via_flat_vectors,
+    copy_flat_vectors_to,
+)
+from keys_values.optimize.model_factory import (
+    GPTShardCellBlock,
+    AccessWeightsGradients,
+)
 from keys_values.utils import copy_parameters
 
 
@@ -220,6 +220,29 @@ def test_gradient_sharded(
             )
             torch.testing.assert_close(value, value_debug)
         torch.testing.assert_close(value, value_comp)
+
+
+def accumulate_gradients(
+    module_pairs: List[Tuple[torch.nn.Module, torch.nn.Module]],
+):
+    """
+    `module_pairs` contains tuples `(mod_from, mod_to)`. For each tuple,
+    read gradients of parameters in `mod_from` and add to gradients in
+    `mod_to`.
+
+    Args:
+        module_pairs: List of `(mod_from, mod_to)` tuples
+        debug_modules: Use for debugging only
+
+    """
+    for mod_from, mod_to in module_pairs:
+        access = AccessWeightsGradients(mod_from)
+        flat_vectors = copy_flat_vectors_to(
+            access.get_gradients(),
+            device=torch.device("cpu"),
+        )
+        mod_from.zero_grad(set_to_none=True)
+        AccessWeightsGradients(mod_to).accumulate_gradients(flat_vectors)
 
 
 def compute_gradients_on_device(

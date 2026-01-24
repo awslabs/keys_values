@@ -263,6 +263,8 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
     def _prefill(self, key: torch.Tensor, value: torch.Tensor):
         if self.buffers_are_allocated and key.device != self.device:
             raise ValueError(f"key.device = {key.device}, must be {self.device}")
+        # check_for_nan(key, "QuantizedKVCacheBuffers._prefill", "key")
+        # check_for_nan(value, "QuantizedKVCacheBuffers._prefill", "value")
         self._allocate_buffers(device=key.device)
         self.dequant_buffers.set_quantized_cache(self)
         return self.dequant_buffers.prefill(
@@ -638,6 +640,8 @@ class DequantizedKVCacheBuffers:
         key: torch.Tensor,
         value: torch.Tensor,
     ) -> KeysAndValues:
+        # check_for_nan(key, "DequantizedKVCacheBuffers._forward", "key")
+        # check_for_nan(value, "DequantizedKVCacheBuffers._forward", "value")
         self.set_slots(positions, key, value)
         return DequantizedBufferKeysAndValues(self)
 
@@ -680,6 +684,8 @@ class DequantizedKVCacheBuffers:
             )
         # Initialize cache buffers
         init_length = key.shape[2]
+        # check_for_nan(key, "DequantizedKVCacheBuffers._prefill", "key")
+        # check_for_nan(value, "DequantizedKVCacheBuffers._prefill", "value")
         self.set_slots((0, init_length), key, value)
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:

@@ -56,12 +56,10 @@ from keys_values.long_context import (
     oom_exception_action,
 )
 from keys_values.model import GPT
-from keys_values.optimize.clone_model import (
-    clone_model_shard_via_flat_vectors,
-    copy_flat_vectors_to,
-)
+from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
+from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.optimize.model_factory import GPTShardCellBlock
-from keys_values.optimize.module_wrapper import AccessWeightsGradients
+from keys_values.utils import check_for_nan_module_weights
 
 
 class LossValue(torch.Tensor):
@@ -131,45 +129,6 @@ def check_model_is_on_device(
             raise ValueError(
                 f"Model {model_name} must be on {device}, but device['{name}'] = {param.device}"
             )
-
-
-def accumulate_gradients(
-    module_pairs: List[Tuple[torch.nn.Module, torch.nn.Module]],
-    debug_modules: Optional[List[torch.nn.Module]] = None,
-):
-    """
-    `module_pairs` contains tuples `(mod_from, mod_to)`. For each tuple,
-    read gradients of parameters in `mod_from` and add to gradients in
-    `mod_to`.
-
-    Args:
-        module_pairs: List of `(mod_from, mod_to)` tuples
-        debug_modules: Use for debugging only
-
-    """
-    if debug_modules is None:
-        debug_modules = [None] * len(module_pairs)
-    else:
-        assert len(debug_modules) == len(module_pairs)
-    for (mod_from, mod_to), mod_debug in zip(module_pairs, debug_modules):
-        access = AccessWeightsGradients(mod_from)
-        flat_vectors = copy_flat_vectors_to(
-            access.get_gradients(),
-            device=torch.device("cpu"),
-        )
-        mod_from.zero_grad(set_to_none=True)
-        AccessWeightsGradients(mod_to).accumulate_gradients(flat_vectors)
-        if mod_debug is not None:
-            for name, param in mod_debug.named_parameters():
-                param_comp = mod_from.get_parameter(name)
-                print(f"Compare {name}")
-                torch.testing.assert_close(param.data, param_comp.data)
-                if param.requires_grad:
-                    src_arg = mod_from.get_parameter(name).grad.data
-                    if param.grad is None:
-                        param.grad = torch.nn.Parameter(src_arg)
-                    else:
-                        param.grad.data.copy_(src_arg)
 
 
 class LongContextGradientModel(LongContextInferenceModel):
@@ -244,6 +203,10 @@ class LongContextGradientModel(LongContextInferenceModel):
     * For evaluation, use :meth:`copy_model_for_evaluation` to obtain a
       :class:`LongContextInferenceModel` copy on device `offload_device`.
 
+    If `offload_grad_accum` is given, we support distributed data parallel
+    (DDP), and `offload_grad_accum` represents the all-reduce communication
+    for gradient accumulation across ranks.
+
     """
 
     def __init__(
@@ -268,6 +231,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         use_arrays_cleanup: bool = True,
         profile_steps: bool = False,
         offload_device: Optional[torch.device] = None,
+        offload_grad_accum: Optional[CPUOffloadAccumulateGradients] = None,
         layer_checkpoint_chunk_size: Optional[int] = None,
         debug_gpt_model: Optional[GPT] = None,
         debug_store_intermediates: bool = False,
@@ -329,6 +293,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             profile_steps: We measure times of different parts of a gradient
                 computation.
             offload_device: See above.
+            offload_grad_accum: See above.
             layer_checkpoint_chunk_size: If `qname != "default"`, layer input
                 checkpoints are quantized. Quantization is done in chunks of
                 this length. Determines GPU memory requirements. A value close
@@ -410,6 +375,16 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._profile_records = [] if profile_steps else None
         self._timer_start = None
         self.offload_device = offload_device
+        if offload_device is not None:
+            if offload_grad_accum is None:
+                offload_grad_accum = CPUOffloadAccumulateGradients([0])
+            elif len(offload_grad_accum.group) > 1 and debug_gpt_model is not None:
+                raise ValueError(
+                    "Can use debug_gpt_model only if len(offload_grad_accum.group) == 1"
+                )
+            self._offload_grad_accum = offload_grad_accum
+        else:
+            self._offload_grad_accum = None
         self._init_cpu_offloading()
         if qname != "default" and layer_checkpoint_chunk_size is None:
             raise ValueError(
@@ -1029,14 +1004,29 @@ class LongContextGradientModel(LongContextInferenceModel):
             ]
             if self.head_model.needs_logits():
                 module_pairs.append((shard_on_device.lm_head, self.gpt_model.lm_head))
+            if self.head_model.state_dict():
+                module_on_device = self.head_model
+            else:
+                module_on_device = None
             if self._debug_gpt_model is not None:
                 debug_modules = [self._debug_gpt_model.transformer.ln_f]
                 if self.head_model.needs_logits():
                     debug_modules.append(self._debug_gpt_model.lm_head)
             else:
                 debug_modules = None
-            accumulate_gradients(module_pairs, debug_modules)
+            self._offload_grad_accum(
+                module_pairs=module_pairs,
+                module_on_device=module_on_device,
+                debug_modules=debug_modules,
+            )
             del shard_on_device
+            # Check for NaNs
+            for _, mod_to in module_pairs:
+                check_for_nan_module_weights(
+                    module=mod_to,
+                    do_grads=True,
+                    extra_msg="Updated by run_head_model",
+                )
 
         if self._record_gpu_memory_kind == 1:
             # End of recording for initial snapshot (everything before the
@@ -1114,9 +1104,19 @@ class LongContextGradientModel(LongContextInferenceModel):
                     ]
                 else:
                     debug_modules = None
-                accumulate_gradients(module_pairs, debug_modules)
+                self._offload_grad_accum(
+                    module_pairs=module_pairs,
+                    debug_modules=debug_modules,
+                )
                 del model_part
                 del shard_on_device
+                # Check for NaNs
+                for i, (_, mod_to) in enumerate(module_pairs):
+                    check_for_nan_module_weights(
+                        module=mod_to,
+                        do_grads=True,
+                        extra_msg=f"Layer {first_layer_idx + i}",
+                    )
 
             for (
                 first_chunk_idx,
@@ -1162,8 +1162,27 @@ class LongContextGradientModel(LongContextInferenceModel):
                 debug_modules = [self._debug_gpt_model.transformer.wte]
             else:
                 debug_modules = None
-            accumulate_gradients(module_pairs, debug_modules)
+            self._offload_grad_accum(
+                module_pairs=module_pairs,
+                debug_modules=debug_modules,
+            )
             del shard_on_device
+            # Check for NaNs
+            for _, mod_to in module_pairs:
+                check_for_nan_module_weights(
+                    module=mod_to,
+                    do_grads=True,
+                    extra_msg="Updated by run_input_embeddings",
+                )
+
+        # Finalize gradient accumulation
+        if self.offload_device is not None:
+            idle_time = self._offload_grad_accum.finalize(self.gpt_model)
+            if idle_time is not None and self.verbose is not VerbosityLevels.NONE:
+                print(
+                    f"[Rank {self._offload_grad_accum.rank()}]: Idle time when "
+                    f"syncing for all_reduce computation(s): {idle_time:.2f} secs"
+                )
 
         if self._debug_profile_backward:
             profiler.disable()

@@ -16,20 +16,23 @@ from typing import Any, Callable, Dict, List, Optional, Union, Iterable
 
 import torch
 from torch import Tensor
-from torch.utils.data import Dataset
 
 from litgpt.prompts import PromptStyle, Default
 from litgpt.tokenizer import Tokenizer
 
-from keys_values.data.sft_dataset import (
+from keys_values.data.base import (
     INPUT_IDS_NAME,
     LABELS_NAME,
+    is_pad_datacase,
+    LongContextDataset,
     common_collate_fn,
 )
 
 
-class SequenceClassificationDataset(Dataset):
-    """An in-memory dataset for supervised finetuning of a sequence classification head
+class SequenceClassificationDataset(LongContextDataset):
+    """
+    An in-memory dataset for supervised finetuning of a sequence classification
+    head.
 
     Args:
         data: A list of samples (dicts). The target/label must be stored under
@@ -44,10 +47,6 @@ class SequenceClassificationDataset(Dataset):
         max_seq_length: Truncate sequences that are longer than this value. By
             default, no truncation is applied.
 
-    Returns a dict with two keys:
-        input_ids: The encoded prompt
-        labels: Index of class label in `class_labels`
-
     """
 
     def __init__(
@@ -59,21 +58,16 @@ class SequenceClassificationDataset(Dataset):
         max_seq_length: int = -1,
         transform: Optional[Callable[[Dict[str, str]], Dict[str, str]]] = None,
     ) -> None:
-        self.data = data
-        self.tokenizer = tokenizer
-        self.prompt_style = (
-            prompt_style
-            if isinstance(prompt_style, PromptStyle)
-            else PromptStyle.from_name(prompt_style)
+        super().__init__(
+            data,
+            tokenizer,
+            prompt_style,
+            max_seq_length,
+            transform,
         )
-        self.max_seq_length = max_seq_length
-        self.transform = transform
         self.class_labels = tuple(class_labels)
         self._label_indexes = None
         self._transform_labels()
-
-    def __len__(self) -> int:
-        return len(self.data)
 
     def _transform_labels(self):
         if len(set(self.class_labels)) != len(self.class_labels):
@@ -130,7 +124,7 @@ def _seq_class_collate_fn(
     samples: List[Dict[str, Any]],
     pad_id: int = 0,
 ) -> Dict[str, Union[Tensor, Dict[str, Any]]]:
-    batched = common_collate_fn(samples, pad_id=pad_id)
+    batched, samples = common_collate_fn(samples, pad_id=pad_id)
     batched[LABELS_NAME] = torch.tensor(
         [sample[LABELS_NAME] for sample in samples],
         dtype=torch.int64,

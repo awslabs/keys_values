@@ -76,6 +76,7 @@ from keys_values.model import GPT as BaseModel
 from keys_values.model import Block as BaseBlock
 from keys_values.model import CausalSelfAttention as BaseCausalSelfAttention
 from keys_values.use_eager_kernel import transform_mha_kwargs
+from keys_values.utils import check_for_nan
 
 
 class LoRAQKVLinear(BaseLoRAQKVLinear):
@@ -173,6 +174,24 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
 
             self.reset_parameters()
 
+    def check_for_nan(
+        self,
+        extra_msg: Optional[str] = None,
+        do_grads: bool = False,
+    ):
+        if hasattr(self, "lora_A"):
+            check_for_nan(self.lora_A, "LoRAQKVLinear", "lora_A", extra_msg)
+            check_for_nan(self.lora_B, "LoRAQKVLinear", "lora_B", extra_msg)
+            if do_grads:
+                if self.lora_A.grad is not None:
+                    check_for_nan(
+                        self.lora_A.grad, "LoRAQKVLinear", "lora_A.grad", extra_msg
+                    )
+                if self.lora_B.grad is not None:
+                    check_for_nan(
+                        self.lora_B.grad, "LoRAQKVLinear", "lora_B.grad", extra_msg
+                    )
+
     @property
     def lora_ind(self) -> torch.Tensor:
         """Lazy creation of a buffer with LoRA indices to overcome the limitation when FSDP with meta device is used."""
@@ -192,6 +211,10 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
             )
 
         return self._lora_ind
+
+    def reset_parameters(self):
+        super().reset_parameters()
+        self.check_for_nan()
 
 
 class GPT(BaseModel):
@@ -256,6 +279,10 @@ class GPT(BaseModel):
         model_copy.mha = self.mha
         return model_copy
 
+    def check_for_nan(self, do_grads: bool = False) -> None:
+        for block in self.transformer.h:
+            block.attn.check_for_nan(do_grads)
+
 
 class Block(BaseBlock):
     def __init__(
@@ -319,3 +346,9 @@ class CausalSelfAttention(BaseCausalSelfAttention):
                 )
 
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def check_for_nan(self, do_grads: bool = False) -> None:
+        self.qkv.check_for_nan(
+            extra_msg=f"CausalSelfAttention: block_idx={self.block_idx}",
+            do_grads=do_grads,
+        )

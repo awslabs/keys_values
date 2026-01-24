@@ -23,9 +23,9 @@ from torch.utils.data import DataLoader
 from litgpt.args import TrainArgs
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
-from litgpt.utils import choose_logger as _choose_logger
+from litgpt.utils import choose_logger as _choose_logger, instantiate_torch_optimizer
 
-from keys_values.finetune.args import EvalArgs, KVCacheArgs
+from keys_values.finetune.args import EvalArgs, KVCacheArgs, OptimizerArgs
 from keys_values.head_model import HeadModel
 from keys_values.long_context import GPTAndHeadModel
 from keys_values.model import GPT
@@ -124,9 +124,11 @@ def get_dataloaders(
     eval: EvalArgs,
     fabric: Optional[L.Fabric] = None,
 ) -> Tuple[DataLoader, DataLoader]:
+    num_devices = 1 if fabric is None else fabric.world_size
     data.connect(
         tokenizer=tokenizer,
         batch_size=train.micro_batch_size,
+        num_devices=num_devices,
         max_seq_length=train.max_seq_length,
         head_model=head_model,
         val_batch_size=eval.micro_batch_size,
@@ -303,3 +305,20 @@ def check_kv_cache(kv_cache: KVCacheArgs):
             "kv_cache must be given for long-context inference, and "
             "kv_cache.name must not be dense-*"
         )
+
+
+def create_optimizer(
+    optim_args: OptimizerArgs,
+    gpt_model: GPT,
+    gpt_param_prefixes: Tuple[str, ...],
+):
+    parameters = [
+        param
+        for name, param in gpt_model.named_parameters()
+        if name.startswith(gpt_param_prefixes)
+    ]
+    return instantiate_torch_optimizer(
+        optim_args.name,
+        parameters,
+        **optim_args.optimizer_kwargs(),
+    )

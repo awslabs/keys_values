@@ -62,6 +62,10 @@ class KVCacheArgs:
         allocate_buffers: If `True`, KV cache buffers are allocated with
             construction. This may be on the wrong device, or with a wrong
             dtype. The default is delayed allocation with first usage
+        grace_period: Only for caches with score-based policies. If positive,
+            this number of last recently inserted tokens are not evicted.
+        init_grace_tokens: Only for `lastrec` cache policy. KV information for
+            the first `init_grace_tokens` is not evicted.
 
     """
 
@@ -71,6 +75,8 @@ class KVCacheArgs:
     cache_kwargs: Optional[Dict[str, Any]] = None
     randomize_chunk_sizes: bool = False
     allocate_buffers: bool = False
+    grace_period: int = 0
+    init_grace_tokens: int = 0
     # Legacy (these are global args now)
     verbose: Optional[str] = None
     attention_forward_temp_size_gb: Optional[float] = None
@@ -83,6 +89,15 @@ class KVCacheArgs:
         ), f"name = {self.name} not supported, must be in {supported_names}"
         _check_positive(self.cache_length, "cache_length")
         assert self.cache_length >= 1
+        if not (0 <= self.grace_period < self.cache_length):
+            raise ValueError(
+                f"grace_period = {self.grace_period}, must be in [0, {self.cache_length}])"
+            )
+        if not (0 <= self.init_grace_tokens < self.cache_length):
+            raise ValueError(
+                f"init_grace_tokens = {self.init_grace_tokens}, must be in [0, {self.cache_length}])"
+            )
+        # Deprecated
         if self.verbose is None:
             self.verbose = VerbosityLevels.SOME.value
         else:
@@ -127,8 +142,11 @@ class GradientArgs:
         chunks_per_cell_multiplier: Each cell contains a number of chunks. The
             length of a cell is the sum of lengths of its cells. We assign
             chunks to cells so that cell lengths are close to
-            `int(cache_length * chunks_per_cell_multiplier)`, but not larger.
-            GPU memory scales linearly in this number.
+            `int(factor * cache_length * chunks_per_cell_multiplier)`, but not
+            larger. Here, `factor = 2 * n_query_groups * head_size / n_embd`.
+            If `chunks_per_cell_multiplier == 1`, this means that embeddings for
+            this cell are as large as KV cache buffers. GPU memory scales
+            linearly in this number.
         single_tokens_for_targets: If `True`, the targets part of a sequence is
             processed token per token (i.e., with chunk size 1). This is slower,
             but more realistic, mirroring how inference looks like.

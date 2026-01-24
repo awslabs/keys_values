@@ -123,11 +123,11 @@ devices.
   the [largest impact on speed and accuracy](#cache-length-and-chunk-size).
 * Play around with different [cache policies](#kv-cache-policy-and-configuration),
   or try to use buffer quantization (both by `kv_cache.name`).
-* If working on a single GPU, try to use `finetune_offload_lora` instead of
-  `finetune_long_lora`, this will free up more memory for the backward pass,
-  allowing you to explore options like `grad.layers_per_cell` and
-  `grad.chunks_per_cell_multiplier`. Larger values speed up computations, but
-  require more GPU memory.
+* Try using `finetune_offload_lora` instead of `finetune_long_lora`, this will
+  free up more memory for the backward pass, allowing you to explore options
+  like `grad.layers_per_cell` and `grad.chunks_per_cell_multiplier`. Larger
+  values speed up computations, but require more GPU memory. Or try
+  `finetune_offload_full` to fine-tune all model parameters.
 * Your KV cache policy is not supported? Why not implement and
   [contribute it back](#implementing-new-kv-cache-policies) to the community?
 * You know how to implement GPU kernels in `CUDA` or `Triton` and would like to
@@ -194,15 +194,16 @@ The following fine-tuning modes are currently provided:
   our gradient computation clashes with assumptions made in `PyTorch
   distributed`, so you cannot easily use fully sharded data parallel.
 * [finetune_offload_lora](./keys_values/finetune/longcon_offload_lora.py):
-  Fine-tune parameters of LoRA adapters, using CPU offloading. We keep model
-  weights and optimizer state on the CPU, running forward and backward on
-  copies on the GPU. The backward pass uses model shards, which frees up GPU
-  memory which can be used to speed up computations. This is the best choice
-  for exploring our method on single GPUs with 40 GB of RAM or less. Distributed
-  data parallel is not supported at the moment, but this is high on our agenda.
+  Fine-tune parameters of LoRA adapters, using CPU offloading. Supports
+  distributed data parallelism. We keep model weights and optimizer state on
+  the CPU, running forward and backward on copies on the GPU. The backward
+  pass uses model shards, which frees up GPU  memory which can be used to speed
+  up computations. This is the best choice for exploring our method for larger
+  models on GPUs with 40 GB of RAM or less.
 * [finetune_offload_full](./keys_values/finetune/longcon_offload_full.py):
-  Fine-tune all model parameters, using CPU offloading. Use this to explore
-  full weights fine-tuning with `Adam optimizers`.
+  Fine-tune all model parameters, using CPU offloading. Supports distributed
+  data parallelism. Use this to explore full weights fine-tuning with `Adam`
+  optimizers.
 
 They mostly share the same command line arguments, which are detailed in the
 sequel.
@@ -225,11 +226,8 @@ Basic arguments are:
 
 * `precision`: Precision to be used for weights. The same is used for KV cache
   buffers.
-* `devices`: Not for `finetune_offload_*` modes. Number of GPU devices to be
-  used. Defaults to 1.
-* `device`: For `finetune_offload_*` modes only. Number of GPU device on which
-  computations are done. Defaults to 0.  The model and optimizer state are kept
-  on the CPU.
+* `devices`: Number of GPU devices to be used. Defaults to 1. If `devices > 1`,
+  distributed data parallel optimization is run.
 * `verbose`: Verbosity level, can be "none", "some", "more", "all".
 * `train.*`: Parameters controlling training. This is taken from `LitGPT` without
   modification. Most important ones:
@@ -238,7 +236,8 @@ Basic arguments are:
   - `train.global_batch_size`: Not for `finetune_offload_*`. Batch size used
     for optimizer updates. Must be  multiple of `train.micro_batch_size`. If
     `train.global_batch_size == train.micro_batch_size * devices`, this is
-    distributed data parallel.
+    distributed data parallel. For `finetune_offload_*`, this value is set
+    automatically.
   - `train.save_interval`: Number of optimizer steps between saving checkpoints.
 * `eval.*`: Parameters controlling evaluations on validation set. Taken from
   `LitGPT` with little modification. Most important ones:
@@ -300,6 +299,14 @@ Relevant arguments for `LongBenchV2` (which is the default dataset):
   choices:
   - "rest": All cases with sequence length > `data.max_seq_length`, sorted by
     token sequence length (non-decreasing).
+
+> When implementing a new `DataModule` for your dataset, we strongly recommend
+> you adopting [SimilarSequenceLengthIterable](./keys_values/data/iterators.py#L172)
+> as `sampler` for the `DataLoader` objects returned by `train_dataloader` and
+> `val_dataloader` (as well as `test_dataloader` if this is provided). This
+> requires the sequence lengths (in tokens) for all data cases, which you need
+> to compute when the dataset is first loaded. Since this takes time, we recommend
+> you store these lengths as meta-data. See `LongBenchV2` for a complete example.
 
 Training loss function and head model are represented by
 [HeadModel](./keys_values/head_model.py#L24). In general, the LLM outputs a logits
@@ -409,8 +416,9 @@ currently supported:
   only be used for sequences of length up to `cache_length`.
 * `lastrec`: [LastRecentlyInsertedKVCache](./keys_values/kvcache/basics.py#L478).
   This cache maintains KV information for the `cache_length` last recently
-  inserted tokens in the cache. When the cache is full, new information
-  overwrites slots which have not been overwritten for the longest time.
+  inserted tokens in the cache (but see `init_grace_tokens` argument). When the
+  cache is full, new information overwrites slots which have not been
+  overwritten for the longest time.
 * `h2o`: [H2OKVCache](./keys_values/kvcache/h2o.py#L28). Implements an improved
   variant of the heavy hitter oracle (H2O) strategy (for citation, see
   docstring). H2O scores each `(b, h, j)` by the sum of attention weights
@@ -468,6 +476,8 @@ are:
 * `max_chunk_size`: Not for `dense`, `lastrec`. Limits the length
   `query.shape[2]` for calls to `kv_cache.forward` except for the prefill (when
   `input_pos == 0`). This is used to speed up finding the score minimizers.
+* `init_grace_tokens`: Only for `lastrec`. KV information for the first
+  `init_grace_tokens` tokens remains in the cache.
 * `keep_initial_fraction`: Not for `dense`, `lastrec`. See docstring of
   [AttnWeightsKVCache](./keys_values/kvcache/attn_weights.py#L283).
 * `normalize_scores`: Not for `dense`, `lastrec`. Scores are cumulative over
@@ -695,13 +705,15 @@ Important arguments for gradient computations are:
   computation. Note that the CPU memory for layer input checkpoints scales
   inverse linearly with this number.
 * `--grad.chunks_per_cell_multiplier`: The length of a cell is the sum of
-  its chunk's lengths. If `max_cell_length = int(kv_cache.cache_length *
+  its chunk's lengths. If `max_cell_length = int(factor * kv_cache.cache_length *
   grad.chunks_per_cell_multiplier)`, chunks are grouped into a cell until
-  its length is close to `max_cell_length`, but not larger. By default,
-  `grad.chunks_per_cell_multiplier = 1`, so cells are about as long as
-  the KV cache. For larger values of the multiplier, there are fewer cells per
-  row, which speeds up computations. Second phase GPU memory requirements
-  depend linearly on this number.
+  its length is close to `max_cell_length`, but not larger. Here,
+  `factor = 2 * n_query_groups * head_size / n_embd`. By default,
+  `grad.chunks_per_cell_multiplier = 1`, so that embeddings for a cell need as
+  much memory as the (uncompressed) KV cache buffers (these two being the
+  main memory blocks needed). For larger values of the multiplier, there are
+  fewer cells per row, which speeds up computations. Second phase GPU memory
+  requirements depend linearly on this number.
 
 These two are important hyper-parameters, to be adjusted to use as much of
 the available GPU as possible. Further arguments are documented in
@@ -719,18 +731,28 @@ trade-off is:
 
 * Maximize `chunks_per_cell_multiplier`, keep `layers_per_cell=1`: Most weights
   are offloaded, leaving most GPU memory for cells. Fewer cells run faster, less
-  GPU memory for KV cache checkpoints.But more activation checkpoints are written
+  GPU memory for KV cache checkpoints. But more activation checkpoints are written
   and read, which is slower due to GPU-CPU synchronization.
 * Maximize `layers_per_cell`, keep `chunks_per_cell_multiplier=1` (or even
   below): More weights are kept on GPU in `backward`, and there are more KV cache
   checkpoints, but less activation checkpoints are written and read.
 
+From this perspective, it may be advantageous to keep `layers_per_cell=1` and
+maximize `chunks_per_cell_multiplier`, since most weights are offloaded then.
+On the other hand, this requires more activation checkpoints to be written,
+which can be slower.
 
-From this
-perspective, it may be advantageous to keep `layers_per_cell=1` and maximize
-`chunks_per_cell_multiplier`, since most weights are offloaded then. On the other
-hand, this requires more activation checkpoints to be written, which can be
-slower.
+Other arguments for fine-tuning are:
+
+* `--grad.single_tokens_for_targets`: If `True`, the targets part of a sequence
+  is processed token per token (i.e., with chunk size 1). This is slower, but
+  more realistic, mirroring how inference looks like. If the targets part is
+  short, it does not make a big time difference.
+* `--grad.layer_checkpoint_chunk_size`: Only relevant if layer input
+  checkpointing uses quantization. We quantize and de-quantize checkpoints in
+  chunks of this length (along sequence axis). Larger values save time, but
+  require more GPU memory. The default value is equal to
+  `--kv_cache.cache_length`.
 
 ### Profiling GPU Memory and Runtime
 

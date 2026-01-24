@@ -561,29 +561,43 @@ def deallocate_kv_cache_buffers_of_model(gpt_model: GPT):
 
 REMOVE_KEYS = {
     "dense": (
-        "replay_log_blocksize",
-        "grace_period",
+        "combination_constant",
         "detach_attn_weights",
+        "grace_period",
+        "init_grace_tokens",
         "keep_initial_fraction",
+        "max_chunk_size",
+        "normalize_scores",
+        "replay_log_blocksize",
+        "scratch_blocksize",
+    ),
+    "lastrec": (
+        "detach_attn_weights",
+        "grace_period",
+        "keep_initial_fraction",
+        "max_chunk_size",
+        "normalize_scores" "combination_constant",
+        "replay_log_blocksize",
+        "scratch_blocksize",
+    ),
+    "h2o": (
+        "combination_constant",
+        "init_grace_tokens",
+        "scratch_blocksize",
+    ),
+    "h2o-vlen": (
+        "combination_constant",
+        "init_grace_tokens",
+        "scratch_blocksize",
+    ),
+    "qh2o": ("init_grace_tokens",),
+    "qh2o-vlen": ("init_grace_tokens",),
+    "h2o-orig": (
+        "init_grace_tokens",
         "normalize_scores",
         "combination_constant",
         "scratch_blocksize",
-        "max_chunk_size",
     ),
-    "lastrec": (
-        "replay_log_blocksize",
-        "grace_period",
-        "detach_attn_weights",
-        "keep_initial_fraction",
-        "normalize_scores" "combination_constant",
-        "scratch_blocksize",
-        "max_chunk_size",
-    ),
-    "h2o": ("combination_constant", "scratch_blocksize"),
-    "h2o-vlen": ("combination_constant", "scratch_blocksize"),
-    "qh2o": (),
-    "qh2o-vlen": (),
-    "h2o-orig": ("normalize_scores", "combination_constant", "scratch_blocksize"),
 }
 
 

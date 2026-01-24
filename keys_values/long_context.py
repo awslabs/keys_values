@@ -710,25 +710,35 @@ class LongContextInferenceModel(GPTAndHeadModel):
         if self.single_tokens_for_targets:
             chunk_sizes += [1] * num_output_tokens
         self.chunk_sizes = chunk_sizes
-        # Select chunks per cell. This is done in a way so that the length of
-        # each cell (i.e., sum of chunk lengths) is close to `cache_length`,
-        # but not larger.
+        # Select chunks per cell. If `chunks_per_cell_multiplier == 1`, the
+        # maximum chunk length is chosen so that the size of embeddings of
+        # this length are equal to the maximum cache buffers size,
         if self._debug_single_cell_per_row:
             # This is used for unit testing only: Force single cell per row.
             # Do not use!
             chunks_per_cell = [len(chunk_sizes)]
         else:
+            factor = (
+                2
+                * self.config.n_query_groups
+                * self.config.head_size
+                / self.config.n_embd
+            )
             max_cache_length = max(
                 cache.cache_length for cache in self.gpt_model.get_kv_caches()
             )
-            max_cell_length = int(max_cache_length * self.chunks_per_cell_multiplier)
+            max_cell_length = int(
+                factor * max_cache_length * self.chunks_per_cell_multiplier
+            )
             chunks_per_cell = []
             cell_length = 0
             num_chunks = 0
             for chunk_size in chunk_sizes:
                 new_length = cell_length + chunk_size
-                if new_length > max_cell_length:
-                    assert num_chunks > 0  # Sanity check
+                # If a single chunk is longer than `max_cell_length` (for
+                # example, the first one -- prefill), we need to make an
+                # exception to have a cell longer than `max_cell_length`:
+                if new_length > max_cell_length and num_chunks > 0:
                     chunks_per_cell.append(num_chunks)
                     cell_length = chunk_size
                     num_chunks = 1
