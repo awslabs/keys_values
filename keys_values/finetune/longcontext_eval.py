@@ -409,9 +409,11 @@ def get_dataloader(
     """
     if not isinstance(data, LongBenchV2):
         raise ValueError("Only LongBenchV2 is currently supported")
+    num_devices = 1 if fabric is None else fabric.world_size
     data.connect(
         tokenizer=tokenizer,
         batch_size=batch_size,
+        num_devices=num_devices,
         head_model=head_model,
         test_batch_size=batch_size,
         eval_tasks=eval_tasks,

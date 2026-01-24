@@ -17,7 +17,7 @@ import sys
 from filelock import FileLock, Timeout
 from pathlib import Path
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import torch
 
@@ -123,3 +123,62 @@ def flush_io_streams():
 
 def randint_torch(a: int, b: int) -> int:
     return torch.randint(a, b + 1, (1,)).item()
+
+
+def check_for_nan(
+    x: torch.Tensor,
+    meth_name: str,
+    key_name: str,
+    extra_txt: Optional[str] = None,
+    do_boom: bool = False,
+) -> int:
+    x = x.detach()
+    num_nan = torch.isnan(x).sum().item()
+    if num_nan > 0:
+        if extra_txt is not None:
+            extra_txt = ": " + extra_txt
+        else:
+            extra_txt = ""
+        print(
+            f"From {meth_name}: {key_name} has {num_nan} NaNs [shape={x.shape}, numel={x.numel()}]"
+            + extra_txt
+        )
+        if do_boom:
+            raise AssertionError("BOOM")
+    return num_nan
+
+
+def check_for_nan_module_weights(
+    module: torch.nn.Module,
+    do_grads: bool = False,
+    extra_msg: Optional[str] = None,
+    do_boom: bool = False,
+):
+    is_boom = False
+    for name, param in module.named_parameters():
+        if param is not None:
+            if (
+                check_for_nan(
+                    param.data,
+                    "check_for_nan_model_weights",
+                    name,
+                    extra_msg,
+                    do_boom=False,
+                )
+                > 0
+            ):
+                is_boom = True
+            if do_grads and param.grad is not None:
+                if (
+                    check_for_nan(
+                        param.grad.data,
+                        "check_for_nan_model_weights",
+                        name + ".grad",
+                        extra_msg,
+                        do_boom=False,
+                    )
+                    > 0
+                ):
+                    is_boom = True
+    if do_boom and is_boom:
+        raise AssertionError("BOOM")

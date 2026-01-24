@@ -86,6 +86,8 @@ class MyPerChannelMinMaxObserver(PerChannelMinMaxObserver):
         if self.min_val is not None:
             raise IndexError("Cannot call more than once")
         y = torch.flatten(x_orig.detach(), start_dim=1)
+        # if torch.isnan(y).any().item():
+        #    print(f"{torch.isnan(y).sum().item()} NANs detected, shape = {y.shape}")
         min_val, max_val = torch.aminmax(y, dim=1)
         # dtype casting only here, not on `y`
         self.min_val = min_val.to(dtype=self._target_dtype)
@@ -101,8 +103,6 @@ class MyPerChannelMinMaxObserver(PerChannelMinMaxObserver):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         quant_min, quant_max = self.quant_min, self.quant_max
         assert len(min_val.shape) > 0
-        print(f"min_val = {min_val[0]}, max_val = {max_val[0]}")
-        print(f"quant_min = {quant_min}, quant_max = {quant_max}")
         # Original code has this and
         #   scale = (max_val_pos - min_val_neg) / float(quant_max - quant_min)
         # Makes no sense to me!
@@ -336,7 +336,6 @@ class TorchBasicQuantizer(Quantizer):
                 _values = _values.transpose(1, 2)
             _values = _values.reshape(-1, self.blocksize)
             scales, zero_points = self._quantization_states(_values)
-            print(f"scale = {scales[0]}, zero_point = {zero_points[0]}")
             q_x = self._quantize_internal(
                 input_float=_values,
                 scales=scales,

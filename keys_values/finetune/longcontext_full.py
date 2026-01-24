@@ -106,6 +106,7 @@ from keys_values.long_context import (
     LongContextInferenceModel,
 )
 from keys_values.model import GPT
+from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.parser_config import save_hyperparameters
 from keys_values.pos_encoding import position_encoding_factory
 
@@ -458,6 +459,8 @@ def main(
             kv_cache.cache_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
         kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
         kv_cache.cache_kwargs["pos_encoding"] = mha_kwargs["pos_encoding"]
+        dtype = fabric_precision_to_dtype(fabric._precision.precision)
+        torch.set_default_dtype(dtype)
         gpt_model = GPT(config, **mha_kwargs)
         head_model = HeadModelFactory.create(
             name=head_model_name,
@@ -466,6 +469,7 @@ def main(
             **head_model_kwargs,
         )
         adapt_requires_grad(gpt_model, head_model)
+        gpt_model.apply(gpt_model._init_weights)
         batch_size = train.micro_batch_size
         if eval.micro_batch_size is not None:
             batch_size = max(batch_size, eval.micro_batch_size)
@@ -477,7 +481,7 @@ def main(
             verbose=verbose,
             attention_backward_temp_size_gb=attention_backward_temp_size_gb,
             max_batch_size=batch_size,
-            dtype=fabric_precision_to_dtype(fabric._precision.precision),
+            dtype=dtype,
             profile_grad_times=profile_grad_times > 0,
             profile_parts=profile_parts,
             fabric=fabric,
@@ -582,7 +586,7 @@ def main(
         )
         fabric.log_dict(metrics, step=state["iter_num"])
         print_message(
-            f"Final evaluation | val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}",
+            f"Final evaluation | val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f} | val_time: {metrics['val_time']:.3f} s",
             fabric,
         )
         flush_io_streams()
@@ -610,6 +614,7 @@ def wrap_gpt_model(
     profile_grad_times: bool = False,
     profile_parts: Optional[str] = None,
     cpu_offload_device: Optional[torch.device] = None,
+    offload_num_devices: int = 1,
     fabric: Optional[L.Fabric] = None,
 ) -> Union[LongContextGradientModel, LongContextInferenceModel]:
     model_for_training = grad is not None
@@ -679,6 +684,15 @@ def wrap_gpt_model(
             autograd_hooks_kwargs = None
         if cpu_offload_device is not None:
             common_kwargs["head_model"] = head_model.to(device=cpu_offload_device)
+            offload_grad_accum = CPUOffloadAccumulateGradients(
+                group=list(range(offload_num_devices)),
+                fabric=fabric,
+            )
+            if offload_num_devices > 1:
+                # Test connection: all-reduce with sum must work
+                offload_grad_accum.test_all_reduce()
+        else:
+            offload_grad_accum = None
         layer_checkpoint_chunk_size = grad.layer_checkpoint_chunk_size
         if layer_checkpoint_chunk_size is None:
             # Default value for chunk size if not given
@@ -703,6 +717,7 @@ def wrap_gpt_model(
             autograd_hooks_kwargs=autograd_hooks_kwargs,
             profile_steps=profile_grad_times,
             offload_device=cpu_offload_device,
+            offload_grad_accum=offload_grad_accum,
             layer_checkpoint_chunk_size=layer_checkpoint_chunk_size,
             debug_profile_forward=profile_parts == "forward",
             debug_profile_backward=profile_parts == "backward",
@@ -789,7 +804,7 @@ def fit(
         )
         val_loss = f"{metrics['val_loss']:.3f}"
         print_message(
-            f"Initial evaluation | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}",
+            f"Initial evaluation | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time: {metrics['val_time']:.3f} s",
             fabric,
         )
         flush_io_streams()
@@ -988,7 +1003,7 @@ def fit(
             )
             val_loss = f"{metrics['val_loss']:.3f}"
             print_message(
-                f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}",
+                f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time: {metrics['val_time']:.3f} s",
                 fabric,
             )
             flush_io_streams()
@@ -1029,6 +1044,7 @@ def validate_and_all_reduce(
     log_metrics: bool = True,
     fabric: Optional[L.Fabric] = None,
 ) -> Dict[str, float]:
+    val_time = None
     with torch.no_grad():
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
         time_start = time.perf_counter()
@@ -1061,7 +1077,7 @@ def validate_and_all_reduce(
     metrics = {
         "val_loss": val_loss,
         "val_ppl": math.exp(val_loss),
-        "val_time_in_ms": val_time * 1000,
+        "val_time": val_time,
     }
     if fabric is not None and log_metrics:
         fabric.log_dict(metrics)

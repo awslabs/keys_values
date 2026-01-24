@@ -16,18 +16,20 @@ from functools import partial
 from typing import List, Dict, Optional, Callable, Union, Any
 
 import torch
-from torch.utils.data import Dataset
 
 from litgpt.prompts import PromptStyle, Default
 from litgpt.tokenizer import Tokenizer
 
+from keys_values.data.base import (
+    INPUT_IDS_NAME,
+    LABELS_NAME,
+    is_pad_datacase,
+    LongContextDataset,
+    common_collate_fn,
+)
 
-INPUT_IDS_NAME = "input_ids"
 
-LABELS_NAME = "labels"
-
-
-class SFTDataset(Dataset):
+class SFTDataset(LongContextDataset):
     """
     Improved variant of :class:`litgpt.data.base.SFTDataset`.
 
@@ -47,20 +49,15 @@ class SFTDataset(Dataset):
         ignore_index: int = -100,
         transform: Optional[Callable[[Dict[str, str]], Dict[str, str]]] = None,
     ) -> None:
-        self.data = data
-        self.tokenizer = tokenizer
-        self.prompt_style = (
-            prompt_style
-            if isinstance(prompt_style, PromptStyle)
-            else PromptStyle.from_name(prompt_style)
+        super().__init__(
+            data,
+            tokenizer,
+            prompt_style,
+            max_seq_length,
+            transform,
         )
-        self.max_seq_length = max_seq_length
         self.mask_prompt = mask_prompt
         self.ignore_index = ignore_index
-        self.transform = transform
-
-    def __len__(self) -> int:
-        return len(self.data)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         example = self.data[idx]
@@ -118,36 +115,12 @@ def get_sft_collate_fn(pad_id: int = 0, ignore_index: int = -100):
     return partial(_sft_collate_fn, pad_id=pad_id, ignore_index=ignore_index)
 
 
-def common_collate_fn(
-    samples: List[Dict[str, Union[torch.Tensor, Dict[str, Any]]]],
-    pad_id: int = 0,
-) -> Dict[str, Union[torch.Tensor, Dict[str, Any]]]:
-    input_ids = torch.nn.utils.rnn.pad_sequence(
-        [sample[INPUT_IDS_NAME] for sample in samples],
-        batch_first=True,
-        padding_value=pad_id,
-    )
-    names = ("raw_plus_prompt_template",)
-    if all("raw" in x["token_counts"] for x in samples):
-        names += ("raw",)
-    return {
-        INPUT_IDS_NAME: input_ids,
-        "token_counts": {
-            name: torch.tensor(
-                [sample["token_counts"][name] for sample in samples],
-                dtype=torch.int64,
-            ).unsqueeze(1)
-            for name in names
-        },
-    }
-
-
 def _sft_collate_fn(
-    samples: List[Dict[str, Union[torch.Tensor, Dict[str, Any]]]],
+    samples: List[Dict[str, Any]],
     pad_id: int = 0,
     ignore_index: int = -100,
 ) -> Dict[str, Union[torch.Tensor, Dict[str, Any]]]:
-    batched = common_collate_fn(samples, pad_id=pad_id)
+    batched, samples = common_collate_fn(samples, pad_id=pad_id)
     batched[LABELS_NAME] = torch.nn.utils.rnn.pad_sequence(
         [sample[LABELS_NAME] for sample in samples],
         batch_first=True,

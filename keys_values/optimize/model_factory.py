@@ -479,6 +479,17 @@ class GPTShardCellBlock(CellBlocks):
         return len(self._shard.transformer.h)
 
 
+FLOAT_DTYPES_FROM_STR = {
+    str(dtype): dtype
+    for dtype in (
+        torch.float32,
+        torch.float16,
+        torch.bfloat16,
+        torch.float64,
+    )
+}
+
+
 class ModelFromFlatVectorsFactory:
     """
     Collects static methods for creating specific modules, setting their
@@ -519,7 +530,7 @@ class ModelFromFlatVectorsFactory:
     ) -> BlockLoRA:
         """
         Create block of LoRA model and set weights from `weights_vecs`. Make
-        sure to dellocate `weights_vecs` afterwards.
+        sure to deallocate `weights_vecs` afterwards.
 
         Args:
             config: See :class:`litgpt.lora.GPT`
@@ -537,11 +548,28 @@ class ModelFromFlatVectorsFactory:
         return block
 
     @staticmethod
+    def _set_default_dtype(weights_vecs: FlatVectors):
+        dtypes = [
+            FLOAT_DTYPES_FROM_STR[name]
+            for name in weights_vecs.keys()
+            if name in FLOAT_DTYPES_FROM_STR
+        ]
+        # If `dtypes` is empty, `weights_vecs` has no float entries. This can
+        # happen if the module has no parameters.
+        if len(dtypes) == 1:
+            torch.set_default_dtype(dtypes[0])
+        elif len(dtypes) > 1:
+            raise ValueError(
+                f"weights_vecs.keys() = {list(weights_vecs.keys())}, must have exactly one float dtype"
+            )
+
+    @staticmethod
     def create_wte(
         config: ConfigFull,
         weights_vecs: FlatVectors,
     ) -> nn.Embedding:
         device = device_of_flat_vectors(weights_vecs)
+        ModelFromFlatVectorsFactory._set_default_dtype(weights_vecs)
         with torch.device(device):
             wte = nn.Embedding(config.padded_vocab_size, config.n_embd)
         AccessWeightsGradients(wte).set_weights(weights_vecs)
@@ -553,6 +581,7 @@ class ModelFromFlatVectorsFactory:
         weights_vecs: FlatVectors,
     ) -> nn.Module:
         device = device_of_flat_vectors(weights_vecs)
+        ModelFromFlatVectorsFactory._set_default_dtype(weights_vecs)
         with torch.device(device):
             ln_f = config.norm_class(config.n_embd, eps=config.norm_eps)
         AccessWeightsGradients(ln_f).set_weights(weights_vecs)
@@ -564,6 +593,7 @@ class ModelFromFlatVectorsFactory:
         weights_vecs: FlatVectors,
     ) -> nn.Linear:
         device = device_of_flat_vectors(weights_vecs)
+        ModelFromFlatVectorsFactory._set_default_dtype(weights_vecs)
         with torch.device(device):
             lm_head = nn.Linear(
                 config.n_embd,
@@ -579,6 +609,7 @@ class ModelFromFlatVectorsFactory:
         weights_vecs: FlatVectors,
     ) -> LoRALinear:
         device = device_of_flat_vectors(weights_vecs)
+        ModelFromFlatVectorsFactory._set_default_dtype(weights_vecs)
         with torch.device(device):
             lm_head = create_lora_linear(
                 config,

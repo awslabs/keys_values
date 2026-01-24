@@ -88,13 +88,17 @@ def positions_wrap_around(
 ) -> PositionsType:
     """
     Returns positions which form a range of length `num`, starting from
-    `current`, and lying in `[start, end)`. If `current + num > end`, the range
-    wraps around and consists of two parts.
+    `current`, and lying in `[min(current, start), end)`. If
+    `current + num >= end`, the range wraps around and consists of two
+    parts. The wrap-around starts at `start`.
+
+    Example: `start = 2, current = 3, end = 8, num = 7` results in
+    `[3, 4, 5, 6, 7, 2, 3]`.
 
     Args:
-        num: Length of positions
+        num: Length of positions, must be `<= end - start`
         current: First entry of positions
-        start: Start of domain range
+        start: Wrap around starts here
         end: End of domain range (not inclusive)
         batch_size: Dimension size for expanding `positions`
         n_query_groups: Dimension size for expanding `positions`

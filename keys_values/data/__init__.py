@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from keys_values.data.longbench_v2 import LongBenchV2
-from keys_values.data.sft_dataset import INPUT_IDS_NAME, LABELS_NAME
+from keys_values.data.base import INPUT_IDS_NAME, LABELS_NAME
 from keys_values.data.evaluation import EvaluationTasks, EvaluationWithTasksHelper
 
 __all__ = [

@@ -15,7 +15,7 @@ from typing import Dict, Any, Optional
 
 import torch
 
-from keys_values.data.sft_dataset import INPUT_IDS_NAME, LABELS_NAME
+from keys_values.data import INPUT_IDS_NAME, LABELS_NAME
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import SUPPORTED_HEAD_MODELS
 
