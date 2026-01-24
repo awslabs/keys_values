@@ -123,11 +123,11 @@ devices.
   the [largest impact on speed and accuracy](#cache-length-and-chunk-size).
 * Play around with different [cache policies](#kv-cache-policy-and-configuration),
   or try to use buffer quantization (both by `kv_cache.name`).
-* If working on a single GPU, try to use `finetune_offload_lora` instead of
-  `finetune_long_lora`, this will free up more memory for the backward pass,
-  allowing you to explore options like `grad.layers_per_cell` and
-  `grad.chunks_per_cell_multiplier`. Larger values speed up computations, but
-  require more GPU memory.
+* Try using `finetune_offload_lora` instead of `finetune_long_lora`, this will
+  free up more memory for the backward pass, allowing you to explore options
+  like `grad.layers_per_cell` and `grad.chunks_per_cell_multiplier`. Larger
+  values speed up computations, but require more GPU memory. Or try
+  `finetune_offload_full` to fine-tune all model parameters.
 * Your KV cache policy is not supported? Why not implement and
   [contribute it back](#implementing-new-kv-cache-policies) to the community?
 * You know how to implement GPU kernels in `CUDA` or `Triton` and would like to
@@ -194,15 +194,16 @@ The following fine-tuning modes are currently provided:
   our gradient computation clashes with assumptions made in `PyTorch
   distributed`, so you cannot easily use fully sharded data parallel.
 * [finetune_offload_lora](./keys_values/finetune/longcon_offload_lora.py):
-  Fine-tune parameters of LoRA adapters, using CPU offloading. We keep model
-  weights and optimizer state on the CPU, running forward and backward on
-  copies on the GPU. The backward pass uses model shards, which frees up GPU
-  memory which can be used to speed up computations. This is the best choice
-  for exploring our method on single GPUs with 40 GB of RAM or less. Distributed
-  data parallel is not supported at the moment, but this is high on our agenda.
+  Fine-tune parameters of LoRA adapters, using CPU offloading. Supports
+  distributed data parallelism. We keep model weights and optimizer state on
+  the CPU, running forward and backward on copies on the GPU. The backward
+  pass uses model shards, which frees up GPU  memory which can be used to speed
+  up computations. This is the best choice for exploring our method for larger
+  models on GPUs with 40 GB of RAM or less.
 * [finetune_offload_full](./keys_values/finetune/longcon_offload_full.py):
-  Fine-tune all model parameters, using CPU offloading. Use this to explore
-  full weights fine-tuning with `Adam optimizers`.
+  Fine-tune all model parameters, using CPU offloading. Supports distributed
+  data parallelism. Use this to explore full weights fine-tuning with `Adam`
+  optimizers.
 
 They mostly share the same command line arguments, which are detailed in the
 sequel.
@@ -225,11 +226,8 @@ Basic arguments are:
 
 * `precision`: Precision to be used for weights. The same is used for KV cache
   buffers.
-* `devices`: Not for `finetune_offload_*` modes. Number of GPU devices to be
-  used. Defaults to 1.
-* `device`: For `finetune_offload_*` modes only. Number of GPU device on which
-  computations are done. Defaults to 0.  The model and optimizer state are kept
-  on the CPU.
+* `devices`: Number of GPU devices to be used. Defaults to 1. If `devices > 1`,
+  distributed data parallel optimization is run.
 * `verbose`: Verbosity level, can be "none", "some", "more", "all".
 * `train.*`: Parameters controlling training. This is taken from `LitGPT` without
   modification. Most important ones:
@@ -238,7 +236,8 @@ Basic arguments are:
   - `train.global_batch_size`: Not for `finetune_offload_*`. Batch size used
     for optimizer updates. Must be  multiple of `train.micro_batch_size`. If
     `train.global_batch_size == train.micro_batch_size * devices`, this is
-    distributed data parallel.
+    distributed data parallel. For `finetune_offload_*`, this value is set
+    automatically.
   - `train.save_interval`: Number of optimizer steps between saving checkpoints.
 * `eval.*`: Parameters controlling evaluations on validation set. Taken from
   `LitGPT` with little modification. Most important ones:
@@ -725,12 +724,10 @@ trade-off is:
   below): More weights are kept on GPU in `backward`, and there are more KV cache
   checkpoints, but less activation checkpoints are written and read.
 
-
-From this
-perspective, it may be advantageous to keep `layers_per_cell=1` and maximize
-`chunks_per_cell_multiplier`, since most weights are offloaded then. On the other
-hand, this requires more activation checkpoints to be written, which can be
-slower.
+From this perspective, it may be advantageous to keep `layers_per_cell=1` and
+maximize `chunks_per_cell_multiplier`, since most weights are offloaded then.
+On the other hand, this requires more activation checkpoints to be written,
+which can be slower.
 
 ### Profiling GPU Memory and Runtime
 

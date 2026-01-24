@@ -15,7 +15,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/).
 * Quantization of KV cache buffers and activation checkpoints to 4 or 8 bits
 * Memory-efficient `MultiHeadSelfAttention` with explicit `backward`
 * `RoPE` position encoding with `YaRN` scaling
-* Fine-tuning scripts supporting `LoRA` and CPU offloading
+* Fine-tuning scripts supporting `LoRA` and CPU offloading, with distributed
+  data parallelism across multiple GPUs
 
 ### Documentation Updates
 * Documentation of concepts in [README.md](./README.md)
