@@ -15,7 +15,9 @@ from typing import List, Tuple, Optional
 
 import torch
 import torch.distributed as dist
+import lightning as L
 
+from keys_values.finetune.utils import print_message
 from keys_values.optimize.clone_model import copy_flat_vectors_to
 from keys_values.optimize.module_wrapper import AccessWeightsGradients
 
@@ -29,15 +31,26 @@ class CPUOffloadAccumulateGradients:
     is not used at all, and `group[0]` does not matter.
 
     """
-    def __init__(self, group: List[int]):
+
+    def __init__(
+        self,
+        group: List[int],
+        fabric: Optional[L.Fabric] = None,
+    ):
         group = sorted(group)
         sz = len(group)
         if group[0] < 0 or any(x == y for x, y in zip(group[:-1], group[1:])):
-            raise ValueError(f"group = {group}, entries must be unique and non-negative")
+            raise ValueError(
+                f"group = {group}, entries must be unique and non-negative"
+            )
+        world_size = dist.get_world_size() if fabric is None else fabric.world_size
         if sz > 1:
-            if group[-1] >= dist.get_world_size():
-                raise ValueError(f"group = {group}, entries must be < world_size = {dist.get_world_size()}")
+            if group[-1] >= world_size:
+                raise ValueError(
+                    f"group = {group}, entries must be < world_size = {world_size}"
+                )
         self.group = group
+        self.fabric = fabric
 
     def __call__(
         self,
@@ -53,6 +66,7 @@ class CPUOffloadAccumulateGradients:
         Args:
             module_pairs: List of `(mod_from, mod_to)` tuples. Here, `mod_from`
                 is on the device, `mod_to` is on the CPU.
+            fabric: If given, all_reduce is done with this fabric.
             module_on_device: If given, this source module is on the device.
                 Its gradients are accumulated if the group size is > 1.
             debug_modules: Use for debugging only. Only for group size 1.
@@ -71,18 +85,26 @@ class CPUOffloadAccumulateGradients:
             if use_dist:
                 # We run all-reduce on all parts of `flat_vectors`
                 for vec in flat_vectors.values():
-                    dist.all_reduce(vec, op=dist.ReduceOp.SUM, group=self.group)
+                    if self.fabric is not None:
+                        self.fabric.all_reduce(vec, reduce_op="sum")
+                    else:
+                        dist.all_reduce(
+                            vec,
+                            op=dist.ReduceOp.SUM,
+                            group=self.group,
+                        )
                 # At this point, `flat_vectors` on each rank is overwritten with
                 # the sum of all `flat_vectors` on each rank
             flat_vectors = copy_flat_vectors_to(
-                flat_vectors, device=torch.device("cpu"),
+                flat_vectors,
+                device=torch.device("cpu"),
             )
             mod_from.zero_grad(set_to_none=True)
             AccessWeightsGradients(mod_to).accumulate_gradients(flat_vectors)
             if mod_debug is not None:
                 for name, param in mod_debug.named_parameters():
                     param_comp = mod_from.get_parameter(name)
-                    print(f"Compare {name}")
+                    print_message(f"Compare {name}", self.fabric)
                     torch.testing.assert_close(param.data, param_comp.data)
                     if param.requires_grad:
                         src_arg = mod_from.get_parameter(name).grad.data
@@ -96,6 +118,4 @@ class CPUOffloadAccumulateGradients:
             flat_vectors = access.get_gradients()
             for vec in flat_vectors.values():
                 dist.all_reduce(vec, op=dist.ReduceOp.SUM, group=self.group)
-            AccessWeightsGradients(module_on_device).accumulate_gradients(
-                flat_vectors
-            )
+            AccessWeightsGradients(module_on_device).accumulate_gradients(flat_vectors)

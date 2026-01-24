@@ -14,6 +14,7 @@
 # limitations under the License.
 import csv
 import dataclasses
+import gc
 import os
 import time
 import warnings
@@ -471,7 +472,8 @@ def main(
         ignore_index=ignore_index,
     )
     steps_per_epoch = len(train_dataloader) // train.gradient_accumulation_iters(
-        devices, num_nodes
+        devices,
+        num_nodes,
     )
     lr_max_steps = min(
         train.epochs * steps_per_epoch, (train.max_steps or float("inf"))
@@ -580,7 +582,7 @@ def main(
     if file_path.exists():
         load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
-    if profile_grad_times > 0:
+    if profile_grad_times > 0 and fabric.global_rank == 0:
         thresh = grad.max_match_trials_pack_arg
         name = "new" if grad.use_new_cache else "old"
         assert profile_skip_steps >= 0
@@ -616,7 +618,9 @@ def main(
     )
     training_time = time.perf_counter() - train_time
     output = create_finetuning_performance_report(
-        training_time, token_counts, fabric.device.type
+        training_time,
+        token_counts,
+        fabric.device.type,
     )
     print_message(output, fabric)
 
@@ -700,7 +704,8 @@ def fit(
     val_loss = "n/a"
     if eval.initial_validation:
         print_with_rank_and_timestamp(
-            "Starting validation evaluations.", fabric.global_rank
+            "Starting validation evaluations.",
+            fabric.global_rank,
         )
         print_message(
             f"\nInitial validation evaluation  (batch_size = {val_dataloader.batch_size}) ...",
@@ -746,6 +751,8 @@ def fit(
         sync_on_compute=False,
     ).to(fabric.device)
     total_lengths = 0
+    gc.collect()
+    torch.cuda.empty_cache()
     print_message(
         "\nGPU memory before training starts:\n" + message_memory_all_devices(),
         fabric,
@@ -797,7 +804,8 @@ def fit(
             != 0
         )
         print_with_rank_and_timestamp(
-            "Starting gradient computation.", fabric.global_rank
+            "Starting gradient computation.",
+            fabric.global_rank,
         )
         with fabric.no_backward_sync(model, enabled=is_accumulating):
             loss = model(
@@ -842,16 +850,14 @@ def fit(
             record_gpu_memory_snapshots.stop_recording()
 
         if not is_accumulating:
-            print_with_rank_and_timestamp(
-                "Waiting for optimizer to update.", fabric.global_rank
-            )
             optimizer.step()
-            print_message("Optimizer update done.", fabric)
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
+            print_message("Optimizer update done.", fabric)
             state["step_count"] += 1
 
         del loss
+        gc.collect()
         torch.cuda.empty_cache()
         print_message(
             f"\nGPU memory at training step {state['iter_num'] - 1}:\n"
@@ -906,7 +912,8 @@ def fit(
 
         if not is_accumulating and state["step_count"] % eval.interval == 0:
             print_with_rank_and_timestamp(
-                "Starting validation evaluations.", fabric.global_rank
+                "Starting validation evaluations.",
+                fabric.global_rank,
             )
             print_message(
                 f"\nPeriodic validation evaluation  (batch_size = {val_dataloader.batch_size}) ...",
@@ -930,7 +937,8 @@ def fit(
             )
             fabric.log_dict(metrics, step=state["iter_num"])
             print_with_rank_and_timestamp(
-                "Finished validation evaluations.", fabric.global_rank
+                "Finished validation evaluations.",
+                fabric.global_rank,
             )
             flush_io_streams()
             val_loss = f"{metrics['val_loss']:.3f}"

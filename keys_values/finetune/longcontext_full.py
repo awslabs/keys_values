@@ -106,6 +106,7 @@ from keys_values.long_context import (
     LongContextInferenceModel,
 )
 from keys_values.model import GPT
+from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.parser_config import save_hyperparameters
 from keys_values.pos_encoding import position_encoding_factory
 
@@ -610,6 +611,7 @@ def wrap_gpt_model(
     profile_grad_times: bool = False,
     profile_parts: Optional[str] = None,
     cpu_offload_device: Optional[torch.device] = None,
+    offload_num_devices: int = 1,
     fabric: Optional[L.Fabric] = None,
 ) -> Union[LongContextGradientModel, LongContextInferenceModel]:
     model_for_training = grad is not None
@@ -679,6 +681,12 @@ def wrap_gpt_model(
             autograd_hooks_kwargs = None
         if cpu_offload_device is not None:
             common_kwargs["head_model"] = head_model.to(device=cpu_offload_device)
+            offload_grad_accum = CPUOffloadAccumulateGradients(
+                group=list(range(offload_num_devices)),
+                fabric=fabric,
+            )
+        else:
+            offload_grad_accum = None
         layer_checkpoint_chunk_size = grad.layer_checkpoint_chunk_size
         if layer_checkpoint_chunk_size is None:
             # Default value for chunk size if not given
@@ -703,6 +711,7 @@ def wrap_gpt_model(
             autograd_hooks_kwargs=autograd_hooks_kwargs,
             profile_steps=profile_grad_times,
             offload_device=cpu_offload_device,
+            offload_grad_accum=offload_grad_accum,
             layer_checkpoint_chunk_size=layer_checkpoint_chunk_size,
             debug_profile_forward=profile_parts == "forward",
             debug_profile_backward=profile_parts == "backward",
