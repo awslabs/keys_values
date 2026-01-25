@@ -22,6 +22,27 @@ from keys_values.optimize.clone_model import copy_flat_vectors_to
 from keys_values.optimize.module_wrapper import AccessWeightsGradients
 
 
+class DistributedPrimitives:
+    @staticmethod
+    def world_size(fabric: Optional[L.Fabric] = None) -> int:
+        return dist.get_world_size() if fabric is None else fabric.world_size
+
+    @staticmethod
+    def rank(fabric: Optional[L.Fabric] = None) -> int:
+        return dist.get_rank() if fabric is None else fabric.local_rank
+
+    @staticmethod
+    def all_reduce_sum(
+        x: torch.Tensor,
+        fabric: Optional[L.Fabric] = None,
+        group: Optional[List[int]] = None,
+    ):
+        if fabric is not None:
+            fabric.all_reduce(x, reduce_op="sum")
+        else:
+            dist.all_reduce(x, op=dist.ReduceOp.SUM, group=group)
+
+
 class CPUOffloadAccumulateGradients:
     """
     Represents data distributed parallel gradient accumulation over a number
@@ -34,21 +55,26 @@ class CPUOffloadAccumulateGradients:
 
     def __init__(
         self,
-        group: List[int],
+        group: Optional[List[int]] = None,
         fabric: Optional[L.Fabric] = None,
     ):
-        group = sorted(group)
-        sz = len(group)
-        if group[0] < 0 or any(x == y for x, y in zip(group[:-1], group[1:])):
-            raise ValueError(
-                f"group = {group}, entries must be unique and non-negative"
-            )
-        world_size = dist.get_world_size() if fabric is None else fabric.world_size
-        if sz > 1:
-            if group[-1] >= world_size:
+        world_size = DistributedPrimitives.world_size(fabric)
+        if group is None:
+            group = list(range(world_size))
+        else:
+            group = sorted(group)
+            if fabric is not None and group != list(range(world_size)):
+                raise ValueError(f"group = {group}. If fabric is given, this must be {list(range(world_size))}")
+            sz = len(group)
+            if group[0] < 0 or any(x == y for x, y in zip(group[:-1], group[1:])):
                 raise ValueError(
-                    f"group = {group}, entries must be < world_size = {world_size}"
+                    f"group = {group}, entries must be unique and non-negative"
                 )
+            if sz > 1:
+                if group[-1] >= world_size:
+                    raise ValueError(
+                        f"group = {group}, entries must be < world_size = {world_size}"
+                    )
         self.group = group
         self.fabric = fabric
 
@@ -85,14 +111,9 @@ class CPUOffloadAccumulateGradients:
             if use_dist:
                 # We run all-reduce on all parts of `flat_vectors`
                 for vec in flat_vectors.values():
-                    if self.fabric is not None:
-                        self.fabric.all_reduce(vec, reduce_op="sum")
-                    else:
-                        dist.all_reduce(
-                            vec,
-                            op=dist.ReduceOp.SUM,
-                            group=self.group,
-                        )
+                    DistributedPrimitives.all_reduce_sum(
+                        vec, self.fabric, self.group,
+                    )
                 # At this point, `flat_vectors` on each rank is overwritten with
                 # the sum of all `flat_vectors` on each rank
             flat_vectors = copy_flat_vectors_to(
@@ -117,5 +138,19 @@ class CPUOffloadAccumulateGradients:
             access = AccessWeightsGradients(module_on_device)
             flat_vectors = access.get_gradients()
             for vec in flat_vectors.values():
-                dist.all_reduce(vec, op=dist.ReduceOp.SUM, group=self.group)
+                DistributedPrimitives.all_reduce_sum(
+                    vec, self.fabric, self.group,
+                )
             AccessWeightsGradients(module_on_device).accumulate_gradients(flat_vectors)
+
+    def test_all_reduce(self):
+        my_rank = DistributedPrimitives.rank(self.fabric)
+        if my_rank not in self.group:
+            raise AssertionError(f"Rank {my_rank} not in group {self.group}")
+        device = torch.device("cuda", my_rank)
+        vec = torch.arange(1, 10, dtype=torch.int32, device=device) * my_rank
+        DistributedPrimitives.all_reduce_sum(vec, self.fabric, self.group)
+        all_factor = sum(self.group)
+        should_be = torch.arange(1, 10, dtype=torch.int32, device=device) * all_factor
+        if not (vec == should_be).all().item():
+            raise AssertionError(f"Rank {my_rank}: Have {vec} after all_reduce, should have {should_be}")

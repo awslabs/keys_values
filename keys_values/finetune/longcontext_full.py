@@ -685,6 +685,9 @@ def wrap_gpt_model(
                 group=list(range(offload_num_devices)),
                 fabric=fabric,
             )
+            if offload_num_devices > 1:
+                # Test connection: all-reduce with sum must work
+                offload_grad_accum.test_all_reduce()
         else:
             offload_grad_accum = None
         layer_checkpoint_chunk_size = grad.layer_checkpoint_chunk_size
@@ -1038,6 +1041,7 @@ def validate_and_all_reduce(
     log_metrics: bool = True,
     fabric: Optional[L.Fabric] = None,
 ) -> Dict[str, float]:
+    val_time = None
     with torch.no_grad():
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
         time_start = time.perf_counter()
