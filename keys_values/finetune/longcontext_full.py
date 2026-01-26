@@ -459,6 +459,8 @@ def main(
             kv_cache.cache_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
         kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
         kv_cache.cache_kwargs["pos_encoding"] = mha_kwargs["pos_encoding"]
+        dtype = fabric_precision_to_dtype(fabric._precision.precision)
+        torch.set_default_dtype(dtype)
         gpt_model = GPT(config, **mha_kwargs)
         head_model = HeadModelFactory.create(
             name=head_model_name,
@@ -478,7 +480,7 @@ def main(
             verbose=verbose,
             attention_backward_temp_size_gb=attention_backward_temp_size_gb,
             max_batch_size=batch_size,
-            dtype=fabric_precision_to_dtype(fabric._precision.precision),
+            dtype=dtype,
             profile_grad_times=profile_grad_times > 0,
             profile_parts=profile_parts,
             fabric=fabric,

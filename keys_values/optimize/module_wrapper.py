@@ -153,7 +153,7 @@ class AccessWeightsGradients:
         for dtype, vec in vecs.items():
             if dtype not in structures:
                 raise ValueError(
-                    f"{vname}[{dtype}] exists, but {dtype} not a key in structures"
+                    f"{vname}[{dtype}] exists, but {dtype} not a key in structures {list(structures.keys())}"
                 )
             structure = structures[dtype]
             vsize = vec.numel()
