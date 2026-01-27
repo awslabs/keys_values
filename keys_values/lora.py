@@ -76,6 +76,7 @@ from keys_values.model import GPT as BaseModel
 from keys_values.model import Block as BaseBlock
 from keys_values.model import CausalSelfAttention as BaseCausalSelfAttention
 from keys_values.use_eager_kernel import transform_mha_kwargs
+from keys_values.utils import check_for_nan
 
 
 class LoRAQKVLinear(BaseLoRAQKVLinear):
@@ -173,6 +174,11 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
 
             self.reset_parameters()
 
+    def check_for_nan(self, extra_msg: Optional[str] = None):
+        check_for_nan(self.linear.weight, "LoRAQKVLinear", "linear.weight", extra_msg)
+        check_for_nan(self.lora_A, "LoRAQKVLinear", "lora_A", extra_msg)
+        check_for_nan(self.lora_B, "LoRAQKVLinear", "lora_B", extra_msg)
+
     @property
     def lora_ind(self) -> torch.Tensor:
         """Lazy creation of a buffer with LoRA indices to overcome the limitation when FSDP with meta device is used."""
@@ -192,6 +198,9 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
             )
 
         return self._lora_ind
+
+    def reset_parameters(self):
+        super().reset_parameters()
 
 
 class GPT(BaseModel):
@@ -256,6 +265,10 @@ class GPT(BaseModel):
         model_copy.mha = self.mha
         return model_copy
 
+    def check_for_nan(self):
+        for block in self.transformer.h:
+            block.attn.check_for_nan()
+
 
 class Block(BaseBlock):
     def __init__(
@@ -319,3 +332,6 @@ class CausalSelfAttention(BaseCausalSelfAttention):
                 )
 
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def check_for_nan(self):
+        self.qkv.check_for_nan(f"CausalSelfAttention: block_idx={self.block_idx}")

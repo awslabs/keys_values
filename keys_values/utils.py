@@ -17,7 +17,7 @@ import sys
 from filelock import FileLock, Timeout
 from pathlib import Path
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import torch
 
@@ -123,3 +123,18 @@ def flush_io_streams():
 
 def randint_torch(a: int, b: int) -> int:
     return torch.randint(a, b + 1, (1,)).item()
+
+
+def check_for_nan(
+    x: torch.Tensor,
+    meth_name: str,
+    key_name: str,
+    extra_txt: Optional[str] = None,
+):
+    num_nan = torch.isnan(x).sum().item()
+    if num_nan > 0:
+        if extra_txt is not None:
+            extra_txt = ": " + extra_txt
+        else:
+            extra_txt = ""
+        print(f"From {meth_name}: {key_name} has {num_nan} NaNs [shape={x.shape}, numel={x.numel()}]" + extra_txt)
