@@ -98,7 +98,7 @@ from keys_values.lora import GPT
 from keys_values.optimize.model_factory import BlockComponentName
 from keys_values.parser_config import save_hyperparameters
 from keys_values.pos_encoding import position_encoding_factory
-from keys_values.utils import flush_io_streams
+from keys_values.utils import flush_io_streams, check_for_nan_module_weights
 
 
 DEFAULT_OUT_DIR = "out/finetune/longcontext_lora"
@@ -283,7 +283,7 @@ def setup(
     if optimizer is None:
         optimizer = OptimizerArgs(name="AdamW")
         print(
-            "Choosing optimizer AdamW with default learning rate. We highly recommend to at least tune optimizer.learning_rate"
+            "Choosing optimizer AdamW with default learning rate. We recommend to at least tune optimizer.learning_rate"
         )
     else:
         print(str(optimizer))
@@ -568,6 +568,7 @@ def main(
     file_path = checkpoint_dir / HEAD_MODEL_FNAME
     if file_path.exists():
         load_checkpoint(fabric, model.head_model, file_path, strict=True)
+    check_for_nan_module_weights(model.gpt_model)
 
     if profile_grad_times > 0 and fabric.global_rank == 0:
         thresh = grad.max_match_trials_pack_arg
@@ -860,6 +861,7 @@ def fit(
             gpu_scheduler.step()
         print_message("Optimizer update done.", fabric)
         state["step_count"] += 1
+        check_for_nan_module_weights(model.gpt_model)
 
         del loss
         gc.collect()

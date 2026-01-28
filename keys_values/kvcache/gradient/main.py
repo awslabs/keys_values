@@ -59,6 +59,7 @@ from keys_values.model import GPT
 from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
 from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.optimize.model_factory import GPTShardCellBlock
+from keys_values.utils import check_for_nan_module_weights
 
 
 class LossValue(torch.Tensor):
@@ -985,6 +986,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         else:
             shard_on_device = self.gpt_model
+        idle_times = dict()
         self.accumulator.run_head_model(
             gpt_model=shard_on_device,
             head_model=self.head_model,
@@ -1013,12 +1015,21 @@ class LongContextGradientModel(LongContextInferenceModel):
                     debug_modules.append(self._debug_gpt_model.lm_head)
             else:
                 debug_modules = None
-            self._offload_grad_accum(
+            idle_time = self._offload_grad_accum(
                 module_pairs=module_pairs,
                 module_on_device=module_on_device,
                 debug_modules=debug_modules,
             )
+            if idle_time is not None:
+                idle_times["head"] = idle_time
             del shard_on_device
+            # Check for NaNs
+            for _, mod_to in module_pairs:
+                check_for_nan_module_weights(
+                    module=mod_to,
+                    do_grads=True,
+                    extra_msg="Updated by run_head_model",
+                )
 
         if self._record_gpu_memory_kind == 1:
             # End of recording for initial snapshot (everything before the
@@ -1096,12 +1107,25 @@ class LongContextGradientModel(LongContextInferenceModel):
                     ]
                 else:
                     debug_modules = None
-                self._offload_grad_accum(
+                idle_time = self._offload_grad_accum(
                     module_pairs=module_pairs,
                     debug_modules=debug_modules,
                 )
+                if idle_time is not None:
+                    if num_layers == 1:
+                        iname = f"layer{first_layer_idx}"
+                    else:
+                        iname = f"layers{first_layer_idx}:{end_layer_idx}"
+                    idle_times[iname] = idle_time
                 del model_part
                 del shard_on_device
+                # Check for NaNs
+                for i, (_, mod_to) in enumerate(module_pairs):
+                    check_for_nan_module_weights(
+                        module=mod_to,
+                        do_grads=True,
+                        extra_msg=f"Layer {first_layer_idx + i}",
+                    )
 
             for (
                 first_chunk_idx,
@@ -1147,11 +1171,26 @@ class LongContextGradientModel(LongContextInferenceModel):
                 debug_modules = [self._debug_gpt_model.transformer.wte]
             else:
                 debug_modules = None
-            self._offload_grad_accum(
+            idle_time = self._offload_grad_accum(
                 module_pairs=module_pairs,
                 debug_modules=debug_modules,
             )
+            if idle_time is not None:
+                idle_times["init"] = idle_time
             del shard_on_device
+            # Check for NaNs
+            for _, mod_to in module_pairs:
+                check_for_nan_module_weights(
+                    module=mod_to,
+                    do_grads=True,
+                    extra_msg="Updated by run_input_embeddings",
+                )
+
+        if idle_times and self.verbose is not VerbosityLevels.NONE:
+            print(f"[Rank {self._offload_grad_accum.rank()}]: Idle times when syncing for all_reduce computations:")
+            print(
+                "\n".join(f"{k}: {v:.2f} secs" for k, v in idle_times.items())
+            )
 
         if self._debug_profile_backward:
             profiler.disable()

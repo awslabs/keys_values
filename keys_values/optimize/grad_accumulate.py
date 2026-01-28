@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import time
 from typing import List, Tuple, Optional
 
 import torch
@@ -83,7 +84,7 @@ class CPUOffloadAccumulateGradients:
         module_pairs: List[Tuple[torch.nn.Module, torch.nn.Module]],
         module_on_device: Optional[torch.nn.Module] = None,
         debug_modules: Optional[List[torch.nn.Module]] = None,
-    ):
+    ) -> Optional[float]:
         """
         Run gradient accumulation for module pairs `(mod_from, mod_to)`. This
         is called by every rank from `group`, and the ranks are synchronized
@@ -97,8 +98,15 @@ class CPUOffloadAccumulateGradients:
                 Its gradients are accumulated if the group size is > 1.
             debug_modules: Use for debugging only. Only for group size 1.
 
+        Returns:
+            In the distributed case, `len(self.group) > 1`: Time (in secs)
+            between start and end of `all_reduce` for first entry of gradients flat vector (normally, there is one
+            entry only). Use this to quantify idle time of devices in
+            the distributed context.
+
         """
-        use_dist = len(self.group) > 1
+        idle_time = None
+        use_dist = self.is_distributed
         if debug_modules is None:
             debug_modules = [None] * len(module_pairs)
         else:
@@ -109,11 +117,15 @@ class CPUOffloadAccumulateGradients:
             access = AccessWeightsGradients(mod_from)
             flat_vectors = access.get_gradients()
             if use_dist:
+                start_time = time.perf_counter()
                 # We run all-reduce on all parts of `flat_vectors`
                 for vec in flat_vectors.values():
                     DistributedPrimitives.all_reduce_sum(
                         vec, self.fabric, self.group,
                     )
+                    if start_time is not None:
+                        idle_time = time.perf_counter() - start_time
+                        start_time = None
                 # At this point, `flat_vectors` on each rank is overwritten with
                 # the sum of all `flat_vectors` on each rank
             flat_vectors = copy_flat_vectors_to(
@@ -143,6 +155,8 @@ class CPUOffloadAccumulateGradients:
                 )
             AccessWeightsGradients(module_on_device).accumulate_gradients(flat_vectors)
 
+        return idle_time
+
     def test_all_reduce(self):
         my_rank = DistributedPrimitives.rank(self.fabric)
         if my_rank not in self.group:
@@ -154,3 +168,10 @@ class CPUOffloadAccumulateGradients:
         should_be = torch.arange(1, 10, dtype=torch.int32, device=device) * all_factor
         if not (vec == should_be).all().item():
             raise AssertionError(f"Rank {my_rank}: Have {vec} after all_reduce, should have {should_be}")
+
+    @property
+    def is_distributed(self) -> bool:
+        return len(self.group) > 1
+
+    def rank(self) -> int:
+        return DistributedPrimitives.rank(self.fabric) if self.is_distributed else 0

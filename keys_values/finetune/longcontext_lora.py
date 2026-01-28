@@ -283,7 +283,7 @@ def setup(
     if optimizer is None:
         optimizer = OptimizerArgs(name="AdamW")
         print(
-            "Choosing optimizer AdamW with default learning rate. We highly recommend to at least tune optimizer.learning_rate"
+            "Choosing optimizer AdamW with default learning rate. We recommend to at least tune optimizer.learning_rate"
         )
     else:
         print(str(optimizer))

@@ -201,6 +201,7 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
 
     def reset_parameters(self):
         super().reset_parameters()
+        self.check_for_nan()
 
 
 class GPT(BaseModel):
