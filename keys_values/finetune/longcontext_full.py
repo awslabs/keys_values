@@ -106,7 +106,10 @@ from keys_values.long_context import (
     LongContextInferenceModel,
 )
 from keys_values.model import GPT
-from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
+from keys_values.optimize.grad_accumulate import (
+    CPUOffloadSyncPerShardAccumulateGradients,
+    CPUOffloadSyncOnceAccumulateGradients,
+)
 from keys_values.parser_config import save_hyperparameters
 from keys_values.pos_encoding import position_encoding_factory
 
@@ -684,10 +687,19 @@ def wrap_gpt_model(
             autograd_hooks_kwargs = None
         if cpu_offload_device is not None:
             common_kwargs["head_model"] = head_model.to(device=cpu_offload_device)
-            offload_grad_accum = CPUOffloadAccumulateGradients(
+            ga_kwargs = dict(
                 group=list(range(offload_num_devices)),
                 fabric=fabric,
             )
+            if grad.ddp_sync_once:
+                offload_grad_accum = CPUOffloadSyncOnceAccumulateGradients(
+                    **ga_kwargs,
+                    flat_vecs_on_gpu=grad.ddp_flat_vecs_on_gpu,
+                )
+            else:
+                offload_grad_accum = CPUOffloadSyncPerShardAccumulateGradients(
+                    **ga_kwargs
+                )
             if offload_num_devices > 1:
                 # Test connection: all-reduce with sum must work
                 offload_grad_accum.test_all_reduce()

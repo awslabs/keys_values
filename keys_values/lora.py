@@ -174,10 +174,23 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
 
             self.reset_parameters()
 
-    def check_for_nan(self, extra_msg: Optional[str] = None):
-        check_for_nan(self.linear.weight, "LoRAQKVLinear", "linear.weight", extra_msg)
+    def check_for_nan(
+        self,
+        extra_msg: Optional[str] = None,
+        do_grads: bool = False,
+    ):
         check_for_nan(self.lora_A, "LoRAQKVLinear", "lora_A", extra_msg)
         check_for_nan(self.lora_B, "LoRAQKVLinear", "lora_B", extra_msg)
+        if do_grads:
+            if self.lora_A.grad is not None:
+                check_for_nan(self.lora_A.grad, "LoRAQKVLinear", "lora_A.grad", extra_msg)
+            if self.lora_B.grad is not None:
+                check_for_nan(self.lora_B.grad, "LoRAQKVLinear", "lora_B.grad", extra_msg)
+        if extra_msg is not None:
+            extra_msg += ": "
+        else:
+            extra_msg = ""
+        print(extra_msg + f"lora_B.shape = {self.lora_B.shape}")  # DEBUG
 
     @property
     def lora_ind(self) -> torch.Tensor:
@@ -266,9 +279,9 @@ class GPT(BaseModel):
         model_copy.mha = self.mha
         return model_copy
 
-    def check_for_nan(self):
+    def check_for_nan(self, do_grads: bool = False) -> None:
         for block in self.transformer.h:
-            block.attn.check_for_nan()
+            block.attn.check_for_nan(do_grads)
 
 
 class Block(BaseBlock):
@@ -334,5 +347,8 @@ class CausalSelfAttention(BaseCausalSelfAttention):
 
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
-    def check_for_nan(self):
-        self.qkv.check_for_nan(f"CausalSelfAttention: block_idx={self.block_idx}")
+    def check_for_nan(self, do_grads: bool = False) -> None:
+        self.qkv.check_for_nan(
+            extra_msg=f"CausalSelfAttention: block_idx={self.block_idx}",
+            do_grads=do_grads,
+        )

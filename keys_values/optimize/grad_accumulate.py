@@ -20,7 +20,10 @@ import lightning as L
 
 from keys_values.finetune.utils import print_message
 from keys_values.optimize.clone_model import copy_flat_vectors_to
-from keys_values.optimize.module_wrapper import AccessWeightsGradients
+from keys_values.optimize.module_wrapper import (
+    AccessWeightsGradients,
+    FlatVectors,
+)
 
 
 class DistributedPrimitives:
@@ -51,6 +54,13 @@ class CPUOffloadAccumulateGradients:
     general, gradients per module are flattened (one vector per dtype), and
     the reductions are done for flat vectors. If the group size is 1, `dist`
     is not used at all, and `group[0]` does not matter.
+
+    Usage:
+
+    * Call :meth:`__call__` on different model shards
+    * Call :meth:`finalize` at the end. Synchronization and data exchange
+      between devices is either done in each :meth:`__call__`, or only
+      at the end in :meth:`finalize`
 
     """
 
@@ -84,25 +94,21 @@ class CPUOffloadAccumulateGradients:
         module_pairs: List[Tuple[torch.nn.Module, torch.nn.Module]],
         module_on_device: Optional[torch.nn.Module] = None,
         debug_modules: Optional[List[torch.nn.Module]] = None,
-    ) -> Optional[float]:
+    ):
         """
         Run gradient accumulation for module pairs `(mod_from, mod_to)`. This
         is called by every rank from `group`, and the ranks are synchronized
         here.
 
+        Note that synchronization and exchange between devices can be
+        delayed until :meth:`finalize` is called.
+
         Args:
             module_pairs: List of `(mod_from, mod_to)` tuples. Here, `mod_from`
                 is on the device, `mod_to` is on the CPU.
-            fabric: If given, all_reduce is done with this fabric.
             module_on_device: If given, this source module is on the device.
                 Its gradients are accumulated if the group size is > 1.
             debug_modules: Use for debugging only. Only for group size 1.
-
-        Returns:
-            In the distributed case, `len(self.group) > 1`: Time (in secs)
-            between start and end of `all_reduce` for first entry of gradients flat vector (normally, there is one
-            entry only). Use this to quantify idle time of devices in
-            the distributed context.
 
         """
         idle_time = None
@@ -118,14 +124,11 @@ class CPUOffloadAccumulateGradients:
             flat_vectors = access.get_gradients()
             if use_dist:
                 start_time = time.perf_counter()
-                # We run all-reduce on all parts of `flat_vectors`
-                for vec in flat_vectors.values():
-                    DistributedPrimitives.all_reduce_sum(
-                        vec, self.fabric, self.group,
-                    )
-                    if start_time is not None:
-                        idle_time = time.perf_counter() - start_time
-                        start_time = None
+                # Depending on subclass, `all_reduce` is done here
+                self._all_reduce_per_shard(flat_vectors)
+                if start_time is not None:
+                    idle_time = time.perf_counter() - start_time
+                    start_time = None
                 # At this point, `flat_vectors` on each rank is overwritten with
                 # the sum of all `flat_vectors` on each rank
             flat_vectors = copy_flat_vectors_to(
@@ -155,7 +158,32 @@ class CPUOffloadAccumulateGradients:
                 )
             AccessWeightsGradients(module_on_device).accumulate_gradients(flat_vectors)
 
-        return idle_time
+        if use_dist:
+            self._update_idle_time(idle_time)
+
+    def _update_idle_time(self, idle_time: float):
+        pass
+
+    def _all_reduce_per_shard(self, flat_vectors: FlatVectors):
+        pass
+
+    def finalize(self, model: torch.nn.Module) -> Optional[float]:
+        """
+        Ensures that gradient accumulation across devices is finalized. For
+        implementations which synchronize with every :meth:`__call__`,
+        nothing is done here.
+
+        Args:
+            model: Module to run `all_reduce` on gradients for. Its blocks
+                must have been covered by `mod_to` submodules in previous
+                :meth:`__call__` calls.
+
+        Returns:
+            In the distributed case, we return the idle time, i.e. the
+            time between start and end of `all_reduce`.
+
+        """
+        raise NotImplementedError()
 
     def test_all_reduce(self):
         my_rank = DistributedPrimitives.rank(self.fabric)
@@ -175,3 +203,95 @@ class CPUOffloadAccumulateGradients:
 
     def rank(self) -> int:
         return DistributedPrimitives.rank(self.fabric) if self.is_distributed else 0
+
+
+class CPUOffloadSyncPerShardAccumulateGradients(CPUOffloadAccumulateGradients):
+    """
+    Implementation for which each :meth:`__call__` call synchronizes
+    between devices. May run up more idle time.
+
+    """
+    def __init__(
+        self,
+        group: Optional[List[int]] = None,
+        fabric: Optional[L.Fabric] = None,
+    ):
+        super().__init__(group, fabric)
+        self._idle_time = 0
+
+    def _update_idle_time(self, idle_time: float):
+        self._idle_time += idle_time
+
+    def _all_reduce_per_shard(self, flat_vectors: FlatVectors):
+        for vec in flat_vectors.values():
+            DistributedPrimitives.all_reduce_sum(
+                vec, self.fabric, self.group,
+            )
+
+    def finalize(self, model: torch.nn.Module) -> Optional[float]:
+        # All synchronizations have been done already
+        result = self._idle_time if self.is_distributed else None
+        self._idle_time = 0  # reset
+        return result
+
+
+class CPUOffloadSyncOnceAccumulateGradients(CPUOffloadAccumulateGradients):
+    """
+    Implementation for which a single synchronization is done with the
+    :meth:`finalize` call. May use more memory.
+
+    """
+    def __init__(
+        self,
+        group: Optional[List[int]] = None,
+        fabric: Optional[L.Fabric] = None,
+        flat_vecs_on_gpu: bool = True,
+    ):
+        """
+        TODO: Establish that `flat_vecs_on_gpu=False` even works. If it
+        works and is not slower, use it here (seems odd to first copy
+        from CPU to GPU and back).
+
+        Args:
+            group: Group of ranks. Defaults to all ranks (world)
+            fabric: Fabric object. Defaults to None, in which case
+                `torch.distributed` is used directly.
+            flat_vecs_on_gpu: If `True`, flat vectors created from model
+                gradients are copied to GPU device of rank before
+                `all_reduce` is called. Defaults to `True`.
+                T
+
+        """
+        super().__init__(group, fabric)
+        self._flat_vecs_on_gpu = flat_vecs_on_gpu
+
+    def finalize(self, model: torch.nn.Module) -> Optional[float]:
+        # Synchronization of all gradients are done here. Calls of
+        # :meth:`__call__` have written gradients into buffers of `model`.
+        # We flatten them into a single vector and run `all_reduce`
+        if not self.is_distributed:
+            return None  # Nothing to do
+        access = AccessWeightsGradients(model)
+        flat_vectors = access.get_gradients()
+        model.zero_grad(set_to_none=True)
+        if self._flat_vecs_on_gpu:
+            flat_vectors = copy_flat_vectors_to(
+                flat_vectors,
+                device=torch.device("cuda", self.rank()),
+            )
+        idle_time = None
+        start_time = time.perf_counter()
+        for vec in flat_vectors.values():
+            DistributedPrimitives.all_reduce_sum(
+                vec, self.fabric, self.group,
+            )
+            if start_time is not None:
+                idle_time = time.perf_counter() - start_time
+                start_time = None
+        if self._flat_vecs_on_gpu:
+            flat_vectors = copy_flat_vectors_to(
+                flat_vectors,
+                device=torch.device("cpu"),
+            )
+        AccessWeightsGradients(model).accumulate_gradients(flat_vectors)
+        return idle_time

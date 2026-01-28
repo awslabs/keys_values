@@ -156,6 +156,8 @@ class GradientArgs:
     use_new_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
     layer_checkpoint_chunk_size: Optional[int] = None
+    ddp_sync_once: bool = False
+    ddp_flat_vecs_on_gpu: bool = True
 
     def __post_init__(self):
         _check_positive(self.layers_per_cell, "layers_per_cell")

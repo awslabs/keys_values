@@ -1113,9 +1113,9 @@ class LongContextGradientModel(LongContextInferenceModel):
                 )
                 if idle_time is not None:
                     if num_layers == 1:
-                        iname = f"layer{first_layer_idx}"
+                        iname = f"layer{first_layer_idx:02d}"
                     else:
-                        iname = f"layers{first_layer_idx}:{end_layer_idx}"
+                        iname = f"layers{first_layer_idx:02d}:{end_layer_idx:02d}"
                     idle_times[iname] = idle_time
                 del model_part
                 del shard_on_device

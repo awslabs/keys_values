@@ -161,6 +161,7 @@ def setup(
         use_new_cache=False,
         max_match_trials_pack_arg=8,
         layer_checkpoint_chunk_size=None,
+        ddp_sync_once=False,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
@@ -449,6 +450,11 @@ def main(
 
     if fabric.global_rank == 0:
         os.makedirs(out_dir, exist_ok=True)
+
+    print_message(
+        "\nGPU memory before model is created:\n" + message_memory_all_devices(),
+        fabric,
+    )
 
     with fabric.init_module(empty_init=(fabric.world_size > 1)):
         # Order of preference for SDPA kernels
@@ -852,9 +858,17 @@ def fit(
             record_gpu_memory_snapshots.store_current_snapshot()
             record_gpu_memory_snapshots.stop_recording()
 
+        # DEBUG
+        print("Check NaN on LoRA: Before optimizer update.")
+        model.gpt_model.check_for_nan(do_grads=True)
+        # END DEBUG
         cpu_optimizer.step()
         cpu_optimizer.zero_grad(set_to_none=True)
         cpu_scheduler.step()
+        # DEBUG
+        print("Check NaN on LoRA: After optimizer update.")
+        model.gpt_model.check_for_nan(do_grads=False)
+        # END DEBUG
         if gpu_optimizer is not None:
             gpu_optimizer.step()
             gpu_optimizer.zero_grad(set_to_none=True)

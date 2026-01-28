@@ -132,6 +132,7 @@ def check_for_nan(
     extra_txt: Optional[str] = None,
     do_boom: bool = False,
 ) -> int:
+    x = x.detach()
     num_nan = torch.isnan(x).sum().item()
     if num_nan > 0:
         if extra_txt is not None:
