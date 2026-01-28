@@ -490,10 +490,10 @@ def main(
                 data=data,
                 **head_model_kwargs,
             )
+            gpt_model.apply(gpt_model._init_weights)
         gpt_model = gpt_model.to(optim_device)
         mark_only_lora_as_trainable(gpt_model)
         adapt_requires_grad(gpt_model, head_model)
-        gpt_model.apply(gpt_model._init_weights)
         batch_size = train.micro_batch_size
         if eval.micro_batch_size is not None:
             batch_size = max(batch_size, eval.micro_batch_size)

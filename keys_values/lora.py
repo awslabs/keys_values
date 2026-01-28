@@ -190,7 +190,6 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
             extra_msg += ": "
         else:
             extra_msg = ""
-        print(extra_msg + f"lora_B.shape = {self.lora_B.shape}")  # DEBUG
 
     @property
     def lora_ind(self) -> torch.Tensor:
