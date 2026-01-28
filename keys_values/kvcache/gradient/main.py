@@ -57,7 +57,10 @@ from keys_values.long_context import (
 )
 from keys_values.model import GPT
 from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
-from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
+from keys_values.optimize.grad_accumulate import (
+    CPUOffloadAccumulateGradients,
+    CPUOffloadSyncPerShardAccumulateGradients,
+)
 from keys_values.optimize.model_factory import GPTShardCellBlock
 from keys_values.utils import check_for_nan_module_weights
 
@@ -377,7 +380,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         self.offload_device = offload_device
         if offload_device is not None:
             if offload_grad_accum is None:
-                offload_grad_accum = CPUOffloadAccumulateGradients([0])
+                offload_grad_accum = CPUOffloadSyncPerShardAccumulateGradients([0])
             elif len(offload_grad_accum.group) > 1 and debug_gpt_model is not None:
                 raise ValueError(
                     "Can use debug_gpt_model only if len(offload_grad_accum.group) == 1"
@@ -986,7 +989,6 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         else:
             shard_on_device = self.gpt_model
-        idle_times = dict()
         self.accumulator.run_head_model(
             gpt_model=shard_on_device,
             head_model=self.head_model,
@@ -1015,13 +1017,11 @@ class LongContextGradientModel(LongContextInferenceModel):
                     debug_modules.append(self._debug_gpt_model.lm_head)
             else:
                 debug_modules = None
-            idle_time = self._offload_grad_accum(
+            self._offload_grad_accum(
                 module_pairs=module_pairs,
                 module_on_device=module_on_device,
                 debug_modules=debug_modules,
             )
-            if idle_time is not None:
-                idle_times["head"] = idle_time
             del shard_on_device
             # Check for NaNs
             for _, mod_to in module_pairs:
@@ -1107,16 +1107,10 @@ class LongContextGradientModel(LongContextInferenceModel):
                     ]
                 else:
                     debug_modules = None
-                idle_time = self._offload_grad_accum(
+                self._offload_grad_accum(
                     module_pairs=module_pairs,
                     debug_modules=debug_modules,
                 )
-                if idle_time is not None:
-                    if num_layers == 1:
-                        iname = f"layer{first_layer_idx:02d}"
-                    else:
-                        iname = f"layers{first_layer_idx:02d}:{end_layer_idx:02d}"
-                    idle_times[iname] = idle_time
                 del model_part
                 del shard_on_device
                 # Check for NaNs
@@ -1171,12 +1165,10 @@ class LongContextGradientModel(LongContextInferenceModel):
                 debug_modules = [self._debug_gpt_model.transformer.wte]
             else:
                 debug_modules = None
-            idle_time = self._offload_grad_accum(
+            self._offload_grad_accum(
                 module_pairs=module_pairs,
                 debug_modules=debug_modules,
             )
-            if idle_time is not None:
-                idle_times["init"] = idle_time
             del shard_on_device
             # Check for NaNs
             for _, mod_to in module_pairs:
@@ -1186,11 +1178,14 @@ class LongContextGradientModel(LongContextInferenceModel):
                     extra_msg="Updated by run_input_embeddings",
                 )
 
-        if idle_times and self.verbose is not VerbosityLevels.NONE:
-            print(f"[Rank {self._offload_grad_accum.rank()}]: Idle times when syncing for all_reduce computations:")
-            print(
-                "\n".join(f"{k}: {v:.2f} secs" for k, v in idle_times.items())
-            )
+        # Finalize gradient accumulation
+        if self.offload_device is not None:
+            idle_time = self._offload_grad_accum.finalize(self.gpt_model)
+            if idle_time is not None and self.verbose is not VerbosityLevels.NONE:
+                print(
+                    f"[Rank {self._offload_grad_accum.rank()}]: Idle time when "
+                    f"syncing for all_reduce computation(s): {idle_time:.2f} secs"
+                )
 
         if self._debug_profile_backward:
             profiler.disable()
