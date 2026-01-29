@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import time
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 import torch
 import torch.distributed as dist
@@ -205,6 +205,7 @@ class CPUOffloadAccumulateGradients:
         return DistributedPrimitives.rank(self.fabric) if self.is_distributed else 0
 
 
+# TODO: Remove this option: It cannot be competitive!
 class CPUOffloadSyncPerShardAccumulateGradients(CPUOffloadAccumulateGradients):
     """
     Implementation for which each :meth:`__call__` call synchronizes
@@ -246,11 +247,10 @@ class CPUOffloadSyncOnceAccumulateGradients(CPUOffloadAccumulateGradients):
         group: Optional[List[int]] = None,
         fabric: Optional[L.Fabric] = None,
         flat_vecs_on_gpu: bool = True,
+        debug_store_grads_for_name: Optional[str] = None,
     ):
         """
-        TODO: Establish that `flat_vecs_on_gpu=False` even works. If it
-        works and is not slower, use it here (seems odd to first copy
-        from CPU to GPU and back).
+        TODO: Try to eliminate flat_vecs_on_gpu, checking what is faster!
 
         Args:
             group: Group of ranks. Defaults to all ranks (world)
@@ -264,6 +264,38 @@ class CPUOffloadSyncOnceAccumulateGradients(CPUOffloadAccumulateGradients):
         """
         super().__init__(group, fabric)
         self._flat_vecs_on_gpu = flat_vecs_on_gpu
+        self._debug_store_grads_for_name = debug_store_grads_for_name
+        self._debug_iter_count = 0
+
+    @staticmethod
+    def extract_grads(
+        part_of_name: str,
+        model: torch.nn.Module,
+        access: AccessWeightsGradients,
+        flat_vectors: FlatVectors,
+        prefix: str,
+    ) -> Dict[str, torch.Tensor]:
+        debug_info = dict()
+        dtype_str = None
+        for name, param in model.named_parameters():
+            if part_of_name in name and param.grad is not None:
+                debug_info[prefix + ":" + name] = param.grad.data.clone()
+                if dtype_str is None:
+                    dtype_str = str(param.dtype)
+        if dtype_str is None:
+            raise AssertionError(f"No gradients in model for params containing {part_of_name}")
+        if dtype_str not in flat_vectors:
+            raise AssertionError(f"dtype_str = {dtype_str}, keys = {list(flat_vectors.keys())}")
+        fvec = flat_vectors[dtype_str]
+        for entry in access._grad_structure[dtype_str].entries:
+            name = entry.name
+            if part_of_name in name:
+                start = entry.offset
+                end = start + entry.size
+                debug_info[prefix + "_fvec:" + name] = fvec[start:end].clone().reshape(
+                    *entry.shape
+                )
+        return debug_info
 
     def finalize(self, model: torch.nn.Module) -> Optional[float]:
         # Synchronization of all gradients are done here. Calls of
@@ -273,6 +305,15 @@ class CPUOffloadSyncOnceAccumulateGradients(CPUOffloadAccumulateGradients):
             return None  # Nothing to do
         access = AccessWeightsGradients(model)
         flat_vectors = access.get_gradients()
+        debug_info = None
+        if self._debug_store_grads_for_name is not None:
+            debug_info = self.extract_grads(
+                self._debug_store_grads_for_name,
+                model,
+                access,
+                flat_vectors,
+                "before",
+            )
         model.zero_grad(set_to_none=True)
         if self._flat_vecs_on_gpu:
             flat_vectors = copy_flat_vectors_to(
@@ -294,4 +335,18 @@ class CPUOffloadSyncOnceAccumulateGradients(CPUOffloadAccumulateGradients):
                 device=torch.device("cpu"),
             )
         AccessWeightsGradients(model).accumulate_gradients(flat_vectors)
+        if self._debug_store_grads_for_name is not None:
+            debug_info.update(
+                self.extract_grads(
+                    self._debug_store_grads_for_name,
+                    model,
+                    access,
+                    flat_vectors,
+                    "after",
+                )
+            )
+            fname = f"./grad_accumulate_iter{self._debug_iter_count}_rank{self.rank()}.pth"
+            print(f"DEBUG: Storing {self._debug_store_grads_for_name} gradients before/after to {fname}")
+            torch.save(debug_info, fname)
+            self._debug_iter_count += 1
         return idle_time

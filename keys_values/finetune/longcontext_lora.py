@@ -654,7 +654,7 @@ def main(
         )
         fabric.log_dict(metrics, step=state["iter_num"])
         print_message(
-            f"Final evaluation | val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}",
+            f"Final evaluation | val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f} | val_time: {metrics['val_time']:.3f} s",
             fabric,
         )
         flush_io_streams()
@@ -731,7 +731,7 @@ def fit(
         )
         val_loss = f"{metrics['val_loss']:.3f}"
         print_message(
-            f"Initial evaluation | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}",
+            f"Initial evaluation | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time: {metrics['val_time']:.3f} s",
             fabric,
         )
         flush_io_streams()
@@ -946,7 +946,7 @@ def fit(
             flush_io_streams()
             val_loss = f"{metrics['val_loss']:.3f}"
             print_message(
-                f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time_in_ms: {metrics['val_time_in_ms']:.3f}",
+                f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time: {metrics['val_time']:.3f} s",
                 fabric,
             )
             fabric.barrier()

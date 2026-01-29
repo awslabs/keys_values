@@ -13,7 +13,6 @@
 # limitations under the License.
 import os
 from typing import List, Optional, Dict, Any, Tuple
-from collections.abc import Iterable, Iterator
 from pathlib import Path
 import json
 from heapq import nlargest
@@ -31,6 +30,7 @@ from keys_values.data.evaluation import (
     get_wrapped_collate_fn,
     ReorderWrapperDataset,
 )
+from keys_values.data.iterators import LongestFirstIterable
 from keys_values.data.sequence_classification import (
     SequenceClassificationDataset,
     get_seq_class_collate_fn,
@@ -59,60 +59,6 @@ SUPPORTED_HEAD_MODELS = (
 )
 
 CLASS_LABELS = ("A", "B", "C", "D")
-
-
-class LongestFirstIterator(Iterator):
-    def __init__(
-        self,
-        dataset_size: int,
-        batch_size: int,
-        inds_longest: List[int],
-    ):
-        assert len(inds_longest) == batch_size
-        if not all(0 <= x < dataset_size for x in inds_longest):
-            raise ValueError(
-                f"inds_longest = {inds_longest}: all entries must be in [0, {dataset_size})"
-            )
-        self.dataset_size = dataset_size
-        self.batch_size = batch_size
-        remainder = list(set(range(dataset_size)) - set(inds_longest))
-        assert len(remainder) == dataset_size - batch_size
-        remainder = torch.tensor(remainder)[torch.randperm(len(remainder))]
-        self._permutation = torch.cat((torch.tensor(inds_longest), remainder))
-        self._pos = 0
-
-    def __next__(self) -> int:
-        if self._pos >= self.dataset_size:
-            self._permutation = torch.randperm(self.dataset_size)
-            self._pos = 0
-        result = self._permutation[self._pos].item()
-        self._pos += 1
-        return result
-
-    def __iter__(self) -> Iterator:
-        return self
-
-
-class LongestFirstIterable(Iterable):
-    def __init__(
-        self,
-        dataset_size: int,
-        batch_size: int,
-        inds_longest: List[int],
-    ):
-        self._kwargs = {
-            "dataset_size": dataset_size,
-            "batch_size": batch_size,
-            "inds_longest": inds_longest.copy(),
-        }
-        self._len = dataset_size
-
-    def __iter__(self) -> Iterator:
-        return LongestFirstIterator(**self._kwargs)
-
-    def __len__(self) -> int:
-        return self._len
-
 
 SUPPORTED_TEST_SET_TAGS = [
     "rest",
