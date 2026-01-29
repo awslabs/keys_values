@@ -332,7 +332,6 @@ class LongBenchV2(DataModule):
                 batch_size=self.batch_size,
                 sampler=LongestFirstIterable(
                     dataset_size=len(self.train_dataset),
-                    batch_size=self.batch_size,
                     inds_longest=inds_longest,
                 ),
                 collate_fn=self._get_collate_fn(),
