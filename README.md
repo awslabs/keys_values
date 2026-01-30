@@ -729,6 +729,18 @@ maximize `chunks_per_cell_multiplier`, since most weights are offloaded then.
 On the other hand, this requires more activation checkpoints to be written,
 which can be slower.
 
+Other arguments for fine-tuning are:
+
+* `--grad.single_tokens_for_targets`: If `True`, the targets part of a sequence
+  is processed token per token (i.e., with chunk size 1). This is slower, but
+  more realistic, mirroring how inference looks like. If the targets part is
+  short, it does not make a big time difference.
+* `--grad.layer_checkpoint_chunk_size`: Only relevant if layer input
+  checkpointing uses quantization. We quantize and de-quantize checkpoints in
+  chunks of this length (along sequence axis). Larger values save time, but
+  require more GPU memory. The default value is equal to
+  `--kv_cache.cache_length`.
+
 ### Profiling GPU Memory and Runtime
 
 This is based on https://pytorch.org/blog/understanding-gpu-memory-1/. It shows

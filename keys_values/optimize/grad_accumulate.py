@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import time
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Callable
 
 import torch
 import torch.distributed as dist
@@ -236,6 +236,9 @@ class CPUOffloadSyncPerShardAccumulateGradients(CPUOffloadAccumulateGradients):
         return result
 
 
+DebugStoreGradsNamePredicate = Callable[[str], bool]
+
+
 class CPUOffloadSyncOnceAccumulateGradients(CPUOffloadAccumulateGradients):
     """
     Implementation for which a single synchronization is done with the
@@ -247,7 +250,7 @@ class CPUOffloadSyncOnceAccumulateGradients(CPUOffloadAccumulateGradients):
         group: Optional[List[int]] = None,
         fabric: Optional[L.Fabric] = None,
         flat_vecs_on_gpu: bool = True,
-        debug_store_grads_for_name: Optional[str] = None,
+        debug_store_grads_name_predicate: Optional[DebugStoreGradsNamePredicate] = None,
     ):
         """
         TODO: Try to eliminate flat_vecs_on_gpu, checking what is faster!
@@ -259,17 +262,16 @@ class CPUOffloadSyncOnceAccumulateGradients(CPUOffloadAccumulateGradients):
             flat_vecs_on_gpu: If `True`, flat vectors created from model
                 gradients are copied to GPU device of rank before
                 `all_reduce` is called. Defaults to `True`.
-                T
 
         """
         super().__init__(group, fabric)
         self._flat_vecs_on_gpu = flat_vecs_on_gpu
-        self._debug_store_grads_for_name = debug_store_grads_for_name
+        self._debug_store_grads_name_predicate = debug_store_grads_name_predicate
         self._debug_iter_count = 0
 
     @staticmethod
     def extract_grads(
-        part_of_name: str,
+        name_predicate: DebugStoreGradsNamePredicate,
         model: torch.nn.Module,
         access: AccessWeightsGradients,
         flat_vectors: FlatVectors,
@@ -278,18 +280,18 @@ class CPUOffloadSyncOnceAccumulateGradients(CPUOffloadAccumulateGradients):
         debug_info = dict()
         dtype_str = None
         for name, param in model.named_parameters():
-            if part_of_name in name and param.grad is not None:
+            if name_predicate(name) and param.grad is not None:
                 debug_info[prefix + ":" + name] = param.grad.data.clone()
                 if dtype_str is None:
                     dtype_str = str(param.dtype)
         if dtype_str is None:
-            raise AssertionError(f"No gradients in model for params containing {part_of_name}")
+            raise AssertionError(f"No gradients in model for params flagged by `name_predicate`")
         if dtype_str not in flat_vectors:
             raise AssertionError(f"dtype_str = {dtype_str}, keys = {list(flat_vectors.keys())}")
         fvec = flat_vectors[dtype_str]
         for entry in access._grad_structure[dtype_str].entries:
             name = entry.name
-            if part_of_name in name:
+            if name_predicate(name):
                 start = entry.offset
                 end = start + entry.size
                 debug_info[prefix + "_fvec:" + name] = fvec[start:end].clone().reshape(
@@ -306,9 +308,9 @@ class CPUOffloadSyncOnceAccumulateGradients(CPUOffloadAccumulateGradients):
         access = AccessWeightsGradients(model)
         flat_vectors = access.get_gradients()
         debug_info = None
-        if self._debug_store_grads_for_name is not None:
+        if self._debug_store_grads_name_predicate is not None:
             debug_info = self.extract_grads(
-                self._debug_store_grads_for_name,
+                self._debug_store_grads_name_predicate,
                 model,
                 access,
                 flat_vectors,
@@ -335,10 +337,10 @@ class CPUOffloadSyncOnceAccumulateGradients(CPUOffloadAccumulateGradients):
                 device=torch.device("cpu"),
             )
         AccessWeightsGradients(model).accumulate_gradients(flat_vectors)
-        if self._debug_store_grads_for_name is not None:
+        if self._debug_store_grads_name_predicate is not None:
             debug_info.update(
                 self.extract_grads(
-                    self._debug_store_grads_for_name,
+                    self._debug_store_grads_name_predicate,
                     model,
                     access,
                     flat_vectors,
@@ -346,7 +348,7 @@ class CPUOffloadSyncOnceAccumulateGradients(CPUOffloadAccumulateGradients):
                 )
             )
             fname = f"./grad_accumulate_iter{self._debug_iter_count}_rank{self.rank()}.pth"
-            print(f"DEBUG: Storing {self._debug_store_grads_for_name} gradients before/after to {fname}")
+            print(f"DEBUG: Storing matching gradients before/after to {fname}")
             torch.save(debug_info, fname)
             self._debug_iter_count += 1
         return idle_time
