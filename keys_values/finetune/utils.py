@@ -124,9 +124,11 @@ def get_dataloaders(
     eval: EvalArgs,
     fabric: Optional[L.Fabric] = None,
 ) -> Tuple[DataLoader, DataLoader]:
+    num_devices = 1 if fabric is None else fabric.world_size
     data.connect(
         tokenizer=tokenizer,
         batch_size=train.micro_batch_size,
+        num_devices=num_devices,
         max_seq_length=train.max_seq_length,
         head_model=head_model,
         val_batch_size=eval.micro_batch_size,

@@ -15,7 +15,6 @@ import os
 from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 import json
-from heapq import nlargest
 
 import torch
 from torch.utils.data import DataLoader, random_split
@@ -30,7 +29,7 @@ from keys_values.data.evaluation import (
     get_wrapped_collate_fn,
     ReorderWrapperDataset,
 )
-from keys_values.data.iterators import LongestFirstIterable
+from keys_values.data.iterators import SimilarSequenceLengthIterable
 from keys_values.data.sequence_classification import (
     SequenceClassificationDataset,
     get_seq_class_collate_fn,
@@ -82,6 +81,10 @@ class LongBenchV2(DataModule):
     - `METADATA_SEQ_LENGTHS_KEY`: List of sequence lengths (in tokens) for
       each record
 
+    For the :meth:`train_dataloader` iterator, we use a
+    :class:`SimilarSequenceLengthIterable` sampler, which tries to form micro
+    and macro batches with sequences of similar length.
+
     """
 
     def __init__(
@@ -128,7 +131,7 @@ class LongBenchV2(DataModule):
             debug_num_cases: If used, we only keep this number of records.
             trainloader_longest_first: If set, :meth:`train_dataloader` returns
                 a data loader whose first batch contain the longest sequences in
-                the dataset, but runs random permutations per epoch otherwise.
+                the dataset, otherwise uses :class:`SimilarSequenceLengthIterable`.
                 This is useful to detect OOM errors early, since they are most
                 likely to happen with the longest batch.
             test_set_tag: If this is given, we also maintain a test dataset
@@ -163,6 +166,7 @@ class LongBenchV2(DataModule):
         self.debug_num_cases = debug_num_cases
         self.tokenizer = None
         self.batch_size = None
+        self.num_devices = None
         self.val_batch_size = None
         self.test_batch_size = None
         self.train_dataset = None
@@ -179,6 +183,7 @@ class LongBenchV2(DataModule):
         self,
         tokenizer: Optional[Tokenizer] = None,
         batch_size: int = 1,
+        num_devices: int = 1,
         max_seq_length: Optional[int] = None,
         **kwargs,
     ) -> None:
@@ -195,6 +200,8 @@ class LongBenchV2(DataModule):
         Args:
             tokenizer: Tokenizer
             batch_size: Batch size for :meth:`train_dataloader`
+            num_devices: Number of GPU devices used for distributed
+                data parallel training
             max_seq_length: Cutoff for sequence length
             **kwargs: See above
 
@@ -210,6 +217,7 @@ class LongBenchV2(DataModule):
             )
         self.tokenizer = tokenizer
         self.batch_size = batch_size
+        self.num_devices = num_devices
         if max_seq_length is not None:
             self.max_seq_length = max_seq_length
         self.val_batch_size = kwargs.get("val_batch_size")
@@ -306,46 +314,22 @@ class LongBenchV2(DataModule):
             return get_seq_class_collate_fn()
 
     def train_dataloader(self) -> DataLoader:
-        if self._trainloader_longest_first:
-            # Make sure that longest sequences are served in the first
-            # batch.
-            # Note: Using `_sequence_lengths_for_train` based on the sequence
-            # lengths computed in preprocessing is necessary. Iterating over
-            # the dataset would require tokenization of all sequences, which
-            # takes a long time.
-            assert self._sequence_lengths_for_train is not None
-            assert len(self._sequence_lengths_for_train) == len(self.train_dataset)
-            inds_longest = [
-                x[1]
-                for x in nlargest(
-                    self.batch_size,
-                    zip(
-                        self._sequence_lengths_for_train,
-                        range(len(self.train_dataset)),
-                    ),
-                    key=lambda y: y[0],
-                )
-            ]
-            torch.random.manual_seed(self.seed)
-            return DataLoader(
-                self.train_dataset,
-                batch_size=self.batch_size,
-                sampler=LongestFirstIterable(
-                    dataset_size=len(self.train_dataset),
-                    inds_longest=inds_longest,
-                ),
-                collate_fn=self._get_collate_fn(),
-                **self._dataloader_kwargs,
-            )
-        else:
-            return DataLoader(
-                self.train_dataset,
-                batch_size=self.batch_size,
+        assert self._sequence_lengths_for_train is not None
+        assert len(self._sequence_lengths_for_train) == len(self.train_dataset)
+        torch.random.manual_seed(self.seed)
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            sampler=SimilarSequenceLengthIterable(
+                sequence_lengths=self._sequence_lengths_for_train,
+                micro_batch_size=self.batch_size,
+                num_devices=self.num_devices,
                 shuffle=True,
-                generator=torch.Generator().manual_seed(self.seed),
-                collate_fn=self._get_collate_fn(),
-                **self._dataloader_kwargs,
-            )
+                longest_first=self._trainloader_longest_first,
+            ),
+            collate_fn=self._get_collate_fn(),
+            **self._dataloader_kwargs,
+        )
 
     def val_dataloader(self) -> DataLoader:
         return DataLoader(

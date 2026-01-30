@@ -83,6 +83,7 @@ class SimilarSequenceLengthIterator(Iterator):
         sequence_lengths: List[int],
         micro_batch_size: int,
         num_devices: int,
+        shuffle: bool = True,
         longest_first: bool = False,
     ):
         assert micro_batch_size >= 1
@@ -92,6 +93,7 @@ class SimilarSequenceLengthIterator(Iterator):
         self.dataset_size = len(sequence_lengths)
         self.micro_batch_size = micro_batch_size
         self.num_devices = num_devices
+        self._shuffle = shuffle
         self._longest_first = longest_first
         self._partition = None
         self._initialize(sequence_lengths)
@@ -132,17 +134,22 @@ class SimilarSequenceLengthIterator(Iterator):
         self._partition = parts_left + parts_mid + parts_right
 
     def _create_permutation(self):
+        def get_index(sz: int) -> List[int]:
+            if self._shuffle:
+                return torch.randperm(sz).tolist()
+            else:
+                return list(range(sz))
+
+        if not self._shuffle and self._permutation is not None:
+            return  # Ordering does not change
         num_outer = len(self._partition)
+        out_inds = get_index(num_outer - int(self._longest_first))
         if self._longest_first:
-            out_inds = [num_outer - 1] + torch.randperm(num_outer - 1).tolist()
-        else:
-            out_inds = torch.randperm(num_outer).tolist()
+            out_inds.insert(0, num_outer - 1)
         parts = [
             self._partition[out_ind][inn_ind]
             for out_ind in out_inds
-            for inn_ind in torch.randperm(
-                len(self._partition[out_ind])
-            ).tolist()
+            for inn_ind in get_index(len(self._partition[out_ind]))
         ]
         self._permutation = torch.cat(parts)
 
@@ -175,8 +182,8 @@ class SimilarSequenceLengthIterable(Iterable):
       macro-batch) are close in length
     * If one macro-batch is shorter than the others, it contains the
       longest sequences
-    * Given that, macro-batches are ordered randomly, and the order of
-      micro-batches in each macro-batch are random as well
+    * Given that, if `shuffle=True`, macro-batches are ordered randomly, and
+      the order of micro-batches in each macro-batch are random as well
 
     TODO: Another feature would be a preferred order of micro-batches
     inside macro-batches, to counter speed differences between the
@@ -188,12 +195,14 @@ class SimilarSequenceLengthIterable(Iterable):
         sequence_lengths: List[int],
         micro_batch_size: int,
         num_devices: int,
+        shuffle: bool = True,
         longest_first: bool = False,
     ):
         self._kwargs = {
             "sequence_lengths": sequence_lengths.copy(),
             "micro_batch_size": micro_batch_size,
             "num_devices": num_devices,
+            "shuffle": shuffle,
             "longest_first": longest_first,
         }
         self._len = len(sequence_lengths)
