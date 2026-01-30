@@ -161,7 +161,6 @@ def setup(
         use_new_cache=False,
         max_match_trials_pack_arg=8,
         layer_checkpoint_chunk_size=None,
-        ddp_sync_once=False,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
