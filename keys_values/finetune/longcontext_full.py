@@ -687,7 +687,6 @@ def wrap_gpt_model(
             offload_grad_accum = CPUOffloadAccumulateGradients(
                 group=list(range(offload_num_devices)),
                 fabric=fabric,
-                flat_vecs_on_gpu=grad.ddp_flat_vecs_on_gpu,
             )
             if offload_num_devices > 1:
                 # Test connection: all-reduce with sum must work

@@ -50,7 +50,6 @@ class DistributedPrimitives:
 DebugStoreGradsNamePredicate = Callable[[str], bool]
 
 
-# TODO: Try to eliminate flat_vecs_on_gpu, checking what is faster!
 class CPUOffloadAccumulateGradients:
     """
     Represents data distributed parallel gradient accumulation over a number
@@ -71,7 +70,6 @@ class CPUOffloadAccumulateGradients:
         self,
         group: Optional[List[int]] = None,
         fabric: Optional[L.Fabric] = None,
-        flat_vecs_on_gpu: bool = True,
         debug_store_grads_name_predicate: Optional[DebugStoreGradsNamePredicate] = None,
     ):
         world_size = DistributedPrimitives.world_size(fabric)
@@ -93,7 +91,6 @@ class CPUOffloadAccumulateGradients:
                     )
         self.group = group
         self.fabric = fabric
-        self._flat_vecs_on_gpu = flat_vecs_on_gpu
         self._debug_store_grads_name_predicate = debug_store_grads_name_predicate
         self._debug_iter_count = 0
 
@@ -108,8 +105,8 @@ class CPUOffloadAccumulateGradients:
         is called by every rank from `group`, and the ranks are synchronized
         here.
 
-        Note that synchronization and exchange between devices can be
-        delayed until :meth:`finalize` is called.
+        Note that synchronization and exchange between devices is delayed until
+        :meth:`finalize` is called.
 
         Args:
             module_pairs: List of `(mod_from, mod_to)` tuples. Here, `mod_from`
@@ -204,11 +201,6 @@ class CPUOffloadAccumulateGradients:
                 "before",
             )
         model.zero_grad(set_to_none=True)
-        if self._flat_vecs_on_gpu:
-            flat_vectors = copy_flat_vectors_to(
-                flat_vectors,
-                device=torch.device("cuda", self.rank()),
-            )
         idle_time = None
         start_time = time.perf_counter()
         for vec in flat_vectors.values():
@@ -218,11 +210,6 @@ class CPUOffloadAccumulateGradients:
             if start_time is not None:
                 idle_time = time.perf_counter() - start_time
                 start_time = None
-        if self._flat_vecs_on_gpu:
-            flat_vectors = copy_flat_vectors_to(
-                flat_vectors,
-                device=torch.device("cpu"),
-            )
         AccessWeightsGradients(model).accumulate_gradients(flat_vectors)
         if self._debug_store_grads_name_predicate is not None:
             debug_info.update(
@@ -244,13 +231,22 @@ class CPUOffloadAccumulateGradients:
         my_rank = DistributedPrimitives.rank(self.fabric)
         if my_rank not in self.group:
             raise AssertionError(f"Rank {my_rank} not in group {self.group}")
-        device = torch.device("cuda", my_rank)
-        vec = torch.arange(1, 10, dtype=torch.int32, device=device) * my_rank
-        DistributedPrimitives.all_reduce_sum(vec, self.fabric, self.group)
-        all_factor = sum(self.group)
-        should_be = torch.arange(1, 10, dtype=torch.int32, device=device) * all_factor
-        if not (vec == should_be).all().item():
-            raise AssertionError(f"Rank {my_rank}: Have {vec} after all_reduce, should have {should_be}")
+        # Test both cases: Vecs on CPU, vecs on devices
+        setups = [
+            (torch.device("cpu"), 1),
+            (torch.device("cuda", my_rank), 2),
+        ]
+        for device, mult in setups:
+            vec = torch.arange(
+                1, 10, dtype=torch.int32, device=device,
+            ) * my_rank * mult
+            DistributedPrimitives.all_reduce_sum(vec, self.fabric, self.group)
+            all_factor = sum(self.group)
+            should_be = torch.arange(
+                1, 10, dtype=torch.int32, device=device,
+            ) * all_factor * mult
+            if not (vec == should_be).all().item():
+                raise AssertionError(f"Rank {my_rank}, device {device}: Have {vec} after all_reduce, should have {should_be}")
 
     @property
     def is_distributed(self) -> bool:
