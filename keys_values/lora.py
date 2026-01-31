@@ -179,17 +179,14 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
         extra_msg: Optional[str] = None,
         do_grads: bool = False,
     ):
-        check_for_nan(self.lora_A, "LoRAQKVLinear", "lora_A", extra_msg)
-        check_for_nan(self.lora_B, "LoRAQKVLinear", "lora_B", extra_msg)
-        if do_grads:
-            if self.lora_A.grad is not None:
-                check_for_nan(self.lora_A.grad, "LoRAQKVLinear", "lora_A.grad", extra_msg)
-            if self.lora_B.grad is not None:
-                check_for_nan(self.lora_B.grad, "LoRAQKVLinear", "lora_B.grad", extra_msg)
-        if extra_msg is not None:
-            extra_msg += ": "
-        else:
-            extra_msg = ""
+        if hasattr(self, "lora_A"):
+            check_for_nan(self.lora_A, "LoRAQKVLinear", "lora_A", extra_msg)
+            check_for_nan(self.lora_B, "LoRAQKVLinear", "lora_B", extra_msg)
+            if do_grads:
+                if self.lora_A.grad is not None:
+                    check_for_nan(self.lora_A.grad, "LoRAQKVLinear", "lora_A.grad", extra_msg)
+                if self.lora_B.grad is not None:
+                    check_for_nan(self.lora_B.grad, "LoRAQKVLinear", "lora_B.grad", extra_msg)
 
     @property
     def lora_ind(self) -> torch.Tensor:

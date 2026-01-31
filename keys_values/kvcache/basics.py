@@ -634,7 +634,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     ):
         init_length = key.shape[2]
         self.kv_buffers.prefill(key, value)
-        self.next_position = init_length
+        self.next_position = init_length % self.cache_length
         self.token_pos[:init_length] = torch.arange(
             init_length,
             dtype=self.token_pos.dtype,
@@ -646,6 +646,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 cache_length=self.cache_length,
                 batch_size=self.batch_size,
                 n_query_groups=self.n_query_groups,
+                init_grace_tokens=self.init_grace_tokens,
             )
 
     def token_positions(self) -> torch.Tensor:

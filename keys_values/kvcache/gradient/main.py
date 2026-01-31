@@ -57,10 +57,7 @@ from keys_values.long_context import (
 )
 from keys_values.model import GPT
 from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
-from keys_values.optimize.grad_accumulate import (
-    CPUOffloadAccumulateGradients,
-    CPUOffloadSyncPerShardAccumulateGradients,
-)
+from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.optimize.model_factory import GPTShardCellBlock
 from keys_values.utils import check_for_nan_module_weights
 
@@ -380,7 +377,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         self.offload_device = offload_device
         if offload_device is not None:
             if offload_grad_accum is None:
-                offload_grad_accum = CPUOffloadSyncPerShardAccumulateGradients([0])
+                offload_grad_accum = CPUOffloadAccumulateGradients([0])
             elif len(offload_grad_accum.group) > 1 and debug_gpt_model is not None:
                 raise ValueError(
                     "Can use debug_gpt_model only if len(offload_grad_accum.group) == 1"

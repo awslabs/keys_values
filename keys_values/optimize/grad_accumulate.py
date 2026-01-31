@@ -29,11 +29,21 @@ from keys_values.optimize.module_wrapper import (
 class DistributedPrimitives:
     @staticmethod
     def world_size(fabric: Optional[L.Fabric] = None) -> int:
-        return dist.get_world_size() if fabric is None else fabric.world_size
+        if fabric is not None:
+            return fabric.world_size
+        elif torch.cuda.is_available():
+            return dist.get_world_size()
+        else:
+            return 1
 
     @staticmethod
     def rank(fabric: Optional[L.Fabric] = None) -> int:
-        return dist.get_rank() if fabric is None else fabric.local_rank
+        if fabric is not None:
+            return fabric.local_rank
+        elif torch.cuda.is_available():
+            return dist.get_rank()
+        else:
+            return 0
 
     @staticmethod
     def all_reduce_sum(
@@ -43,7 +53,7 @@ class DistributedPrimitives:
     ):
         if fabric is not None:
             fabric.all_reduce(x, reduce_op="sum")
-        else:
+        elif torch.cuda.is_available():
             dist.all_reduce(x, op=dist.ReduceOp.SUM, group=group)
 
 
