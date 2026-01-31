@@ -90,9 +90,13 @@ class KVCacheArgs:
         _check_positive(self.cache_length, "cache_length")
         assert self.cache_length >= 1
         if not (0 <= self.grace_period < self.cache_length):
-            raise ValueError(f"grace_period = {self.grace_period}, must be in [0, {self.cache_length}])")
+            raise ValueError(
+                f"grace_period = {self.grace_period}, must be in [0, {self.cache_length}])"
+            )
         if not (0 <= self.init_grace_tokens < self.cache_length):
-            raise ValueError(f"init_grace_tokens = {self.init_grace_tokens}, must be in [0, {self.cache_length}])")
+            raise ValueError(
+                f"init_grace_tokens = {self.init_grace_tokens}, must be in [0, {self.cache_length}])"
+            )
         # Deprecated
         if self.verbose is None:
             self.verbose = VerbosityLevels.SOME.value

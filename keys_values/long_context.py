@@ -718,7 +718,12 @@ class LongContextInferenceModel(GPTAndHeadModel):
             # Do not use!
             chunks_per_cell = [len(chunk_sizes)]
         else:
-            factor = 2 * self.config.n_query_groups * self.config.head_size / self.config.n_embd
+            factor = (
+                2
+                * self.config.n_query_groups
+                * self.config.head_size
+                / self.config.n_embd
+            )
             max_cache_length = max(
                 cache.cache_length for cache in self.gpt_model.get_kv_caches()
             )

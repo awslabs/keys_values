@@ -648,10 +648,10 @@ class CausalSelfAttention(nn.Module):
         # Split qkv into query, key and value matrices.
         q, k, v = qkv.split((query_size, key_size, key_size), dim=-1)
         # DEBUG
-        #check_for_nan(x, "CausalSelfAttention.forward start", "x")
-        #check_for_nan(q, "CausalSelfAttention.forward start", "q")
-        #check_for_nan(k, "CausalSelfAttention.forward start", "k")
-        #check_for_nan(v, "CausalSelfAttention.forward start", "v")
+        # check_for_nan(x, "CausalSelfAttention.forward start", "x")
+        # check_for_nan(q, "CausalSelfAttention.forward start", "q")
+        # check_for_nan(k, "CausalSelfAttention.forward start", "k")
+        # check_for_nan(v, "CausalSelfAttention.forward start", "v")
         # END DEBUG
 
         if self.config.norm_qk and self.config.norm_qk_type == "olmo2":
@@ -705,9 +705,9 @@ class CausalSelfAttention(nn.Module):
         else:
             # Defer this to KV cache
             # DEBUG
-            #check_for_nan(q, "CausalSelfAttention.forward self.kv_cache", "q")
-            #check_for_nan(k, "CausalSelfAttention.forward self.kv_cache", "k")
-            #check_for_nan(v, "CausalSelfAttention.forward self.kv_cache", "v")
+            # check_for_nan(q, "CausalSelfAttention.forward self.kv_cache", "q")
+            # check_for_nan(k, "CausalSelfAttention.forward self.kv_cache", "k")
+            # check_for_nan(v, "CausalSelfAttention.forward self.kv_cache", "v")
             # END DEBUG
             y = self.kv_cache(
                 query=q,
@@ -717,7 +717,7 @@ class CausalSelfAttention(nn.Module):
             )
 
         # Output projection
-        #check_for_nan(y, "CausalSelfAttention.forward", "y")
+        # check_for_nan(y, "CausalSelfAttention.forward", "y")
         y = self._transform_output(y, query=q, mha=mha)
         return self.proj(y)  # (batch_size, num, n_embd)
 

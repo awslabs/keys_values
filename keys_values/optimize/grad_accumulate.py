@@ -76,6 +76,7 @@ class CPUOffloadAccumulateGradients:
       between devices only happens here.
 
     """
+
     def __init__(
         self,
         group: Optional[List[int]] = None,
@@ -88,7 +89,9 @@ class CPUOffloadAccumulateGradients:
         else:
             group = sorted(group)
             if fabric is not None and group != list(range(world_size)):
-                raise ValueError(f"group = {group}. If fabric is given, this must be {list(range(world_size))}")
+                raise ValueError(
+                    f"group = {group}. If fabric is given, this must be {list(range(world_size))}"
+                )
             sz = len(group)
             if group[0] < 0 or any(x == y for x, y in zip(group[:-1], group[1:])):
                 raise ValueError(
@@ -159,7 +162,9 @@ class CPUOffloadAccumulateGradients:
             if use_dist:
                 for vec in flat_vectors.values():
                     DistributedPrimitives.all_reduce_sum(
-                        vec, self.fabric, self.group,
+                        vec,
+                        self.fabric,
+                        self.group,
                     )
             AccessWeightsGradients(module_on_device).accumulate_gradients(flat_vectors)
 
@@ -179,17 +184,21 @@ class CPUOffloadAccumulateGradients:
                 if dtype_str is None:
                     dtype_str = str(param.dtype)
         if dtype_str is None:
-            raise AssertionError(f"No gradients in model for params flagged by `name_predicate`")
+            raise AssertionError(
+                f"No gradients in model for params flagged by `name_predicate`"
+            )
         if dtype_str not in flat_vectors:
-            raise AssertionError(f"dtype_str = {dtype_str}, keys = {list(flat_vectors.keys())}")
+            raise AssertionError(
+                f"dtype_str = {dtype_str}, keys = {list(flat_vectors.keys())}"
+            )
         fvec = flat_vectors[dtype_str]
         for entry in access._grad_structure[dtype_str].entries:
             name = entry.name
             if name_predicate(name):
                 start = entry.offset
                 end = start + entry.size
-                debug_info[prefix + "_fvec:" + name] = fvec[start:end].clone().reshape(
-                    *entry.shape
+                debug_info[prefix + "_fvec:" + name] = (
+                    fvec[start:end].clone().reshape(*entry.shape)
                 )
         return debug_info
 
@@ -215,7 +224,9 @@ class CPUOffloadAccumulateGradients:
         start_time = time.perf_counter()
         for vec in flat_vectors.values():
             DistributedPrimitives.all_reduce_sum(
-                vec, self.fabric, self.group,
+                vec,
+                self.fabric,
+                self.group,
             )
             if start_time is not None:
                 idle_time = time.perf_counter() - start_time
@@ -231,7 +242,9 @@ class CPUOffloadAccumulateGradients:
                     "after",
                 )
             )
-            fname = f"./grad_accumulate_iter{self._debug_iter_count}_rank{self.rank()}.pth"
+            fname = (
+                f"./grad_accumulate_iter{self._debug_iter_count}_rank{self.rank()}.pth"
+            )
             print(f"DEBUG: Storing matching gradients before/after to {fname}")
             torch.save(debug_info, fname)
             self._debug_iter_count += 1
@@ -247,16 +260,32 @@ class CPUOffloadAccumulateGradients:
             (torch.device("cuda", my_rank), 2),
         ]
         for device, mult in setups:
-            vec = torch.arange(
-                1, 10, dtype=torch.int32, device=device,
-            ) * my_rank * mult
+            vec = (
+                torch.arange(
+                    1,
+                    10,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                * my_rank
+                * mult
+            )
             DistributedPrimitives.all_reduce_sum(vec, self.fabric, self.group)
             all_factor = sum(self.group)
-            should_be = torch.arange(
-                1, 10, dtype=torch.int32, device=device,
-            ) * all_factor * mult
+            should_be = (
+                torch.arange(
+                    1,
+                    10,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                * all_factor
+                * mult
+            )
             if not (vec == should_be).all().item():
-                raise AssertionError(f"Rank {my_rank}, device {device}: Have {vec} after all_reduce, should have {should_be}")
+                raise AssertionError(
+                    f"Rank {my_rank}, device {device}: Have {vec} after all_reduce, should have {should_be}"
+                )
 
     @property
     def is_distributed(self) -> bool:

@@ -86,7 +86,7 @@ class MyPerChannelMinMaxObserver(PerChannelMinMaxObserver):
         if self.min_val is not None:
             raise IndexError("Cannot call more than once")
         y = torch.flatten(x_orig.detach(), start_dim=1)
-        #if torch.isnan(y).any().item():
+        # if torch.isnan(y).any().item():
         #    print(f"{torch.isnan(y).sum().item()} NANs detected, shape = {y.shape}")
         min_val, max_val = torch.aminmax(y, dim=1)
         # dtype casting only here, not on `y`

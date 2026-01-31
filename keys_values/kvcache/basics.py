@@ -610,7 +610,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             ntp, ntp + num1, device=self.device, dtype=torch.int
         )
         if diff > 0:
-            self.token_pos[start:(start + diff)] = torch.arange(
+            self.token_pos[start : (start + diff)] = torch.arange(
                 ntp + num1, ntp + num, device=self.device, dtype=torch.int
             )
         np += num

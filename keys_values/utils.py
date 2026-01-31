@@ -139,7 +139,10 @@ def check_for_nan(
             extra_txt = ": " + extra_txt
         else:
             extra_txt = ""
-        print(f"From {meth_name}: {key_name} has {num_nan} NaNs [shape={x.shape}, numel={x.numel()}]" + extra_txt)
+        print(
+            f"From {meth_name}: {key_name} has {num_nan} NaNs [shape={x.shape}, numel={x.numel()}]"
+            + extra_txt
+        )
         if do_boom:
             raise AssertionError("BOOM")
     return num_nan
@@ -154,22 +157,28 @@ def check_for_nan_module_weights(
     is_boom = False
     for name, param in module.named_parameters():
         if param is not None:
-            if check_for_nan(
-                param.data,
-                "check_for_nan_model_weights",
-                name,
-                extra_msg,
-                do_boom=False,
-            ) > 0:
-                is_boom = True
-            if do_grads and param.grad is not None:
-                if check_for_nan(
-                    param.grad.data,
+            if (
+                check_for_nan(
+                    param.data,
                     "check_for_nan_model_weights",
-                    name + ".grad",
+                    name,
                     extra_msg,
                     do_boom=False,
-                ) > 0:
+                )
+                > 0
+            ):
+                is_boom = True
+            if do_grads and param.grad is not None:
+                if (
+                    check_for_nan(
+                        param.grad.data,
+                        "check_for_nan_model_weights",
+                        name + ".grad",
+                        extra_msg,
+                        do_boom=False,
+                    )
+                    > 0
+                ):
                     is_boom = True
     if do_boom and is_boom:
         raise AssertionError("BOOM")

@@ -480,7 +480,8 @@ class GPTShardCellBlock(CellBlocks):
 
 
 FLOAT_DTYPES_FROM_STR = {
-    str(dtype): dtype for dtype in (
+    str(dtype): dtype
+    for dtype in (
         torch.float32,
         torch.float16,
         torch.bfloat16,
@@ -558,7 +559,9 @@ class ModelFromFlatVectorsFactory:
         if len(dtypes) == 1:
             torch.set_default_dtype(dtypes[0])
         elif len(dtypes) > 1:
-            raise ValueError(f"weights_vecs.keys() = {list(weights_vecs.keys())}, must have exactly one float dtype")
+            raise ValueError(
+                f"weights_vecs.keys() = {list(weights_vecs.keys())}, must have exactly one float dtype"
+            )
 
     @staticmethod
     def create_wte(

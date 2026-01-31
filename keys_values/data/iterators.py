@@ -59,6 +59,7 @@ class LongestFirstIterable(Iterable):
     `inds_longest`.
 
     """
+
     def __init__(
         self,
         dataset_size: int,
@@ -89,7 +90,9 @@ class SimilarSequenceLengthIterator(Iterator):
         assert micro_batch_size >= 1
         assert num_devices >= 1
         if micro_batch_size == 1 and num_devices == 1:
-            raise ValueError("This sampler requires micro_batch_size > 1 or num_devices > 1")
+            raise ValueError(
+                "This sampler requires micro_batch_size > 1 or num_devices > 1"
+            )
         self.dataset_size = len(sequence_lengths)
         self.micro_batch_size = micro_batch_size
         self.num_devices = num_devices
@@ -190,6 +193,7 @@ class SimilarSequenceLengthIterable(Iterable):
     devices. Does this happen?
 
     """
+
     def __init__(
         self,
         sequence_lengths: List[int],
