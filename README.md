@@ -408,8 +408,9 @@ currently supported:
   only be used for sequences of length up to `cache_length`.
 * `lastrec`: [LastRecentlyInsertedKVCache](./keys_values/kvcache/basics.py#L478).
   This cache maintains KV information for the `cache_length` last recently
-  inserted tokens in the cache. When the cache is full, new information
-  overwrites slots which have not been overwritten for the longest time.
+  inserted tokens in the cache (but see `init_grace_tokens` argument). When the
+  cache is full, new information overwrites slots which have not been
+  overwritten for the longest time.
 * `h2o`: [H2OKVCache](./keys_values/kvcache/h2o.py#L28). Implements an improved
   variant of the heavy hitter oracle (H2O) strategy (for citation, see
   docstring). H2O scores each `(b, h, j)` by the sum of attention weights
@@ -467,6 +468,8 @@ are:
 * `max_chunk_size`: Not for `dense`, `lastrec`. Limits the length
   `query.shape[2]` for calls to `kv_cache.forward` except for the prefill (when
   `input_pos == 0`). This is used to speed up finding the score minimizers.
+* `init_grace_tokens`: Only for `lastrec`. KV information for the first
+  `init_grace_tokens` tokens remains in the cache.
 * `keep_initial_fraction`: Not for `dense`, `lastrec`. See docstring of
   [AttnWeightsKVCache](./keys_values/kvcache/attn_weights.py#L283).
 * `normalize_scores`: Not for `dense`, `lastrec`. Scores are cumulative over

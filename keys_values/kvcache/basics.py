@@ -450,6 +450,7 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
         cache_length: int,
         batch_size: int,
         n_query_groups: int,
+        init_grace_tokens: int,
     ):
         super().__init__(
             token_chunks,
@@ -458,6 +459,7 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
             grace_period=0,
         )
         self._shape = (batch_size, n_query_groups)
+        self.init_grace_tokens = init_grace_tokens
 
     def extract_index(
         self,
@@ -475,10 +477,13 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
                 f"input_pos = {input_pos} must be >= {self.cache_length} = cache_length"
             )
         device = kwargs.get("device", torch.get_default_device())
+        start = self.init_grace_tokens
+        mod = self.cache_length - start
+        current = (input_pos - self.cache_length) % mod + start
         return positions_wrap_around(
             num=num,
-            current=input_pos % self.cache_length,
-            start=0,
+            current=current,
+            start=start,
             end=self.cache_length,
             batch_size=self._shape[0],
             n_query_groups=self._shape[1],
@@ -494,6 +499,10 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     those slots are overwritten whose content is in the cache for the
     longest time.
 
+    If `init_grace_tokens > 0`, this number of initial keys and values are kept
+    in the cache indefinitely. Use this in order to cater for initial prompt
+    tokens which may be important.
+
     """
 
     def __init__(
@@ -501,9 +510,13 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         config: Config,
         buffers: KVCacheBuffers,
         block_idx: int,
+        init_grace_tokens: int = 0,
         **base_kwargs,
     ):
+        if init_grace_tokens < 0:
+            raise ValueError(f"init_grace_tokens={init_grace_tokens}, must be >= 0")
         super().__init__(config, buffers, block_idx, **base_kwargs)
+        self.init_grace_tokens = init_grace_tokens
         # Note: We could generate `token_pos` on the fly from `input_pos`
         # and `next_position`, but it is simpler just to maintain it.
         device = self._default_device_for_new_params()
@@ -522,6 +535,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         max_batch_size: int,
         cache_length: int,
         block_idx: int,
+        init_grace_tokens: int = 0,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         **base_kwargs,
@@ -533,6 +547,8 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             config: Model config
             max_batch_size: Maximum batch size supported
             cache_length: Number of slots (i.e., tokens) in cache
+            init_grace_tokens: This number of initial keys and values are
+                kept in the cache indefinitely. Defaults to 0.
             device: Device for buffers. If not given, it is set with the
                 first :meth:`forward` call, based on the input arguments.
             dtype: Data type for buffers. If not given, it is set with the
@@ -553,6 +569,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             config,
             buffers,
             block_idx,
+            init_grace_tokens=init_grace_tokens,
             **base_kwargs,
         )
 
@@ -561,7 +578,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         return super()._parameter_names() + ["token_pos"]
 
     def max_forward_length(self) -> int:
-        return self.cache_length
+        return self.cache_length - self.init_grace_tokens
 
     def _forward_internal(
         self,
@@ -570,10 +587,11 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
         num = key.shape[2]
+        start = self.init_grace_tokens
         positions = positions_wrap_around(
             num=num,
             current=self.next_position,
-            start=0,
+            start=start,
             end=self.cache_length,
             batch_size=self.batch_size,
             n_query_groups=self.n_query_groups,
@@ -592,10 +610,14 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             ntp, ntp + num1, device=self.device, dtype=torch.int
         )
         if diff > 0:
-            self.token_pos[:diff] = torch.arange(
+            self.token_pos[start:(start + diff)] = torch.arange(
                 ntp + num1, ntp + num, device=self.device, dtype=torch.int
             )
-        self.next_position = (np + num) % self.cache_length
+        np += num
+        diff = np - self.cache_length
+        if diff >= 0:
+            np = diff + start
+        self.next_position = np
         if self._replay_log is not None:
             if not isinstance(self._replay_log, DefaultKVCacheReplayLog):
                 raise IndexError(
@@ -612,7 +634,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     ):
         init_length = key.shape[2]
         self.kv_buffers.prefill(key, value)
-        self.next_position = init_length % self.cache_length
+        self.next_position = init_length
         self.token_pos[:init_length] = torch.arange(
             init_length,
             dtype=self.token_pos.dtype,
@@ -671,6 +693,11 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
 
     def get_replay_log(self) -> Optional[KVCacheReplayLog]:
         return copy.copy(self._replay_log)
+
+    def _base_kwargs_for_clone(self) -> Dict[str, Any]:
+        result = super()._base_kwargs_for_clone()
+        result["init_grace_tokens"] = self.init_grace_tokens
+        return result
 
     def clone(self) -> KVCache:
         return LastRecentlyInsertedKVCache(**self._base_kwargs_for_clone())
