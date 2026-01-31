@@ -730,8 +730,10 @@ class LongContextInferenceModel(GPTAndHeadModel):
             num_chunks = 0
             for chunk_size in chunk_sizes:
                 new_length = cell_length + chunk_size
-                if new_length > max_cell_length:
-                    assert num_chunks > 0  # Sanity check
+                # If a single chunk is longer than `max_cell_length` (for
+                # example, the first one -- prefill), we need to make an
+                # exception to have a cell longer than `max_cell_length`:
+                if new_length > max_cell_length and num_chunks > 0:
                     chunks_per_cell.append(num_chunks)
                     cell_length = chunk_size
                     num_chunks = 1
