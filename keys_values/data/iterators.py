@@ -188,10 +188,6 @@ class SimilarSequenceLengthIterable(Iterable):
     * Given that, if `shuffle=True`, macro-batches are ordered randomly, and
       the order of micro-batches in each macro-batch are random as well
 
-    TODO: Another feature would be a preferred order of micro-batches
-    inside macro-batches, to counter speed differences between the
-    devices. Does this happen?
-
     """
 
     def __init__(

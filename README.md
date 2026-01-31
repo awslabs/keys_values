@@ -300,6 +300,14 @@ Relevant arguments for `LongBenchV2` (which is the default dataset):
   - "rest": All cases with sequence length > `data.max_seq_length`, sorted by
     token sequence length (non-decreasing).
 
+> When implementing a new `DataModule` for your dataset, we strongly recommend
+> you adopting [SimilarSequenceLengthIterable](./keys_values/data/iterators.py#L172)
+> as `sampler` for the `DataLoader` object returned by `train_dataloader`. This
+> requires the sequence lengths (in tokens) for all training data cases, which
+> you need to compute when the dataset is first loaded. Since this takes time,
+> we recommend you store these lengths as meta-data. See `LongBenchV2` for a
+> complete example.
+
 Training loss function and head model are represented by
 [HeadModel](./keys_values/head_model.py#L24). In general, the LLM outputs a logits
 tensor over the vocabulary, which the head model maps to a loss function value,
