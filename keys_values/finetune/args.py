@@ -127,8 +127,11 @@ class GradientArgs:
         chunks_per_cell_multiplier: Each cell contains a number of chunks. The
             length of a cell is the sum of lengths of its cells. We assign
             chunks to cells so that cell lengths are close to
-            `int(cache_length * chunks_per_cell_multiplier)`, but not larger.
-            GPU memory scales linearly in this number.
+            `int(factor * cache_length * chunks_per_cell_multiplier)`, but not
+            larger. Here, `factor = 2 * n_query_groups * head_size / n_embd`.
+            If `chunks_per_cell_multiplier == 1`, this means that embeddings for
+            this cell are as large as KV cache buffers. GPU memory scales
+            linearly in this number.
         single_tokens_for_targets: If `True`, the targets part of a sequence is
             processed token per token (i.e., with chunk size 1). This is slower,
             but more realistic, mirroring how inference looks like.

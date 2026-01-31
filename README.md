@@ -694,13 +694,15 @@ Important arguments for gradient computations are:
   computation. Note that the CPU memory for layer input checkpoints scales
   inverse linearly with this number.
 * `--grad.chunks_per_cell_multiplier`: The length of a cell is the sum of
-  its chunk's lengths. If `max_cell_length = int(kv_cache.cache_length *
+  its chunk's lengths. If `max_cell_length = int(factor * kv_cache.cache_length *
   grad.chunks_per_cell_multiplier)`, chunks are grouped into a cell until
-  its length is close to `max_cell_length`, but not larger. By default,
-  `grad.chunks_per_cell_multiplier = 1`, so cells are about as long as
-  the KV cache. For larger values of the multiplier, there are fewer cells per
-  row, which speeds up computations. Second phase GPU memory requirements
-  depend linearly on this number.
+  its length is close to `max_cell_length`, but not larger. Here,
+  `factor = 2 * n_query_groups * head_size / n_embd`. By default,
+  `grad.chunks_per_cell_multiplier = 1`, so that embeddings for a cell need as
+  much memory as the (uncompressed) KV cache buffers (these two being the
+  main memory blocks needed). For larger values of the multiplier, there are
+  fewer cells per row, which speeds up computations. Second phase GPU memory
+  requirements depend linearly on this number.
 
 These two are important hyper-parameters, to be adjusted to use as much of
 the available GPU as possible. Further arguments are documented in
@@ -718,7 +720,7 @@ trade-off is:
 
 * Maximize `chunks_per_cell_multiplier`, keep `layers_per_cell=1`: Most weights
   are offloaded, leaving most GPU memory for cells. Fewer cells run faster, less
-  GPU memory for KV cache checkpoints.But more activation checkpoints are written
+  GPU memory for KV cache checkpoints. But more activation checkpoints are written
   and read, which is slower due to GPU-CPU synchronization.
 * Maximize `layers_per_cell`, keep `chunks_per_cell_multiplier=1` (or even
   below): More weights are kept on GPU in `backward`, and there are more KV cache
