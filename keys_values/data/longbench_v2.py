@@ -356,27 +356,39 @@ class LongBenchV2(DataModule):
             **self._dataloader_kwargs,
         )
 
-    # TODO: Use _sequence_lengths["test"]
     def test_dataloader(self, num_devices: int = 1) -> DataLoader:
         if self.test_dataset is None:
             raise IndexError("Test dataset is not defined. Use 'test_set_tag'")
+        assert self._sequence_lengths is not None
+        assert len(self._sequence_lengths["test"]) == len(self.test_dataset)
         if self._test_eval_tasks is None:
-            return DataLoader(
-                ReorderWrapperDataset(
-                    self.test_dataset,
-                    num_devices=num_devices,
-                    batch_size=self.test_batch_size,
-                ),
+            _test_dataset = ReorderWrapperDataset(
+                self.test_dataset,
+                num_devices=num_devices,
                 batch_size=self.test_batch_size,
-                shuffle=False,
+            )
+            sequence_lengths = _test_dataset.reorder_list(
+                self._sequence_lengths["test"]
+            )
+            return DataLoader(
+                _test_dataset,
+                batch_size=self.test_batch_size,
+                sampler=SimilarSequenceLengthIterable(
+                    sequence_lengths=sequence_lengths,
+                    micro_batch_size=self.test_batch_size,
+                    num_devices=self.num_devices,
+                    shuffle=False,
+                ),
                 collate_fn=self._get_collate_fn(),
                 **self._dataloader_kwargs,
             )
         else:
             # Cross product between test dataset and evaluation tasks (these
             # are typically different model checkpoints)
+            # TODO: Use _sequence_lengths["test"]
+            # ==> More complex!
             collate_fn = get_wrapped_collate_fn(self._get_collate_fn())
-            dataset = EvaluationWithTasksDataset(
+            _test_dataset = EvaluationWithTasksDataset(
                 dataset=self.test_dataset,
                 tasks=self._test_eval_tasks,
                 batch_size=self.test_batch_size,
@@ -384,7 +396,7 @@ class LongBenchV2(DataModule):
             )
             return DataLoader(
                 ReorderWrapperDataset(
-                    dataset,
+                    _test_dataset,
                     num_devices=num_devices,
                     batch_size=self.test_batch_size,
                 ),

@@ -281,6 +281,14 @@ class ReorderWrapperDataset(Dataset):
     def __len__(self) -> int:
         return len(self._dataset)
 
+    @staticmethod
+    def _idx_to_orig_idx(
+        idx: int, ndev: int, bs: int, period: int,
+    ) -> int:
+        offset = (idx // period) * period
+        orig_idx = idx % period
+        return (orig_idx % ndev) * bs + (orig_idx // ndev) + offset
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         num_cases = self.__len__()
         if not (0 <= idx < num_cases):
@@ -291,7 +299,32 @@ class ReorderWrapperDataset(Dataset):
             ndev = self._num_devices
             bs = self._batch_size
             period = ndev * bs
-            offset = (idx // period) * period
-            orig_idx = idx % period
-            orig_idx = (orig_idx % ndev) * bs + (orig_idx // ndev) + offset
+            orig_idx = self._idx_to_orig_idx(idx, ndev, bs, period)
         return self._dataset[orig_idx]
+
+    def reorder_list(self, x: list) -> list:
+        """
+        Reorders list `x` (same size as dataset) in the same way as the dataset
+        itself.
+
+        Args:
+            x (list): List to be reordered
+
+        Returns:
+            Reordered list
+
+        """
+        num_cases = self.__len__()
+        if len(x) != num_cases:
+            raise ValueError(f"len(x) = {len(x)}, must be {num_cases}")
+        if self._num_devices == 1 or self._batch_size == 1:
+            result = x
+        else:
+            ndev = self._num_devices
+            bs = self._batch_size
+            period = ndev * bs
+            result = []
+            for idx in range(num_cases):
+                orig_idx = self._idx_to_orig_idx(idx, ndev, bs, period)
+                result.append(x[orig_idx])
+        return result
