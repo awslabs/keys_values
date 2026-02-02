@@ -81,9 +81,9 @@ class LongBenchV2(DataModule):
     - `METADATA_SEQ_LENGTHS_KEY`: List of sequence lengths (in tokens) for
       each record
 
-    For the :meth:`train_dataloader` iterator, we use a
-    :class:`SimilarSequenceLengthIterable` sampler, which tries to form micro
-    and macro batches with sequences of similar length.
+    For the :meth:`train_dataloader` and :meth:`val_dataloader` iterators, we
+    use a :class:`SimilarSequenceLengthIterable` sampler, which tries to form
+    micro and macro batches with sequences of similar length.
 
     """
 
@@ -177,7 +177,7 @@ class LongBenchV2(DataModule):
         self._test_eval_tasks = None
         # Maintain sequence lengths (in tokens) for cases in training set.
         # This is used to support specialized data loaders.
-        self._sequence_lengths_for_train = None
+        self._sequence_lengths = None
 
     def connect(
         self,
@@ -253,9 +253,18 @@ class LongBenchV2(DataModule):
             generator=torch.Generator().manual_seed(self.seed),
         )
         train_data, val_data = list(train_data), list(val_data)
-        self._sequence_lengths_for_train = [
-            record["num_tokens_instruction"] for record in train_data
-        ]
+        self._sequence_lengths = {
+            "train": [
+                record["num_tokens_instruction"] for record in train_data
+            ],
+            "valid": [
+                record["num_tokens_instruction"] for record in val_data
+            ],
+        }
+        if test_data is not None:
+            self._sequence_lengths["test"] = [
+                record["num_tokens_instruction"] for record in test_data
+            ]
 
         if not self._is_sequence_classification:
             self.train_dataset = SFTDataset(
@@ -314,14 +323,14 @@ class LongBenchV2(DataModule):
             return get_seq_class_collate_fn()
 
     def train_dataloader(self) -> DataLoader:
-        assert self._sequence_lengths_for_train is not None
-        assert len(self._sequence_lengths_for_train) == len(self.train_dataset)
+        assert self._sequence_lengths is not None
+        assert len(self._sequence_lengths["train"]) == len(self.train_dataset)
         torch.random.manual_seed(self.seed)
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
             sampler=SimilarSequenceLengthIterable(
-                sequence_lengths=self._sequence_lengths_for_train,
+                sequence_lengths=self._sequence_lengths["train"],
                 micro_batch_size=self.batch_size,
                 num_devices=self.num_devices,
                 shuffle=True,
@@ -332,14 +341,22 @@ class LongBenchV2(DataModule):
         )
 
     def val_dataloader(self) -> DataLoader:
+        assert self._sequence_lengths is not None
+        assert len(self._sequence_lengths["valid"]) == len(self.val_dataset)
         return DataLoader(
             self.val_dataset,
             batch_size=self.val_batch_size,
-            shuffle=False,
+            sampler=SimilarSequenceLengthIterable(
+                sequence_lengths=self._sequence_lengths["valid"],
+                micro_batch_size=self.val_batch_size,
+                num_devices=self.num_devices,
+                shuffle=False,
+            ),
             collate_fn=self._get_collate_fn(),
             **self._dataloader_kwargs,
         )
 
+    # TODO: Use _sequence_lengths["test"]
     def test_dataloader(self, num_devices: int = 1) -> DataLoader:
         if self.test_dataset is None:
             raise IndexError("Test dataset is not defined. Use 'test_set_tag'")

@@ -302,11 +302,11 @@ Relevant arguments for `LongBenchV2` (which is the default dataset):
 
 > When implementing a new `DataModule` for your dataset, we strongly recommend
 > you adopting [SimilarSequenceLengthIterable](./keys_values/data/iterators.py#L172)
-> as `sampler` for the `DataLoader` object returned by `train_dataloader`. This
-> requires the sequence lengths (in tokens) for all training data cases, which
-> you need to compute when the dataset is first loaded. Since this takes time,
-> we recommend you store these lengths as meta-data. See `LongBenchV2` for a
-> complete example.
+> as `sampler` for the `DataLoader` objects returned by `train_dataloader` and
+> `val_dataloader` (as well as `test_dataloader` if this is provided). This
+> requires the sequence lengths (in tokens) for all data cases, which you need
+> to compute when the dataset is first loaded. Since this takes time, we recommend
+> you store these lengths as meta-data. See `LongBenchV2` for a complete example.
 
 Training loss function and head model are represented by
 [HeadModel](./keys_values/head_model.py#L24). In general, the LLM outputs a logits
