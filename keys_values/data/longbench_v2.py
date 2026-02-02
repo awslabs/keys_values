@@ -24,6 +24,7 @@ from litgpt.data import DataModule
 from litgpt.prompts import Default
 from litgpt.tokenizer import Tokenizer
 
+from keys_values.data.base import pad_dataset
 from keys_values.data.evaluation import (
     EvaluationWithTasksDataset,
     get_wrapped_collate_fn,
@@ -268,7 +269,11 @@ class LongBenchV2(DataModule):
 
         if not self._is_sequence_classification:
             self.train_dataset = SFTDataset(
-                data=train_data,
+                data=pad_dataset(
+                    train_data,
+                    batch_size=self.batch_size,
+                    num_devices=self.num_devices,
+                ),
                 tokenizer=self.tokenizer,
                 prompt_style=Default(),
                 max_seq_length=self.max_seq_length,
@@ -276,7 +281,11 @@ class LongBenchV2(DataModule):
                 ignore_index=self.ignore_index,
             )
             self.val_dataset = SFTDataset(
-                data=val_data,
+                data=pad_dataset(
+                    val_data,
+                    batch_size=self.batch_size,
+                    num_devices=self.num_devices,
+                ),
                 tokenizer=self.tokenizer,
                 prompt_style=Default(),
                 max_seq_length=self.max_seq_length,
@@ -285,7 +294,11 @@ class LongBenchV2(DataModule):
             )
             if test_data is not None:
                 self.test_dataset = SFTDataset(
-                    data=test_data,
+                    data=pad_dataset(
+                        test_data,
+                        batch_size=self.batch_size,
+                        num_devices=self.num_devices,
+                    ),
                     tokenizer=self.tokenizer,
                     prompt_style=Default(),
                     max_seq_length=-1,
@@ -294,14 +307,22 @@ class LongBenchV2(DataModule):
                 )
         else:
             self.train_dataset = SequenceClassificationDataset(
-                data=train_data,
+                data=pad_dataset(
+                    train_data,
+                    batch_size=self.batch_size,
+                    num_devices=self.num_devices,
+                ),
                 tokenizer=self.tokenizer,
                 prompt_style=Default(),
                 class_labels=CLASS_LABELS,
                 max_seq_length=self.max_seq_length,
             )
             self.val_dataset = SequenceClassificationDataset(
-                data=val_data,
+                data=pad_dataset(
+                    val_data,
+                    batch_size=self.batch_size,
+                    num_devices=self.num_devices,
+                ),
                 tokenizer=self.tokenizer,
                 prompt_style=Default(),
                 class_labels=CLASS_LABELS,
@@ -309,7 +330,11 @@ class LongBenchV2(DataModule):
             )
             if test_data is not None:
                 self.test_dataset = SequenceClassificationDataset(
-                    data=test_data,
+                    data=pad_dataset(
+                        test_data,
+                        batch_size=self.batch_size,
+                        num_devices=self.num_devices,
+                    ),
                     tokenizer=self.tokenizer,
                     prompt_style=Default(),
                     class_labels=CLASS_LABELS,
@@ -327,7 +352,11 @@ class LongBenchV2(DataModule):
         assert len(self._sequence_lengths["train"]) == len(self.train_dataset)
         torch.random.manual_seed(self.seed)
         return DataLoader(
-            self.train_dataset,
+            ReorderWrapperDataset(
+                self.train_dataset,
+                num_devices=self.num_devices,
+                batch_size=self.batch_size,
+            ),
             batch_size=self.batch_size,
             sampler=SimilarSequenceLengthIterable(
                 sequence_lengths=self._sequence_lengths["train"],
@@ -344,7 +373,11 @@ class LongBenchV2(DataModule):
         assert self._sequence_lengths is not None
         assert len(self._sequence_lengths["valid"]) == len(self.val_dataset)
         return DataLoader(
-            self.val_dataset,
+            ReorderWrapperDataset(
+                self.val_dataset,
+                num_devices=self.num_devices,
+                batch_size=self.val_batch_size,
+            ),
             batch_size=self.val_batch_size,
             sampler=SimilarSequenceLengthIterable(
                 sequence_lengths=self._sequence_lengths["valid"],
