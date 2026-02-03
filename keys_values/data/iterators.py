@@ -93,7 +93,10 @@ class SimilarSequenceLengthIterator(Iterator):
             raise ValueError(
                 "This sampler requires micro_batch_size > 1 or num_devices > 1"
             )
-        self.dataset_size = len(sequence_lengths)
+        global_batch_size = micro_batch_size * num_devices
+        num_chunks = math.ceil(len(sequence_lengths) / global_batch_size)
+        self.dataset_size = num_chunks * global_batch_size
+        self.padding_size = self.dataset_size - len(sequence_lengths)
         self.micro_batch_size = micro_batch_size
         self.num_devices = num_devices
         self._shuffle = shuffle
@@ -106,35 +109,41 @@ class SimilarSequenceLengthIterator(Iterator):
     def _initialize(self, sequence_lengths: List[int]):
         # Sort from shortest to longest
         inds_ascending = torch.argsort(torch.tensor(sequence_lengths))
-        # If there is a shorter macro-batch, choose it in the middle
-        global_batch_size = self.micro_batch_size * self.num_devices
-        num_full_batches = self.dataset_size // global_batch_size
-        num_left = math.ceil(num_full_batches / 2)
-        start = num_left * global_batch_size
-        if num_left > 0:
-            parts_left = [
-                global_batch.split(self.micro_batch_size)
-                for global_batch in inds_ascending[:start].split(global_batch_size)
-            ]
-        else:
-            parts_left = []
-        num_right = num_full_batches - num_left
-        end = self.dataset_size - num_right * global_batch_size
-        if num_right > 0:
-            parts_right = [
-                global_batch.split(self.micro_batch_size)
-                for global_batch in inds_ascending[end:].split(global_batch_size)
-            ]
-        else:
-            parts_right = []
-        if start < end:
-            parts_mid = [
-                global_batch.split(self.micro_batch_size)
-                for global_batch in inds_ascending[start:end].split(global_batch_size)
-            ]
-        else:
-            parts_mid = []
-        self._partition = parts_left + parts_mid + parts_right
+        ndev = self.num_devices
+        mbs = self.micro_batch_size
+        global_batch_size = mbs * ndev
+        num_batches = self.dataset_size // global_batch_size
+        num_full_batches = num_batches - int(self.padding_size > 0)
+        # If the last macro-batch would be shorter than `num_devices`, we use two
+        # shorter macro-batches at the end (we cannot have empty micro-batches)
+        if 0 < self.padding_size < ndev:
+            num_full_batches -= 1
+        start = num_full_batches * global_batch_size
+        micro_batches = inds_ascending[:start].split(mbs)
+        num_mb = len(micro_batches)
+        assert num_mb == num_full_batches * ndev  # Sanity check
+        parts = [
+            micro_batches[off:(off + mbs)] for off in range(0, num_mb, mbs)
+        ]
+        rem_batches = num_batches - num_full_batches
+        if rem_batches > 0:
+            num_final = self.dataset_size - start
+            num_mb = rem_batches * ndev
+            mbs = math.ceil(num_final / num_mb)
+            assert mbs >= 1  # Sanity check
+            fix_me = num_mb * mbs - num_final
+            assert fix_me == 0 or mbs > 1  # Sanity check
+            sizes = [mbs] * (num_mb - fix_me) + [mbs - 1] * fix_me
+            assert sum(sizes) == num_final  # Sanity check
+            rem_micro_batches = inds_ascending[start:].split(sizes)
+            parts.append(rem_micro_batches[:ndev])
+            if rem_batches > 1:
+                parts.append(rem_micro_batches[ndev:])
+
+        # Sanity check
+        assert len(parts) == num_batches
+        assert all(len(x) == ndev for x in parts)
+        self._partition = parts
 
     def _create_permutation(self):
         def get_index(sz: int) -> List[int]:
@@ -177,6 +186,13 @@ class SimilarSequenceLengthIterable(Iterable):
     training over several devices. Batches are of size `micro_batch_size`
     per device, and there are `num_devices` devices. Also, `sequence_lengths`
     is the number of tokens per sequence.
+
+    Note: We assume the size of the dataset this sampler is applied to, is a
+    multiple of `micro_batch_size * num_devices`, possibly padded at the end
+    to reach this size. This means that `sequence_lengths` can be shorter than
+    the dataset size. When this happens, we ensure that the shorter macro-batch
+    is the last one (if `shuffle=False`), containing the longest sequences (as
+    well as pad entries).
 
     The method ensures that:
 

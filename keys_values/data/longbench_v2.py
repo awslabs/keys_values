@@ -24,11 +24,10 @@ from litgpt.data import DataModule
 from litgpt.prompts import Default
 from litgpt.tokenizer import Tokenizer
 
-from keys_values.data.base import pad_dataset
+from keys_values.data.base import pad_dataset, ReorderWrapperDataset
 from keys_values.data.evaluation import (
     EvaluationWithTasksDataset,
     get_wrapped_collate_fn,
-    ReorderWrapperDataset,
 )
 from keys_values.data.iterators import SimilarSequenceLengthIterable
 from keys_values.data.sequence_classification import (
@@ -246,6 +245,15 @@ class LongBenchV2(DataModule):
         self._get_dataset()
 
     def setup(self, stage: str = "") -> None:
+        """
+        Note: Datasets `train_dataset`, `val_dataset`, `test_dataset` are
+        padded so that their size becomes a multiple of
+        `batch_size * num_devices`, where `batch_size` is the respective
+        micro-batch size. Such padding entries are filtered out by the
+        collators. They are needed so that samplers can do their job
+        properly.
+
+        """
         data, test_data = self._get_dataset()
         # Partition the dataset into train and test
         train_data, val_data = random_split(
@@ -389,10 +397,11 @@ class LongBenchV2(DataModule):
             **self._dataloader_kwargs,
         )
 
-    # TODO: Use _sequence_lengths["test"]
     def test_dataloader(self, num_devices: int = 1) -> DataLoader:
         if self.test_dataset is None:
             raise IndexError("Test dataset is not defined. Use 'test_set_tag'")
+        assert self._sequence_lengths is not None
+        assert len(self._sequence_lengths["test"]) == len(self.test_dataset)
         if self._test_eval_tasks is None:
             return DataLoader(
                 ReorderWrapperDataset(
@@ -401,11 +410,17 @@ class LongBenchV2(DataModule):
                     batch_size=self.test_batch_size,
                 ),
                 batch_size=self.test_batch_size,
-                shuffle=False,
+                sampler=SimilarSequenceLengthIterable(
+                    sequence_lengths=self._sequence_lengths["test"],
+                    micro_batch_size=self.test_batch_size,
+                    num_devices=self.num_devices,
+                    shuffle=False,
+                ),
                 collate_fn=self._get_collate_fn(),
                 **self._dataloader_kwargs,
             )
         else:
+            # TODO: Use _sequence_lengths["test"]
             # Cross product between test dataset and evaluation tasks (these
             # are typically different model checkpoints)
             collate_fn = get_wrapped_collate_fn(self._get_collate_fn())
