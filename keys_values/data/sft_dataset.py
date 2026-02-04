@@ -23,7 +23,6 @@ from litgpt.tokenizer import Tokenizer
 from keys_values.data.base import (
     INPUT_IDS_NAME,
     LABELS_NAME,
-    is_pad_datacase,
     LongContextDataset,
     common_collate_fn,
 )
