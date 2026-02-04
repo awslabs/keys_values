@@ -149,7 +149,9 @@ class LongBenchV2(DataModule):
                 f"test_set_tag = {test_set_tag} is not supported, must be None or in {SUPPORTED_TEST_SET_TAGS}"
             )
         if trainloader_longest_first and trainloader_shortest_first:
-            raise ValueError("Cannot use both trainloader_longest_first and trainloader_shortest_first")
+            raise ValueError(
+                "Cannot use both trainloader_longest_first and trainloader_shortest_first"
+            )
         self.mask_prompt = mask_prompt
         self.val_split_fraction = val_split_fraction
         self.ignore_index = ignore_index

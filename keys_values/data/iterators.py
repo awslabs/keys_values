@@ -157,7 +157,9 @@ class SimilarSequenceLengthIterator(Iterator):
         if not self._shuffle and self._permutation is not None:
             return  # Ordering does not change
         num_outer = len(self._partition)
-        out_inds = get_index(num_outer - int(self._longest_first or self._shortest_first))
+        out_inds = get_index(
+            num_outer - int(self._longest_first or self._shortest_first)
+        )
         if self._longest_first:
             out_inds.insert(0, num_outer - 1)
         elif self._shortest_first:
