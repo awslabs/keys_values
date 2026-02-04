@@ -242,6 +242,8 @@ def setup(
             directory `f"iteration{step % record_gpu_memory_period}"`.
             If this is 0, files are not overwritten, we use `f"iteration{step}"`.
             Defaults to 0.
+        generate_with_eval: If `True`, we test token generation with each
+            evaluation
         profile_grad_times: If given, we profile complete gradient computation
             for this many steps, then stop. Results are written to CSV file.
         profile_parts: If given, we use `cProfile` to profile the first forward

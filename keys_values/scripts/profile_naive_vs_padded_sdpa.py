@@ -293,7 +293,7 @@ def main(
 
 
 def fingerprint(config: Config) -> Tuple[int, int, int]:
-    return (config.n_head, config.n_query_groups, config.head_size)
+    return config.n_head, config.n_query_groups, config.head_size
 
 
 if __name__ == "__main__":

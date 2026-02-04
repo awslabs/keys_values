@@ -56,6 +56,8 @@ def cell_computation(
             assigned.
         get_inputs_slice: Inputs to layer `first_layer_idx`
         input_pos: Input position for first chunk
+        debug_intermediates: For debugging
+        name_prefix: For debugging
 
     """
     output_parts = []

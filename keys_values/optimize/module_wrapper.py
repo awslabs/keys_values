@@ -144,8 +144,8 @@ class AccessWeightsGradients:
     def param_structure(self) -> Dict[str, ParameterStructure]:
         return self._param_structure
 
+    @staticmethod
     def _check_sizes(
-        self,
         structures: Dict[str, ParameterStructure],
         vecs: FlatVectors,
         vname: str,

@@ -545,8 +545,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
             self.debug_intermediates = None
         self._debug_no_deallocate_buffers = debug_no_deallocate_buffers
 
+    @staticmethod
     def _check_args(
-        self,
         gpt_model: GPT,
         chunk_size: int,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit],
