@@ -88,8 +88,8 @@ class CellBlocks:
             for block_idx, block, _ in self.blocks_with_kwargs()
         ]
 
+    @staticmethod
     def _check_kv_cache(
-        self,
         kv_cache: KVCache,
         block_idx: int,
         batch_size: int,

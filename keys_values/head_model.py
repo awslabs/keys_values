@@ -85,8 +85,8 @@ class HeadModel(torch.nn.Module):
         """
         raise NotImplementedError()
 
+    @staticmethod
     def _check_model_outputs_targets(
-        self,
         model_outputs: torch.Tensor,
         targets: Optional[torch.Tensor],
         final_dim: int,

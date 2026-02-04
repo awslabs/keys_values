@@ -547,6 +547,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             config: Model config
             max_batch_size: Maximum batch size supported
             cache_length: Number of slots (i.e., tokens) in cache
+            block_idx: Block index
             init_grace_tokens: This number of initial keys and values are
                 kept in the cache indefinitely. Defaults to 0.
             device: Device for buffers. If not given, it is set with the

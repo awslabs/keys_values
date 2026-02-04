@@ -129,10 +129,10 @@ def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
     assert (should_be == kv_cache.token_positions()[:, :, :num_insert]).all().item()
     # Compute MHA in steps
     kv_cache.reset()
-    y_parts = []
-    y_parts.append(kv_cache(**range_from_args(data, 0, num_prefill)))
-    for pos in range(num_prefill, num_insert):
-        y_parts.append(kv_cache(**range_from_args(data, pos, pos + 1)))
+    y_parts = [kv_cache(**range_from_args(data, 0, num_prefill))] + [
+        kv_cache(**range_from_args(data, pos, pos + 1))
+        for pos in range(num_prefill, num_insert)
+    ]
 
     assert kv_cache.current_length == num_insert
     assert (should_be == kv_cache.token_positions()[:, :, :num_insert]).all().item()

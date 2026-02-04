@@ -1052,7 +1052,8 @@ class CellComputationAutogradHooks(AutogradHooks):
             dim=2,
         )
 
-    def _map_type(self, x: torch.Tensor) -> str:
+    @staticmethod
+    def _map_type(x: torch.Tensor) -> str:
         x_dtype = x.dtype
         if x_dtype == torch.int64:
             return "I64"
