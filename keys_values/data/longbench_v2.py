@@ -102,6 +102,7 @@ class LongBenchV2(DataModule):
         metadata_dir: Optional[str] = None,
         debug_num_cases: Optional[int] = None,
         trainloader_longest_first: bool = False,
+        trainloader_shortest_first: bool = False,
         test_set_tag: Optional[str] = None,
     ):
         """
@@ -134,6 +135,8 @@ class LongBenchV2(DataModule):
                 the dataset, otherwise uses :class:`SimilarSequenceLengthIterable`.
                 This is useful to detect OOM errors early, since they are most
                 likely to happen with the longest batch.
+            trainloader_shortest_first: Same as `trainloader_longest_first`,
+                but the first batch contain the shortest sequences.
             test_set_tag: If this is given, we also maintain a test dataset
                 and serve a test dataloader. The tag determines how the test
                 set is chosen. Current choices:
@@ -145,6 +148,8 @@ class LongBenchV2(DataModule):
             raise ValueError(
                 f"test_set_tag = {test_set_tag} is not supported, must be None or in {SUPPORTED_TEST_SET_TAGS}"
             )
+        if trainloader_longest_first and trainloader_shortest_first:
+            raise ValueError("Cannot use both trainloader_longest_first and trainloader_shortest_first")
         self.mask_prompt = mask_prompt
         self.val_split_fraction = val_split_fraction
         self.ignore_index = ignore_index
@@ -173,6 +178,7 @@ class LongBenchV2(DataModule):
         self.val_dataset = None
         self.test_dataset = None
         self._trainloader_longest_first = trainloader_longest_first
+        self._trainloader_shortest_first = trainloader_shortest_first
         self.test_set_tag = test_set_tag
         self._test_eval_tasks = None
         # Maintain sequence lengths (in tokens) for cases in training set.
@@ -368,6 +374,7 @@ class LongBenchV2(DataModule):
                 num_devices=self.num_devices,
                 shuffle=True,
                 longest_first=self._trainloader_longest_first,
+                shortest_first=self._trainloader_shortest_first,
             ),
             collate_fn=self._get_collate_fn(),
             **self._dataloader_kwargs,
