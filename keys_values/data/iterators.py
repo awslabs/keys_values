@@ -86,6 +86,7 @@ class SimilarSequenceLengthIterator(Iterator):
         num_devices: int,
         shuffle: bool = True,
         longest_first: bool = False,
+        shortest_first: bool = False,
     ):
         assert micro_batch_size >= 1
         assert num_devices >= 1
@@ -93,6 +94,8 @@ class SimilarSequenceLengthIterator(Iterator):
             raise ValueError(
                 "This sampler requires micro_batch_size > 1 or num_devices > 1"
             )
+        if shortest_first and longest_first:
+            raise ValueError("Cannot set both shortest_first and longest_first")
         global_batch_size = micro_batch_size * num_devices
         num_chunks = math.ceil(len(sequence_lengths) / global_batch_size)
         self.dataset_size = num_chunks * global_batch_size
@@ -101,6 +104,7 @@ class SimilarSequenceLengthIterator(Iterator):
         self.num_devices = num_devices
         self._shuffle = shuffle
         self._longest_first = longest_first
+        self._shortest_first = shortest_first
         self._partition = None
         self._initialize(sequence_lengths)
         self._pos = self.dataset_size
@@ -153,9 +157,11 @@ class SimilarSequenceLengthIterator(Iterator):
         if not self._shuffle and self._permutation is not None:
             return  # Ordering does not change
         num_outer = len(self._partition)
-        out_inds = get_index(num_outer - int(self._longest_first))
+        out_inds = get_index(num_outer - int(self._longest_first or self._shortest_first))
         if self._longest_first:
             out_inds.insert(0, num_outer - 1)
+        elif self._shortest_first:
+            out_inds = [0] + [x + 1 for x in out_inds]
         parts = [
             self._partition[out_ind][inn_ind]
             for out_ind in out_inds
@@ -211,6 +217,7 @@ class SimilarSequenceLengthIterable(Iterable):
         num_devices: int,
         shuffle: bool = True,
         longest_first: bool = False,
+        shortest_first: bool = False,
     ):
         self._kwargs = {
             "sequence_lengths": sequence_lengths.copy(),
@@ -218,6 +225,7 @@ class SimilarSequenceLengthIterable(Iterable):
             "num_devices": num_devices,
             "shuffle": shuffle,
             "longest_first": longest_first,
+            "shortest_first": shortest_first,
         }
         self._len = len(sequence_lengths)
 

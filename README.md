@@ -289,9 +289,9 @@ Relevant arguments for `LongBenchV2` (which is the default dataset):
   validation dataset. The rest is used for training.
 * `data.trainloader_longest_first`: If `True`, the training dataloader returns
   the longest sequences in the first batch. This is useful in order to detect
-  out of memory errors early.<br>
-  Note that the current implementation does not otherwise cluster the cases so
-  that sequences in a batch are most similar in length.
+  out of memory errors early.
+* `data.trainloader_shortest_first`: If `True`, the training dataloader returns
+  the shortest sequences in the first batch. This can be useful for debugging.
 * `data.num_workers`, `data.pin_memory`: Arguments passed to
   `torch.utils.data.DataLoader`.
 * `data.test_set_tag`: If this is given, we also maintain a test dataset and
