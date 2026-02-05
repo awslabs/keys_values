@@ -16,8 +16,10 @@ from dataclasses import replace
 
 import torch
 import pytest
+import lightning as L
 
 from litgpt.config import Config
+from litgpt.utils import _RunIf
 
 from keys_values.head_model import CrossEntropyOnLogits, SequenceClassification
 from keys_values.head_model_factory import HeadModelFactory
@@ -30,6 +32,7 @@ from keys_values.kvcache.test_utils import (
     cache_names_and_devices,
 )
 from keys_values.model import GPT
+from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.utils import randint_torch
 
 
@@ -199,9 +202,8 @@ def test_complete_gradient_computation(
 
 def args_copy_model_to_device():
     return [
-        (device, dtype, name)
-        for device, dtype, name in product(
-            available_backends(do_mps=False),
+        (dtype, name)
+        for dtype, name in product(
             [torch.bfloat16, torch.float16, torch.float32],
             [
                 name
@@ -212,16 +214,34 @@ def args_copy_model_to_device():
     ]
 
 
+@_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
-    "cpu_offload_device, dtype, cache_name",
+    "dtype, cache_name",
     args_copy_model_to_device(),
 )
-def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
+def test_copy_model_to_device(dtype, cache_name):
+    fabric = L.Fabric(
+        devices=1,
+        num_nodes=1,
+        strategy="auto",
+        precision="bf16-true",
+    )
+    fabric.launch(
+        run_copy_model_to_device,
+        dtype=dtype,
+        cache_name=cache_name,
+    )
+
+
+def run_copy_model_to_device(
+    fabric: L.Fabric, dtype: torch.dtype, cache_name: str,
+):
     seed = 31415927
     torch.random.manual_seed(seed)
     torch.set_default_dtype(dtype)
 
     device = torch.device("cpu")
+    cpu_offload_device = torch.device("cuda", fabric.local_rank)
     cache_lengths = [128, 128]
     batch_size = 5
     n_layer = len(cache_lengths)
@@ -266,6 +286,10 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
         assert kv_cache.device in (device, None), (l_ix, kv_cache.device, device)
     with torch.device(cpu_offload_device):
         head_model = HeadModelFactory.create(name=head_model_name, config=config)
+    offload_grad_accum = CPUOffloadAccumulateGradients(
+        group=[0],
+        fabric=fabric,
+    )
     model = LongContextGradientModel(
         gpt_model=gpt_model,
         head_model=head_model,
@@ -273,6 +297,7 @@ def test_copy_model_to_device(cpu_offload_device, dtype, cache_name):
         chunk_size=chunk_size,
         qname="default",
         offload_device=cpu_offload_device,
+        offload_grad_accum=offload_grad_accum,
     )
     model.zero_grad()
 
