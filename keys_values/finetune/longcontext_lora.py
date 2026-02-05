@@ -181,6 +181,7 @@ def setup(
     profile_grad_times: int = 0,
     profile_skip_steps: int = 0,
     profile_parts: Optional[str] = None,
+    debug_dont_use_autograd_hooks: bool = False,
 ) -> None:
     """Finetune a model using the LoRA method.
 
@@ -422,6 +423,7 @@ def setup(
         profile_grad_times=profile_grad_times,
         profile_skip_steps=profile_skip_steps,
         profile_parts=profile_parts,
+        debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
     )
 
 
@@ -452,6 +454,7 @@ def main(
     profile_grad_times: int,
     profile_skip_steps: int,
     profile_parts: Optional[str],
+    debug_dont_use_autograd_hooks: bool,
 ) -> None:
     validate_args(train, eval)
 
@@ -547,6 +550,7 @@ def main(
             profile_grad_times=profile_grad_times > 0,
             profile_parts=profile_parts,
             fabric=fabric,
+            debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
         )
 
     num_trainable_params = num_parameters(model, requires_grad=True)

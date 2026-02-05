@@ -25,6 +25,7 @@ from keys_values.data.base import (
     LABELS_NAME,
     LongContextDataset,
     common_collate_fn,
+    is_pad_datacase,
 )
 
 
@@ -74,23 +75,33 @@ class SequenceClassificationDataset(LongContextDataset):
                 f"class_labels = {self.class_labels}, must not have duplicate entries"
             )
         self._label_indexes = []
+        is_in_padding = False
         for idx, example in enumerate(self.data):
-            label = example["output"]
-            pos = next(
-                (i for i, cl in enumerate(self.class_labels) if cl == label), None
-            )
-            if pos is None:
-                raise ValueError(
-                    f"data[{idx}]['output'] = '{label}' invalid, must lie in {self.class_labels}"
+            if is_pad_datacase(example):
+                is_in_padding = True
+            else:
+                if is_in_padding:
+                    raise ValueError(
+                        f"data can only contain pad entries at the end, but entry {idx} is not padding, while pad entries before"
+                    )
+                label = example["output"]
+                pos = next(
+                    (i for i, cl in enumerate(self.class_labels) if cl == label), None
                 )
-            self._label_indexes.append(pos)
+                if pos is None:
+                    raise ValueError(
+                        f"data[{idx}]['output'] = '{label}' invalid, must lie in {self.class_labels}"
+                    )
+                self._label_indexes.append(pos)
 
-    def __getitem__(self, idx: int) -> Dict[str, Union[Tensor, Dict[str, Any]]]:
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
         if not (0 <= idx < len(self.data)):
             raise IndexError(
                 f"index {idx} out of range, must be in [0, {len(self.data)})"
             )
         example = self.data[idx]
+        if is_pad_datacase(example):
+            return example
         label_idx = self._label_indexes[idx]
         if self.transform is not None:
             example = self.transform(example)

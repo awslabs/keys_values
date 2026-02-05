@@ -175,6 +175,7 @@ def setup(
     generate_with_eval: bool = False,
     profile_grad_times: int = 0,
     profile_parts: Optional[str] = None,
+    debug_dont_use_autograd_hooks: bool = False,
 ) -> None:
     """Finetune a model.
 
@@ -378,6 +379,7 @@ def setup(
         generate_with_eval=generate_with_eval,
         profile_grad_times=profile_grad_times,
         profile_parts=profile_parts,
+        debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
     )
 
 
@@ -408,6 +410,7 @@ def main(
     generate_with_eval: bool,
     profile_grad_times: int,
     profile_parts: Optional[str],
+    debug_dont_use_autograd_hooks: bool,
 ) -> None:
     validate_args(train, eval)
 
@@ -487,6 +490,7 @@ def main(
             profile_grad_times=profile_grad_times > 0,
             profile_parts=profile_parts,
             fabric=fabric,
+            debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
         )
 
     num_trainable_params = num_parameters(model, requires_grad=True)
@@ -618,6 +622,7 @@ def wrap_gpt_model(
     cpu_offload_device: Optional[torch.device] = None,
     offload_num_devices: int = 1,
     fabric: Optional[L.Fabric] = None,
+    debug_dont_use_autograd_hooks: bool = False,
 ) -> Union[LongContextGradientModel, LongContextInferenceModel]:
     model_for_training = grad is not None
     print_message(
@@ -723,6 +728,7 @@ def wrap_gpt_model(
             layer_checkpoint_chunk_size=layer_checkpoint_chunk_size,
             debug_profile_forward=profile_parts == "forward",
             debug_profile_backward=profile_parts == "backward",
+            debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
         )
     else:
         model = LongContextInferenceModel(**common_kwargs)
