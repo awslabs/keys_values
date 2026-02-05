@@ -83,25 +83,26 @@ class CPUOffloadAccumulateGradients:
         fabric: Optional[L.Fabric] = None,
         debug_store_grads_name_predicate: Optional[DebugStoreGradsNamePredicate] = None,
     ):
-        world_size = DistributedPrimitives.world_size(fabric)
         if group is None:
+            world_size = DistributedPrimitives.world_size(fabric)
             group = list(range(world_size))
-        else:
+        elif len(group) > 1:
+            world_size = DistributedPrimitives.world_size(fabric)
             group = sorted(group)
             if fabric is not None and group != list(range(world_size)):
                 raise ValueError(
                     f"group = {group}. If fabric is given, this must be {list(range(world_size))}"
                 )
-            sz = len(group)
             if group[0] < 0 or any(x == y for x, y in zip(group[:-1], group[1:])):
                 raise ValueError(
                     f"group = {group}, entries must be unique and non-negative"
                 )
-            if sz > 1:
-                if group[-1] >= world_size:
-                    raise ValueError(
-                        f"group = {group}, entries must be < world_size = {world_size}"
-                    )
+            if group[-1] >= world_size:
+                raise ValueError(
+                    f"group = {group}, entries must be < world_size = {world_size}"
+                )
+        else:
+            group = [0]
         self.group = group
         self.fabric = fabric
         self._debug_store_grads_name_predicate = debug_store_grads_name_predicate
