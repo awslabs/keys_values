@@ -25,6 +25,7 @@ from keys_values.data.base import (
     LABELS_NAME,
     LongContextDataset,
     common_collate_fn,
+    is_pad_datacase,
 )
 
 
@@ -60,6 +61,8 @@ class SFTDataset(LongContextDataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         example = self.data[idx]
+        if is_pad_datacase(example):
+            return example
         if self.transform is not None:
             example = self.transform(example)
         prompt = self.prompt_style.apply(prompt=example["instruction"], **example)

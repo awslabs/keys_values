@@ -99,7 +99,6 @@ class SimilarSequenceLengthIterator(Iterator):
         global_batch_size = micro_batch_size * num_devices
         num_chunks = math.ceil(len(sequence_lengths) / global_batch_size)
         self.dataset_size = num_chunks * global_batch_size
-        self.padding_size = self.dataset_size - len(sequence_lengths)
         self.micro_batch_size = micro_batch_size
         self.num_devices = num_devices
         self._shuffle = shuffle
@@ -112,38 +111,64 @@ class SimilarSequenceLengthIterator(Iterator):
 
     def _initialize(self, sequence_lengths: List[int]):
         # Sort from shortest to longest
+        len_sl = len(sequence_lengths)
         inds_ascending = torch.argsort(torch.tensor(sequence_lengths))
+        # These are positions of padding entries, they are used to complete
+        # micro-batches
+        extra_inds = torch.arange(
+            len(sequence_lengths),
+            self.dataset_size,
+            dtype=inds_ascending.dtype,
+            device=inds_ascending.device,
+        )
         ndev = self.num_devices
         mbs = self.micro_batch_size
         global_batch_size = mbs * ndev
         num_batches = self.dataset_size // global_batch_size
-        num_full_batches = num_batches - int(self.padding_size > 0)
-        # If the last macro-batch would be shorter than `num_devices`, we use two
-        # shorter macro-batches at the end (we cannot have empty micro-batches)
-        if 0 < self.padding_size < ndev:
+        size_last = (
+            0
+            if len_sl == self.dataset_size
+            else global_batch_size - self.dataset_size + len_sl
+        )
+        num_full_batches = num_batches
+        if size_last > 0:
             num_full_batches -= 1
-        start = num_full_batches * global_batch_size
-        micro_batches = inds_ascending[:start].split(mbs)
-        num_mb = len(micro_batches)
-        assert num_mb == num_full_batches * ndev  # Sanity check
-        parts = [micro_batches[off : (off + mbs)] for off in range(0, num_mb, mbs)]
+            if size_last < ndev:
+                num_full_batches -= 1
+        if num_full_batches > 0:
+            start = num_full_batches * global_batch_size
+            micro_batches = inds_ascending[:start].split(mbs)
+            num_mb = len(micro_batches)
+            assert num_mb == num_full_batches * ndev, (num_mb, num_full_batches * ndev)
+            parts = [
+                micro_batches[off : (off + ndev)] for off in range(0, num_mb, ndev)
+            ]
+        else:
+            parts = []
+            start = 0
         rem_batches = num_batches - num_full_batches
         if rem_batches > 0:
-            num_final = self.dataset_size - start
+            size_rest = len(sequence_lengths) - start
             num_mb = rem_batches * ndev
-            mbs = math.ceil(num_final / num_mb)
+            mbs = math.ceil(size_rest / num_mb)
             assert mbs >= 1  # Sanity check
-            fix_me = num_mb * mbs - num_final
-            assert fix_me == 0 or mbs > 1  # Sanity check
+            fix_me = num_mb * mbs - size_rest
+            assert fix_me == 0 or mbs > 1, (fix_me, mbs)  # Sanity check
             sizes = [mbs] * (num_mb - fix_me) + [mbs - 1] * fix_me
-            assert sum(sizes) == num_final  # Sanity check
-            rem_micro_batches = inds_ascending[start:].split(sizes)
-            parts.append(rem_micro_batches[:ndev])
+            assert sum(sizes) == size_rest  # Sanity check
+            off = 0
+            micro_batches = []
+            for batch in inds_ascending[start:].split(sizes):
+                rem_sz = self.micro_batch_size - batch.numel()
+                micro_batches.append(torch.cat((batch, extra_inds[off : off + rem_sz])))
+                off += rem_sz
+            assert off == extra_inds.numel()  # Sanity check
+            parts.append(micro_batches[:ndev])
             if rem_batches > 1:
-                parts.append(rem_micro_batches[ndev:])
+                parts.append(micro_batches[ndev:])
 
         # Sanity check
-        assert len(parts) == num_batches
+        assert len(parts) == num_batches, (parts, num_batches)
         assert all(len(x) == ndev for x in parts)
         self._partition = parts
 

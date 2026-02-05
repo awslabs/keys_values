@@ -361,7 +361,8 @@ class LongBenchV2(DataModule):
 
     def train_dataloader(self) -> DataLoader:
         assert self._sequence_lengths is not None
-        assert len(self._sequence_lengths["train"]) == len(self.train_dataset)
+        len_sl = len(self._sequence_lengths["train"])
+        assert 0 < len_sl <= len(self.train_dataset), (len_sl, len(self.train_dataset))
         torch.random.manual_seed(self.seed)
         return DataLoader(
             ReorderWrapperDataset(
@@ -384,7 +385,8 @@ class LongBenchV2(DataModule):
 
     def val_dataloader(self) -> DataLoader:
         assert self._sequence_lengths is not None
-        assert len(self._sequence_lengths["valid"]) == len(self.val_dataset)
+        len_sl = len(self._sequence_lengths["valid"])
+        assert 0 < len_sl <= len(self.val_dataset), (len_sl, len(self.val_dataset))
         return DataLoader(
             ReorderWrapperDataset(
                 self.val_dataset,
@@ -406,7 +408,8 @@ class LongBenchV2(DataModule):
         if self.test_dataset is None:
             raise IndexError("Test dataset is not defined. Use 'test_set_tag'")
         assert self._sequence_lengths is not None
-        assert len(self._sequence_lengths["test"]) == len(self.test_dataset)
+        len_sl = len(self._sequence_lengths["test"])
+        assert 0 < len_sl <= len(self.test_dataset), (len_sl, len(self.test_dataset))
         if self._test_eval_tasks is None:
             return DataLoader(
                 ReorderWrapperDataset(

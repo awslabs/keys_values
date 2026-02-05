@@ -174,6 +174,7 @@ def setup(
     generate_with_eval: bool = False,
     profile_grad_times: int = 0,
     profile_parts: Optional[str] = None,
+    debug_dont_use_autograd_hooks: bool = False,
 ) -> None:
     """Finetune a model using the LoRA method, with CPU offloading
 
@@ -384,6 +385,7 @@ def setup(
         generate_with_eval=generate_with_eval,
         profile_grad_times=profile_grad_times,
         profile_parts=profile_parts,
+        debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
     )
 
 
@@ -412,6 +414,7 @@ def main(
     generate_with_eval: bool,
     profile_grad_times: int,
     profile_parts: Optional[str],
+    debug_dont_use_autograd_hooks: bool,
 ) -> None:
     validate_args(train, eval)
 
@@ -510,6 +513,7 @@ def main(
             cpu_offload_device=cpu_offload_device,
             offload_num_devices=devices,
             fabric=fabric,
+            debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
         )
 
     num_trainable_params = num_parameters(model, requires_grad=True)
