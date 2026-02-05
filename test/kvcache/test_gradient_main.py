@@ -234,7 +234,9 @@ def test_copy_model_to_device(dtype, cache_name):
 
 
 def run_copy_model_to_device(
-    fabric: L.Fabric, dtype: torch.dtype, cache_name: str,
+    fabric: L.Fabric,
+    dtype: torch.dtype,
+    cache_name: str,
 ):
     seed = 31415927
     torch.random.manual_seed(seed)
