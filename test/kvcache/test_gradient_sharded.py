@@ -28,10 +28,7 @@ from keys_values.kvcache.gradient.accumulate import copy_requires_grad
 from keys_values.kvcache.gradient.main import LongContextGradientModel
 from keys_values.kvcache.test_utils import create_kv_cache, copy_gradients
 from keys_values.lora import GPT
-from keys_values.optimize.clone_model import (
-    clone_model_shard_via_flat_vectors,
-    copy_flat_vectors_to,
-)
+from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
 from keys_values.optimize.model_factory import (
     GPTShardCellBlock,
     AccessWeightsGradients,
@@ -237,10 +234,7 @@ def accumulate_gradients(
     """
     for mod_from, mod_to in module_pairs:
         access = AccessWeightsGradients(mod_from)
-        flat_vectors = copy_flat_vectors_to(
-            access.get_gradients(),
-            device=torch.device("cpu"),
-        )
+        flat_vectors = access.get_gradients(device=torch.device("cpu"))
         mod_from.zero_grad(set_to_none=True)
         AccessWeightsGradients(mod_to).accumulate_gradients(flat_vectors)
 

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Union, Callable, Optional
+from typing import Union, Optional
 
 import torch
 
@@ -27,44 +27,26 @@ from keys_values.optimize.model_factory import (
     ModelFromFlatVectorsFactory,
     names_and_modules_for_shard,
 )
-from keys_values.optimize.module_wrapper import (
-    FlatVectors,
-    AccessWeightsGradients,
-)
-
-
-def copy_flat_vectors_to(
-    flat_vectors: FlatVectors,
-    device: torch.device,
-) -> FlatVectors:
-    return {
-        dtype: vec.to(device=device, non_blocking=True)
-        for dtype, vec in flat_vectors.items()
-    }
-
-
-CopyFlatVectorFunction = Callable[[FlatVectors, torch.device], FlatVectors]
+from keys_values.optimize.module_wrapper import AccessWeightsGradients
 
 
 def clone_model_shard_via_flat_vectors(
     model: GPTFull,
     device: torch.device,
     shard_type: Optional[str],
-    copy_function: Optional[CopyFlatVectorFunction] = None,
     lm_head: bool = True,
 ) -> Union[GPTFullWrapper, GPTLoRAWrapper, GPTShardOfBlocks]:
     """
     Creates copy of shard `shard_type` from `model` on device `device`. If
     `shard_type is None`, the whole model is copied.
-    Different to `model.clone(device)`, this is done by creating flat vectors, copying them
-    to the device, and creating the model there from the flat vectors.
+    Different to `model.clone(device)`, this is done by creating flat vectors
+    (on device of `model`), then create weights on `device` from there. We do
+    not create flat vectors on `device`, though.
 
     This function loops over submodules, copying flat vectors for each. This
     requires less memory on device for the flat vectors.
 
     """
-    if copy_function is None:
-        copy_function = copy_flat_vectors_to
     is_lora = isinstance(model, GPTLoRA)
     if isinstance(model, GPTAdapter):
         raise NotImplementedError("model must not be GPTAdapter: Not implemented")
@@ -98,13 +80,17 @@ def clone_model_shard_via_flat_vectors(
             else ModelFromFlatVectorsFactory.CHOICES_FULL
         )
         for comp_name, src_module in names_and_modules:
-            flat_vecs_src = AccessWeightsGradients(src_module).get_weights()
-            flat_vecs_trg = copy_function(flat_vecs_src, device)
+            flat_vecs = AccessWeightsGradients(src_module).get_weights()
+            # Components are created on `device`, their weights are taken from
+            # `flat_vecs`. This involves transfer if `flat_vecs.device` is
+            # different. We do not create flat vectors on `device` in this
+            # case.
             creator = choices.get(comp_name)
             if creator is not None:
                 components[comp_name] = creator(
                     config=model.config,
-                    weights_vecs=flat_vecs_trg,
+                    weights_vecs=flat_vecs,
+                    device=device,
                 )
             else:
                 block_idx = BlockComponentName.is_h(comp_name)
@@ -117,7 +103,8 @@ def clone_model_shard_via_flat_vectors(
                 components[comp_name] = _creator(
                     config=model.config,
                     block_idx=block_idx,
-                    weights_vecs=flat_vecs_trg,
+                    weights_vecs=flat_vecs,
+                    device=device,
                 )
     finally:
         model.assign_kv_caches(kv_caches)

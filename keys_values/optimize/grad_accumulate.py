@@ -12,18 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import time
-from typing import List, Tuple, Optional, Dict, Callable
+from typing import List, Tuple, Optional, Callable
 
 import torch
 import torch.distributed as dist
 import lightning as L
 
 from keys_values.finetune.utils import print_message
-from keys_values.optimize.clone_model import copy_flat_vectors_to
-from keys_values.optimize.module_wrapper import (
-    AccessWeightsGradients,
-    FlatVectors,
-)
+from keys_values.optimize.module_wrapper import AccessWeightsGradients
 
 
 class DistributedPrimitives:
@@ -46,15 +42,29 @@ class DistributedPrimitives:
             return 0
 
     @staticmethod
+    def device(fabric: Optional[L.Fabric] = None) -> torch.device:
+        if fabric is not None:
+            return fabric.device
+        elif torch.cuda.is_available():
+            return torch.device("cuda", DistributedPrimitives.rank(fabric))
+        else:
+            return torch.device("cpu")
+
+    @staticmethod
     def all_reduce_sum(
         x: torch.Tensor,
         fabric: Optional[L.Fabric] = None,
         group: Optional[List[int]] = None,
     ):
-        if fabric is not None:
-            fabric.all_reduce(x, reduce_op="sum")
-        elif torch.cuda.is_available():
-            dist.all_reduce(x, op=dist.ReduceOp.SUM, group=group)
+        if fabric is not None or torch.cuda.is_available():
+            if x.device != DistributedPrimitives.device(fabric):
+                raise ValueError(
+                    f"x.device = {x.device}, must be {DistributedPrimitives.device(fabric)}"
+                )
+            if fabric is not None:
+                fabric.all_reduce(x, reduce_op="sum")
+            else:
+                dist.all_reduce(x, op=dist.ReduceOp.SUM, group=group)
 
 
 DebugStoreGradsNamePredicate = Callable[[str], bool]
@@ -67,13 +77,6 @@ class CPUOffloadAccumulateGradients:
     general, gradients per module are flattened (one vector per dtype), and
     the reductions are done for flat vectors. If the group size is 1, `dist`
     is not used at all, and `group[0]` does not matter.
-
-    Usage:
-
-    * Call :meth:`__call__` on different model shards. This leads to gradient
-      accumulation on the model on CPU.
-    * Call :meth:`finalize` at the end. Synchronization and data exchange
-      between devices only happens here.
 
     """
 
@@ -113,14 +116,11 @@ class CPUOffloadAccumulateGradients:
         module_pairs: List[Tuple[torch.nn.Module, torch.nn.Module]],
         module_on_device: Optional[torch.nn.Module] = None,
         debug_modules: Optional[List[torch.nn.Module]] = None,
-    ):
+    ) -> Optional[float]:
         """
         Run gradient accumulation for module pairs `(mod_from, mod_to)`. This
         is called by every rank from `group`, and the ranks are synchronized
         here.
-
-        Note that synchronization and exchange between devices is delayed until
-        :meth:`finalize` is called.
 
         Args:
             module_pairs: List of `(mod_from, mod_to)` tuples. Here, `mod_from`
@@ -128,6 +128,10 @@ class CPUOffloadAccumulateGradients:
             module_on_device: If given, this source module is on the device.
                 Its gradients are accumulated if the group size is > 1.
             debug_modules: Use for debugging only. Only for group size 1.
+
+        Returns:
+            Idle time in seconds at `all_reduce` sync point, or `None` if not
+            distributed.
 
         """
         use_dist = self.is_distributed
@@ -137,14 +141,29 @@ class CPUOffloadAccumulateGradients:
             if use_dist:
                 raise ValueError("debug_modules supported only if len(group) == 1")
             assert len(debug_modules) == len(module_pairs)
+        idle_time = 0
         for (mod_from, mod_to), mod_debug in zip(module_pairs, debug_modules):
             access = AccessWeightsGradients(mod_from)
-            flat_vectors = copy_flat_vectors_to(
-                access.get_gradients(),
-                device=torch.device("cpu"),
-            )
+            flat_vectors = access.get_gradients()
+            if use_dist:
+                idle_time_now = None
+                start_time = time.perf_counter()
+                for vec in flat_vectors.values():
+                    DistributedPrimitives.all_reduce_sum(
+                        vec,
+                        self.fabric,
+                        self.group,
+                    )
+                    if idle_time_now is None:
+                        idle_time_now = time.perf_counter() - start_time
+                if idle_time_now is not None:
+                    idle_time += idle_time_now
             mod_from.zero_grad(set_to_none=True)
+            flat_vectors = {
+                k: v.to(device=torch.device("cpu")) for k, v in flat_vectors.items()
+            }
             AccessWeightsGradients(mod_to).accumulate_gradients(flat_vectors)
+
             if mod_debug is not None:
                 for name, param in mod_debug.named_parameters():
                     param_comp = mod_from.get_parameter(name)
@@ -169,124 +188,35 @@ class CPUOffloadAccumulateGradients:
                     )
             AccessWeightsGradients(module_on_device).accumulate_gradients(flat_vectors)
 
-    @staticmethod
-    def extract_grads(
-        name_predicate: DebugStoreGradsNamePredicate,
-        model: torch.nn.Module,
-        access: AccessWeightsGradients,
-        flat_vectors: FlatVectors,
-        prefix: str,
-    ) -> Dict[str, torch.Tensor]:
-        debug_info = dict()
-        dtype_str = None
-        for name, param in model.named_parameters():
-            if name_predicate(name) and param.grad is not None:
-                debug_info[prefix + ":" + name] = param.grad.data.clone()
-                if dtype_str is None:
-                    dtype_str = str(param.dtype)
-        if dtype_str is None:
-            raise AssertionError(
-                f"No gradients in model for params flagged by `name_predicate`"
-            )
-        if dtype_str not in flat_vectors:
-            raise AssertionError(
-                f"dtype_str = {dtype_str}, keys = {list(flat_vectors.keys())}"
-            )
-        fvec = flat_vectors[dtype_str]
-        for entry in access._grad_structure[dtype_str].entries:
-            name = entry.name
-            if name_predicate(name):
-                start = entry.offset
-                end = start + entry.size
-                debug_info[prefix + "_fvec:" + name] = (
-                    fvec[start:end].clone().reshape(*entry.shape)
-                )
-        return debug_info
-
-    def finalize(self, model: torch.nn.Module) -> Optional[float]:
-        # Synchronization of all gradients are done here. Calls of
-        # :meth:`__call__` have written gradients into buffers of `model`.
-        # We flatten them into a single vector and run `all_reduce`
-        if not self.is_distributed:
-            return None  # Nothing to do
-        access = AccessWeightsGradients(model)
-        flat_vectors = access.get_gradients()
-        debug_info = None
-        if self._debug_store_grads_name_predicate is not None:
-            debug_info = self.extract_grads(
-                self._debug_store_grads_name_predicate,
-                model,
-                access,
-                flat_vectors,
-                "before",
-            )
-        model.zero_grad(set_to_none=True)
-        idle_time = None
-        start_time = time.perf_counter()
-        for vec in flat_vectors.values():
-            DistributedPrimitives.all_reduce_sum(
-                vec,
-                self.fabric,
-                self.group,
-            )
-            if start_time is not None:
-                idle_time = time.perf_counter() - start_time
-                start_time = None
-        AccessWeightsGradients(model).accumulate_gradients(flat_vectors)
-        if self._debug_store_grads_name_predicate is not None:
-            debug_info.update(
-                self.extract_grads(
-                    self._debug_store_grads_name_predicate,
-                    model,
-                    access,
-                    flat_vectors,
-                    "after",
-                )
-            )
-            fname = (
-                f"./grad_accumulate_iter{self._debug_iter_count}_rank{self.rank()}.pth"
-            )
-            print(f"DEBUG: Storing matching gradients before/after to {fname}")
-            torch.save(debug_info, fname)
-            self._debug_iter_count += 1
-        return idle_time
+        return idle_time if use_dist else None
 
     def test_all_reduce(self):
+        device = DistributedPrimitives.device(self.fabric)
         my_rank = DistributedPrimitives.rank(self.fabric)
-        if my_rank not in self.group:
-            raise AssertionError(f"Rank {my_rank} not in group {self.group}")
-        # Test both cases: Vecs on CPU, vecs on devices
-        setups = [
-            (torch.device("cpu"), 1),
-            (torch.device("cuda", my_rank), 2),
-        ]
-        for device, mult in setups:
-            vec = (
-                torch.arange(
-                    1,
-                    10,
-                    dtype=torch.int32,
-                    device=device,
-                )
-                * my_rank
-                * mult
+        vec = (
+            torch.arange(
+                1,
+                10,
+                dtype=torch.int32,
+                device=device,
             )
-            DistributedPrimitives.all_reduce_sum(vec, self.fabric, self.group)
-            all_factor = sum(self.group)
-            should_be = (
-                torch.arange(
-                    1,
-                    10,
-                    dtype=torch.int32,
-                    device=device,
-                )
-                * all_factor
-                * mult
+            * my_rank
+        )
+        DistributedPrimitives.all_reduce_sum(vec, self.fabric, self.group)
+        all_factor = sum(self.group)
+        should_be = (
+            torch.arange(
+                1,
+                10,
+                dtype=torch.int32,
+                device=device,
             )
-            if not (vec == should_be).all().item():
-                raise AssertionError(
-                    f"Rank {my_rank}, device {device}: Have {vec} after all_reduce, should have {should_be}"
-                )
+            * all_factor
+        )
+        if not (vec == should_be).all().item():
+            raise AssertionError(
+                f"Rank {my_rank}, device {device}: Have {vec} after all_reduce, should have {should_be}"
+            )
 
     @property
     def is_distributed(self) -> bool:
