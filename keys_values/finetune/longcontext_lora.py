@@ -28,7 +28,6 @@ from lightning.fabric.plugins import BitsandbytesPrecision
 from lightning.fabric.strategies import DDPStrategy
 from lightning.fabric.utilities import ThroughputMonitor
 from lightning_utilities.core.imports import RequirementCache
-from torch.utils.data import DataLoader
 from torchmetrics import RunningMean
 
 from litgpt.args import TrainArgs
@@ -57,7 +56,7 @@ from keys_values.attention_utils import (
     DEFAULT_TMP_ARRAY_LIMIT_GB,
     SDPA_KERNELS_BEST_ORDERING,
 )
-from keys_values.data import LongBenchV2, INPUT_IDS_NAME
+from keys_values.data import LongBenchV2, INPUT_IDS_NAME, MyDataLoader
 from keys_values.finetune.args import (
     EvalArgs,
     GradientArgs,
@@ -474,10 +473,7 @@ def main(
         eos_id=tokenizer.eos_id,
         ignore_index=ignore_index,
     )
-    steps_per_epoch = len(train_dataloader) // train.gradient_accumulation_iters(
-        devices,
-        num_nodes,
-    )
+    steps_per_epoch = len(train_dataloader)
     lr_max_steps = min(
         train.epochs * steps_per_epoch, (train.max_steps or float("inf"))
     )
@@ -677,8 +673,8 @@ def main(
 def fit(
     fabric: L.Fabric,
     state: Dict[str, Any],
-    train_dataloader: DataLoader,
-    val_dataloader: DataLoader,
+    train_dataloader: MyDataLoader,
+    val_dataloader: MyDataLoader,
     batch_transform: BatchTransform,
     devices: int,
     checkpoint_dir: Path,

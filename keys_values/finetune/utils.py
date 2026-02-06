@@ -18,13 +18,13 @@ from typing import Optional, Tuple, Literal, Dict, Any
 
 import lightning as L
 import torch
-from torch.utils.data import DataLoader
 
 from litgpt.args import TrainArgs
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import choose_logger as _choose_logger, instantiate_torch_optimizer
 
+from keys_values.data.dataloader import MyDataLoader
 from keys_values.finetune.args import EvalArgs, KVCacheArgs, OptimizerArgs
 from keys_values.head_model import HeadModel
 from keys_values.long_context import GPTAndHeadModel
@@ -123,12 +123,14 @@ def get_dataloaders(
     train: TrainArgs,
     eval: EvalArgs,
     fabric: Optional[L.Fabric] = None,
-) -> Tuple[DataLoader, DataLoader]:
+) -> Tuple[MyDataLoader, MyDataLoader]:
     num_devices = 1 if fabric is None else fabric.world_size
+    rank = 0 if fabric is None else fabric.local_rank
     data.connect(
         tokenizer=tokenizer,
         batch_size=train.micro_batch_size,
         num_devices=num_devices,
+        rank=rank,
         max_seq_length=train.max_seq_length,
         head_model=head_model,
         val_batch_size=eval.micro_batch_size,
@@ -139,11 +141,6 @@ def get_dataloaders(
     data.setup()
     train_dataloader = data.train_dataloader()
     val_dataloader = data.val_dataloader()
-    if fabric is not None:
-        train_dataloader, val_dataloader = fabric.setup_dataloaders(
-            train_dataloader,
-            val_dataloader,
-        )
     return train_dataloader, val_dataloader
 
 

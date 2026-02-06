@@ -25,7 +25,6 @@ from typing import Dict, Literal, Optional, Union, Any
 import lightning as L
 import torch
 from lightning.fabric.strategies import DDPStrategy
-from torch.utils.data import DataLoader
 from torchmetrics import RunningMean
 
 from keys_values.utils import flush_io_streams
@@ -56,7 +55,7 @@ from keys_values.attention_utils import (
     DEFAULT_TMP_ARRAY_LIMIT_GB,
     SDPA_KERNELS_BEST_ORDERING,
 )
-from keys_values.data import LongBenchV2, INPUT_IDS_NAME
+from keys_values.data import LongBenchV2, INPUT_IDS_NAME, MyDataLoader
 from keys_values.finetune.args import (
     EvalArgs,
     GradientArgs,
@@ -430,9 +429,7 @@ def main(
         eos_id=tokenizer.eos_id,
         ignore_index=ignore_index,
     )
-    steps_per_epoch = len(train_dataloader) // train.gradient_accumulation_iters(
-        devices, num_nodes
-    )
+    steps_per_epoch = len(train_dataloader)
     lr_max_steps = min(
         train.epochs * steps_per_epoch, (train.max_steps or float("inf"))
     )
@@ -757,8 +754,8 @@ def create_baseline_model(
 def fit(
     fabric: L.Fabric,
     state: Dict[str, Any],
-    train_dataloader: DataLoader,
-    val_dataloader: DataLoader,
+    train_dataloader: MyDataLoader,
+    val_dataloader: MyDataLoader,
     batch_transform: BatchTransform,
     devices: int,
     resume: Union[bool, Literal["auto"], Path],
@@ -1045,7 +1042,7 @@ def fit(
 
 def validate_and_all_reduce(
     model: GPTAndHeadModel,
-    val_dataloader: DataLoader,
+    val_dataloader: MyDataLoader,
     eval: EvalArgs,
     batch_transform: BatchTransform,
     generate_example_kwargs: Optional[Dict[str, Any]] = None,
@@ -1096,7 +1093,7 @@ def validate_and_all_reduce(
 @torch.no_grad()
 def validate(
     model: GPTAndHeadModel,
-    val_dataloader: DataLoader,
+    val_dataloader: MyDataLoader,
     eval: EvalArgs,
     batch_transform: BatchTransform,
 ) -> torch.Tensor:

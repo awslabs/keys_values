@@ -23,6 +23,7 @@ from litgpt.tokenizer import Tokenizer
 from keys_values.data.base import (
     INPUT_IDS_NAME,
     LABELS_NAME,
+    POSITION_NAME,
     LongContextDataset,
     common_collate_fn,
     is_pad_datacase,
@@ -79,6 +80,7 @@ class SequenceClassificationDataset(LongContextDataset):
         for idx, example in enumerate(self.data):
             if is_pad_datacase(example):
                 is_in_padding = True
+                pos = None
             else:
                 if is_in_padding:
                     raise ValueError(
@@ -92,7 +94,7 @@ class SequenceClassificationDataset(LongContextDataset):
                     raise ValueError(
                         f"data[{idx}]['output'] = '{label}' invalid, must lie in {self.class_labels}"
                     )
-                self._label_indexes.append(pos)
+            self._label_indexes.append(pos)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         if not (0 <= idx < len(self.data)):
@@ -100,9 +102,9 @@ class SequenceClassificationDataset(LongContextDataset):
                 f"index {idx} out of range, must be in [0, {len(self.data)})"
             )
         example = self.data[idx]
-        if is_pad_datacase(example):
-            return example
         label_idx = self._label_indexes[idx]
+        if label_idx is None:
+            return example  # Padding case
         if self.transform is not None:
             example = self.transform(example)
         prompt = self.prompt_style.apply(prompt=example["instruction"], **example)
@@ -119,11 +121,14 @@ class SequenceClassificationDataset(LongContextDataset):
             raw_count = len(encoded_prompt)
         if raw_count is not None:
             token_counts["raw"] = raw_count
-        return {
+        result = {
             INPUT_IDS_NAME: encoded_prompt,
             LABELS_NAME: label_idx,
             "token_counts": token_counts,
         }
+        if POSITION_NAME in example:
+            result[POSITION_NAME] = example[POSITION_NAME]
+        return result
 
 
 def get_seq_class_collate_fn(pad_id: int = 0):
