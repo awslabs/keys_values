@@ -206,9 +206,11 @@ class CPUOffloadAccumulateGradients:
 
     def finalize(self, model: torch.nn.Module) -> Optional[float]:
         # DEBUG
+        regex = r"transformer\.h\.(\d+)\.attn\.qkv\.lora_B$"
+        if self.is_distributed:
+            print("\n*** Checking gradient entries before all_reduce ***")
         found_it = [False] * 36
         val_zero = None
-        regex = r"transformer\.h\.(\d+)\.attn\.qkv\.lora_B$"
         for name, param in model.named_parameters():
             result = re.match(regex, name)
             if result is not None:
@@ -218,7 +220,7 @@ class CPUOffloadAccumulateGradients:
                     gradient = param.grad.data
                     temp = torch.abs(gradient).flatten()
                     vals, ind = torch.topk(temp, k=8)
-                    print(f"*** Parameter {name}. Largest gradient entries:")
+                    print(f"Parameter {name}. Largest gradient entries:")
                     print(gradient.flatten()[ind])
                     if block_idx == 0:
                         val_zero = vals[0]
@@ -226,7 +228,7 @@ class CPUOffloadAccumulateGradients:
                     print(f"{name} has no gradient")
         if not all(found_it):
             print(f"Did not find all {len(found_it)} params: {found_it}")
-        if val_zero is not None and val_zero > 1e+30:
+        if not self.is_distributed and val_zero is not None and val_zero > 1e+30:
             print("STOPPING HERE!")
             exit(0)
         # END DEBUG
@@ -259,6 +261,32 @@ class CPUOffloadAccumulateGradients:
                 idle_time = time.perf_counter() - start_time
                 start_time = None
         AccessWeightsGradients(model).accumulate_gradients(flat_vectors)
+        # DEBUG
+        if self.is_distributed:
+            print("\n*** Checking gradient entries after all_reduce ***")
+            found_it = [False] * 36
+            val_zero = None
+            for name, param in model.named_parameters():
+                result = re.match(regex, name)
+                if result is not None:
+                    block_idx = int(result.group(1))
+                    found_it[block_idx] = True
+                    if param.requires_grad:
+                        gradient = param.grad.data
+                        temp = torch.abs(gradient).flatten()
+                        vals, ind = torch.topk(temp, k=8)
+                        print(f"Parameter {name}. Largest gradient entries:")
+                        print(gradient.flatten()[ind])
+                        if block_idx == 0:
+                            val_zero = vals[0]
+                    else:
+                        print(f"{name} has no gradient")
+            if not all(found_it):
+                print(f"Did not find all {len(found_it)} params: {found_it}")
+            if val_zero is not None and val_zero > 1e+30:
+                print("STOPPING HERE!")
+                exit(0)
+        # END DEBUG
         if self._debug_store_grads_name_predicate is not None:
             debug_info.update(
                 self.extract_grads(
