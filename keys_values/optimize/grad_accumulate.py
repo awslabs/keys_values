@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import re  # DEBUG
 import time
 from typing import List, Tuple, Optional, Dict, Callable
 
@@ -204,6 +205,31 @@ class CPUOffloadAccumulateGradients:
         return debug_info
 
     def finalize(self, model: torch.nn.Module) -> Optional[float]:
+        # DEBUG
+        found_it = [False] * 36
+        val_zero = None
+        regex = r"transformer\.h\.(\d+)\.attn\.qkv\.lora_B$"
+        for name, param in model.named_parameters():
+            result = re.match(regex, name)
+            if result is not None:
+                block_idx = int(result.group(1))
+                found_it[block_idx] = True
+                if param.requires_grad:
+                    gradient = param.grad.data
+                    temp = torch.abs(gradient).flatten()
+                    vals, ind = torch.topk(temp, k=8)
+                    print(f"*** Parameter {name}. Largest gradient entries:")
+                    print(gradient.flatten()[ind])
+                    if block_idx == 0:
+                        val_zero = vals[0]
+                else:
+                    print(f"{name} has no gradient")
+        if not all(found_it):
+            print(f"Did not find all {len(found_it)} params: {found_it}")
+        if val_zero is not None and val_zero > 1e+30:
+            print("STOPPING HERE!")
+            exit(0)
+        # END DEBUG
         # Synchronization of all gradients are done here. Calls of
         # :meth:`__call__` have written gradients into buffers of `model`.
         # We flatten them into a single vector and run `all_reduce`
