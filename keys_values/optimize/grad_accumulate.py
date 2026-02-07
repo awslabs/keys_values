@@ -20,7 +20,6 @@ import torch.distributed as dist
 import lightning as L
 
 from keys_values.finetune.utils import print_message
-from keys_values.optimize.clone_model import copy_flat_vectors_to
 from keys_values.optimize.module_wrapper import (
     AccessWeightsGradients,
     FlatVectors,
@@ -140,10 +139,7 @@ class CPUOffloadAccumulateGradients:
             assert len(debug_modules) == len(module_pairs)
         for (mod_from, mod_to), mod_debug in zip(module_pairs, debug_modules):
             access = AccessWeightsGradients(mod_from)
-            flat_vectors = copy_flat_vectors_to(
-                access.get_gradients(),
-                device=torch.device("cpu"),
-            )
+            flat_vectors = access.get_gradients(device=torch.device("cpu"))
             mod_from.zero_grad(set_to_none=True)
             AccessWeightsGradients(mod_to).accumulate_gradients(flat_vectors)
             if mod_debug is not None:

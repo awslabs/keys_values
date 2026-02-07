@@ -502,6 +502,7 @@ class ModelFromFlatVectorsFactory:
         config: ConfigFull,
         block_idx: int,
         weights_vecs: FlatVectors,
+        device: Optional[torch.device] = None,
     ) -> BlockFull:
         """
         Create block of full model and set weights from `weights_vecs`. Make
@@ -511,12 +512,15 @@ class ModelFromFlatVectorsFactory:
             config: See :class:`litgpt.model.GPT`
             block_idx: Index of block in complete model
             weights_vecs: Flat vectors the weights are initialized from
+            device: Device the block is created on. Dwfaults to device of
+                `weights_vecs`.
 
         Returns:
             :class:`litgpt.model.Block` object with initialized weights
 
         """
-        device = device_of_flat_vectors(weights_vecs)
+        if device is None:
+            device = device_of_flat_vectors(weights_vecs)
         with torch.device(device):
             block = BlockFull(config, block_idx)
         AccessWeightsGradients(block).set_weights(weights_vecs)
@@ -527,6 +531,7 @@ class ModelFromFlatVectorsFactory:
         config: ConfigLoRA,
         block_idx: int,
         weights_vecs: FlatVectors,
+        device: Optional[torch.device] = None,
     ) -> BlockLoRA:
         """
         Create block of LoRA model and set weights from `weights_vecs`. Make
@@ -536,12 +541,15 @@ class ModelFromFlatVectorsFactory:
             config: See :class:`litgpt.lora.GPT`
             block_idx: Index of block in complete model
             weights_vecs: Flat vectors the weights are initialized from
+            device: Device the block is created on. Dwfaults to device of
+                `weights_vecs`.
 
         Returns:
             :class:`litgpt.lora.Block` object with initialized weights
 
         """
-        device = device_of_flat_vectors(weights_vecs)
+        if device is None:
+            device = device_of_flat_vectors(weights_vecs)
         with torch.device(device):
             block = BlockLoRA(config, block_idx)
         AccessWeightsGradients(block).set_weights(weights_vecs)
@@ -567,8 +575,10 @@ class ModelFromFlatVectorsFactory:
     def create_wte(
         config: ConfigFull,
         weights_vecs: FlatVectors,
+        device: Optional[torch.device] = None,
     ) -> nn.Embedding:
-        device = device_of_flat_vectors(weights_vecs)
+        if device is None:
+            device = device_of_flat_vectors(weights_vecs)
         ModelFromFlatVectorsFactory._set_default_dtype(weights_vecs)
         with torch.device(device):
             wte = nn.Embedding(config.padded_vocab_size, config.n_embd)
@@ -579,8 +589,10 @@ class ModelFromFlatVectorsFactory:
     def create_ln_f(
         config: ConfigFull,
         weights_vecs: FlatVectors,
+        device: Optional[torch.device] = None,
     ) -> nn.Module:
-        device = device_of_flat_vectors(weights_vecs)
+        if device is None:
+            device = device_of_flat_vectors(weights_vecs)
         ModelFromFlatVectorsFactory._set_default_dtype(weights_vecs)
         with torch.device(device):
             ln_f = config.norm_class(config.n_embd, eps=config.norm_eps)
@@ -591,8 +603,10 @@ class ModelFromFlatVectorsFactory:
     def create_full_lm_head(
         config: ConfigFull,
         weights_vecs: FlatVectors,
+        device: Optional[torch.device] = None,
     ) -> nn.Linear:
-        device = device_of_flat_vectors(weights_vecs)
+        if device is None:
+            device = device_of_flat_vectors(weights_vecs)
         ModelFromFlatVectorsFactory._set_default_dtype(weights_vecs)
         with torch.device(device):
             lm_head = nn.Linear(
@@ -607,8 +621,10 @@ class ModelFromFlatVectorsFactory:
     def create_lora_lm_head(
         config: ConfigLoRA,
         weights_vecs: FlatVectors,
+        device: Optional[torch.device] = None,
     ) -> LoRALinear:
-        device = device_of_flat_vectors(weights_vecs)
+        if device is None:
+            device = device_of_flat_vectors(weights_vecs)
         ModelFromFlatVectorsFactory._set_default_dtype(weights_vecs)
         with torch.device(device):
             lm_head = create_lora_linear(
@@ -652,6 +668,7 @@ class ModelFromFlatVectorsFactory:
         config: ConfigFull,
         weights_vecs: Dict[str, FlatVectors],
         component_keys: List[str],
+        device: Optional[torch.device] = None,
     ) -> Dict[str, nn.Module]:
         components = dict()
         for comp_name in component_keys:
@@ -661,6 +678,7 @@ class ModelFromFlatVectorsFactory:
                 components[comp_name] = creator(
                     config=config,
                     weights_vecs=_weights_vecs,
+                    device=device,
                 )
             else:
                 block_idx = BlockComponentName.is_h(comp_name)
@@ -672,6 +690,7 @@ class ModelFromFlatVectorsFactory:
                     config=config,
                     block_idx=block_idx,
                     weights_vecs=_weights_vecs,
+                    device=device,
                 )
             # Deallocate
             del weights_vecs[comp_name]
@@ -682,6 +701,7 @@ class ModelFromFlatVectorsFactory:
     def create_full_model(
         config: ConfigFull,
         weights_vecs: Dict[str, FlatVectors],
+        device: Optional[torch.device] = None,
         **mha_kwargs,
     ) -> GPTFullWrapper:
         """
@@ -696,6 +716,8 @@ class ModelFromFlatVectorsFactory:
             config: See :class:`litgpt.model.GPT`
             weights_vecs: Flat vectors the weights are initialized from.
                 Entries are deleted as model is built. Empty on return.
+            device: Device the block is created on. Dwfaults to device of
+                `weights_vecs`.
 
         Returns:
             :class:`litgpt.model.GPT` object with initialized weights
@@ -710,6 +732,7 @@ class ModelFromFlatVectorsFactory:
             config=config,
             weights_vecs=weights_vecs,
             component_keys=component_keys,
+            device=device,
         )
         # Complete model from components
         return GPTFullWrapper(
@@ -723,6 +746,7 @@ class ModelFromFlatVectorsFactory:
         config: ConfigLoRA,
         weights_vecs: Dict[str, FlatVectors],
         component_keys: List[str],
+        device: Optional[torch.device] = None,
     ) -> Dict[str, nn.Module]:
         components = dict()
         for comp_name in component_keys:
@@ -732,6 +756,7 @@ class ModelFromFlatVectorsFactory:
                 components[comp_name] = creator(
                     config=config,
                     weights_vecs=_weights_vecs,
+                    device=device,
                 )
             else:
                 block_idx = BlockComponentName.is_h(comp_name)
@@ -743,6 +768,7 @@ class ModelFromFlatVectorsFactory:
                     config=config,
                     block_idx=block_idx,
                     weights_vecs=_weights_vecs,
+                    device=device,
                 )
             # Deallocate
             del weights_vecs[comp_name]
@@ -753,6 +779,7 @@ class ModelFromFlatVectorsFactory:
     def create_lora_model(
         config: ConfigLoRA,
         weights_vecs: Dict[str, FlatVectors],
+        device: Optional[torch.device] = None,
         **mha_kwargs,
     ) -> GPTLoRAWrapper:
         """
@@ -767,6 +794,8 @@ class ModelFromFlatVectorsFactory:
             config: See :class:`litgpt.model.GPT`
             weights_vecs: Flat vectors the weights are initialized from.
                 Entries are deleted as model is built. Empty on return.
+            device: Device the block is created on. Dwfaults to device of
+                `weights_vecs`.
 
         Returns:
             :class:`litgpt.lora.GPT` object with initialized weights
@@ -781,6 +810,7 @@ class ModelFromFlatVectorsFactory:
             config=config,
             weights_vecs=weights_vecs,
             component_keys=component_keys,
+            device=device,
         )
         # Complete model from components
         return GPTLoRAWrapper(
