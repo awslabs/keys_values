@@ -166,7 +166,8 @@ class CPUOffloadAccumulateGradients:
                     )
                     if idle_time_now is None:
                         idle_time_now = time.perf_counter() - start_time
-                idle_time += idle_time_now
+                if idle_time_now is not None:
+                    idle_time += idle_time_now
             mod_from.zero_grad(set_to_none=True)
             flat_vectors = {
                 k: v.to(device=torch.device("cpu"))

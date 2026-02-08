@@ -363,6 +363,7 @@ class LongBenchV2(DataModule):
         assert self._sequence_lengths is not None
         len_sl = len(self._sequence_lengths["train"])
         assert 0 < len_sl <= len(self.train_dataset), (len_sl, len(self.train_dataset))
+        print(f"train_dataloader: len_sl = {len_sl}, batch_size = {self.batch_size}, num_devices = {self.num_devices}")  # DEBUG
         torch.random.manual_seed(self.seed)
         return DataLoader(
             ReorderWrapperDataset(
@@ -387,6 +388,7 @@ class LongBenchV2(DataModule):
         assert self._sequence_lengths is not None
         len_sl = len(self._sequence_lengths["valid"])
         assert 0 < len_sl <= len(self.val_dataset), (len_sl, len(self.val_dataset))
+        print(f"val_dataloader: len_sl = {len_sl}, batch_size = {self.val_batch_size}, num_devices = {self.num_devices}")  # DEBUG
         return DataLoader(
             ReorderWrapperDataset(
                 self.val_dataset,

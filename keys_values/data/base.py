@@ -23,6 +23,8 @@ INPUT_IDS_NAME = "input_ids"
 
 LABELS_NAME = "labels"
 
+POSITION_NAME = "position"
+
 
 class LongContextDataset(Dataset):
     """
@@ -53,11 +55,11 @@ class LongContextDataset(Dataset):
 
 
 def get_pad_datacase() -> Dict[str, Any]:
-    return {"PADDING_DONT_USE": None}
+    return {"PADDING_DONT_USE": 31415927}
 
 
 def is_pad_datacase(x: Dict[str, Any]) -> bool:
-    return x == get_pad_datacase()
+    return x.get("PADDING_DONT_USE") == 31415927
 
 
 def pad_dataset(
@@ -69,19 +71,29 @@ def pad_dataset(
     Pads dataset `dataset` so its length becomes a multiple of
     `batch_size * num_devices`.
 
+    We also add a field :const:`POSITION_NAME` to each entry, containing the
+    position in the complete dataset.
+
     """
     factor = batch_size * num_devices
     remainder = len(dataset) % factor
     extra = [get_pad_datacase()] * ((factor - remainder) % factor)
-    return dataset + extra
+    return [{**x, POSITION_NAME: i} for i, x in enumerate(dataset + extra)]
 
 
 def common_collate_fn(
     samples: List[Dict[str, Any]],
     pad_id: int = 0,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    # Batch can contain `None` entries from padding
+    # DEBUG
+    if samples and POSITION_NAME in samples[0].keys():
+        print(f"common_collate_fn: batch = {[x[POSITION_NAME] for x in samples]}")
+    # END DEBUG
+    # Batch can contain padding entries
+    _samples = samples
     samples = [x for x in samples if not is_pad_datacase(x)]
+    if not samples:
+        raise ValueError(f"common_collate_fn received all-padding samples: Cannot return empty batch:\n{_samples}")
     input_ids = torch.nn.utils.rnn.pad_sequence(
         [sample[INPUT_IDS_NAME] for sample in samples],
         batch_first=True,

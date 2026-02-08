@@ -23,6 +23,7 @@ from litgpt.tokenizer import Tokenizer
 from keys_values.data.base import (
     INPUT_IDS_NAME,
     LABELS_NAME,
+    POSITION_NAME,
     LongContextDataset,
     common_collate_fn,
     is_pad_datacase,
@@ -120,11 +121,14 @@ class SequenceClassificationDataset(LongContextDataset):
             raw_count = len(encoded_prompt)
         if raw_count is not None:
             token_counts["raw"] = raw_count
-        return {
+        result = {
             INPUT_IDS_NAME: encoded_prompt,
             LABELS_NAME: label_idx,
             "token_counts": token_counts,
         }
+        if POSITION_NAME in example:
+            result[POSITION_NAME] = example[POSITION_NAME]
+        return result
 
 
 def get_seq_class_collate_fn(pad_id: int = 0):

@@ -23,6 +23,7 @@ from litgpt.tokenizer import Tokenizer
 from keys_values.data.base import (
     INPUT_IDS_NAME,
     LABELS_NAME,
+    POSITION_NAME,
     LongContextDataset,
     common_collate_fn,
     is_pad_datacase,
@@ -100,11 +101,14 @@ class SFTDataset(LongContextDataset):
         if raw_count is not None:
             token_counts["raw"] = raw_count + len(encoded_response)
 
-        return {
+        result = {
             INPUT_IDS_NAME: encoded_prompt_and_response,
             LABELS_NAME: labels,
             "token_counts": token_counts,
         }
+        if POSITION_NAME in example:
+            result[POSITION_NAME] = example[POSITION_NAME]
+        return result
 
 
 def get_sft_collate_fn(pad_id: int = 0, ignore_index: int = -100):
