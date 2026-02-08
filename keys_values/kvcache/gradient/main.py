@@ -972,6 +972,7 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         # Start with gradient w.r.t. head model, which also provides the
         # head gradients for the final layer.
+        total_idle_time = 0
         if self.verbose is VerbosityLevels.SOME:
             num_rows = len(self.layer_checkpoints.layer_numbers) - 2
             print(
@@ -1014,12 +1015,14 @@ class LongContextGradientModel(LongContextInferenceModel):
                     debug_modules.append(self._debug_gpt_model.lm_head)
             else:
                 debug_modules = None
-            self._offload_grad_accum(
+            idle_time = self._offload_grad_accum(
                 module_pairs=module_pairs,
                 module_on_device=module_on_device,
                 debug_modules=debug_modules,
             )
             del shard_on_device
+            if idle_time is not None:
+                total_idle_time += idle_time
             # Check for NaNs
             for _, mod_to in module_pairs:
                 check_for_nan_module_weights(
@@ -1104,12 +1107,14 @@ class LongContextGradientModel(LongContextInferenceModel):
                     ]
                 else:
                     debug_modules = None
-                self._offload_grad_accum(
+                idle_time = self._offload_grad_accum(
                     module_pairs=module_pairs,
                     debug_modules=debug_modules,
                 )
                 del model_part
                 del shard_on_device
+                if idle_time is not None:
+                    total_idle_time += idle_time
                 # Check for NaNs
                 for i, (_, mod_to) in enumerate(module_pairs):
                     check_for_nan_module_weights(
@@ -1162,11 +1167,13 @@ class LongContextGradientModel(LongContextInferenceModel):
                 debug_modules = [self._debug_gpt_model.transformer.wte]
             else:
                 debug_modules = None
-            self._offload_grad_accum(
+            idle_time = self._offload_grad_accum(
                 module_pairs=module_pairs,
                 debug_modules=debug_modules,
             )
             del shard_on_device
+            if idle_time is not None:
+                total_idle_time += idle_time
             # Check for NaNs
             for _, mod_to in module_pairs:
                 check_for_nan_module_weights(
@@ -1175,14 +1182,12 @@ class LongContextGradientModel(LongContextInferenceModel):
                     extra_msg="Updated by run_input_embeddings",
                 )
 
-        # Finalize gradient accumulation
-        if self.offload_device is not None:
-            idle_time = self._offload_grad_accum.finalize(self.gpt_model)
-            if idle_time is not None and self.verbose is not VerbosityLevels.NONE:
-                print(
-                    f"[Rank {self._offload_grad_accum.rank()}]: Idle time when "
-                    f"syncing for all_reduce computation(s): {idle_time:.2f} secs"
-                )
+        # Print idle time
+        if self.offload_device is not None and self.verbose is not VerbosityLevels.NONE and total_idle_time > 0:
+            print(
+                f"[Rank {self._offload_grad_accum.rank()}]: Combined idle time "
+                f"at sync points of all_reduce computation(s): {total_idle_time:.2f} secs"
+            )
 
         if self._debug_profile_backward:
             profiler.disable()

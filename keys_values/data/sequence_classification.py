@@ -79,6 +79,7 @@ class SequenceClassificationDataset(LongContextDataset):
         for idx, example in enumerate(self.data):
             if is_pad_datacase(example):
                 is_in_padding = True
+                pos = None
             else:
                 if is_in_padding:
                     raise ValueError(
@@ -92,7 +93,7 @@ class SequenceClassificationDataset(LongContextDataset):
                     raise ValueError(
                         f"data[{idx}]['output'] = '{label}' invalid, must lie in {self.class_labels}"
                     )
-                self._label_indexes.append(pos)
+            self._label_indexes.append(pos)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         if not (0 <= idx < len(self.data)):
@@ -100,9 +101,9 @@ class SequenceClassificationDataset(LongContextDataset):
                 f"index {idx} out of range, must be in [0, {len(self.data)})"
             )
         example = self.data[idx]
-        if is_pad_datacase(example):
-            return example
         label_idx = self._label_indexes[idx]
+        if label_idx is None:
+            return example  # Padding case
         if self.transform is not None:
             example = self.transform(example)
         prompt = self.prompt_style.apply(prompt=example["instruction"], **example)

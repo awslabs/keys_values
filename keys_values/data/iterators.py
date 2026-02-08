@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-from typing import Iterator, List, Iterable
+from typing import Iterator, List
 
 import torch
+from torch.utils.data import Sampler
 
 
-class LongestFirstIterator(Iterator):
+class LongestFirstIterator(Iterator[int]):
     def __init__(
         self,
         dataset_size: int,
@@ -38,22 +39,20 @@ class LongestFirstIterator(Iterator):
 
     def __next__(self) -> int:
         if self._pos >= self.dataset_size:
-            self._permutation = torch.randperm(self.dataset_size)
-            self._pos = 0
+            raise StopIteration
         result = self._permutation[self._pos].item()
         self._pos += 1
         return result
 
-    def __iter__(self) -> Iterator:
+    def __iter__(self) -> Iterator[int]:
         return self
 
 
-class LongestFirstIterable(Iterable):
+class LongestFirstIterable(Sampler[int]):
     """
     To be used as `sampler` for :class:`torch.utils.data.DataLoader`.
     Returns `inds_longest` first, then a random permutation of the remainder
-    for the rest of the epoch. Afterwards, each epoch is a random permutation,
-    independent of `inds_longest`.
+    for the rest of the epoch.
 
     Use this to ensure that the first batch is given by the indexes in
     `inds_longest`.
@@ -71,14 +70,14 @@ class LongestFirstIterable(Iterable):
         }
         self._len = dataset_size
 
-    def __iter__(self) -> Iterator:
+    def __iter__(self) -> Iterator[int]:
         return LongestFirstIterator(**self._kwargs)
 
     def __len__(self) -> int:
         return self._len
 
 
-class SimilarSequenceLengthIterator(Iterator):
+class SimilarSequenceLengthIterator(Iterator[int]):
     def __init__(
         self,
         sequence_lengths: List[int],
@@ -106,8 +105,9 @@ class SimilarSequenceLengthIterator(Iterator):
         self._shortest_first = shortest_first
         self._partition = None
         self._initialize(sequence_lengths)
-        self._pos = self.dataset_size
         self._permutation = None
+        self._create_permutation()
+        self._pos = 0
 
     def _initialize(self, sequence_lengths: List[int]):
         # Sort from shortest to longest
@@ -195,21 +195,20 @@ class SimilarSequenceLengthIterator(Iterator):
             for inn_ind in get_index(len(self._partition[out_ind]))
         ]
         self._permutation = torch.cat(parts)
+        assert len(self._permutation) == self.dataset_size  # Sanity check
 
     def __next__(self) -> int:
         if self._pos >= self.dataset_size:
-            self._create_permutation()
-            self._pos = 0
-            self._longest_first = False
+            raise StopIteration
         result = self._permutation[self._pos].item()
         self._pos += 1
         return result
 
-    def __iter__(self) -> Iterator:
+    def __iter__(self) -> Iterator[int]:
         return self
 
 
-class SimilarSequenceLengthIterable(Iterable):
+class SimilarSequenceLengthIterable(Sampler[int]):
     """
     To be used as `sampler` for :class:`torch.utils.data.DataLoader`.
 
@@ -256,7 +255,7 @@ class SimilarSequenceLengthIterable(Iterable):
         }
         self._len = len(sequence_lengths)
 
-    def __iter__(self) -> Iterator:
+    def __iter__(self) -> Iterator[int]:
         return SimilarSequenceLengthIterator(**self._kwargs)
 
     def __len__(self) -> int:
