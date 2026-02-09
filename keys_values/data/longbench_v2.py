@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Union
 from pathlib import Path
 import json
 
@@ -25,11 +25,12 @@ from litgpt.prompts import Default
 from litgpt.tokenizer import Tokenizer
 
 from keys_values.data.base import pad_dataset, ReorderWrapperDataset
+from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.evaluation import (
     EvaluationWithTasksDataset,
     get_wrapped_collate_fn,
 )
-from keys_values.data.iterators import SimilarSequenceLengthIterable
+from keys_values.data.iterators import SimilarSequenceLengthSampler
 from keys_values.data.sequence_classification import (
     SequenceClassificationDataset,
     get_seq_class_collate_fn,
@@ -94,8 +95,6 @@ class LongBenchV2(DataModule):
         ignore_index: int = -100,
         max_seq_length: Optional[int] = None,
         seed: int = 42,
-        num_workers: int = 4,
-        pin_memory: bool = False,
         include_multiturn_conversations: bool = False,
         repo_id: str = "THUDM/LongBench-v2",
         access_token: Optional[str] = None,
@@ -117,10 +116,6 @@ class LongBenchV2(DataModule):
                 filtered out. Defaults to 100000.
             seed: The random seed for creating the train/val splits and shuffling
                 the dataset.
-            num_workers: Option of `torch.utils.data.DataLoader`. How many
-                processes to use for loading.
-            pin_memory: Option of `torch.utils.data.DataLoader`. If `True`, data
-                loading may be faster.
             include_multiturn_conversations: Whether to include multi-turn
                 conversations in the dataset.
             repo_id: The Hugging Face dataset repository ID from where to
@@ -157,10 +152,6 @@ class LongBenchV2(DataModule):
         self.ignore_index = ignore_index
         self.max_seq_length = 100000 if max_seq_length is None else max_seq_length
         self.seed = seed
-        self._dataloader_kwargs = {
-            "num_workers": num_workers,
-            "pin_memory": pin_memory,
-        }
         self.include_multiturn_conversations = include_multiturn_conversations
         self.repo_id = repo_id
         self.access_token = (
@@ -192,6 +183,7 @@ class LongBenchV2(DataModule):
         tokenizer: Optional[Tokenizer] = None,
         batch_size: int = 1,
         num_devices: int = 1,
+        rank: Optional[int] = None,
         max_seq_length: Optional[int] = None,
         **kwargs,
     ) -> None:
@@ -210,6 +202,7 @@ class LongBenchV2(DataModule):
             batch_size: Batch size for :meth:`train_dataloader`
             num_devices: Number of GPU devices used for distributed
                 data parallel training
+            rank: Rank (only if `num_devices > 1`)
             max_seq_length: Cutoff for sequence length
             **kwargs: See above
 
@@ -223,9 +216,17 @@ class LongBenchV2(DataModule):
             raise ValueError(
                 f"head_model '{head_model}' not supported, must be in {SUPPORTED_HEAD_MODELS}"
             )
+        if num_devices < 1:
+            raise ValueError("num_devices must be >= 1")
+        if num_devices > 1:
+            if rank is None or not(0 <= rank < num_devices):
+                raise ValueError(f"rank = {rank}, must be in [0, {num_devices})")
+        else:
+            rank = 0
         self.tokenizer = tokenizer
         self.batch_size = batch_size
         self.num_devices = num_devices
+        self.rank = rank
         if max_seq_length is not None:
             self.max_seq_length = max_seq_length
         self.val_batch_size = kwargs.get("val_batch_size")
@@ -359,75 +360,60 @@ class LongBenchV2(DataModule):
         else:
             return get_seq_class_collate_fn()
 
-    def train_dataloader(self) -> DataLoader:
+    def train_dataloader(self) -> MyDataLoader:
         assert self._sequence_lengths is not None
         len_sl = len(self._sequence_lengths["train"])
         assert 0 < len_sl <= len(self.train_dataset), (len_sl, len(self.train_dataset))
-        print(f"train_dataloader: len_sl = {len_sl}, batch_size = {self.batch_size}, num_devices = {self.num_devices}")  # DEBUG
-        torch.random.manual_seed(self.seed)
-        return DataLoader(
-            ReorderWrapperDataset(
-                self.train_dataset,
-                num_devices=self.num_devices,
-                batch_size=self.batch_size,
-            ),
-            batch_size=self.batch_size,
-            sampler=SimilarSequenceLengthIterable(
+        return MyDataLoader(
+            dataset=self.train_dataset,
+            batch_sampler=SimilarSequenceLengthSampler(
                 sequence_lengths=self._sequence_lengths["train"],
                 micro_batch_size=self.batch_size,
+                seed=self.seed,
                 num_devices=self.num_devices,
+                rank=self.rank,
                 shuffle=True,
                 longest_first=self._trainloader_longest_first,
                 shortest_first=self._trainloader_shortest_first,
             ),
             collate_fn=self._get_collate_fn(),
-            **self._dataloader_kwargs,
         )
 
-    def val_dataloader(self) -> DataLoader:
+    def val_dataloader(self) -> MyDataLoader:
         assert self._sequence_lengths is not None
         len_sl = len(self._sequence_lengths["valid"])
         assert 0 < len_sl <= len(self.val_dataset), (len_sl, len(self.val_dataset))
-        print(f"val_dataloader: len_sl = {len_sl}, batch_size = {self.val_batch_size}, num_devices = {self.num_devices}")  # DEBUG
-        return DataLoader(
-            ReorderWrapperDataset(
-                self.val_dataset,
-                num_devices=self.num_devices,
-                batch_size=self.val_batch_size,
-            ),
-            batch_size=self.val_batch_size,
-            sampler=SimilarSequenceLengthIterable(
+        return MyDataLoader(
+            dataset=self.val_dataset,
+            batch_sampler=SimilarSequenceLengthSampler(
                 sequence_lengths=self._sequence_lengths["valid"],
                 micro_batch_size=self.val_batch_size,
+                seed=self.seed,
                 num_devices=self.num_devices,
+                rank=self.rank,
                 shuffle=False,
             ),
             collate_fn=self._get_collate_fn(),
-            **self._dataloader_kwargs,
         )
 
-    def test_dataloader(self, num_devices: int = 1) -> DataLoader:
+    def test_dataloader(self, num_devices: int = 1) -> Union[DataLoader, MyDataLoader]:
         if self.test_dataset is None:
             raise IndexError("Test dataset is not defined. Use 'test_set_tag'")
         assert self._sequence_lengths is not None
         len_sl = len(self._sequence_lengths["test"])
         assert 0 < len_sl <= len(self.test_dataset), (len_sl, len(self.test_dataset))
         if self._test_eval_tasks is None:
-            return DataLoader(
-                ReorderWrapperDataset(
-                    self.test_dataset,
-                    num_devices=num_devices,
-                    batch_size=self.test_batch_size,
-                ),
-                batch_size=self.test_batch_size,
-                sampler=SimilarSequenceLengthIterable(
+            return MyDataLoader(
+                dataset=self.test_dataset,
+                batch_sampler=SimilarSequenceLengthSampler(
                     sequence_lengths=self._sequence_lengths["test"],
                     micro_batch_size=self.test_batch_size,
+                    seed=self.seed,
                     num_devices=self.num_devices,
+                    rank=self.rank,
                     shuffle=False,
                 ),
                 collate_fn=self._get_collate_fn(),
-                **self._dataloader_kwargs,
             )
         else:
             # TODO: Use _sequence_lengths["test"]
@@ -449,7 +435,6 @@ class LongBenchV2(DataModule):
                 batch_size=self.test_batch_size,
                 shuffle=False,
                 collate_fn=collate_fn,
-                **self._dataloader_kwargs,
             )
 
     def head_model_kwargs(self, name: str) -> Dict[str, Any]:
@@ -705,13 +690,12 @@ class LongBenchV2Truncated(LongBenchV2):
         ignore_index: int = -100,
         max_seq_length: Optional[int] = None,
         seed: int = 42,
-        num_workers: int = 4,
-        pin_memory: bool = False,
         include_multiturn_conversations: bool = False,
         repo_id: str = "THUDM/LongBench-v2",
         access_token: Optional[str] = None,
         debug_num_cases: Optional[int] = None,
     ):
+        raise NotImplementedError("REFACTOR FIRST!")
         if metadata_dir is None:
             raise ValueError(
                 "metadata_dir must be given, and the metadata file must exist. "
@@ -723,8 +707,6 @@ class LongBenchV2Truncated(LongBenchV2):
             ignore_index=ignore_index,
             max_seq_length=max_seq_length,
             seed=seed,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
             include_multiturn_conversations=include_multiturn_conversations,
             repo_id=repo_id,
             access_token=access_token,

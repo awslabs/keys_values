@@ -434,10 +434,7 @@ def main(
         eos_id=tokenizer.eos_id,
         ignore_index=ignore_index,
     )
-    steps_per_epoch = len(train_dataloader) // train.gradient_accumulation_iters(
-        devices,
-        1,
-    )
+    steps_per_epoch = len(train_dataloader)
     lr_max_steps = min(
         train.epochs * steps_per_epoch, (train.max_steps or float("inf"))
     )

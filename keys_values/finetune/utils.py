@@ -125,10 +125,12 @@ def get_dataloaders(
     fabric: Optional[L.Fabric] = None,
 ) -> Tuple[DataLoader, DataLoader]:
     num_devices = 1 if fabric is None else fabric.world_size
+    rank = 0 if fabric is None else fabric.local_rank
     data.connect(
         tokenizer=tokenizer,
         batch_size=train.micro_batch_size,
         num_devices=num_devices,
+        rank=rank,
         max_seq_length=train.max_seq_length,
         head_model=head_model,
         val_batch_size=eval.micro_batch_size,
@@ -139,11 +141,6 @@ def get_dataloaders(
     data.setup()
     train_dataloader = data.train_dataloader()
     val_dataloader = data.val_dataloader()
-    if fabric is not None:
-        train_dataloader, val_dataloader = fabric.setup_dataloaders(
-            train_dataloader,
-            val_dataloader,
-        )
     return train_dataloader, val_dataloader
 
 

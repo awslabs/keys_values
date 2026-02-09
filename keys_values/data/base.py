@@ -85,10 +85,6 @@ def common_collate_fn(
     samples: List[Dict[str, Any]],
     pad_id: int = 0,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    # DEBUG
-    if samples and POSITION_NAME in samples[0].keys():
-        print(f"common_collate_fn: batch = {[x[POSITION_NAME] for x in samples]}")
-    # END DEBUG
     # Batch can contain padding entries
     _samples = samples
     samples = [x for x in samples if not is_pad_datacase(x)]

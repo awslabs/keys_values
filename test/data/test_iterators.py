@@ -27,7 +27,9 @@ def similar_sequence_length_should_be(
     num_devices: int,
     longest_first: bool,
     shortest_first: bool,
+    seed: int,
 ) -> List[List[int]]:
+    prng = torch.Generator().manual_seed(seed)
     len_sl = len(sequence_lengths)
     global_batch_size = micro_batch_size * num_devices
     len_dataset = math.ceil(len_sl / global_batch_size) * global_batch_size
@@ -43,10 +45,11 @@ def similar_sequence_length_should_be(
         if size_last < num_devices:
             num_full -= 1
             num_extra += 1
-    result = [
-        sort_ind[start : (start + micro_batch_size)]
-        for start in range(0, num_full * global_batch_size, micro_batch_size)
-    ]
+    result = []
+    for start in range(0, num_full * global_batch_size, global_batch_size):
+        for off in torch.randperm(num_devices, generator=prng):
+            _start = start + off * micro_batch_size
+            result.append(sort_ind[_start : (_start + micro_batch_size)])
     if num_extra > 0:
         size_rest = len_sl - num_full * global_batch_size
         num_mb = num_extra * num_devices
@@ -59,13 +62,22 @@ def similar_sequence_length_should_be(
         assert sum(sizes) == size_rest
         off1 = num_full * global_batch_size
         off2 = 0
-        for sz1 in sizes:
+        _result = [[] for _ in range(num_devices)]
+        rind = torch.randperm(num_devices, generator=prng)
+        if num_extra > 1:
+            rind = torch.cat(
+                (rind, torch.randperm(num_devices, generator=prng))
+            )
+        for sz1, pos in zip(sizes, rind):
             sz2 = micro_batch_size - sz1
-            result.append(sort_ind[off1 : off1 + sz1] + extra_ind[off2 : off2 + sz2])
+            _result[pos].append(sort_ind[off1 : off1 + sz1] + extra_ind[off2 : off2 + sz2])
             off1 += sz1
             off2 += sz2
         assert off1 == len_sl
         assert off2 == len(extra_ind)
+        result.extend([x[0] for x in _result])
+        if num_extra > 1:
+            result.extend([x[1] for x in _result])
 
     if longest_first:
         result = result[(-num_devices):] + result[:(-num_devices)]
@@ -95,8 +107,18 @@ def test_similar_sequence_length_iterator(
     torch.random.manual_seed(seed)
 
     global_batch_size = micro_batch_size * num_devices
-    len_dataset = math.ceil(len_sl / global_batch_size) * global_batch_size
-    sequence_lengths = torch.randint(16, 1024, size=(len_sl,)).tolist()
+    num_chunks = math.ceil(len_sl / global_batch_size)
+    len_dataset = num_chunks * global_batch_size
+    sequence_lengths = None
+    done = False
+    # Avoid ties, otherwise tests fail due to differences in sorting:
+    for _ in range(100):
+        sequence_lengths = torch.randint(16, 32768, size=(len_sl,)).tolist()
+        if len(set(sequence_lengths)) == len_sl:
+            done = True  # No ties
+            break
+    if not done:
+        raise AssertionError("WTF !!!!")
     print(
         f"len_sl = {len_sl}, micro_batch_size = {micro_batch_size}, num_devices = {num_devices}"
     )
@@ -112,20 +134,32 @@ def test_similar_sequence_length_iterator(
             num_devices=num_devices,
             longest_first=longest_first,
             shortest_first=shortest_first,
+            seed=seed,
         )
-        print("should_be:")
-        print("\n".join(str(b) for b in should_be))
-        iterator = SimilarSequenceLengthIterator(
-            sequence_lengths=sequence_lengths,
-            micro_batch_size=micro_batch_size,
-            num_devices=num_devices,
-            shuffle=False,
-            longest_first=longest_first,
-            shortest_first=shortest_first,
-        )
-        batches = [
-            [next(iterator) for _ in range(micro_batch_size)]
-            for _ in range(len_dataset // micro_batch_size)
+        iterator = [
+            SimilarSequenceLengthIterator(
+                sequence_lengths=sequence_lengths,
+                micro_batch_size=micro_batch_size,
+                seed=seed,
+                num_devices=num_devices,
+                rank=rank,
+                shuffle=False,
+                longest_first=longest_first,
+                shortest_first=shortest_first,
+            )
+            for rank in range(num_devices)
         ]
-        print("batches:")
-        print("\n".join(str(b) for b in batches))
+        batches = [
+            [next(iterator[step % num_devices]) for _ in range(micro_batch_size)]
+            for step in range(len_dataset // micro_batch_size)
+        ]
+        assert len(batches) == len(should_be)
+        print("batches vs should_be:")
+        print(
+            "\n".join(
+                f"{i:3d}: " + str(a) + " -- " + str(b)
+                for i, (a, b) in enumerate(zip(batches, should_be))
+            )
+        )
+        for i, (a, b) in enumerate(zip(batches, should_be)):
+            assert a == b, (i, a, b)

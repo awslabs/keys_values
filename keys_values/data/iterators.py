@@ -12,97 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-from typing import Iterator, List
+from typing import Iterator, List, Optional
 
 import torch
 from torch.utils.data import Sampler
 
 
-class LongestFirstIterator(Iterator[int]):
-    def __init__(
-        self,
-        dataset_size: int,
-        inds_longest: List[int],
-    ):
-        batch_size = len(inds_longest)
-        if not all(0 <= x < dataset_size for x in inds_longest):
-            raise ValueError(
-                f"inds_longest = {inds_longest}: all entries must be in [0, {dataset_size})"
-            )
-        self.dataset_size = dataset_size
-        self.batch_size = batch_size
-        remainder = list(set(range(dataset_size)) - set(inds_longest))
-        assert len(remainder) == dataset_size - batch_size
-        remainder = torch.tensor(remainder)[torch.randperm(len(remainder))]
-        self._permutation = torch.cat((torch.tensor(inds_longest), remainder))
-        self._pos = 0
-
-    def __next__(self) -> int:
-        if self._pos >= self.dataset_size:
-            raise StopIteration
-        result = self._permutation[self._pos].item()
-        self._pos += 1
-        return result
-
-    def __iter__(self) -> Iterator[int]:
-        return self
-
-
-class LongestFirstIterable(Sampler[int]):
-    """
-    To be used as `sampler` for :class:`torch.utils.data.DataLoader`.
-    Returns `inds_longest` first, then a random permutation of the remainder
-    for the rest of the epoch.
-
-    Use this to ensure that the first batch is given by the indexes in
-    `inds_longest`.
-
-    """
-
-    def __init__(
-        self,
-        dataset_size: int,
-        inds_longest: List[int],
-    ):
-        self._kwargs = {
-            "dataset_size": dataset_size,
-            "inds_longest": inds_longest.copy(),
-        }
-        self._len = dataset_size
-
-    def __iter__(self) -> Iterator[int]:
-        return LongestFirstIterator(**self._kwargs)
-
-    def __len__(self) -> int:
-        return self._len
-
-
-class SimilarSequenceLengthIterator(Iterator[int]):
+class SimilarSequenceLengthIterator(Iterator[List[int]]):
     def __init__(
         self,
         sequence_lengths: List[int],
         micro_batch_size: int,
+        seed: int,
         num_devices: int,
-        shuffle: bool = True,
-        longest_first: bool = False,
-        shortest_first: bool = False,
+        rank: int,
+        shuffle: bool,
+        longest_first: bool,
+        shortest_first: bool,
     ):
-        assert micro_batch_size >= 1
-        assert num_devices >= 1
-        if micro_batch_size == 1 and num_devices == 1:
-            raise ValueError(
-                "This sampler requires micro_batch_size > 1 or num_devices > 1"
-            )
-        if shortest_first and longest_first:
-            raise ValueError("Cannot set both shortest_first and longest_first")
         global_batch_size = micro_batch_size * num_devices
         num_chunks = math.ceil(len(sequence_lengths) / global_batch_size)
         self.dataset_size = num_chunks * global_batch_size
+        self.num_next = num_chunks
         self.micro_batch_size = micro_batch_size
         self.num_devices = num_devices
+        self.rank = rank
         self._shuffle = shuffle
         self._longest_first = longest_first
         self._shortest_first = shortest_first
+        self._prng = torch.Generator().manual_seed(seed)
         self._partition = None
         self._initialize(sequence_lengths)
         self._permutation = None
@@ -135,16 +73,20 @@ class SimilarSequenceLengthIterator(Iterator[int]):
             num_full_batches -= 1
             if size_last < ndev:
                 num_full_batches -= 1
+        parts = []
         if num_full_batches > 0:
             start = num_full_batches * global_batch_size
             micro_batches = inds_ascending[:start].split(mbs)
             num_mb = len(micro_batches)
             assert num_mb == num_full_batches * ndev, (num_mb, num_full_batches * ndev)
-            parts = [
-                micro_batches[off : (off + ndev)] for off in range(0, num_mb, ndev)
-            ]
+            for off in range(0, num_mb, ndev):
+                # Randomization between devices (otherwise, lower devices
+                # receive shorter sequences)
+                rind = torch.randperm(ndev, generator=self._prng)
+                parts.append(
+                    micro_batches[off + rind[self.rank].item()].tolist()
+                )
         else:
-            parts = []
             start = 0
         rem_batches = num_batches - num_full_batches
         if rem_batches > 0:
@@ -156,26 +98,35 @@ class SimilarSequenceLengthIterator(Iterator[int]):
             assert fix_me == 0 or mbs > 1, (fix_me, mbs)  # Sanity check
             sizes = [mbs] * (num_mb - fix_me) + [mbs - 1] * fix_me
             assert sum(sizes) == size_rest  # Sanity check
-            off = 0
-            micro_batches = []
-            for batch in inds_ascending[start:].split(sizes):
-                rem_sz = self.micro_batch_size - batch.numel()
-                micro_batches.append(torch.cat((batch, extra_inds[off : off + rem_sz])))
-                off += rem_sz
-            assert off == extra_inds.numel()  # Sanity check
-            parts.append(micro_batches[:ndev])
+            # Randomization between devices (otherwise, lower devices
+            # receive shorter sequences):
+            rind = torch.randperm(ndev, generator=self._prng)
             if rem_batches > 1:
-                parts.append(micro_batches[ndev:])
+                rind = torch.cat(
+                    (rind, torch.randperm(ndev, generator=self._prng))
+                )
+            off = 0
+            for batch, pos in zip(
+                inds_ascending[start:].split(sizes), rind,
+            ):
+                rem_sz = self.micro_batch_size - batch.numel()
+                if pos == self.rank:
+                    parts.append(
+                        torch.cat((batch, extra_inds[off : off + rem_sz])).tolist()
+                    )
+                off += rem_sz
+                pos += 1
+            assert off == extra_inds.numel()  # Sanity check
 
         # Sanity check
         assert len(parts) == num_batches, (parts, num_batches)
-        assert all(len(x) == ndev for x in parts)
+        assert all(len(x) == self.micro_batch_size for x in parts)
         self._partition = parts
 
     def _create_permutation(self):
         def get_index(sz: int) -> List[int]:
             if self._shuffle:
-                return torch.randperm(sz).tolist()
+                return torch.randperm(sz, generator=self._prng).tolist()
             else:
                 return list(range(sz))
 
@@ -189,40 +140,40 @@ class SimilarSequenceLengthIterator(Iterator[int]):
             out_inds.insert(0, num_outer - 1)
         elif self._shortest_first:
             out_inds = [0] + [x + 1 for x in out_inds]
-        parts = [
-            self._partition[out_ind][inn_ind]
-            for out_ind in out_inds
-            for inn_ind in get_index(len(self._partition[out_ind]))
-        ]
-        self._permutation = torch.cat(parts)
-        assert len(self._permutation) == self.dataset_size  # Sanity check
+        self._permutation = out_inds
 
-    def __next__(self) -> int:
-        if self._pos >= self.dataset_size:
+    def __next__(self) -> List[int]:
+        if self._pos >= self.num_next:
             raise StopIteration
-        result = self._permutation[self._pos].item()
+        part_pos = self._permutation[self._pos]
         self._pos += 1
-        return result
+        return self._partition[part_pos]
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self) -> Iterator[List[int]]:
         return self
 
 
-class SimilarSequenceLengthIterable(Sampler[int]):
+class SimilarSequenceLengthSampler(Sampler[List[int]]):
     """
-    To be used as `sampler` for :class:`torch.utils.data.DataLoader`.
+    To be used as `batch_sampler` for :class:`torch.utils.data.DataLoader`.
 
     Use this to create balanced batches for distributed data parallel
     training over several devices. Batches are of size `micro_batch_size`
     per device, and there are `num_devices` devices. Also, `sequence_lengths`
     is the number of tokens per sequence.
 
+    The sampler is aware of the process rank (via `rank`) and returns indexes
+    of the corresponding part of the dataset only. The dataset length (with
+    padding) is `micro_batch_size * num_chunks`, where
+    `num_chunks = ceil(len(sequence_lengths) / global_batch_size)` and
+    `global_batch_size = micro_batch_size * num_devices`.
+
     Note: We assume the size of the dataset this sampler is applied to, is a
-    multiple of `micro_batch_size * num_devices`, possibly padded at the end
-    to reach this size. This means that `sequence_lengths` can be shorter than
-    the dataset size. When this happens, we ensure that the shorter macro-batch
-    is the last one (if `shuffle=False`), containing the longest sequences (as
-    well as pad entries).
+    multiple of `global_batch_size`, possibly padded at the end to reach this
+    size. This means that `sequence_lengths` can be shorter than the dataset
+    size. When this happens, we ensure that the shorter macro-batch is the last
+    one (if `shuffle=False`), containing the longest sequences (as well as pad
+    entries).
 
     The method ensures that:
 
@@ -231,8 +182,8 @@ class SimilarSequenceLengthIterable(Sampler[int]):
       macro-batch) are close in length
     * If one macro-batch is shorter than the others, it contains the
       longest sequences
-    * Given that, if `shuffle=True`, macro-batches are ordered randomly, and
-      the order of micro-batches in each macro-batch are random as well
+    * Given that, if `shuffle=True`, macro-batches are ordered randomly. In
+      any case, the order of micro-batches in each macro-batch are random.
 
     """
 
@@ -240,22 +191,40 @@ class SimilarSequenceLengthIterable(Sampler[int]):
         self,
         sequence_lengths: List[int],
         micro_batch_size: int,
-        num_devices: int,
+        seed: int,
+        num_devices: int = 1,
+        rank: Optional[int] = None,
         shuffle: bool = True,
         longest_first: bool = False,
         shortest_first: bool = False,
     ):
+        assert micro_batch_size >= 1
+        assert num_devices >= 1
+        if micro_batch_size == 1 and num_devices == 1:
+            raise ValueError(
+                "This sampler requires micro_batch_size > 1 or num_devices > 1"
+            )
+        if shortest_first and longest_first:
+            raise ValueError("Cannot set both shortest_first and longest_first")
+        if num_devices > 1:
+            if num_devices is None or not(0 <= rank < num_devices):
+                raise ValueError(f"rank = {rank}, must be in [0, {num_devices})")
+        else:
+            rank = 0
         self._kwargs = {
             "sequence_lengths": sequence_lengths.copy(),
             "micro_batch_size": micro_batch_size,
+            "seed": seed,
             "num_devices": num_devices,
+            "rank": rank,
             "shuffle": shuffle,
             "longest_first": longest_first,
             "shortest_first": shortest_first,
         }
-        self._len = len(sequence_lengths)
+        global_batch_size = micro_batch_size * num_devices
+        self._len = math.ceil(len(sequence_lengths) / global_batch_size)
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self) -> Iterator[List[int]]:
         return SimilarSequenceLengthIterator(**self._kwargs)
 
     def __len__(self) -> int:
