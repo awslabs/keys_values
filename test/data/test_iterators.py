@@ -150,7 +150,7 @@ def test_similar_sequence_length_iterator(
             for rank in range(num_devices)
         ]
         batches = [
-            [next(iterator[step % num_devices]) for _ in range(micro_batch_size)]
+            next(iterator[step % num_devices])
             for step in range(len_dataset // micro_batch_size)
         ]
         assert len(batches) == len(should_be)
