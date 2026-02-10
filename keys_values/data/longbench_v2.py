@@ -695,7 +695,6 @@ class LongBenchV2Truncated(LongBenchV2):
         access_token: Optional[str] = None,
         debug_num_cases: Optional[int] = None,
     ):
-        raise NotImplementedError("REFACTOR FIRST!")
         if metadata_dir is None:
             raise ValueError(
                 "metadata_dir must be given, and the metadata file must exist. "
@@ -720,10 +719,19 @@ class LongBenchV2Truncated(LongBenchV2):
         self,
         tokenizer: Optional[Tokenizer] = None,
         batch_size: int = 1,
+        num_devices: int = 1,
+        rank: Optional[int] = None,
         max_seq_length: Optional[int] = None,
         **kwargs,
     ) -> None:
-        super().connect(tokenizer, batch_size, max_seq_length, **kwargs)
+        super().connect(
+            tokenizer,
+            batch_size,
+            num_devices,
+            rank,
+            max_seq_length,
+            **kwargs,
+        )
         truncation_context_width = kwargs.get("truncation_context_width")
         if truncation_context_width is None:
             raise ValueError("truncation_context_width must be provided")
