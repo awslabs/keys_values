@@ -51,7 +51,7 @@ from keys_values.kvcache.gradient.checkpoints import (
 from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.gradient.inference_replay import inference_replay_cache_factory
 from keys_values.kvcache.stack_layers import CellBlocks
-from keys_values.kvcache.utils import VerbosityLevels
+from keys_values.utils import VerbosityLevels
 from keys_values.long_context import (
     get_chunks_for_cells,
     get_chunk_of_targets,

@@ -16,7 +16,7 @@ from typing import Optional
 
 import torch
 
-from keys_values.kvcache.utils import VerbosityLevels
+from keys_values.utils import VerbosityLevels
 
 RECORD_MEMORY_MAX_MEM_EVENTS_PER_SNAPSHOT = 200000
 

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Callable
 import math
 
 import torch
@@ -481,6 +481,7 @@ def pytorch_scaled_dot_product_attention(
     sdpa_kernels: Union[SDPBackend, List[SDPBackend]],
     do_filter_kernels: bool = False,
     mask: Optional[torch.Tensor] = None,
+    annotation_callback: Optional[Callable[[torch.Tensor, torch.Tensor], None]] = None,
 ) -> Tuple[torch.Tensor, Optional[List[SDPBackend]]]:
     """
     If you call this repeatedly and want to filter `sdpa_kernels`, use
@@ -497,6 +498,8 @@ def pytorch_scaled_dot_product_attention(
         sdpa_kernels: Kernels to be considered, in this order
         do_filter_kernels: See above
         mask: Mask tensor, optional
+        annotation_callback: If given, we call
+            `annotation_callback(key, value)` just before calling SDPA
 
     Returns:
         `(attn_outputs, filtered_sdpa_kernels)`, where `attn_outputs` is
@@ -515,6 +518,8 @@ def pytorch_scaled_dot_product_attention(
         key = repeat_interleave(key, n_head)
         value = repeat_interleave(value, n_head)
         enable_gqa = key.shape[1] == n_query_groups
+    if annotation_callback is not None:
+        annotation_callback(key, value)
     kwargs = dict(
         query=query,
         key=key,

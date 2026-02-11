@@ -45,11 +45,6 @@ from keys_values.kvcache.gradient.cleanup import (
 )
 from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
-from keys_values.kvcache.utils import (
-    wrap_tqdm_if_verbose,
-    VerbosityLevels,
-    message_with_device_memory,
-)
 from keys_values.long_context import (
     LongContextInferenceModel,
     GPTAndHeadModel,
@@ -59,7 +54,12 @@ from keys_values.model import GPT
 from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
 from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.optimize.model_factory import GPTShardCellBlock
-from keys_values.utils import check_for_nan_module_weights
+from keys_values.utils import (
+    check_for_nan_module_weights,
+    VerbosityLevels,
+    wrap_tqdm_if_verbose,
+    message_with_device_memory,
+)
 
 
 class LossValue(torch.Tensor):

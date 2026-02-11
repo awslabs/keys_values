@@ -29,10 +29,10 @@ from keys_values.kvcache.stack_layers import DefaultCellBlocks
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     copy_gradients,
-    exchange_kv_cache_checkpoints,
     available_backends,
 )
-from keys_values.kvcache.utils import VerbosityLevels
+from keys_values.kvcache.test_utils_advanced import exchange_kv_cache_checkpoints
+from keys_values.utils import VerbosityLevels
 from keys_values.model import GPT
 
 

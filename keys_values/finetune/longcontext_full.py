@@ -27,7 +27,6 @@ import torch
 from lightning.fabric.strategies import DDPStrategy
 from torchmetrics import RunningMean
 
-from keys_values.utils import flush_io_streams
 from litgpt.args import TrainArgs
 from litgpt.data import DataModule
 from litgpt.config import Config
@@ -56,11 +55,13 @@ from keys_values.attention_utils import (
     SDPA_KERNELS_BEST_ORDERING,
 )
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME, MyDataLoader
+from keys_values.flex_attention import FlexAttentionArgs
 from keys_values.finetune.args import (
     EvalArgs,
     GradientArgs,
     KVCacheArgs,
     OptimizerArgs,
+    SDPAArgs,
 )
 from keys_values.finetune.batch_transform import (
     BatchTransformFactory,
@@ -94,12 +95,6 @@ from keys_values.kvcache.gradient.main import (
     LongContextGradientModel,
     NaiveGPTAndHeadModel,
 )
-from keys_values.kvcache.utils import (
-    fabric_precision_to_dtype,
-    log_memory_all_devices,
-    message_memory_all_devices,
-    VerbosityLevels,
-)
 from keys_values.long_context import (
     GPTAndHeadModel,
     LongContextInferenceModel,
@@ -108,6 +103,13 @@ from keys_values.model import GPT
 from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.parser_config import save_hyperparameters
 from keys_values.pos_encoding import position_encoding_factory
+from keys_values.utils import (
+    flush_io_streams,
+    VerbosityLevels,
+    fabric_precision_to_dtype,
+    message_memory_all_devices,
+    log_memory_all_devices,
+)
 
 
 DEFAULT_OUT_DIR = "out/finetune/longcontext_full"
@@ -168,6 +170,10 @@ def setup(
     attention_forward_temp_size_gb: Optional[float] = None,
     attention_backward_temp_size_gb: Optional[float] = None,
     yarn_rope: bool = True,
+    sdpa: SDPAArgs = SDPAArgs(
+        flex_attention=True,
+        flex_extend_kv=True,
+    ),
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
     record_gpu_memory_period: int = 0,
@@ -225,6 +231,12 @@ def setup(
             sequence length for each batch? Defaults to `True`. If not, RoPE is
             determined by the model configuration, and is static (no dependence
             on sequence length).
+        sdpa: Configuration for scaled dot product attention (SDPA), the core
+            of multi-head self attention, see
+            ``keys_values.finetune.args.SDPAArgs`` for details. Set
+            `sdpa.flex_attention` to `True` to activate PyTorch
+            `flex_attention`. Otherwise, the zero-padded query SDPA kernel is
+            used.
         record_gpu_memory_snapshots: If given, we record GPU memory traces in
             snapshots. This argument is the `max_entries` parameter, a good
             value is 50000 or 100000.
@@ -372,6 +384,7 @@ def setup(
         attention_forward_temp_size_gb=attention_forward_temp_size_gb,
         attention_backward_temp_size_gb=attention_backward_temp_size_gb,
         yarn_rope=yarn_rope,
+        sdpa=sdpa,
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
@@ -403,6 +416,7 @@ def main(
     attention_forward_temp_size_gb: float,
     attention_backward_temp_size_gb: float,
     yarn_rope: bool,
+    sdpa: SDPAArgs,
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
@@ -453,14 +467,19 @@ def main(
             name="attention_forward_temp_size_gb",
         )
         mha_kwargs = dict(
-            sdpa_kernels=SDPA_KERNELS_BEST_ORDERING,
             tmp_array_limit_gb=tmp_array_limit_forward,
             pos_encoding=position_encoding_factory(config, do_yarn=yarn_rope),
         )
-        if "sdpa_kernels" not in kv_cache.cache_kwargs:
-            kv_cache.cache_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
-        kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
-        kv_cache.cache_kwargs["pos_encoding"] = mha_kwargs["pos_encoding"]
+        if "sdpa_kernels" in kv_cache.cache_kwargs:
+            mha_kwargs["sdpa_kernels"] = kv_cache.cache_kwargs["sdpa_kernels"]
+        else:
+            mha_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
+        if sdpa.flex_attention:
+            # The block mask managers (for prefill, for chunks) are shared
+            # among all multi-head attention blocks
+            flexatt_args = FlexAttentionArgs(extend_kv=sdpa.flex_extend_kv)
+            mha_kwargs["flexatt_args"] = flexatt_args
+        kv_cache.cache_kwargs.update(mha_kwargs)
         dtype = fabric_precision_to_dtype(fabric._precision.precision)
         torch.set_default_dtype(dtype)
         gpt_model = GPT(config, **mha_kwargs)

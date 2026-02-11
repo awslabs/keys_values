@@ -16,7 +16,8 @@ from typing import Any, Set, Optional, Union, Dict, Tuple, Iterable
 
 import torch
 
-from keys_values.kvcache.utils import bytes_for_torch_dtype, storage_id
+from keys_values.kvcache.utils import storage_id
+from keys_values.utils import bytes_for_torch_dtype
 
 
 @dataclass(frozen=True)

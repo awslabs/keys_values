@@ -32,9 +32,7 @@ from keys_values.kvcache.buffers import (
     KVCacheBuffersParams,
     positions_wrap_around,
 )
-from keys_values.kvcache.utils import bitsize_of, bits_for_torch_dtype
-from keys_values.utils import index_to_3d
-
+from keys_values.utils import index_to_3d, bits_for_torch_dtype, bitsize_of
 
 NOT_NEEDED_ARGS = ("max_batch_size", "cache_length", "dtype")
 

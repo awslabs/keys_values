@@ -13,13 +13,15 @@
 # limitations under the License.
 import csv
 import sys
+from enum import unique, Enum
 
 from filelock import FileLock, Timeout
 from pathlib import Path
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Iterable, Union, Iterator, Tuple
 
 import torch
+from tqdm import tqdm
 
 
 # Currently, `F.scaled_dot_product_attention` does not properly support the
@@ -76,6 +78,11 @@ def expand_index(index: torch.Tensor, head_size: int) -> torch.Tensor:
 def index_to_3d(index: torch.Tensor, dim0: int, dim1: int) -> torch.Tensor:
     assert index.ndim == 1
     return index.view(1, 1, -1).expand(dim0, dim1, -1)
+
+
+def is_index_1d(index: torch.Tensor) -> bool:
+    ndim = index.ndim
+    return index.stride() == (0,) * (ndim - 1) + (1,)
 
 
 def need_repeat_interleave(n_head: int, n_query_groups: int) -> bool:
@@ -182,3 +189,123 @@ def check_for_nan_module_weights(
                     is_boom = True
     if do_boom and is_boom:
         raise AssertionError("BOOM")
+
+
+@unique
+class VerbosityLevels(str, Enum):
+    NONE = "none"
+    SOME = "some"
+    MORE = "more"
+    ALL = "all"
+
+
+def wrap_tqdm_if_verbose(
+    iterator: Iterable,
+    verbose: VerbosityLevels,
+    total: Optional[int] = None,
+) -> Union[Iterable, Iterator]:
+    if verbose is VerbosityLevels.NONE:
+        return iterator
+    if isinstance(iterator, Iterator):
+        return tqdm(iterator, total=total)
+    else:
+        return tqdm(iterator)
+
+
+_PRECISION_TO_DTYPE = {
+    "16-true": torch.float16,
+    "16-mixed": torch.float16,
+    "bf16-true": torch.bfloat16,
+    "bf16-mixed": torch.bfloat16,
+    "32-true": torch.float32,
+}
+
+_PRECISION_NOT_SUPPORTED = (
+    "transformer-engine",
+    "transformer-engine-float16",
+    "64-true",
+)
+
+
+def fabric_precision_to_dtype(precision: str) -> torch.dtype:
+    result = _PRECISION_TO_DTYPE.get(precision)
+    if result is None:
+        if precision in _PRECISION_NOT_SUPPORTED:
+            raise ValueError(f"Precision {precision} not yet supported")
+        else:
+            raise ValueError(f"Precision {precision} is not valid")
+    return result
+
+
+def map_model_weights_from_precision(
+    model: torch.nn.Module,
+    precision: str,
+) -> torch.nn.Module:
+    result = _PRECISION_TO_DTYPE.get(precision)
+    if result is None:
+        return model
+    elif result == torch.float16:
+        return model.half()
+    elif result == torch.bfloat16:
+        return model.bfloat16()
+    elif result == torch.float32:
+        return model.float()
+
+
+def message_with_device_memory(device: torch.device) -> str:
+    free, total = torch.cuda.mem_get_info(device)
+    used_in_gb = (total - free) / (1024**3)
+    free_in_gb = free / (1024**3)
+    return f"Memory on {device}: Used {used_in_gb:.3f} GB, Free {free_in_gb:.3f} GB"
+
+
+def message_memory_all_devices() -> str:
+    num_devices = torch.cuda.device_count()
+    assert num_devices > 0, "There are no CUDA devices"
+    lines = [
+        message_with_device_memory(torch.device("cuda", i)) for i in range(num_devices)
+    ]
+    return "\n".join(lines)
+
+
+def log_memory_all_devices() -> Dict[str, float]:
+    num_devices = torch.cuda.device_count()
+    result = dict()
+    for i in range(num_devices):
+        device = torch.device("cuda", i)
+        free, total = torch.cuda.mem_get_info(device)
+        used_in_gb = (total - free) / (1024**3)
+        result[f"memory_cuda{i}"] = used_in_gb
+    return result
+
+
+def bytes_for_torch_dtype(dtype: torch.dtype) -> int:
+    """
+    Args:
+        dtype: Torch data type
+
+    Returns:
+        Number of bytes used to represent one number of this type.
+
+    """
+    return torch.tensor([], dtype=dtype).element_size()
+
+
+def bits_for_torch_dtype(dtype: torch.dtype) -> int:
+    """
+    Args:
+        dtype: Torch data type
+
+    Returns:
+        Number of bits used to represent one number of this type.
+
+    """
+    return bytes_for_torch_dtype(dtype) * 8
+
+
+def bitsize_of(x: torch.Tensor) -> int:
+    return x.numel() * x.element_size() * 8
+
+
+def shape_to_tuple(x: torch.Tensor) -> Tuple[int, ...]:
+    return tuple(int(d) for d in x.shape)

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from functools import partial
 from typing import List, Optional, Tuple, Union, Callable
 
 import torch
@@ -30,8 +31,15 @@ from keys_values.attention_utils import (
     slice_as_flat,
     pytorch_scaled_dot_product_attention,
 )
+from keys_values.flex_attention import (
+    scaled_dot_product_attention_flexatt,
+    FlexAttentionArgs,
+)
 from keys_values.pos_encoding import position_encoding_factory, PositionEncoding
-from keys_values.sdpa_wrapper import scaled_dot_product_attention as qpadded_sdpa
+from keys_values.sdpa_wrapper import (
+    scaled_dot_product_attention as scaled_dot_product_attention_zeropad,
+    ReorderAnnotationCallback,
+)
 
 
 class KeysAndValues:
@@ -92,6 +100,8 @@ SDPA_IMPL_EAGER_BLOCKS = 2
 
 SDPA_IMPL_EAGER_NO_BLOCKS = 3
 
+SDPA_IMPL_FLEXATTENTION = 4
+
 
 UseEagerPredicate = Callable[[int, int], bool]
 
@@ -122,21 +132,24 @@ class MultiHeadSelfAttention:
 
     There are different ways how SDPA is computed, see also
     :meth:`_sdpa_mode`:
-    - :const:`SDPA_IMPL_PYTORCH`: PyTorch SDPA kernel (see above). Only
-        used for prefill (`input_pos=0`). This is because this is all
-        PyTorch SDPA reliably supports at the moment (their C++
-        default implementation is quite useless).
+    - :const:`SDPA_IMPL_PYTORCH`: PyTorch SDPA kernel. Only used for
+        prefill (`input_pos=0`), where this is faster than the other
+        choices.
+    - :const:`SDPA_IMPL_FLEXATTENTION`: PyTorch `flex_attention`. This is
+        used for non-prefill (`input_pos > 0`) if `flexatt_args` is provided
+        and attention weights are not required. Cannot be used if attention
+        weights are required.
     - :const:`SDPA_IMPL_QPADDED_PYTORCH: Variant of PyTorch kernel, where
         `query` is zero-padded. This is implemented in
         :func:`sdpa_wrapper.scaled_dot_product_attention`. Cannot be used
         if attention weights are required.
+        Note: This is slower in general than `flex_attention`.
     - :const:`SDPA_IMPL_EAGER_BLOCKS`: Eager (own) implementation, using
         blocking to limit GPU memory usage.
     - :const:`SDPA_IMPL_EAGER_NO_BLOCKS: Eager (own) implementation without
         blocking. This is the worst, it is chosen only if
-        `config.attention_logit_softcapping` is not `None` (because I
-        can't be bothered to extend the blocking implementation to this
-        case).
+        `config.attention_logit_softcapping` is not `None` and `flex_attention`
+        is not used.
 
     PyTorch kernels are most efficient for the `is_causal=True` case
     (where queries and keys are over the same tokens), but do not return
@@ -153,11 +166,12 @@ class MultiHeadSelfAttention:
     ```
         use_eager_kernel(kv_len, q_len) = q_len <= thresh(kv_len)
     ```
-    This is because :const:`SDPA_IMPL_QPADDED_PYTORCH` is faster from a
-    certain value of `q_len` upwards. It also requires less temporary
-    memory.
+    This is because :const:`SDPA_IMPL_QPADDED_PYTORCH` (or
+    :const:`SDPA_IMPL_FLEXATTENTION`) is faster from a certain value of `q_len`
+    upwards. It also requires less temporary memory.
 
-    Look at :class:`DefaultUseEagerKernel` for choosing `use_eager_kernel`.
+    Use :class:`DefaultUseEagerKernel` for an optimized choice of
+    `use_eager_kernel`.
 
     """
 
@@ -170,6 +184,7 @@ class MultiHeadSelfAttention:
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
         use_eager_kernel: Optional[UseEagerPredicate] = None,
         filter_sdpa_kernels: bool = True,
+        flexatt_args: Optional[FlexAttentionArgs] = None,
     ) -> None:
         self.config = config
         if pos_encoding is None:
@@ -179,18 +194,19 @@ class MultiHeadSelfAttention:
         self._do_filter_kernels = filter_sdpa_kernels
         self.use_eager_sdpa_always = use_eager_sdpa_always
         self.set_tmp_array_limit_gb(tmp_array_limit_gb)
-        if self.config.attention_logit_softcapping is not None:
+        if self.config.attention_logit_softcapping is not None and flexatt_args is None:
             print(
                 "Your model uses attention logit softcapping "
-                "(config.attention_logit_softcapping != None). Time or memory "
-                "efficient implementations of SDPA cannot be used, you may run "
-                "out of GPU memory. Consider using a model without attention "
-                "logit softcapping."
+                "(config.attention_logit_softcapping != None). This is efficient "
+                "only with FlexAttention (provide flexatt_args for that). You "
+                "may run out of GPU memory. Consider using a model without "
+                "attention logit softcapping or provide flexatt_args."
             )
         if use_eager_kernel is None and not use_eager_sdpa_always:
             # This is a good choice for `kv_len = 32768`
             use_eager_kernel = lambda kv_len, q_len: q_len < 512
         self._use_eager_kernel = use_eager_kernel
+        self._flexatt_args = flexatt_args
 
     @property
     def sdpa_kernels(self) -> Union[SDPBackend, List[SDPBackend]]:
@@ -199,6 +215,10 @@ class MultiHeadSelfAttention:
     @property
     def tmp_array_limit_gb(self) -> Optional[TemporaryArrayLimit]:
         return self._tmp_array_limit_gb
+
+    @property
+    def has_flex_attention(self) -> bool:
+        return self._flexatt_args is not None
 
     def set_tmp_array_limit_gb(self, limit: Optional[TemporaryArrayLimit]):
         if limit is not None:
@@ -219,6 +239,7 @@ class MultiHeadSelfAttention:
         input_pos: Optional[int] = None,
         return_attn_weights: bool = False,
         token_positions: Optional[torch.Tensor] = None,
+        annotation_callback: Optional[ReorderAnnotationCallback] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Args:
@@ -234,6 +255,9 @@ class MultiHeadSelfAttention:
             token_positions: Required if `input_pos > 0`. Contains token
                 positions in KV cache. This is needed to select the correct
                 part of the mask matrix
+            annotation_callback: If this is given, it is a callback passed
+                to specialized SDPA variants. Its arguments are
+                `key, value, sort_index`.
 
         Returns:
             `attn_output, attn_weights`, where `attn_weights` is `None` if
@@ -294,6 +318,7 @@ class MultiHeadSelfAttention:
             sliding_window_size=sliding_window_size,
             mask=mask,
             return_attn_weights=return_attn_weights,
+            annotation_callback=annotation_callback,
         )
         # Re-assemble all head outputs side by side.
         attn_outputs = attn_outputs.reshape(batch_size, seq_length, -1)
@@ -330,20 +355,26 @@ class MultiHeadSelfAttention:
             Type of SDPA implementation: See `SDPA_IMPL_*` constants
 
         """
-        if self.config.attention_logit_softcapping is not None:
-            return SDPA_IMPL_EAGER_NO_BLOCKS
         must_eager = return_attn_weights or self.use_eager_sdpa_always
-        if must_eager or not is_causal:
-            if (
-                must_eager
-                or sliding_window_size is not None
-                or self._use_eager_kernel(kv_len, q_len)
-            ):
-                return SDPA_IMPL_EAGER_BLOCKS
+        use_flex_att = self._flexatt_args is not None and not must_eager
+        if self.config.attention_logit_softcapping is not None:
+            if use_flex_att:
+                return SDPA_IMPL_FLEXATTENTION
             else:
-                return SDPA_IMPL_QPADDED_PYTORCH
-        else:
+                return SDPA_IMPL_EAGER_NO_BLOCKS
+        if is_causal and not must_eager:
+            # For prefill, native PyTorch SDPA is fastest
             return SDPA_IMPL_PYTORCH
+        if use_flex_att:
+            return SDPA_IMPL_FLEXATTENTION
+        elif (
+            must_eager
+            or sliding_window_size is not None
+            or self._use_eager_kernel(kv_len, q_len)
+        ):
+            return SDPA_IMPL_EAGER_BLOCKS
+        else:
+            return SDPA_IMPL_QPADDED_PYTORCH
 
     def get_scale_factor(self):
         return self.pos_encoding.sdpa_scale_factor()
@@ -362,6 +393,7 @@ class MultiHeadSelfAttention:
         mask: Optional[torch.Tensor] = None,
         return_attn_weights: bool = False,
         transpose_result: bool = True,
+        annotation_callback: Optional[ReorderAnnotationCallback] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         scale_factor = self.get_scale_factor()
         # We cannot call PyTorch scaled_dot_product_attention if:
@@ -378,7 +410,7 @@ class MultiHeadSelfAttention:
                 sliding_window_size=sliding_window_size,
             )
         if sdpa_mode == SDPA_IMPL_QPADDED_PYTORCH:
-            attn_outputs, filtered_kernels = qpadded_sdpa(
+            attn_outputs, filtered_kernels = scaled_dot_product_attention_zeropad(
                 query=query,
                 key=k_and_v.keys(),
                 value=k_and_v.values(),
@@ -387,14 +419,33 @@ class MultiHeadSelfAttention:
                 token_positions=token_positions,
                 sdpa_kernels=self.sdpa_kernels,
                 do_filter_kernels=self._do_filter_kernels,
+                annotation_callback=annotation_callback,
             )
             if self._do_filter_kernels:
                 self._do_filter_kernels = False
                 self._sdpa_kernels = filtered_kernels
+        elif sdpa_mode == SDPA_IMPL_FLEXATTENTION:
+            attn_outputs = scaled_dot_product_attention_flexatt(
+                flexatt_args=self._flexatt_args,
+                query=query,
+                key=k_and_v.keys(),
+                value=k_and_v.values(),
+                scale_factor=scale_factor,
+                sliding_window_size=sliding_window_size,
+                attention_logit_softcapping=self.config.attention_logit_softcapping,
+                input_pos=input_pos,
+                token_positions=token_positions,
+                annotation_callback=annotation_callback,
+            )
         elif sdpa_mode == SDPA_IMPL_PYTORCH:
             # We need `key` and `value` at the same time here. For the training
             # use case, this will be the case, since `k_and_v` is the default
             # in this case.
+            if annotation_callback is not None:
+                annotation_callback = partial(
+                    annotation_callback,
+                    sort_index=None,
+                )
             attn_outputs, filtered_kernels = pytorch_scaled_dot_product_attention(
                 query=query,
                 key=k_and_v.keys(),
@@ -403,6 +454,7 @@ class MultiHeadSelfAttention:
                 sdpa_kernels=self.sdpa_kernels,
                 do_filter_kernels=self._do_filter_kernels,
                 mask=mask,
+                annotation_callback=annotation_callback,
             )
             if self._do_filter_kernels:
                 self._do_filter_kernels = False

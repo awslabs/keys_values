@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import replace
+from functools import partial
 from typing import Optional, Tuple, Dict, Any
 
 import torch
@@ -23,28 +24,27 @@ from keys_values.attention import (
     DefaultKeysAndValues,
     SDPA_IMPL_QPADDED_PYTORCH,
     SDPA_IMPL_EAGER_BLOCKS,
+    SDPA_IMPL_FLEXATTENTION,
 )
 from keys_values.kvcache.attn_weights import (
     update_token_positions,
     UpdateTokenPositionsGracePeriod,
 )
 from keys_values.kvcache.base import DefaultKVCache, KVCacheReplayLog
-from keys_values.kvcache.gradient.autograd_hooks import (
+from keys_values.kvcache.gradient.autograd_hooks import Annotations
+from keys_values.kvcache.gradient.annotation import (
     NodeAnnotation,
-    Annotations,
-    MAX_DELTA_TRANS_LENGTH,
     create_random_index,
+    MAX_DELTA_TRANS_LENGTH,
+    create_ext_annotations,
 )
 from keys_values.kvcache.gradient.sdpa_op import (
     scatter_on_buffers,
     cat_on_buffers,
 )
-from keys_values.kvcache.utils import shape_to_tuple, for_debug
-from keys_values.utils import (
-    expand_index,
-    need_repeat_interleave,
-    repeat_interleave,
-)
+from keys_values.kvcache.utils import for_debug
+from keys_values.sdpa_wrapper import ReorderAnnotationCallback
+from keys_values.utils import expand_index, shape_to_tuple
 
 
 class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
@@ -52,7 +52,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
     Variant of :class:`TrainingAttnWeightsReplayCache`. Here, we do not use
     the special operators of `sdpa_op`, but employ
     :class:`MultiHeadSelfAttention` as part of the `autograd` graph, with
-    `sdpa_mode = SDPA_IMPL_QPADDED_PYTORCH`.
+    `sdpa_mode in (SDPA_IMPL_QPADDED_PYTORCH, SDPA_IMPL_FLEXATTENTION`.
 
     As in :class:`TrainingAttnWeightsReplayCache`, the main difficulty here is
     to support the autograd saved tensors hook mechanism by annotating the
@@ -84,13 +84,6 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             raise ValueError(f"layer_idx {layer_idx}, must be nonnegative")
         if num_chunks <= 0:
             raise ValueError(f"num_chunks {num_chunks}, must be positive")
-        if config.attention_logit_softcapping is not None:
-            raise ValueError(
-                "This replay cache does not support "
-                "config.attention_logit_softcapping being used, since this "
-                "forbids the use of fast SDPA kernels. Please choose a "
-                "different model."
-            )
         super().__init__(
             config=config,
             max_batch_size=batch_size,
@@ -105,6 +98,17 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         if self.mha.use_eager_sdpa_always:
             raise ValueError(
                 "This replay cache does not support mha.use_eager_sdpa_always = True"
+            )
+        if (
+            config.attention_logit_softcapping is not None
+            and not self.mha.has_flex_attention
+        ):
+            raise ValueError(
+                "This replay cache does not support "
+                "config.attention_logit_softcapping being used, unless together "
+                "with FlexAttention. Choose a model without attention logit "
+                "softcapping, or use FlexAttention by passing flexatt_args "
+                "when creating the MultiHeadSelfAttention object."
             )
         self.replay_log = replay_log
         self._batch_size = batch_size
@@ -131,12 +135,15 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         self.debug_print_annotations = debug_print_annotations
         self._debug_full_args = debug_full_args
         sliding_window_size = self.mha._get_sliding_window_size(layer_idx)
-        if sliding_window_size is not None:
+        if self.mha.has_flex_attention:
+            sdpa_mode = SDPA_IMPL_FLEXATTENTION
+        elif sliding_window_size is not None:
             print(
                 "WARNING: config.sliding_window_size is used. This means that "
                 "a naive SDPA kernel has to be used, for which computations "
                 "can be slow. Consider switching to a model which does not use "
-                "config.sliding_window_size."
+                "config.sliding_window_size, or use FlexAttention by passing "
+                "flexatt_args when creating the MultiHeadSelfAttention object."
             )
             sdpa_mode = SDPA_IMPL_EAGER_BLOCKS
         else:
@@ -329,17 +336,10 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 positions,
             )
             # Post-processing w.r.t. annotations
-            self._create_node_after_creator(
-                x=key_buffer_new,
-                kind="scatter-key",
-                index=index_e,
-                debug_msg="scatter-after",
-            )
-            self._create_node_after_creator(
-                x=value_buffer_new,
-                kind="scatter-value",
-                index=index_e,
-                debug_msg="scatter-after",
+            annotation_callback = self._create_callback_after_creator(
+                key=key_buffer_new,
+                value=value_buffer_new,
+                kind="scatter",
             )
             self.kv_buffers = DefaultKeysAndValues(
                 key_buffer_new,
@@ -373,18 +373,10 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 self.kv_buffers.values(),
             )
             # Post-processing w.r.t. annotations
-            debug_msg = f"cat-after (clen={self.current_length})"
-            self._create_node_after_creator(
-                x=key_buffer_new,
-                kind="cat-key",
-                index=None,
-                debug_msg=debug_msg,
-            )
-            self._create_node_after_creator(
-                x=value_buffer_new,
-                kind="cat-value",
-                index=None,
-                debug_msg=debug_msg,
+            annotation_callback = self._create_callback_after_creator(
+                key=key_buffer_new,
+                value=value_buffer_new,
+                kind="cat",
             )
             self.kv_buffers = DefaultKeysAndValues(
                 key_buffer_new,
@@ -401,6 +393,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
             input_pos=self.input_pos,
             token_positions=self.token_positions(),
             return_attn_weights=False,
+            annotation_callback=annotation_callback,
             **self._sdpa_kwargs,
         )
         return attn_outputs.reshape(self.batch_size, num, -1)
@@ -442,8 +435,7 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
                 NodeAnnotation(
                     kind="padded-query",
                     layer_idx=self.layer_idx,
-                    chunk_idx=self._token_chunk_pos
-                    - 1,  # `token_chunk_pos` has already been advanced
+                    chunk_idx=self._token_chunk_pos - 1,
                     shape=shape,
                     index=index,
                     delta=delta,
@@ -557,87 +549,47 @@ class TrainingAttnWeightsReplayCacheNew(DefaultKVCache):
         )
         return expand_index(result, head_size)
 
-    def _create_node_after_creator(
+    def _create_callback_after_creator(
         self,
-        x: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
         kind: str,
-        index: Optional[torch.Tensor],
-        debug_msg: Optional[str] = None,
-    ):
+    ) -> Optional[ReorderAnnotationCallback]:
         chunk_idx = self._token_chunk_pos - 1  # Counter has already been advanced
-        x = x.detach()
+        annotation_callback = None
         if self._node_annotations is not None:
             if chunk_idx == self._end_token_chunk_pos - 1:
                 # We need to store the final node in order to start the
                 # reconstruction of all earlier ones.
                 self._node_annotations.set_final(
-                    x=x,
+                    x=key.detach(),
                     layer_idx=self.layer_idx,
                     chunk_idx=chunk_idx,
-                    kind=kind,
+                    kind=kind + "-key",
+                )
+                self._node_annotations.set_final(
+                    x=value.detach(),
+                    layer_idx=self.layer_idx,
+                    chunk_idx=chunk_idx,
+                    kind=kind + "-value",
                 )
             if NodeAnnotation.kind_is_scatter(kind):
-                assert index is not None
-                # Create "ext-*" annotation for node `x` after it was created, so
-                # the chunk index is `chunk_idx`
-                # Create index
-                need_ri = need_repeat_interleave(self.n_head, self.n_query_groups)
-                is_keys = NodeAnnotation.kind_is_keys(kind)
-                ext_kind = "ext-key" if is_keys else "ext-value"
-                # Used for reordering in padded-query SDPA
-                sort_index = torch.argsort(
-                    self.token_positions().detach(),
-                    dim=-1,
-                ).to(dtype=torch.int32)
-                extra_info = {"sort_index": sort_index}
-                # `delta_index` is equal to initial slices of `index`.
-                # `ext_index` must be such that if
-                # `delta = gather(x, delta_index)` and
-                # `x1 = gather(x, sort_index)`, then
-                # `delta == gather(x1, ext_index)`. This means that
-                # `ext_index` can be used to extract `delta` from the pack
-                # argument, which is transformed by `sort_index`.
-                ext_index = self._append_random_index(index)[
-                    :, :, :MAX_DELTA_TRANS_LENGTH, :
-                ]
-                delta = x.gather(2, ext_index)
-                ext_index = repeat_interleave(
-                    self._transform_index(
-                        index=ext_index,
-                        sort_index=sort_index,
-                    ),
-                    self.n_head,
-                )
-                delta = repeat_interleave(delta, self.n_head)
-                shape = shape_to_tuple(x)
-                if need_ri:
-                    shape = (shape[0], self.n_head) + shape[2:]
-                annotation = NodeAnnotation(
-                    kind=ext_kind,
+                annot_kwargs = dict(
                     layer_idx=self.layer_idx,
                     chunk_idx=chunk_idx,
-                    shape=shape,
-                    index=ext_index,
-                    delta=delta,
-                    extra_info=extra_info,
-                    debug_msg=debug_msg,
                 )
-                if self._debug_full_args:
-                    sort_index = extra_info["sort_index"]
-                    x = x.gather(2, expand_index(sort_index, self.head_size))
-                    if need_ri:
-                        x = repeat_interleave(x, self.n_head)
-                    annotation = replace(
-                        annotation,
-                        debug_full_arg=x,
-                    )
-                self._append_annotation(annotation)
-
+                annotation_callback = partial(
+                    create_ext_annotations,
+                    node_annotations=self._node_annotations.nodes,
+                    annot_kwargs=annot_kwargs,
+                )
         if self._debug_tensors is not None:
             name = f"c{self._token_chunk_pos - 1}-l{self.layer_idx}-{kind}"
             if name in self._debug_tensors:
                 raise IndexError(f"Entry {name} already in debug_tensor!")
-            self._debug_tensors[name] = x.clone()
+            self._debug_tensors[name + "-key"] = key.clone()
+            self._debug_tensors[name + "-value"] = value.clone()
+        return annotation_callback
 
     @property
     def max_prefill_length(self) -> int:

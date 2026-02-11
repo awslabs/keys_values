@@ -26,64 +26,41 @@ from keys_values.attention import (
     scaled_dot_product_attention_in_blocks,
     DefaultKeysAndValues,
 )
-from keys_values.attention_utils import SDPA_KERNELS_BEST_ORDERING
+from keys_values.flex_attention import (
+    scaled_dot_product_attention_flexatt,
+    FlexAttentionArgs,
+)
 from keys_values.kvcache.base import KVCacheParams
-from keys_values.kvcache.test_utils import random_keys_values, random_tensor
-from keys_values.sdpa_wrapper import scaled_dot_product_attention
-from keys_values.utils import append_results_to_csv, randint_torch
-
-
-def sample_inputs(
-    params: KVCacheParams,
-    chunk_size: int,
-    input_pos: int,
-    device: torch.device,
-) -> Dict[str, torch.Tensor]:
-    batch_size = params.max_batch_size
-    cache_length = params.cache_length
-    n_query_groups = params.n_query_groups
-    query = random_tensor(params, num=chunk_size, is_query=True, device=device)
-    key, value = random_keys_values(params, num=cache_length, device=device)
-    index_kwargs = dict(dtype=torch.int64, device=device)
-    token_positions = torch.randint(
-        low=0,
-        high=input_pos - 1,
-        size=(batch_size, n_query_groups, cache_length),
-        **index_kwargs,
-    )
-    for b in range(batch_size):
-        for h in range(n_query_groups):
-            randpos = torch.randperm(cache_length, **index_kwargs)[:chunk_size]
-            token_positions[b, h, randpos] = torch.arange(
-                input_pos,
-                input_pos + chunk_size,
-                **index_kwargs,
-            )
-    return {
-        "query": query,
-        "key": key,
-        "value": value,
-        "token_positions": token_positions,
-    }
+from keys_values.scripts.profile_naive_vs_padded_sdpa import (
+    sample_inputs,
+    fingerprint,
+)
+from keys_values.utils import append_results_to_csv
 
 
 @torch.inference_mode()
-def measure_naive_time(
+def measure_naive_and_flexatt_time(
     chunk_size: float,
     params: KVCacheParams,
     num_repeats: int,
+    warmup_steps: int,
     records: List[dict],
     tmp_array_limit_gb: float,
-    fval: float,
     device: torch.device,
+    _compile: bool,
 ) -> float:
     chunk_size = round(chunk_size)
-    input_pos = 2 * params.cache_length  # Value should not matter
+    input_pos = 2 * params.cache_length  # Value does not matter
     scale_factor = 1.0 / math.sqrt(params.head_size)
-    sum_time_in_ms = 0
-    try:
-        for repeat in range(num_repeats):
-            data = sample_inputs(params, chunk_size, input_pos, device)
+    # In reality, we use different compiled expressions for each chunk size,
+    # so need to do this here as well
+    flexatt_args = FlexAttentionArgs(_compile=_compile)
+    sum_timediff_in_ms = 0
+    for repeat in range(num_repeats):
+        data = sample_inputs(params, chunk_size, input_pos, device)
+        forward_time = None
+        try:
+            # Naive SDPA
             torch.cuda.current_stream().synchronize()
             forward_time = time.perf_counter()
             y, _ = scaled_dot_product_attention_in_blocks(
@@ -97,22 +74,49 @@ def measure_naive_time(
                 tmp_array_limit_gb=tmp_array_limit_gb,
             )
             torch.cuda.current_stream().synchronize()
-            time_in_ms = (time.perf_counter() - forward_time) * 1000
-            sum_time_in_ms += time_in_ms
+        except RuntimeError:
+            # Most likely out of memory error
+            if repeat >= warmup_steps:
+                sum_timediff_in_ms = 100000 * num_repeats
+                break
+        time_in_ms_naive = (time.perf_counter() - forward_time) * 1000
+        if repeat >= warmup_steps:
+            sum_timediff_in_ms += time_in_ms_naive
+        try:
+            # FlexAttention SDPA
+            forward_time = time.perf_counter()
+            y = scaled_dot_product_attention_flexatt(
+                flexatt_args=flexatt_args,
+                query=data["query"],
+                key=data["key"],
+                value=data["value"],
+                scale_factor=scale_factor,
+                sliding_window_size=None,
+                attention_logit_softcapping=None,
+                input_pos=input_pos,
+                token_positions=data["token_positions"],
+            )
+            torch.cuda.current_stream().synchronize()
+        except RuntimeError:
+            # Most likely this one:
+            # torch._inductor.exc.InductorError: RuntimeError: No valid triton configs. OutOfMemoryError: out of resource: triton_tem_fused_flex_attention_0 Required: 278528 Hardware limit:166912 Reducing block sizes or `num_stages` may help.
+            if repeat >= warmup_steps:
+                sum_timediff_in_ms = -100000 * num_repeats
+                break
+        time_in_ms_flex = (time.perf_counter() - forward_time) * 1000
+        if repeat >= warmup_steps:
+            sum_timediff_in_ms -= time_in_ms_flex
             records.append(
                 {
                     "cache_length": params.cache_length,
                     "chunk_size": chunk_size,
                     "repeat": repeat,
-                    "time_in_ms": time_in_ms,
+                    "time_in_ms_naive": time_in_ms_naive,
+                    "time_in_ms_flex": time_in_ms_flex,
                 }
             )
-    except RuntimeError:
-        # Most like out of memory error
-        sum_time_in_ms = 100000 * num_repeats
 
-    ret = (sum_time_in_ms / num_repeats) - fval
-    return ret
+    return sum_timediff_in_ms / num_repeats
 
 
 @torch.inference_mode()
@@ -127,59 +131,32 @@ def find_chunk_size(
     maxiter: int = 100,
 ) -> Dict[str, Any]:
     """
-    Given a setup in `params`, in particular `params.cache_length`, we profile
-    time for `sdpa_type` SDPA first, which does not depend on `chunk_size`.
-    Then, we run root finding to search for a `chunk_size` value such that
-    `scaled_dot_product_attention_in_blocks` takes about the same time.
+    Given a setup in `params`, in particular `params.cache_length`, we run root
+    finding to search for a `chunk_size` value such that
+    `scaled_dot_product_attention_in_blocks` takes about the same time as
+    `scaled_dot_product_attention_flexatt`. We return the root value for
+    `chunk_size`, as well as a list of dictionaries containing all the
+    evaluations.
 
-    All evaluations (time in ms) are averaged over `num_repeats` repeats. We
-    return the root value for `chunk_size`, as well as a list of dictionaries
-    containing all the evaluations.
+    Note: Different to zero-padded SDPA, FlexAttention SDPA times depend on
+    `chunk_size`, so the difference may not be strictly decreasing and have
+    a unique root.
 
     """
     if params.cache_length < 32:
         raise ValueError("params.cache_length must be greater than 32")
-    # Measure time for SDPA `sdpa_type`
-    chunk_size = params.cache_length // 64  # Should not matter
-    input_pos = 2 * params.cache_length
-    sdpa_kernels = SDPA_KERNELS_BEST_ORDERING.copy()
-    scale_factor = 1.0 / math.sqrt(params.head_size)
-    sum_time_in_ms = 0
-    for repeat in [None] * warmup_steps + list(range(num_repeats)):
-        data = sample_inputs(params, chunk_size, input_pos, device)
-        torch.cuda.current_stream().synchronize()
-        forward_time = time.perf_counter()
-        y, _ = scaled_dot_product_attention(
-            query=data["query"],
-            key=data["key"],
-            value=data["value"],
-            scale_factor=scale_factor,
-            input_pos=input_pos,
-            token_positions=data["token_positions"],
-            sdpa_kernels=sdpa_kernels,
-        )
-        torch.cuda.current_stream().synchronize()
-        time_in_ms = (time.perf_counter() - forward_time) * 1000
-        if repeat is not None:
-            sum_time_in_ms += time_in_ms
-    time_padded_query = sum_time_in_ms / num_repeats
-    print(
-        f"\ncache_length = {params.cache_length}: Time for {sdpa_type} SDPA = {time_padded_query} ms"
-    )
     # Running root finding
     records = []
     root_func = partial(
-        measure_naive_time,
+        measure_naive_and_flexatt_time,
         params=params,
         num_repeats=num_repeats,
+        warmup_steps=warmup_steps,
         records=records,
         tmp_array_limit_gb=tmp_array_limit_gb,
-        fval=time_padded_query,
         device=device,
+        _compile=sdpa_type.endswith("_comp"),
     )
-    # Warm-up:
-    for _ in range(warmup_steps):
-        root_func(randint_torch(1, params.cache_length))
     x0 = max(params.cache_length // 64, 8)
     bracket = (1, params.cache_length)
     try:
@@ -295,12 +272,16 @@ def main(
             )
 
 
-def fingerprint(config: Config) -> Tuple[int, int, int]:
-    return config.n_head, config.n_query_groups, config.head_size
-
-
+# Note: It turns out that `flex_attention` is almost always faster than
+# our eager blocked variant, so the data obtained by this script is not
+# used in the end.
+#
+# Different to `profile_naive_vs_padded_sdpa.py`, the functions targeted
+# here may not have a unique root, so the procedure here is brittle.
 if __name__ == "__main__":
-    sdpa_type = "zero_padded"
+    # sdpa_type = "zero_padded"
+    # sdpa_type = "flexatt_comp"
+    sdpa_type = "flexatt_nocomp"
     dtype = torch.bfloat16
     num_repeats = 20
     batch_sizes = [1, 2, 3, 4, 8]

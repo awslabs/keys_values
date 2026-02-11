@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from functools import partial
 from itertools import product
 import math
 import os
@@ -24,14 +23,10 @@ from litgpt.config import Config
 from keys_values.attention import (
     KeysAndValues,
     eager_scaled_dot_product_attention,
-    DefaultKeysAndValues,
 )
 from keys_values.attention_utils import build_mask_cache
 from keys_values.kvcache.base import KVCacheParams, KVCache
-from keys_values.kvcache.buffers import DefaultKVCacheBuffers
 from keys_values.kvcache.factory import KVCacheFactory
-from keys_values.kvcache.gradient.accumulate import GradientAccumulator
-from keys_values.kvcache.gradient.checkpoints import KVCacheBufferCheckpoints
 
 
 # Tests run quite slowly for "mps". If this changes, switch this to True
@@ -94,6 +89,41 @@ def random_keys_values(
     keys = random_tensor(params, num, device=device)
     values = random_tensor(params, num, device=device)
     return keys, values
+
+
+def random_args_cache_forward(
+    params: KVCacheParams,
+    num: int,
+    vocab_size: int,
+    device: Optional[torch.device] = None,
+) -> Dict[str, torch.Tensor]:
+    query = random_tensor(params, num=num, is_query=True, device=device)
+    kv = random_keys_values(params, num=num, device=device)
+    idx = torch.randint(
+        low=0,
+        high=vocab_size,
+        size=(params.max_batch_size, num),
+        device=device,
+    )
+    return {
+        "query": query,
+        "key": kv[0],
+        "value": kv[1],
+        "token_idx": idx,
+    }
+
+
+def range_from_args(
+    data: Dict[str, torch.Tensor],
+    start: int,
+    end: int,
+) -> Dict[str, torch.Tensor]:
+    return {
+        "query": data["query"][:, :, start:end, :],
+        "key": data["key"][:, :, start:end, :],
+        "value": data["value"][:, :, start:end, :],
+        "token_idx": data["token_idx"][:, start:end],
+    }
 
 
 def random_index(
@@ -183,53 +213,6 @@ def test_bitsandbytes() -> bool:
     return COMPILED_WITH_CUDA
 
 
-class KVCacheBufferTestingCheckpoints(KVCacheBufferCheckpoints):
-    """
-    Checkpointing class used for testing. The checkpoints are not quantized,
-    but the buffers are stored as they are. This is not recommended in
-    practice, but simplifies gradient testing. Also, we do not reserve
-    memory for checkpoints up front, but copy them as they come in.
-
-    """
-
-    def __init__(
-        self,
-        chunk_numbers: List[int],
-        device: Optional[torch.device] = None,
-    ):
-        super().__init__(chunk_numbers)
-        self._checkpoints: List[Optional[DefaultKeysAndValues]] = [None] * len(
-            chunk_numbers
-        )
-        if device is None:
-            device = torch.get_default_device()
-        self.device = device
-
-    def _set_checkpoint(
-        self,
-        pos: int,
-        buffers: DefaultKVCacheBuffers,
-    ) -> int:
-        k_and_v = buffers.get_keys_values()
-        self._checkpoints[pos] = DefaultKeysAndValues(
-            keys=k_and_v.keys().to(device=self.device, copy=True),
-            values=k_and_v.values().to(device=self.device, copy=True),
-        )
-        return pos
-
-    def _get_checkpoint(
-        self,
-        pos: int,
-        out: DefaultKVCacheBuffers,
-    ):
-        checkpoint = self._checkpoints[pos]
-        if checkpoint is None:
-            raise ValueError(
-                f"checkpoint at pos={pos} is still empty. Use 'set_checkpoint'"
-            )
-        out.prefill_from_keys_values(checkpoint)
-
-
 def copy_gradients(
     model: torch.nn.Module,
     device: Optional[torch.device] = None,
@@ -239,39 +222,6 @@ def copy_gradients(
         for name, param in model.named_parameters()
         if param.grad is not None
     }
-
-
-def exchange_kv_cache_checkpoints(
-    accumulator: GradientAccumulator,
-    device: Optional[torch.device] = None,
-):
-    """
-    Ensures that `accumulator._kv_cache_checkpoints` are of testing type
-    :class:`KVCacheBufferTestingCheckpoints`. These do not quantize checkpoints,
-    which simplifies gradient testing a lot.
-
-    """
-
-    def wrapped_create_checkpoints_and_buffers(
-        orig_func,
-        model_part,
-    ):
-        cache_buffers, checkpoints = orig_func(model_part)
-        # Need to replace checkpoints
-        chunk_numbers = checkpoints[0].chunk_numbers
-        checkpoints = [
-            KVCacheBufferTestingCheckpoints(
-                chunk_numbers=chunk_numbers,
-                device=device,
-            )
-            for _ in range(len(checkpoints))
-        ]
-        return cache_buffers, checkpoints
-
-    accumulator._create_checkpoints_and_buffers = partial(
-        wrapped_create_checkpoints_and_buffers,
-        accumulator._create_checkpoints_and_buffers,
-    )
 
 
 def available_backends(do_mps: bool = True) -> List[torch.device]:
@@ -339,41 +289,6 @@ def product_with_devices(
             list_tuples,
         )
     ]
-
-
-def random_args_cache_forward(
-    params: KVCacheParams,
-    num: int,
-    vocab_size: int,
-    device: Optional[torch.device] = None,
-) -> Dict[str, torch.Tensor]:
-    query = random_tensor(params, num=num, is_query=True, device=device)
-    kv = random_keys_values(params, num=num, device=device)
-    idx = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(params.max_batch_size, num),
-        device=device,
-    )
-    return {
-        "query": query,
-        "key": kv[0],
-        "value": kv[1],
-        "token_idx": idx,
-    }
-
-
-def range_from_args(
-    data: Dict[str, torch.Tensor],
-    start: int,
-    end: int,
-) -> Dict[str, torch.Tensor]:
-    return {
-        "query": data["query"][:, :, start:end, :],
-        "key": data["key"][:, :, start:end, :],
-        "value": data["value"][:, :, start:end, :],
-        "token_idx": data["token_idx"][:, start:end],
-    }
 
 
 def debug_print_gradients(model: torch.nn.Module):
