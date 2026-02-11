@@ -24,14 +24,13 @@ from keys_values.kvcache.base import DefaultKVCache
 from keys_values.kvcache.factory import deallocate_kv_cache_buffers_of_model
 from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
-from keys_values.kvcache.utils import (
-    wrap_tqdm_if_verbose,
+from keys_values.model import GPT
+from keys_values.utils import (
+    randint_torch,
     VerbosityLevels,
+    wrap_tqdm_if_verbose,
     bytes_for_torch_dtype,
 )
-from keys_values.model import GPT
-from keys_values.utils import randint_torch
-
 
 HEAD_OR_INITIAL_TENSORS_MAX_BYTES = 2**31
 

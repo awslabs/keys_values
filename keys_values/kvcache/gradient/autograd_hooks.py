@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Union, Tuple, Dict, Optional, Set, Any
+from typing import List, Union, Tuple, Dict, Optional, Set
 from dataclasses import dataclass, field, replace
 from collections import Counter
 
@@ -20,137 +20,18 @@ import torch
 from litgpt.config import Config
 
 from keys_values.kvcache.base import KVCacheReplayLog
+from keys_values.kvcache.gradient.annotation import (
+    NodeAnnotation,
+    NodeAnnotationForLog,
+    MAX_DELTA_TRANS_LENGTH,
+    apply_ext_annotation,
+)
 from keys_values.kvcache.gradient.cleanup import ArraysForCleanup
-from keys_values.kvcache.utils import shape_to_tuple, bytes_for_torch_dtype
-from keys_values.utils import expand_index, repeat_interleave
-
-
-_ANNOTATION_KIND_VALUES = {
-    "cat-key",
-    "cat-value",
-    "ext-key",
-    "ext-value",
-    "padded-query",
-    "scatter-key",
-    "scatter-value",
-}
-
-
-@dataclass()
-class NodeAnnotation:
-    """
-    Note: If the node-creating operation is `x_new = f(x, index, delta)`, the
-    information recorded is for reconstructing `x` (not `x_new`). For example,
-    `shape = x.shape`, and `delta`, `index` refer to a part of `x`.
-
-    The semantics of `index`, `delta` depend on `kind`. Only for "scatter-*",
-    it is used to reconstruct `x` from `x_new`. For all other kinds, `index`
-    and `delta` are used only to support matching (i.e., recognize whether a
-    pack argument is equal to `x_new`)
-
-    """
-
-    kind: str
-    layer_idx: int
-    chunk_idx: int
-    shape: Tuple[int, ...]
-    index: Optional[torch.Tensor]
-    delta: Optional[torch.Tensor]
-    positions: Optional[torch.Tensor] = None
-    extra_info: Optional[Dict[str, Any]] = None
-    match_id: Optional[int] = None
-    does_not_match: Set[int] = field(default_factory=set)
-    debug_full_arg: Optional[torch.Tensor] = None
-    debug_msg: Optional[str] = None
-
-    def __post_init__(self):
-        assert self.layer_idx >= 0
-        assert self.chunk_idx >= 0
-        self.kind_is_valid(self.kind)
-        if self.index is not None:
-            assert self.delta is not None
-            device = self.delta.device
-            assert (
-                self.index.device == device
-            ), f"delta.device = {device}, index.device = {self.index.device}, must be the same"
-        else:
-            assert self.delta is None
-            device = None
-        if self.positions is not None:
-            assert self.is_scatter, "positions only with scatter"
-            assert self.positions.ndim == 1, "positions must be a 1D tensor"
-            if device is not None:
-                assert (
-                    self.positions.device == device
-                ), f"delta.device = {device}, positions.device = {self.positions.device}, must be the same"
-
-    def __str__(self) -> str:
-        return f"{self.kind} ({self.layer_idx},{self.chunk_idx}): {self.shape}"
-
-    @property
-    def is_keys(self) -> bool:
-        return self.kind_is_keys(self.kind)
-
-    @staticmethod
-    def kind_is_keys(kind: str) -> bool:
-        return kind.endswith("key")
-
-    @property
-    def is_values(self) -> bool:
-        return self.kind_is_values(self.kind)
-
-    @staticmethod
-    def kind_is_values(kind: str) -> bool:
-        return kind.endswith("value")
-
-    @property
-    def is_scatter(self) -> bool:
-        return self.kind_is_scatter(self.kind)
-
-    @staticmethod
-    def kind_is_scatter(kind: str) -> bool:
-        return kind.startswith("scatter")
-
-    @property
-    def is_cat(self) -> bool:
-        return self.kind_is_cat(self.kind)
-
-    @staticmethod
-    def kind_is_cat(kind: str) -> bool:
-        return kind.startswith("cat")
-
-    @property
-    def is_ext(self) -> bool:
-        return self.kind_is_ext(self.kind)
-
-    @staticmethod
-    def kind_is_ext(kind: str) -> bool:
-        return kind.startswith("ext")
-
-    @staticmethod
-    def kind_is_valid(kind: str):
-        assert (
-            kind in _ANNOTATION_KIND_VALUES
-        ), f"kind = '{kind}', must be in {_ANNOTATION_KIND_VALUES}"
-
-
-class NodeAnnotationForLog:
-    def __init__(self, annotation: NodeAnnotation):
-        self.kind = annotation.kind
-        self.layer_idx = annotation.layer_idx
-        self.chunk_idx = annotation.chunk_idx
-        self.shape = annotation.shape
-        self.index_shape = shape_to_tuple(annotation.index)
-        self.delta_shape = shape_to_tuple(annotation.delta)
-        self.dtype = annotation.delta.dtype
-        self.positions_shape = (
-            (
-                None
-                if annotation.positions is None
-                else shape_to_tuple(annotation.positions)
-            ),
-        )
-        self.debug_msg = annotation.debug_msg
+from keys_values.utils import (
+    expand_index,
+    bytes_for_torch_dtype,
+    shape_to_tuple,
+)
 
 
 @dataclass(frozen=True)
@@ -313,14 +194,6 @@ class AnnotationUsageLog:
             lines.append("All pack arguments have been used.")
 
         return "\n".join(lines)
-
-
-# The typical shape for `annotation.delta` in phase (1), matching annotations
-# against pack arguments, is
-# `(batch_size, n_query_groups, MAX_DELTA_TRANS_LENGTH, head_size)`. Making
-# this smaller increases the probability of false matches, but speeds up the
-# matching.
-MAX_DELTA_TRANS_LENGTH = 32
 
 
 @dataclass(frozen=True)
@@ -895,6 +768,8 @@ class CellComputationAutogradHooks(AutogradHooks):
                 print(f"_unpack_from_annotation: {str(annotation)}")
             buffer = self._unpack_padded_query(annotation)
         else:
+            # TODO: Squeeze in "reorder-*" here!!
+            # - Same role as "ext-*". Mut exclusive?
             layer_idx = annotation.layer_idx
             chunk_idx = annotation.chunk_idx
             buffer, final_idx = self._node_annotations.get_final(
@@ -933,11 +808,10 @@ class CellComputationAutogradHooks(AutogradHooks):
                     )
             for annot in annotations_todo:
                 if annot.is_ext:
-                    buffer = self._unpack_extended(
+                    buffer = apply_ext_annotation(
                         buffer,
                         annot,
                         self.n_head,
-                        self.head_size,
                     )
                 else:
                     length = annot.shape[2]
@@ -989,28 +863,6 @@ class CellComputationAutogradHooks(AutogradHooks):
                 f"{str(annotation)}: Don't find prior annotation for this one!"
             )
         return result
-
-    @staticmethod
-    def _unpack_extended(
-        buffer: torch.Tensor,
-        annotation: NodeAnnotation,
-        n_head: int,
-        head_size: int,
-    ) -> torch.Tensor:
-        # Extended keys, values may be permuted
-        sort_index = (
-            None
-            if annotation.extra_info is None
-            else annotation.extra_info.get("sort_index")
-        )
-        if sort_index is not None:
-            buffer = torch.gather(
-                buffer,
-                2,
-                expand_index(sort_index, head_size),
-            )
-        buffer = repeat_interleave(buffer, n_head)
-        return buffer
 
     @staticmethod
     def _unpack_scatter(
@@ -1425,21 +1277,3 @@ def debug_compute_ratio(a: torch.Tensor, b: torch.Tensor):
     max_val = ratio.max().item()
     min_val = ratio.min().item()
     print(f"{a.shape}, {a_dtype}, {b_dtype}: Ratio in [{min_val}, {max_val}]")
-
-
-def create_random_index(
-    shape: Tuple[int, int, int, int],
-    length: int,
-    device: torch.device,
-    dtype: Optional[torch.dtype] = None,
-) -> torch.Tensor:
-    assert len(shape) == 4
-    if dtype is None:
-        dtype = torch.int64
-    index_kwargs = dict(dtype=dtype, device=device)
-    result = torch.empty(shape[:-1], **index_kwargs)
-    num = min(shape[2], length)
-    for b in range(shape[0]):
-        for h in range(shape[1]):
-            result[b, h, :] = torch.randperm(length, **index_kwargs)[:num]
-    return expand_index(result, shape[-1])

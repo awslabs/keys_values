@@ -19,9 +19,11 @@ import pytest
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.gradient.autograd_hooks import (
     CellComputationAutogradHooks,
+)
+from keys_values.kvcache.gradient.annotation import (
     NodeAnnotation,
-    MAX_DELTA_TRANS_LENGTH,
     create_random_index,
+    MAX_DELTA_TRANS_LENGTH,
 )
 from keys_values.kvcache.gradient.train_attn_weights_replay_new import (
     TrainingAttnWeightsReplayCacheNew,

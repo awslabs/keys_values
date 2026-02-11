@@ -32,8 +32,7 @@ from keys_values.kvcache.buffers import (
     positions_wrap_around,
     PositionsType,
 )
-from keys_values.kvcache.utils import bitsize_of, bits_for_torch_dtype
-from keys_values.utils import index_to_3d
+from keys_values.utils import index_to_3d, bits_for_torch_dtype, bitsize_of
 
 
 class AttnWeightsReplayLog(DefaultKVCacheReplayLog):

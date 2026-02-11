@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional, Union, Tuple
+from functools import partial
+from typing import List, Optional, Union, Tuple, Callable
 
 import torch
 from torch.nn.attention import SDPBackend
 
 from keys_values.attention_utils import pytorch_scaled_dot_product_attention
-from keys_values.utils import expand_index
+from keys_values.utils import expand_index, is_index_1d
 
 
 def sdpa_check_args(
@@ -46,6 +47,11 @@ def sdpa_check_args(
     return batch_size, n_head, n_query_groups, q_len, kv_len, head_size
 
 
+ReorderAnnotationCallback = Callable[
+    [torch.Tensor, torch.Tensor, Optional[torch.Tensor]], None
+]
+
+
 def scaled_dot_product_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -55,6 +61,7 @@ def scaled_dot_product_attention(
     token_positions: Optional[torch.Tensor],
     sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
     do_filter_kernels: bool = False,
+    annotation_callback: Optional[ReorderAnnotationCallback] = None,
 ) -> Tuple[torch.Tensor, Optional[List[SDPBackend]]]:
     """
     Wraps `F.scaled_dot_product_attention` in a way which supports
@@ -90,6 +97,8 @@ def scaled_dot_product_attention(
             built up.
         sdpa_kernels: Kernels to be used for SDPA can be restricted by
             `sdpa_kernels`.
+        annotation_callback: If this is given and `key, value` are reordered,
+            the results are passed to this callback.
 
     Returns:
         Attention outputs, shape `(batch_size, n_heads, q_len, head_size)`
@@ -107,6 +116,7 @@ def scaled_dot_product_attention(
             raise ValueError(
                 f"Without token_positions, must have input_pos + q_len = {input_pos + q_len} == {kv_len} = kv_len"
             )
+        sort_index = None
     else:
         # Reorder entries in `key`, `value`, so that new entries are on the
         # right. New entries are those with `token_positions >= input_pos`.
@@ -121,10 +131,11 @@ def scaled_dot_product_attention(
             raise ValueError(
                 f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
             )
-        sort_index = torch.argsort(token_positions.detach(), dim=-1)
-        sort_index = expand_index(sort_index, head_size)
-        key = torch.gather(key, 2, sort_index)
-        value = torch.gather(value, 2, sort_index)
+        key, value, sort_index = reorder_key_value(
+            key,
+            value,
+            token_positions.detach(),
+        )
 
     # At this point, the new entries in `key`, `value`, corresponding to the
     # `query` tokens, are on the right end. Causal masking works if `query`
@@ -136,6 +147,11 @@ def scaled_dot_product_attention(
             device=query.device,
         ).expand(batch_size, n_head, kv_len - q_len, head_size)
         query = torch.cat((fill_left, query), dim=2)
+    if annotation_callback is not None:
+        annotation_callback = partial(
+            annotation_callback,
+            sort_index=sort_index,
+        )
     full_y, filtered_kernels = pytorch_scaled_dot_product_attention(
         query=query,
         key=key,
@@ -143,9 +159,39 @@ def scaled_dot_product_attention(
         scale_factor=scale_factor,
         sdpa_kernels=sdpa_kernels,
         do_filter_kernels=do_filter_kernels,
+        annotation_callback=annotation_callback,
     )
     if q_len < kv_len:
         attn_output = full_y[:, :, (-q_len):, :].clone()
     else:
         attn_output = full_y
     return attn_output, filtered_kernels
+
+
+def reorder_key_value(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    token_positions: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if not is_index_1d(token_positions):
+        sort_index = torch.argsort(token_positions, dim=-1)
+    else:
+        # `token_positions` is essentially 1D
+        sort_index = torch.argsort(token_positions[0, 0, :])
+    return (
+        reorder_buffer_given_sort_index(key, sort_index),
+        reorder_buffer_given_sort_index(value, sort_index),
+        sort_index,
+    )
+
+
+def reorder_buffer_given_sort_index(
+    buffer: torch.Tensor,
+    sort_index: torch.Tensor,
+) -> torch.Tensor:
+    if sort_index.ndim == 3:
+        index = expand_index(sort_index, buffer.shape[-1])
+        buffer = torch.gather(buffer, -2, index)
+    else:
+        buffer = buffer[:, :, sort_index, :]
+    return buffer

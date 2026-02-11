@@ -28,17 +28,19 @@ from keys_values.kvcache.attn_weights import (
 )
 from keys_values.kvcache.base import DefaultKVCache, KVCacheReplayLog
 from keys_values.kvcache.gradient.autograd_hooks import (
-    NodeAnnotation,
     Annotations,
-    MAX_DELTA_TRANS_LENGTH,
+)
+from keys_values.kvcache.gradient.annotation import (
+    NodeAnnotation,
     create_random_index,
+    MAX_DELTA_TRANS_LENGTH,
 )
 from keys_values.kvcache.gradient.sdpa_op import (
     KVCacheCatUpdateAndSDPAFunction,
     KVCacheScatterUpdateAndSDPAFunction,
 )
-from keys_values.kvcache.utils import shape_to_tuple, for_debug
-from keys_values.utils import expand_index
+from keys_values.kvcache.utils import for_debug
+from keys_values.utils import expand_index, shape_to_tuple
 
 
 class TrainingAttnWeightsReplayCache(DefaultKVCache):

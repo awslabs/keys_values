@@ -53,7 +53,7 @@ DATA_KV_LEN = [4096, 6144, 8192, 12288, 16384, 24576, 32768]
 
 
 def load_q_len_thresh_data() -> Tuple[np.ndarray, List[List[int]]]:
-    path = Path(__file__).parent / "scripts" / "qlen_thresholds.csv"
+    path = Path(__file__).parent / "scripts" / "zero_padded_qlen_thresholds.csv"
     inputs = []
     q_len_thresh = []
     with path.open("r") as fp:

@@ -26,8 +26,7 @@ from keys_values.kvcache.quantize.quantization import (
     Quantizer,
     QuantizerState,
 )
-from keys_values.kvcache.utils import bitsize_of, bits_for_torch_dtype
-
+from keys_values.utils import bits_for_torch_dtype, bitsize_of
 
 ALLOWED_SOURCE_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 

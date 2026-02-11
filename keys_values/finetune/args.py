@@ -17,7 +17,7 @@ from typing import Optional, Tuple, Dict, Any, List
 from litgpt.args import EvalArgs as _EvalArgs
 
 from keys_values.kvcache.factory import KVCacheFactory, split_name
-from keys_values.kvcache.utils import VerbosityLevels
+from keys_values.utils import VerbosityLevels
 
 
 def _check_positive(value: Optional[float], name: str):
@@ -356,3 +356,27 @@ class EvalArgs(_EvalArgs):
     """
 
     micro_batch_size: Optional[int] = None
+
+
+@dataclass
+class SDPAArgs:
+    """Command line arguments for gradient computation (fine-tuning)
+
+    Use `flex_extend_kv=True` if you encounter errors like this:
+    ```
+    AssertionError: expected size 32==8, stride 4194304==4194304 at dim=1
+    This error most often comes from a incorrect fake (aka meta) kernel for a custom op.
+    ```
+
+    Args:
+        flex_attention: Should PyTorch `flex_attention` be used? If not,
+            we use PyTorch SDPA with zero-padded queries. Defaults to
+            `True`.
+        flex_extend_kv: If `True`, we apply `repeat_interleave` to
+            `key, value` to avoid the GQA case. This may be needed to get
+            around bugs in `flex_attention`.
+
+    """
+
+    flex_attention: bool = True
+    flex_extend_kv: bool = True

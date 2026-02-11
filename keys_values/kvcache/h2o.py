@@ -22,7 +22,7 @@ from keys_values.kvcache.attn_weights import AttnWeightsKVCache
 from keys_values.kvcache.base import KVCacheParams, KVCache
 from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.kvcache.buffers import KVCacheBuffers
-from keys_values.kvcache.utils import bitsize_of, bits_for_torch_dtype
+from keys_values.utils import bits_for_torch_dtype, bitsize_of
 
 
 class H2OKVCache(AttnWeightsKVCache):

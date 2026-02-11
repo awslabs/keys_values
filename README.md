@@ -7,7 +7,6 @@ It sits on top of [LitGPT](https://github.com/Lightning-AI/litgpt/tree/main).
 The library is primarily intended for research and evaluation. Using it as part
 of a production system will require substantial extra efforts.
 
-
 ## Getting Started
 
 We depend on `LitGPT` and inherits its dependencies. Depending on what you plan
@@ -128,6 +127,8 @@ devices.
   like `grad.layers_per_cell` and `grad.chunks_per_cell_multiplier`. Larger
   values speed up computations, but require more GPU memory. Or try
   `finetune_offload_full` to fine-tune all model parameters.
+* Use PyTorch `flex_attention` also during `backward` pass to speed things up,
+  by adding `--grad.use_new_cache True`.
 * Your KV cache policy is not supported? Why not implement and
   [contribute it back](#implementing-new-kv-cache-policies) to the community?
 * You know how to implement GPU kernels in `CUDA` or `Triton` and would like to
@@ -139,7 +140,8 @@ devices.
 
 The library supports inference in the same rudimentary way than `LitGPT`, but
 for contexts of essentially arbitrary length. The code in `generate/base` can
-be used in the same way as the original `LitGPT` code.
+be used in the same way as the original `LitGPT` code. We integrate with
+PyTorch `flex_attention` for fast scaled dot product attention (SDPA).
 
 Having said that, we are aware that this is not competitive with leading
 inference libraries, such as [vLLM](https://github.com/vllm-project/vllm) or
@@ -580,7 +582,8 @@ be stored before encoding.
 Scaled dot product attention (SDPA) is represented by
 [MultiHeadSelfAttention.__call__](./keys_values/attention.py#L209). Ideally, its
 implementations are via fast kernels, such as
-[torch.nn.functional.scaled_dot_product_attention](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html).
+[torch.nn.functional.scaled_dot_product_attention](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) or
+[torch.nn.attention.flex_attention.flex_attention](https://docs.pytorch.org/docs/stable/nn.attention.flex_attention.html#torch.nn.attention.flex_attention.FlexKernelOptions).
 However, we have some special requirements:
 
 * Some KV cache policies require attention weights on top of attention outputs
@@ -591,7 +594,7 @@ However, we have some special requirements:
   `(batch_size, n_head, kv_len)`, with `return_attn_weights=True`. This is
   sufficient to compute H2O and other scores.
 * We need the "rectangular" case, where `1 << q_len << kv_len`, not just the
-  "training" (or prefill) case, `q_len == kv_len`, which most SDPA kernel
+  "training" (or prefill) case, `q_len == kv_len`, which many SDPA kernel
   developers focus on almost exclusively.
 * We need implicit causal attention masking even if `key`, `value` are
   reordered, as expressed by `kv_cache.token_positions`. This is the least
@@ -599,8 +602,16 @@ However, we have some special requirements:
 
 We are currently working actively to improve the SDPA kernel situation for this
 library (and would be very happy for help, see
-[CONTRIBUTING.md](./CONTRIBUTING.md)). At present, we support two kernels:
+[CONTRIBUTING.md](./CONTRIBUTING.md)). At present, we support these kernels:
 
+* PyTorch `flex_attention` SDPA: We use
+  `torch.nn.attention.flex_attention.flex_attention`, see
+  [keys_values/flex_attention.py](./keys_values/flex_attention.py) for details.
+  Use `--sdpa.flex_attention True` to activate these kernels. We support
+  `config.sliding_window_size` and `config.attention_logit_softcapping` with
+  these fast kernels. We also reorder `key`, `query` so that the new entries
+  (corresponding to `query`) are on the right end. Cannot return attention
+  weights.
 * Query-padded PyTorch SDPA: We use
   `torch.nn.functional.scaled_dot_product_attention`, but pad `query` with
   zeroes on the left to obtain the square "training" case. We also reorder
@@ -612,9 +623,9 @@ library (and would be very happy for help, see
   GB of GPU memory is needed for the temporary buffers.
 
 We ran an experiment for many different `kv_len` to determine from which
-`q_len` value onwards query-padded SDPA is faster. However, if attention
-weights are required, we currently have to use naive SDPA even for large
-`q_len`.
+`q_len` value onwards query-padded SDPA is faster than naive SDPA. However, if
+attention weights are required, we currently have to use naive SDPA even for
+large `q_len`.
 
 Note that SDPA for the initial prefill call always uses the fast PyTorch SDPA.
 This is because no scores are computed then, and so attention weights are not
@@ -622,6 +633,9 @@ needed even for H2O policies.
 
 Relevant arguments are:
 
+* `sdpa.flex_attention`: Selects `flex_attention`. Otherwise, query-padded SDPA
+  is used. `sdpa.flex_mask_compile` and `sdpa.flex_extend_kv` are parameters
+  for `flex_attention`.
 * `attention_forward_temp_size_gb`: Size limit (in GB) for temporary buffers
   in naive SDPA, used in `forward` pass.
 * `attention_backward_temp_size_gb`: Same size limit, but for SDPA computations
@@ -744,6 +758,11 @@ which can be slower.
 
 Other arguments for fine-tuning are:
 
+* `--grad.use_new_cache`: Setting this to `True` is experimental right now. It
+  means that SDPA kernels (`flex_attention` or query-padded SDPA) are used in
+  `backward` mode as well. Since these kernels are not fused with
+  `torch.scatter`, more GPU memory is required. On the other hand, with
+  `flex_attention`, this runs quite a bit faster.
 * `--grad.single_tokens_for_targets`: If `True`, the targets part of a sequence
   is processed token per token (i.e., with chunk size 1). This is slower, but
   more realistic, mirroring how inference looks like. If the targets part is
