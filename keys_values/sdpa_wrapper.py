@@ -20,6 +20,32 @@ from keys_values.attention_utils import pytorch_scaled_dot_product_attention
 from keys_values.utils import expand_index
 
 
+def sdpa_check_args(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+) -> Tuple[int, int, int, int, int, int]:
+    if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
+        raise ValueError("query, key, value must be 4D tensors")
+    if key.shape != value.shape:
+        raise ValueError("key, value must have same shape")
+    batch_size, n_head, q_len, head_size = query.shape
+    if key.shape[0] != batch_size or key.shape[-1] != head_size:
+        raise ValueError(
+            f"key.shape = {key.shape}, must be ({batch_size}, _, _, {head_size})"
+        )
+    _, n_query_groups, kv_len, _ = key.shape
+    if not (0 < q_len <= kv_len):
+        raise ValueError(
+            f"Must have 0 < q_len = {q_len} <= kv_len = {kv_len}. Don't use this for prefill"
+        )
+    if n_query_groups <= 0 or n_head % n_query_groups != 0 or n_head < n_query_groups:
+        raise ValueError(
+            f"n_head = {n_head}, n_query_groups = {n_query_groups}: n_head must be positive multiple of n_query_groups"
+        )
+    return batch_size, n_head, n_query_groups, q_len, kv_len, head_size
+
+
 def scaled_dot_product_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -69,23 +95,13 @@ def scaled_dot_product_attention(
         Attention outputs, shape `(batch_size, n_heads, q_len, head_size)`
 
     """
-    if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
-        raise ValueError("query, key, value must be 4D tensors")
-    if key.shape != value.shape:
-        raise ValueError("key, value must have same shape")
-    batch_size, n_head, q_len, head_size = query.shape
-    if key.shape[0] != batch_size or key.shape[-1] != head_size:
-        raise ValueError(
-            f"key.shape = {key.shape}, must be ({batch_size}, _, _, {head_size})"
-        )
-    kv_len = key.shape[2]
-    if not (0 < q_len <= kv_len):
-        raise ValueError(
-            f"Must have 0 < q_len = {q_len} <= kv_len = {kv_len}. Don't use this for prefill"
-        )
+    batch_size, n_head, _, q_len, kv_len, head_size = sdpa_check_args(
+        query,
+        key,
+        value,
+    )
     if sdpa_kernels is None:
         sdpa_kernels = []
-
     if token_positions is None:
         if input_pos + q_len != kv_len:
             raise ValueError(

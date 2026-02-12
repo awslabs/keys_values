@@ -695,6 +695,11 @@ class CausalSelfAttention(nn.Module):
             k = torch.cat((k_roped, k[..., rope_n_elem:]), dim=-1)
 
         # Inner part of multi-head self-attention computation
+        # SDPA kernels need contiguous tensors to work most efficiently, or
+        # even to work at all
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
         if self.kv_cache is None:
             # Default causal self-attention
             y, _ = mha(
