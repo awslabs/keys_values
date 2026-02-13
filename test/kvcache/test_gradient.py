@@ -32,8 +32,8 @@ from keys_values.kvcache.test_utils import (
     available_backends,
 )
 from keys_values.kvcache.test_utils_advanced import exchange_kv_cache_checkpoints
-from keys_values.utils import VerbosityLevels
 from keys_values.model import GPT
+from keys_values.utils import VerbosityLevels
 
 
 def make_get_inputs_slice(x: torch.Tensor) -> GetInputSlice:

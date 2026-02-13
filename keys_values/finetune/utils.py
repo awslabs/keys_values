@@ -168,18 +168,31 @@ def validate_args(train: TrainArgs, eval: EvalArgs) -> None:
         raise ValueError("\n".join(issues))
 
 
+def is_lora_model(model: GPTAndHeadModel) -> bool:
+    from keys_values.lora import GPT as GPTLoRA
+
+    return isinstance(model, GPTLoRA)
+
+
 def save_model_checkpoint(
     fabric: L.Fabric,
     model: GPTAndHeadModel,
     file_dir: Path,
 ) -> None:
+    from litgpt.lora import lora_filter
+
+    if is_lora_model(model):
+        file_path = file_dir / LORA_WEIGHTS_FNAME
+        save_kwargs = dict(filter={"model": lora_filter})
+    else:
+        file_path = file_dir / LIT_MODEL_FNAME
+        save_kwargs = dict()
     file_dir.mkdir(parents=True, exist_ok=True)
-    file_path = file_dir / LIT_MODEL_FNAME
     print_message(
         f"\nSaving model weights to {str(file_path)!r}",
         fabric,
     )
-    fabric.save(file_path, state={"model": model.gpt_model})
+    fabric.save(file_path, state={"model": model.gpt_model}, **save_kwargs)
     if model.head_model.state_dict():
         file_path = file_dir / HEAD_MODEL_FNAME
         print_message(

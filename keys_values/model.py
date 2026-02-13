@@ -647,12 +647,6 @@ class CausalSelfAttention(nn.Module):
         key_size = n_query_groups * head_size
         # Split qkv into query, key and value matrices.
         q, k, v = qkv.split((query_size, key_size, key_size), dim=-1)
-        # DEBUG
-        # check_for_nan(x, "CausalSelfAttention.forward start", "x")
-        # check_for_nan(q, "CausalSelfAttention.forward start", "q")
-        # check_for_nan(k, "CausalSelfAttention.forward start", "k")
-        # check_for_nan(v, "CausalSelfAttention.forward start", "v")
-        # END DEBUG
 
         if self.config.norm_qk and self.config.norm_qk_type == "olmo2":
             q = self.norm_q(q)
@@ -709,11 +703,6 @@ class CausalSelfAttention(nn.Module):
             )
         else:
             # Defer this to KV cache
-            # DEBUG
-            # check_for_nan(q, "CausalSelfAttention.forward self.kv_cache", "q")
-            # check_for_nan(k, "CausalSelfAttention.forward self.kv_cache", "k")
-            # check_for_nan(v, "CausalSelfAttention.forward self.kv_cache", "v")
-            # END DEBUG
             y = self.kv_cache(
                 query=q,
                 key=k,
