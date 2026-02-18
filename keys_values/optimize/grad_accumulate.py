@@ -18,7 +18,6 @@ import torch
 import torch.distributed as dist
 import lightning as L
 
-from keys_values.finetune.utils import print_message
 from keys_values.optimize.module_wrapper import AccessWeightsGradients
 
 
@@ -167,7 +166,7 @@ class CPUOffloadAccumulateGradients:
             if mod_debug is not None:
                 for name, param in mod_debug.named_parameters():
                     param_comp = mod_from.get_parameter(name)
-                    print_message(f"Compare {name}", self.fabric)
+                    print(f"Compare {name}")
                     torch.testing.assert_close(param.data, param_comp.data)
                     if param.requires_grad:
                         src_arg = mod_from.get_parameter(name).grad.data

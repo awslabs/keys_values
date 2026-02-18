@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import replace
+from functools import partial
 from typing import Optional, Tuple, Dict, Any
 
 import torch
@@ -21,37 +22,77 @@ from litgpt.config import Config
 from keys_values.attention import (
     KeysAndValues,
     DefaultKeysAndValues,
+    SDPA_IMPL_QPADDED_PYTORCH,
+    SDPA_IMPL_EAGER_BLOCKS,
+    SDPA_IMPL_FLEXATTENTION,
 )
 from keys_values.kvcache.attn_weights import (
     update_token_positions,
     UpdateTokenPositionsGracePeriod,
 )
 from keys_values.kvcache.base import DefaultKVCache, KVCacheReplayLog
-from keys_values.kvcache.gradient.autograd_hooks import (
-    Annotations,
-)
+from keys_values.kvcache.gradient.autograd_hooks import Annotations
 from keys_values.kvcache.gradient.annotation import (
     NodeAnnotation,
     create_random_index,
     MAX_DELTA_TRANS_LENGTH,
+    create_ext_annotations,
 )
 from keys_values.kvcache.gradient.sdpa_op import (
-    KVCacheCatUpdateAndSDPAFunction,
-    KVCacheScatterUpdateAndSDPAFunction,
+    scatter_on_buffers,
+    cat_on_buffers,
 )
 from keys_values.kvcache.utils import for_debug
+from keys_values.sdpa_wrapper import ReorderAnnotationCallback
 from keys_values.utils import expand_index, shape_to_tuple
 
 
-class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
+class TrainingAttnWeightsReplayCache(DefaultKVCache):
     """
-    Variant of :class:`TrainingAttnWeightsReplayCache`. Needs less GPU memory,
-    but is also slower than using the other class with `flex_attention`.
+    Replay cache corresponding to :class:`AttnWeightsKVCache`, to be used in
+    training mode.
 
-    This KV cache is using the :class:`KVCacheScatterUpdateAndSDPAFunction` or
-    :class:`KVCacheCatUpdateAndSDPAFunction` operators to implement
-    :meth:`forward`. This keeps GPU memory usage to the minimum and allows
-    control when supporting packing.
+    A replay cache is used in order to compute gradients by way of activation
+    checkpointing. We first process the batch of input sequences in inference
+    mode, store checkpoints along the way and retrieve the replay log in the end.
+
+    We then run forward-backward between checkpoints. For the forward pass in
+    training mode, we run the same processing, but using replay caches
+    (configured by replay logs) in place of the KV caches. We start the process
+    from a particular token position and KV cache checkpoint.
+
+    Support of autograd saved tensors hooks:
+
+    A number of tensor nodes in the autograd computation graph are large, but
+    can be obtained from others by way of `scatter` or `cat`, so the argument
+    we really have to store is much smaller. We support this by packing and
+    unpacking these saved tensors, see:
+
+    https://pytorch.org/tutorials/intermediate/autograd_saved_tensors_hooks_tutorial.html
+
+    The tensor nodes in question receive :class:`NodeAnnotation` annotations.
+    These are communicated to the pack hook by appending the annotation to the
+    `node_annotations` list. The pack hook pops the annotation from the list.
+    Its return value contains all information necessary for the unpack hook to
+    compute the full-sized value. If the node-creating operation is
+    `x_new = f(x, index, delta)`, the annotation is for reconstructing `x` (not
+    `x_new`).
+
+    Note: Why do we need :class:`TrainingAttnWeightsReplayCache` and
+    :class:`InferenceAttnWeightsReplayCache`, why not just one of them? The
+    former is used to run forward in inference mode along a row of cells to
+    compute quantized KV cache checkpoints. This second forward inference pass
+    is needed because we cannot store all KV cache checkpoints. It is a simple
+    variant of :class:`AttnWeightsReplayCache` without any scoring. The training
+    replay cache here is different. No quantization is done, and no memory is
+    reused, so that forward-backward works robustly. We also do not maintain any
+    buffers here, the whole purpose is to build a computation graph.
+
+    In principle, we could use :class:`TrainingAttnWeightsReplayCache` for
+    computing KV cache checkpoints, but this would need quite a bit more memory,
+    since no quantization or dequantization are done. Since
+    :class:`InferenceAttnWeightsReplayCache` is easily obtained from
+    :class:`AttnWeightsReplayCache`, this is the simpler option.
 
     """
 
@@ -84,11 +125,27 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
             max_batch_size=batch_size,
             cache_length=cache_length,
             block_idx=layer_idx,
+            dtype=None,
             **base_kwargs,
         )
         if len(replay_log) == 0:
             raise ValueError("replay_log must not be empty")
         self._device = replay_log.device
+        if self.mha.use_eager_sdpa_always:
+            raise ValueError(
+                "This replay cache does not support mha.use_eager_sdpa_always = True"
+            )
+        if (
+            config.attention_logit_softcapping is not None
+            and not self.mha.has_flex_attention
+        ):
+            raise ValueError(
+                "This replay cache does not support "
+                "config.attention_logit_softcapping being used, unless together "
+                "with FlexAttention. Choose a model without attention logit "
+                "softcapping, or use FlexAttention by passing flexatt_args "
+                "when creating the MultiHeadSelfAttention object."
+            )
         self.replay_log = replay_log
         self._batch_size = batch_size
         self.kv_buffers = None
@@ -113,6 +170,24 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
         # If this is set, we log all annotations being created
         self.debug_print_annotations = debug_print_annotations
         self._debug_full_args = debug_full_args
+        sliding_window_size = self.mha._get_sliding_window_size(layer_idx)
+        if self.mha.has_flex_attention:
+            sdpa_mode = SDPA_IMPL_FLEXATTENTION
+        elif sliding_window_size is not None:
+            print(
+                "WARNING: config.sliding_window_size is used. This means that "
+                "a naive SDPA kernel has to be used, for which computations "
+                "can be slow. Consider switching to a model which does not use "
+                "config.sliding_window_size, or use FlexAttention by passing "
+                "flexatt_args when creating the MultiHeadSelfAttention object."
+            )
+            sdpa_mode = SDPA_IMPL_EAGER_BLOCKS
+        else:
+            sdpa_mode = SDPA_IMPL_QPADDED_PYTORCH
+        self._sdpa_kwargs = dict(
+            sdpa_mode=sdpa_mode,
+            sliding_window_size=sliding_window_size,
+        )
         if debug_intermediates is not None:
             self._debug_intermediates = debug_intermediates[0]
             self._debug_prefix = debug_intermediates[1]
@@ -125,7 +200,8 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
         return self._batch_size
 
     def _initialize_replay(self):
-        # Initialize `_token_chunk_pos`, `_input_pos`, and
+        # Initialize `_token_chunk_pos`, `_start_token_chunk_pos`,
+        # `_end_token_chunk_pos`, `_input_pos`, and
         # `_next_grace_pos`.
         input_pos = self._input_pos  # target value to reach
         self._input_pos = 0
@@ -137,6 +213,7 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
             if self._input_pos >= input_pos:
                 done = self._input_pos == input_pos
                 break
+            # This advances `_token_chunk_pos`
             num = chunk.shape[-1]
             self._process_token_chunk(chunk)
             self._input_pos += num
@@ -202,9 +279,7 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
             `(batch_size, n_query_groups, T)`.where `T <= cache_length`
             is the current cache length.
         """
-        # Note: The `clone` is necessary to avoid this error during backward,
-        # using the :class:`KVCacheUpdateAndSDPAFunction` or
-        # :class:`SDPAFunction` operator:
+        # Note: The `clone` is necessary to avoid this error during backward:
         # RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation: [torch.IntTensor [5, 4, 512]] is at version 8; expected version 7 instead
         return self._token_positions[:, :, : self.current_length].clone()
 
@@ -228,7 +303,6 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
                 f"query.shape[0] = {query.shape[0]}, batch_size = {self.batch_size}, must be equal"
             )
         # For prefill, we use the default implementation based on :meth:`_prefill`.
-        # If `input_pos > 0`, we use our own special-purpose operators.
         input_pos = self._input_pos  # Value before update
         if input_pos == 0:
             attn_outputs = super().forward(query, key, value, token_idx)
@@ -259,22 +333,10 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        If the cache is full, we use the fused operator
-        :class:`KVCacheScatterUpdateAndSDPAFunction`, otherwise we use the operator
-        :class:`KVCacheCatUpdateAndSDPAFunction`. These minimize GPU memory
-        requirements during training.
-
-        For prefill, we use the superclass method. This is because our fused
-        operators have a backward implementation which reserves an amount of GPU
-        memory which is large for prefill. In this case, it is better to call
-        the SDPA operators by PyTorch.
-
-        """
         assert self.input_pos > 0  # Not to be used for prefill
         num = key.shape[2]
-        # Process token chunk. This also updates `_token_positions`, but not
-        # `_input_pos`
+        # Process token chunk. This also updates `_token_positions` and the
+        # counters (including `_input_pos`)
         index, update_result = self._process_token_chunk(token_idx)
         # Cache full: Single scatter. `update_result` is given iff there is
         # a grace period.
@@ -284,11 +346,6 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
         else:
             # All slices are the same
             positions = update_result.positions[0, 0, :]
-        if self._debug_intermediates is not None:
-            prefix = self._debug_prefix + f"_sdpa_inputpos{self.input_pos}"
-            debug_intermediates = (self._debug_intermediates, prefix)
-        else:
-            debug_intermediates = None
         do_scatter = self.current_length >= self.cache_length
         if do_scatter:
             index_e = expand_index(index, head_size=self.head_size)
@@ -305,32 +362,20 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
                 positions=positions,
                 debug_msg="scatter-before",
             )
-            # "scatter" update of KV cache buffers and MHA computation, via
-            # special operator
-            attn_output, key_buffer_new, value_buffer_new = (
-                KVCacheScatterUpdateAndSDPAFunction.apply(
-                    query,
-                    key,
-                    value,
-                    self.kv_buffers.keys(),
-                    self.kv_buffers.values(),
-                    index,
-                    self.token_positions(),
-                    self.input_pos,
-                    self.mha,
-                    positions,
-                    self.mha._get_sliding_window_size(self.block_idx),
-                    debug_intermediates,
-                )
+            # "scatter" update of KV cache buffers
+            key_buffer_new, value_buffer_new = scatter_on_buffers(
+                key,
+                value,
+                self.kv_buffers.keys(),
+                self.kv_buffers.values(),
+                index,
+                positions,
             )
             # Post-processing w.r.t. annotations
-            self._create_node_after_creator(
-                x=key_buffer_new,
-                kind="scatter-key",
-            )
-            self._create_node_after_creator(
-                x=value_buffer_new,
-                kind="scatter-value",
+            annotation_callback = self._create_callback_after_creator(
+                key=key_buffer_new,
+                value=value_buffer_new,
+                kind="scatter",
             )
             self.kv_buffers = DefaultKeysAndValues(
                 key_buffer_new,
@@ -356,37 +401,83 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
                 index=None,
                 debug_msg=debug_msg,
             )
-            # "cat" update of KV cache buffers and MHA computation, via
-            # special operator
-            attn_output, key_buffer_new, value_buffer_new = (
-                KVCacheCatUpdateAndSDPAFunction.apply(
-                    query,
-                    key,
-                    value,
-                    self.kv_buffers.keys(),
-                    self.kv_buffers.values(),
-                    self.mha,
-                    self.mha._get_sliding_window_size(self.block_idx),
-                    debug_intermediates,
-                )
+            # "cat" update of KV cache buffers
+            key_buffer_new, value_buffer_new, _, _ = cat_on_buffers(
+                key,
+                value,
+                self.kv_buffers.keys(),
+                self.kv_buffers.values(),
             )
             # Post-processing w.r.t. annotations
-            self._create_node_after_creator(
-                x=key_buffer_new,
-                kind="cat-key",
+            annotation_callback = self._create_callback_after_creator(
+                key=key_buffer_new,
+                value=value_buffer_new,
+                kind="cat",
             )
-            self._create_node_after_creator(
-                x=value_buffer_new,
-                kind="cat-value",
-            )
-            # Update buffers
             self.kv_buffers = DefaultKeysAndValues(
                 key_buffer_new,
                 value_buffer_new,
             )
             self.current_length += num
 
-        return attn_output.transpose(1, 2).reshape(self.batch_size, num, -1)
+        # SDPA computation
+        if self._node_annotations is not None:
+            self._padded_query_annotation(query)
+        attn_outputs, _ = self.mha.scaled_dot_product_attention(
+            query=query,
+            k_and_v=self.kv_buffers,
+            input_pos=self.input_pos,
+            token_positions=self.token_positions(),
+            return_attn_weights=False,
+            annotation_callback=annotation_callback,
+            **self._sdpa_kwargs,
+        )
+        return attn_outputs.reshape(self.batch_size, num, -1)
+
+    def _padded_query_annotation(self, query: torch.Tensor):
+        if self._sdpa_kwargs["sdpa_mode"] == SDPA_IMPL_QPADDED_PYTORCH:
+            # Create annotation for padded query
+            _, _, q_len, head_size = query.shape
+            kv_len = self.kv_buffers.keys().shape[2]
+            shape = tuple(query.shape[:2]) + (kv_len, head_size)
+            # Pick a delta which includes zeros and non-zeros
+            delta_len = min(MAX_DELTA_TRANS_LENGTH, kv_len - q_len)
+            num_nonzeros = min(delta_len - 2, q_len)
+            num_zeros = delta_len - num_nonzeros
+            delta = torch.cat(
+                (
+                    torch.zeros(
+                        (1, 1, 1, 1),
+                        dtype=query.dtype,
+                        device=query.device,
+                    ).expand(*shape[:2], num_zeros, head_size),
+                    query[:, :, :num_nonzeros, :],
+                ),
+                dim=2,
+            )
+            start = kv_len - q_len - num_zeros
+            end = start + delta_len
+            index = (
+                torch.arange(
+                    start,
+                    end,
+                    dtype=torch.int32,
+                    device=query.device,
+                )
+                .view(1, 1, -1, 1)
+                .expand(*shape[:2], -1, head_size)
+            )
+            self._append_annotation(
+                NodeAnnotation(
+                    kind="padded-query",
+                    layer_idx=self.layer_idx,
+                    chunk_idx=self._token_chunk_pos - 1,
+                    shape=shape,
+                    index=index,
+                    delta=delta,
+                    extra_info={"q_len": q_len},
+                )
+            )
 
     def _append_annotation(self, annotation: NodeAnnotation):
         self._node_annotations.append_safe(annotation)
@@ -435,10 +526,13 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
         debug_msg: Optional[str] = None,
     ):
         chunk_idx = self._token_chunk_pos - 1  # Counter has already been advanced
-        if (
-            self._node_annotations is not None
-            and chunk_idx > self._start_token_chunk_pos
-        ):
+        # If this is the first cell and `chunk_idx == 1`, we do not have to create
+        # an annotation, because the corresponding "ext" annotation does not need
+        # to be supported.
+        thres_idx = max(self._start_token_chunk_pos, 1)
+        if self._node_annotations is not None and chunk_idx > thres_idx:
+            # This annotation is for `x` before the node is created, so the
+            # chunk index is `chunk_idx - 1`.
             is_keys = NodeAnnotation.kind_is_keys(kind)
             x = self.kv_buffers.keys() if is_keys else self.kv_buffers.values()
             x = x.detach()[:, :, : self.current_length, :]
@@ -462,34 +556,76 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
                     annotation,
                     debug_full_arg=x.clone(),
                 )
-
             self._append_annotation(annotation)
 
-    def _create_node_after_creator(
-        self,
-        x: torch.Tensor,
-        kind: str,
-    ):
-        chunk_idx = self._token_chunk_pos - 1  # Counter has already been advanced
-        x = x.detach()
-        if (
-            self._node_annotations is not None
-            and chunk_idx == self._end_token_chunk_pos - 1
-        ):
-            # We need to store the final node in order to start the
-            # reconstruction of all earlier ones
-            self._node_annotations.set_final(
-                x=x,
-                layer_idx=self.layer_idx,
-                chunk_idx=chunk_idx,
-                kind=kind,
+    @staticmethod
+    def _transform_index(
+        index: torch.Tensor,
+        sort_index: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, n_query_groups, num, head_size = index.shape
+        si_len = sort_index.shape[-1]
+        assert sort_index.shape == (batch_size, n_query_groups, si_len)
+        sort_index = sort_index.to(dtype=index.dtype)
+        index = index[:, :, :, 0]
+        result = (
+            torch.empty_like(sort_index)
+            .scatter_(
+                2,
+                sort_index,
+                torch.arange(
+                    si_len,
+                    dtype=index.dtype,
+                    device=index.device,
+                )
+                .view(1, 1, -1)
+                .expand(batch_size, n_query_groups, -1),
             )
+            .gather(2, index)
+        )
+        return expand_index(result, head_size)
 
+    def _create_callback_after_creator(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kind: str,
+    ) -> Optional[ReorderAnnotationCallback]:
+        chunk_idx = self._token_chunk_pos - 1  # Counter has already been advanced
+        annotation_callback = None
+        if self._node_annotations is not None:
+            if chunk_idx == self._end_token_chunk_pos - 1:
+                # We need to store the final node in order to start the
+                # reconstruction of all earlier ones.
+                self._node_annotations.set_final(
+                    x=key.detach(),
+                    layer_idx=self.layer_idx,
+                    chunk_idx=chunk_idx,
+                    kind=kind + "-key",
+                )
+                self._node_annotations.set_final(
+                    x=value.detach(),
+                    layer_idx=self.layer_idx,
+                    chunk_idx=chunk_idx,
+                    kind=kind + "-value",
+                )
+            if NodeAnnotation.kind_is_scatter(kind):
+                annot_kwargs = dict(
+                    layer_idx=self.layer_idx,
+                    chunk_idx=chunk_idx,
+                )
+                annotation_callback = partial(
+                    create_ext_annotations,
+                    node_annotations=self._node_annotations.nodes,
+                    annot_kwargs=annot_kwargs,
+                )
         if self._debug_tensors is not None:
             name = f"c{self._token_chunk_pos - 1}-l{self.layer_idx}-{kind}"
             if name in self._debug_tensors:
                 raise IndexError(f"Entry {name} already in debug_tensor!")
-            self._debug_tensors[name] = x.clone()
+            self._debug_tensors[name + "-key"] = key.clone()
+            self._debug_tensors[name + "-value"] = value.clone()
+        return annotation_callback
 
     @property
     def max_prefill_length(self) -> int:
@@ -536,7 +672,7 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
         token_idx: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], Optional[UpdateTokenPositionsGracePeriod]]:
         """
-        Processes token chunk, comparing `token_idx` against the current chunk
+         Processes token chunk, comparing `token_idx` against the current chunk
         in the replay log, and advancing `token_chunk_pos`. We also update
         `_token_positions`.
 

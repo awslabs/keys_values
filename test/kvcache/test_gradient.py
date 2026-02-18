@@ -62,7 +62,7 @@ def args_gradient_row_of_cells():
                 ([512, 512], [512, 8, 4, 8, 2, 8, 2, 8, 8], [1, 3, 3, 2]),
                 ([512, 504], [504, 4, 4, 8, 4, 8, 2, 8, 2, 8, 8], [1, 2, 3, 3, 2]),
             ],
-            [False, True],
+            [True, False],
         )
     ]
     # `limit_num_unmatched` depends on the scenario. These are the numbers of

@@ -25,7 +25,7 @@ from keys_values.kvcache.gradient.annotation import (
     create_random_index,
     MAX_DELTA_TRANS_LENGTH,
 )
-from keys_values.kvcache.gradient.train_attn_weights_replay_new import (
+from keys_values.kvcache.gradient.train_attn_weights_replay import (
     TrainingAttnWeightsReplayCache,
 )
 from keys_values.kvcache.test_utils import (

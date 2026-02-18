@@ -28,10 +28,10 @@ from keys_values.kvcache.gradient.inference_replay import (
     get_replay_logs,
     InferenceAttnWeightsReplayCache,
 )
-from keys_values.kvcache.gradient.train_attn_weights_replay import (
+from keys_values.kvcache.gradient.train_attn_weights_replay_old import (
     TrainingAttnWeightsReplayCacheOld,
 )
-from keys_values.kvcache.gradient.train_attn_weights_replay_new import (
+from keys_values.kvcache.gradient.train_attn_weights_replay import (
     TrainingAttnWeightsReplayCache,
 )
 from keys_values.kvcache.test_utils import (
