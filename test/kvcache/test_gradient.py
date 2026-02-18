@@ -105,7 +105,7 @@ def args_gradient_row_of_cells():
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, use_new_cache, limit_num_unmatched, tol_kwargs, device",
+    "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, use_old_cache, limit_num_unmatched, tol_kwargs, device",
     args_gradient_row_of_cells(),
 )
 def test_gradient_row_of_cells(
@@ -114,7 +114,7 @@ def test_gradient_row_of_cells(
     cache_lengths,
     tokens_per_chunk,
     chunks_per_cell,
-    use_new_cache,
+    use_old_cache,
     limit_num_unmatched,
     tol_kwargs,
     device,
@@ -123,7 +123,7 @@ def test_gradient_row_of_cells(
     torch.random.manual_seed(seed)
     print(f"cache_name={cache_name}, cache_kwargs={cache_kwargs}")
     print(
-        f"cache_length={cache_lengths}\ntokens_per_chunk={tokens_per_chunk}\nchunks_per_cell={chunks_per_cell}\nuse_new_cache={use_new_cache}"
+        f"cache_length={cache_lengths}\ntokens_per_chunk={tokens_per_chunk}\nchunks_per_cell={chunks_per_cell}\nuse_old_cache={use_old_cache}"
     )
 
     use_autograd_hooks = True
@@ -251,7 +251,7 @@ def test_gradient_row_of_cells(
         debug_tensors=debug_cache_tensors,
         verbose=VerbosityLevels.SOME,
         train_cache_kwargs=dict(
-            use_new_cache=use_new_cache,
+            use_old_cache=use_old_cache,
             debug_full_args=True,
             debug_print_annotations=True,
         ),
@@ -303,7 +303,7 @@ def test_gradient_row_of_cells(
         qname="torch-quantized8",  # will not be used
         debug_tensors=debug_cache_tensors_comp,
         verbose=VerbosityLevels.SOME,
-        train_cache_kwargs=dict(use_new_cache=use_new_cache),
+        train_cache_kwargs=dict(use_old_cache=use_old_cache),
     )
     accumulator_comp._batch_size = batch_size
     accumulator_comp._initialize_internal(

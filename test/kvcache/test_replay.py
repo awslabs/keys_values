@@ -29,10 +29,10 @@ from keys_values.kvcache.gradient.inference_replay import (
     InferenceAttnWeightsReplayCache,
 )
 from keys_values.kvcache.gradient.train_attn_weights_replay import (
-    TrainingAttnWeightsReplayCache,
+    TrainingAttnWeightsReplayCacheOld,
 )
 from keys_values.kvcache.gradient.train_attn_weights_replay_new import (
-    TrainingAttnWeightsReplayCacheNew,
+    TrainingAttnWeightsReplayCache,
 )
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
@@ -219,7 +219,7 @@ def args_training_replay():
 
 
 @pytest.mark.parametrize(
-    "cache_name, device, cache_kwargs, tol_kwargs, use_new_cache",
+    "cache_name, device, cache_kwargs, tol_kwargs, use_old_cache",
     [
         a + (b,)
         for a, b in product(
@@ -228,7 +228,7 @@ def args_training_replay():
         )
     ],
 )
-def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_new_cache):
+def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_old_cache):
     seed = 31415927
     torch.random.manual_seed(seed)
 
@@ -242,15 +242,15 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_new_c
     vocab_size = 48
     tokens_per_chunk = [cache_length, 8, 4, 8, 2, 8, 2, 8, 8]
     seq_length = sum(tokens_per_chunk)
-    if use_new_cache:
-        replay_class = TrainingAttnWeightsReplayCacheNew
+    if not use_old_cache:
+        replay_class = TrainingAttnWeightsReplayCache
         # Eager SDPA never used
         cache_kwargs = {
             **cache_kwargs,
             "use_eager_kernel": lambda kv_len, q_len: False,
         }
     else:
-        replay_class = TrainingAttnWeightsReplayCache
+        replay_class = TrainingAttnWeightsReplayCacheOld
     layer_outputs = dict()
 
     def start_of_layer_hook(x: torch.Tensor, l_ix: int, tag: str):

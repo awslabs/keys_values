@@ -150,10 +150,11 @@ class GradientArgs:
         single_tokens_for_targets: If `True`, the targets part of a sequence is
             processed token per token (i.e., with chunk size 1). This is slower,
             but more realistic, mirroring how inference looks like.
-        use_new_cache: If `True`, we use
-            :class:`TrainingAttnWeightsReplayCacheNew` instead of
-            :class:`TrainingAttnWeightsReplayCache`. The new code uses a faster
-            SDPA during backward as well, but at present needs more GPU memory.
+        use_old_cache: If `True`, we use
+            :class:`TrainingAttnWeightsReplayCacheOld` instead of
+            :class:`TrainingAttnWeightsReplayCache`. The old code uses the
+            fused naive SDPA during backward, which is slower, but also needs
+            less GPU memory.
         max_match_trials_pack_arg: Parameter controlling autograd saved tensors
             hook mechanism, see :class:`CellComputationAutogradHooks`.
             Arguments of :meth:`pack_hook` are matched against annotations. A
@@ -171,7 +172,7 @@ class GradientArgs:
     layers_per_cell: int = 1
     chunks_per_cell_multiplier: float = 1.0
     single_tokens_for_targets: bool = (False,)
-    use_new_cache: bool = False
+    use_old_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
     layer_checkpoint_chunk_size: Optional[int] = None
 

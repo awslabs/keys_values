@@ -168,7 +168,7 @@ def setup(
         layers_per_cell=1,
         chunks_per_cell_multiplier=1.0,
         single_tokens_for_targets=False,
-        use_new_cache=False,
+        use_old_cache=False,
         max_match_trials_pack_arg=8,
         layer_checkpoint_chunk_size=None,
     ),
@@ -234,7 +234,7 @@ def setup(
             require attention weights (e.g., H2O).
         attention_backward_temp_size_gb: Size of GPU memory buffers (in GB) used
             in naive SDPA during backward computations. At present, naive SDPA
-            is used in backward if `grad.use_new_cache == False`.
+            is used in backward if `grad.use_old_cache == True`.
         yarn_rope: Should YaRN be used to adjust RoPE (position encoding) to the
             sequence length for each batch? Defaults to `True`. If not, RoPE is
             determined by the model configuration, and is static (no dependence
@@ -721,10 +721,10 @@ def main(
 
     if profile_grad_times > 0 and fabric.global_rank == 0:
         thresh = grad.max_match_trials_pack_arg
-        name = "new" if grad.use_new_cache else "old"
+        name = "old" if grad.use_old_cache else "new"
         profile_grad_params = {
             "path": Path(out_dir) / f"profile_grad_times_{name}_{thresh}.csv",
-            "use_new_cache": grad.use_new_cache,
+            "use_old_cache": grad.use_old_cache,
             "max_match_trials_pack_arg": thresh,
             "profile_grad_times": profile_grad_times,
             "cache_name": kv_cache.name,
@@ -884,7 +884,7 @@ def wrap_gpt_model(
         )
         train_cache_kwargs = {
             "sdpa_kernels": cache_kwargs["sdpa_kernels"],
-            "use_new_cache": grad.use_new_cache,
+            "use_old_cache": grad.use_old_cache,
         }
         if grad.max_match_trials_pack_arg is not None:
             autograd_hooks_kwargs = dict(

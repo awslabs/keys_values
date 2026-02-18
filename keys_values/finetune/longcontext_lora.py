@@ -88,7 +88,7 @@ def setup(
         layers_per_cell=1,
         chunks_per_cell_multiplier=1.0,
         single_tokens_for_targets=False,
-        use_new_cache=False,
+        use_old_cache=False,
         max_match_trials_pack_arg=8,
         layer_checkpoint_chunk_size=None,
     ),
@@ -156,7 +156,7 @@ def setup(
             require attention weights (e.g., H2O).
         attention_backward_temp_size_gb: Size of GPU memory buffers (in GB) used
             in naive SDPA during backward computations. At present, naive SDPA
-            is used in backward if `grad.use_new_cache == False`.
+            is used in backward if `grad.use_old_cache == True`.
         yarn_rope: Should YaRN be used to adjust RoPE (position encoding) to the
             sequence length for each batch? Defaults to `True`. If not, RoPE is
             determined by the model configuration, and is static (no dependence

@@ -56,14 +56,14 @@ def args_complete_gradient_computation():
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths, use_new_cache, device",
+    "cache_name, cache_kwargs, cache_lengths, use_old_cache, device",
     args_complete_gradient_computation(),
 )
 def test_complete_gradient_computation(
     cache_name,
     cache_kwargs,
     cache_lengths,
-    use_new_cache,
+    use_old_cache,
     device,
 ):
     seed = 31415927
@@ -150,7 +150,7 @@ def test_complete_gradient_computation(
             layers_per_cell=layers_per_cell,
             chunk_size=chunk_size,
             qname=qname,
-            train_cache_kwargs=dict(use_new_cache=use_new_cache),
+            train_cache_kwargs=dict(use_old_cache=use_old_cache),
             autograd_hooks_kwargs=dict(max_match_trials_pack_arg=4),
             debug_single_cell_per_row=debug_flag,
             debug_dont_use_autograd_hooks=debug_flag,
@@ -358,6 +358,6 @@ if __name__ == "__main__":
         cache_name="h2o",
         cache_kwargs={"grace_period": 10, "replay_log_blocksize": 64},
         cache_lengths=[128, 128],
-        use_new_cache=False,
+        use_old_cache=False,
         device=torch.device("cuda", 0),
     )

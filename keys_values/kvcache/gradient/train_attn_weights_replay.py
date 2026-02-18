@@ -43,57 +43,15 @@ from keys_values.kvcache.utils import for_debug
 from keys_values.utils import expand_index, shape_to_tuple
 
 
-class TrainingAttnWeightsReplayCache(DefaultKVCache):
+class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
     """
-    Replay cache corresponding to :class:`AttnWeightsKVCache`, to be used in
-    training mode.
+    Variant of :class:`TrainingAttnWeightsReplayCache`. Needs less GPU memory,
+    but is also slower than using the other class with `flex_attention`.
 
-    A replay cache is used in order to compute gradients by way of activation
-    checkpointing. We first process the batch of input sequences in inference
-    mode, store checkpoints along the way and retrieve the replay log in the end.
-
-    We then run forward-backward between checkpoints. For the forward pass in
-    training mode, we run the same processing, but using replay caches
-    (configured by replay logs) in place of the KV caches. We start the process
-    from a particular token position and KV cache checkpoint.
-
-    Importantly, this KV cache is using the :class:`KVCacheScatterUpdateAndSDPAFunction`
-    or :class:`KVCacheCatUpdateAndSDPAFunction` operators to implement
+    This KV cache is using the :class:`KVCacheScatterUpdateAndSDPAFunction` or
+    :class:`KVCacheCatUpdateAndSDPAFunction` operators to implement
     :meth:`forward`. This keeps GPU memory usage to the minimum and allows
     control when supporting packing.
-
-    Support of autograd saved tensors hooks:
-
-    A number of tensor nodes in the autograd computation graph are large, but
-    can be obtained from others by way of `scatter` or `cat`, so the argument
-    we really have to store is much smaller. We support this by packing and
-    unpacking these saved tensors, see:
-
-    https://pytorch.org/tutorials/intermediate/autograd_saved_tensors_hooks_tutorial.html
-
-    The tensor nodes in question receive :class:`NodeAnnotation` annotations.
-    These are communicated to the pack hook by appending the annotation to the
-    `node_annotations` list. The pack hook pops the annotation from the list.
-    Its return value contains all information necessary for the unpack hook to
-    compute the full-sized value. If the node-creating operation is
-    `x_new = f(x, index, delta)`, the annotation is for reconstructing `x` (not
-    `x_new`).
-
-    Note: Why do we need :class:`TrainingAttnWeightsReplayCache` and
-    :class:`InferenceAttnWeightsReplayCache`, why not just one of them? The
-    former is used to run forward in inference mode along a row of cells to
-    compute quantized KV cache checkpoints. This second forward inference pass
-    is needed because we cannot store all KV cache checkpoints. It is a simple
-    variant of :class:`AttnWeightsReplayCache` without any scoring. The training
-    replay cache here is different. No quantization is done, and no memory is
-    reused, so that forward-backward works robustly. We also do not maintain any
-    buffers here, the whole purpose is to build a computation graph.
-
-    In principle, we could use :class:`TrainingAttnWeightsReplayCache` for
-    computing KV cache checkpoints, but this would need quite a bit more memory,
-    since no quantization or dequantization are done. Since
-    :class:`InferenceAttnWeightsReplayCache` is easily obtained from
-    :class:`AttnWeightsReplayCache`, this is the simpler option.
 
     """
 

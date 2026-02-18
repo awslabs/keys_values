@@ -24,10 +24,10 @@ from keys_values.attention import DefaultKeysAndValues
 from keys_values.kvcache.base import KVCacheReplayLog, DefaultKVCache
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.train_attn_weights_replay import (
-    TrainingAttnWeightsReplayCache,
+    TrainingAttnWeightsReplayCacheOld,
 )
 from keys_values.kvcache.gradient.train_attn_weights_replay_new import (
-    TrainingAttnWeightsReplayCacheNew,
+    TrainingAttnWeightsReplayCache,
 )
 from keys_values.kvcache.stack_layers import CellBlocks
 from keys_values.kvcache.utils import for_debug
@@ -110,7 +110,7 @@ class CellComputation(nn.Module):
         autograd_hooks: Optional[CellComputationAutogradHooks],
         replay_logs: List[KVCacheReplayLog],
         batch_size: int,
-        use_new_cache: bool = False,
+        use_old_cache: bool = False,
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
         **cache_kwargs,
     ):
@@ -123,9 +123,8 @@ class CellComputation(nn.Module):
                 optional, cell computations can be done without the hooks
             replay_logs: KV cache replay logs for layers treated here
             batch_size: Batch size
-            use_new_cache: If `True`, we use :class:`TrainingAttnWeightsReplayCacheNew`
-                instead of :class:`TrainingAttnWeightsReplayCache`. This is yet
-                experimental
+            use_old_cache: If `True`, we use :class:`TrainingAttnWeightsReplayCacheOld`
+                instead of :class:`TrainingAttnWeightsReplayCache`.
 
         """
         super().__init__()
@@ -182,7 +181,7 @@ class CellComputation(nn.Module):
         self._token_pos_per_chunk = [0] + list(
             accumulate(idx.shape[-1] for idx in replay_logs[0].token_chunks)
         )
-        self._use_new_cache = use_new_cache
+        self._use_old_cache = use_old_cache
         self._debug_tensors = debug_tensors
 
     @staticmethod
@@ -218,17 +217,17 @@ class CellComputation(nn.Module):
         self,
         first_chunk_idx: int,
         num_chunks: int,
-    ) -> List[TrainingAttnWeightsReplayCache]:
+    ) -> List[TrainingAttnWeightsReplayCacheOld]:
         first_layer_idx = self.model_part.first_layer_idx
         more_kwargs = dict(
             start_input_pos=self._token_pos_per_chunk[first_chunk_idx],
             num_chunks=num_chunks,
             debug_tensors=self._debug_tensors,
         )
-        if self._use_new_cache:
-            cache_class = TrainingAttnWeightsReplayCacheNew
-        else:
+        if not self._use_old_cache:
             cache_class = TrainingAttnWeightsReplayCache
+        else:
+            cache_class = TrainingAttnWeightsReplayCacheOld
         return [
             cache_class(
                 **kwargs,

@@ -26,7 +26,7 @@ from keys_values.kvcache.gradient.annotation import (
     MAX_DELTA_TRANS_LENGTH,
 )
 from keys_values.kvcache.gradient.train_attn_weights_replay_new import (
-    TrainingAttnWeightsReplayCacheNew,
+    TrainingAttnWeightsReplayCache,
 )
 from keys_values.kvcache.test_utils import (
     random_tensor,
@@ -115,7 +115,7 @@ def test_extract_delta(device, dtype):
         delta = repeat_interleave(keys.gather(2, ext_index), n_head)
         assert delta.shape == (batch_size, n_head, MAX_DELTA_TRANS_LENGTH, head_size)
         ext_index = repeat_interleave(
-            TrainingAttnWeightsReplayCacheNew._transform_index(
+            TrainingAttnWeightsReplayCache._transform_index(
                 index=ext_index,
                 sort_index=sort_index,
             ),

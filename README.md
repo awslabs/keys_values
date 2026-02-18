@@ -127,8 +127,6 @@ devices.
   like `grad.layers_per_cell` and `grad.chunks_per_cell_multiplier`. Larger
   values speed up computations, but require more GPU memory. Or try
   `finetune_offload_full` to fine-tune all model parameters.
-* Use PyTorch `flex_attention` also during `backward` pass to speed things up,
-  by adding `--grad.use_new_cache True`.
 * Your KV cache policy is not supported? Why not implement and
   [contribute it back](#implementing-new-kv-cache-policies) to the community?
 * You know how to implement GPU kernels in `CUDA` or `Triton` and would like to
@@ -758,11 +756,11 @@ which can be slower.
 
 Other arguments for fine-tuning are:
 
-* `--grad.use_new_cache`: Setting this to `True` is experimental right now. It
-  means that SDPA kernels (`flex_attention` or query-padded SDPA) are used in
-  `backward` mode as well. Since these kernels are not fused with
-  `torch.scatter`, more GPU memory is required. On the other hand, with
-  `flex_attention`, this runs quite a bit faster.
+* `--grad.use_old_cache`: If this is `True`, an older training replay cache is
+  used for gradient computations. This used a fused naive SDPA kernel, which
+  requires less GPU memory, but is also slower (if `flex_attention` is used).
+  It is an open issue to provide a fast SDPA kernel fused with `torch.scatter`,
+  the best of both worlds.
 * `--grad.single_tokens_for_targets`: If `True`, the targets part of a sequence
   is processed token per token (i.e., with chunk size 1). This is slower, but
   more realistic, mirroring how inference looks like. If the targets part is
