@@ -433,6 +433,9 @@ class MultiHeadSelfAttention:
                 key=k_and_v.keys(),
                 value=k_and_v.values(),
                 scale_factor=scale_factor,
+                sliding_window_size=sliding_window_size,
+                attention_logit_softcapping=self.config.attention_logit_softcapping,
+                input_pos=input_pos,
                 token_positions=token_positions,
                 annotation_callback=annotation_callback,
             )
