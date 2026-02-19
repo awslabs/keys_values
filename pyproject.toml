@@ -33,11 +33,5 @@ include = [
 ]
 exclude = []
 
-[tool.setuptools.package-data]
-keys_values = [
-    "LICENSE",
-    "README.md",
-]
-
 [tool.setuptools.dynamic]
 version = {attr = "keys_values.read_version"}

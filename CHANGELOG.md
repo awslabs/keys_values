@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/).
 * Supports sparse attention and selective key-value cache policies (such as H2O)
 * Key-value cache policies `dense`, `lastrec`, `h2o`, `qh2o`, `h2o-vlen`, `qh2o-vlen`
 * Fine-tuning of models on long context data with KV caches embedded
+* Fast scaled dot product attention via `flex_attention`
 * Quantization of KV cache buffers and activation checkpoints to 4 or 8 bits
 * Memory-efficient `MultiHeadSelfAttention` with explicit `backward`
 * `RoPE` position encoding with `YaRN` scaling
