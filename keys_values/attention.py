@@ -35,10 +35,6 @@ from keys_values.flex_attention import (
     scaled_dot_product_attention_flexatt,
     FlexAttentionArgs,
 )
-from keys_values.flex_attention_simple import (
-    scaled_dot_product_attention_flexatt_simple,
-    FlexAttentionArgsSimple,
-)
 from keys_values.pos_encoding import position_encoding_factory, PositionEncoding
 from keys_values.sdpa_wrapper import (
     scaled_dot_product_attention as scaled_dot_product_attention_zeropad,
@@ -188,7 +184,7 @@ class MultiHeadSelfAttention:
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
         use_eager_kernel: Optional[UseEagerPredicate] = None,
         filter_sdpa_kernels: bool = True,
-        flexatt_args: Optional[FlexAttentionArgsSimple] = None,
+        flexatt_args: Optional[FlexAttentionArgs] = None,
     ) -> None:
         self.config = config
         if pos_encoding is None:
@@ -431,7 +427,7 @@ class MultiHeadSelfAttention:
         elif sdpa_mode == SDPA_IMPL_FLEXATTENTION:
             assert sliding_window_size is None
             assert self.config.attention_logit_softcapping is None
-            attn_outputs = scaled_dot_product_attention_flexatt_simple(
+            attn_outputs = scaled_dot_product_attention_flexatt(
                 flexatt_args=self._flexatt_args,
                 query=query,
                 key=k_and_v.keys(),
