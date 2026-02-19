@@ -425,8 +425,6 @@ class MultiHeadSelfAttention:
                 self._do_filter_kernels = False
                 self._sdpa_kernels = filtered_kernels
         elif sdpa_mode == SDPA_IMPL_FLEXATTENTION:
-            assert sliding_window_size is None
-            assert self.config.attention_logit_softcapping is None
             attn_outputs = scaled_dot_product_attention_flexatt(
                 flexatt_args=self._flexatt_args,
                 query=query,
