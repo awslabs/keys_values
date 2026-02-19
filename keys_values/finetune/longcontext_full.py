@@ -58,7 +58,8 @@ from keys_values.attention_utils import (
     SDPA_KERNELS_BEST_ORDERING,
 )
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME, MyDataLoader
-from keys_values.flex_attention import FlexAttentionArgs
+#from keys_values.flex_attention import FlexAttentionArgs
+from keys_values.flex_attention_simple import FlexAttentionArgsSimple
 from keys_values.finetune.args import (
     EvalArgs,
     GradientArgs,
@@ -572,7 +573,8 @@ def main(
         if sdpa.flex_attention:
             # The block mask managers (for prefill, for chunks) are shared
             # among all multi-head attention blocks
-            flexatt_args = FlexAttentionArgs(extend_kv=sdpa.flex_extend_kv)
+            # flexatt_args = FlexAttentionArgs(extend_kv=sdpa.flex_extend_kv)
+            flexatt_args = FlexAttentionArgsSimple(extend_kv=sdpa.flex_extend_kv)
             mha_kwargs["flexatt_args"] = flexatt_args
         kv_cache.cache_kwargs.update(mha_kwargs)
         dtype = fabric_precision_to_dtype(fabric._precision.precision)

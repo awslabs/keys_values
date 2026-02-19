@@ -348,6 +348,16 @@ def causal_mask_for_chunk_notp(
     return result
 
 
+def causal_mask_for_chunk_debug(
+    batch: torch.Tensor,
+    head: torch.Tensor,
+    q_idx: torch.Tensor,
+    kv_idx: torch.Tensor,
+    offset: int,
+) -> torch.Tensor:
+    return q_idx + offset >= kv_idx
+
+
 # TODO: Case `tp_ndim > 0` does not work reliably. Figure this out or remove.
 # The case `tp_ndim == 0` does not need a class, because the block mask has no
 # variable inputs.
@@ -378,11 +388,18 @@ class BlockMaskForChunk:
         if tp_is_none:
             self.input_pos = None
             self.token_positions = None
-            mask_mod = partial(
-                causal_mask_for_chunk_notp,
-                input_pos=kv_len - q_len,
-                sliding_window_size=sliding_window_size,
-            )
+            if sliding_window_size is None:
+                mask_mod = partial(
+                    causal_mask_for_chunk_debug,
+                    offset=kv_len - q_len,
+                )
+                assert not tp_is_3d
+            else:
+                mask_mod = partial(
+                    causal_mask_for_chunk_notp,
+                    input_pos=kv_len - q_len,
+                    sliding_window_size=sliding_window_size,
+                )
         else:
             self.input_pos = torch.tensor(0, **kwargs)
             self.token_positions = torch.zeros(
