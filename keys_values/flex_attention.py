@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from functools import partial
-from typing import Optional, Callable, Tuple, Union
+from typing import Optional, Callable, Tuple
 
 import torch
 from torch.nn.attention.flex_attention import (
@@ -26,13 +26,13 @@ from keys_values.sdpa_wrapper import (
     reorder_key_value,
     ReorderAnnotationCallback,
 )
-from keys_values.utils import is_index_1d, repeat_interleave
+from keys_values.utils import repeat_interleave
+
 
 FlexAttnWithBlockMask = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, float, bool],
     torch.Tensor,
 ]
-
 
 ScoreModifier = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
@@ -86,18 +86,15 @@ class FlexAttnManager:
 
     """
 
-    def __init__(
-        self,
-        debug_flexatt_no_compile: bool = False,
-    ):
+    def __init__(self):
         self._entries = dict()
         self.num_hits = dict()
-        self._debug_flexatt_no_compile = debug_flexatt_no_compile
 
     def _get_args(
         self,
         kv_len: int,
         device: torch.device,
+        requires_grad: bool,
         sliding_window_size: Optional[int],
         als_signature: Optional[int],
         **kwargs,
@@ -110,35 +107,25 @@ class FlexAttnManager:
         device: torch.device,
         sliding_window_size: Optional[int],
         **kwargs,
-    ) -> Union[BlockMask, "BlockMaskForChunk"]:
-        raise NotImplementedError
-
-    def _create_final_attn_fn(
-        self,
-        attn_fn: Callable,
-        score_mod: Optional[ScoreModifier],
-        block_mask: Union[BlockMask, "BlockMaskForChunk"],
-        kv_len: int,
-        device: torch.device,
-        sliding_window_size: Optional[int],
-        **kwargs,
-    ) -> FlexAttnWithBlockMask:
+    ) -> BlockMask:
         raise NotImplementedError
 
     def __call__(
         self,
         kv_len: int,
         device: torch.device,
+        requires_grad: bool,
         sliding_window_size: Optional[int],
         attention_logit_softcapping: Optional[float],
         **kwargs,
-    ) -> FlexAttnWithBlockMask:
+    ) -> Tuple[FlexAttnWithBlockMask, bool]:
         als_signature, thresh = quantize_attention_logit_softcapping(
             attention_logit_softcapping
         )
         args = self._get_args(
             kv_len,
             device,
+            requires_grad,
             sliding_window_size,
             als_signature,
             **kwargs,
@@ -157,27 +144,18 @@ class FlexAttnManager:
                 score_mod = partial(logit_softcapping, thresh=thresh)
             else:
                 score_mod = None
-            if not self._debug_flexatt_no_compile:
-                attn_fn = torch.compile(flex_attention, fullgraph=True)
-            else:
-                attn_fn = None
-            result = (block_mask, score_mod, attn_fn)
+            attn_fn = partial(
+                torch.compile(flex_attention, fullgraph=True),
+                score_mod=score_mod,
+                block_mask=block_mask,
+            )
+            extend_kv = True if self._entries else False
+            result = (attn_fn, extend_kv)
             self._entries[args] = result
             self.num_hits[args] = 1
         else:
             self.num_hits[args] = self.num_hits[args] + 1
-        block_mask, score_mod, attn_fn = result
-        if self._debug_flexatt_no_compile:
-            attn_fn = flex_attention
-        return self._create_final_attn_fn(
-            attn_fn=attn_fn,
-            score_mod=score_mod,
-            block_mask=block_mask,
-            kv_len=kv_len,
-            device=device,
-            sliding_window_size=sliding_window_size,
-            **kwargs,
-        )
+        return result
 
 
 class FlexAttnForPrefillManager(FlexAttnManager):
@@ -187,21 +165,19 @@ class FlexAttnForPrefillManager(FlexAttnManager):
 
     """
 
-    def __init__(
-        self,
-        debug_flexatt_no_compile: bool = False,
-    ):
-        super().__init__(debug_flexatt_no_compile)
+    def __init__(self):
+        super().__init__()
 
     def _get_args(
         self,
         kv_len: int,
         device: torch.device,
+        requires_grad: bool,
         sliding_window_size: Optional[int],
         als_signature: Optional[int],
         **kwargs,
     ) -> tuple:
-        return kv_len, device, sliding_window_size, als_signature
+        return kv_len, device, requires_grad, sliding_window_size, als_signature
 
     def _create_block_mask(
         self,
@@ -209,7 +185,7 @@ class FlexAttnForPrefillManager(FlexAttnManager):
         device: torch.device,
         sliding_window_size: Optional[int],
         **kwargs,
-    ) -> Union[BlockMask, "BlockMaskForChunk"]:
+    ) -> BlockMask:
         mask_mod = partial(
             causal_mask_for_prefill,
             sliding_window_size=sliding_window_size,
@@ -223,124 +199,16 @@ class FlexAttnForPrefillManager(FlexAttnManager):
             device=device,
         )
 
-    def _create_final_attn_fn(
-        self,
-        attn_fn: Callable,
-        score_mod: Optional[ScoreModifier],
-        block_mask: Union[BlockMask, "BlockMaskForChunk"],
-        kv_len: int,
-        device: torch.device,
-        sliding_window_size: Optional[int],
-        **kwargs,
-    ) -> FlexAttnWithBlockMask:
-        return partial(
-            attn_fn,
-            score_mod=score_mod,
-            block_mask=block_mask,
-        )
 
-
-def transform_token_positions(
-    token_positions: torch.Tensor,
-    n_head: int,
-) -> torch.Tensor:
-    """
-    Transforms `token_positions` argument to
-    :func:`scaled_dot_product_attention_flexatt` into tensor used in the
-    kernel. If the argument is extended from 1D, we return the 1D slice.
-    Otherwise, if `q_per_kv > 1`, we create an expanded copy of shape
-    `(batch_size, n_head, kv_len)`.
-
-    """
-    if is_index_1d(token_positions):
-        return token_positions[0, 0, :]
-    else:
-        batch_size, n_query_groups, _ = token_positions.shape
-        q_per_kv = n_head // n_query_groups
-        if q_per_kv > 1:
-            token_positions = (
-                token_positions.unsqueeze(2)
-                .expand(
-                    -1,
-                    -1,
-                    q_per_kv,
-                    -1,
-                )
-                .reshape(batch_size, n_head, -1)
-                .contiguous()
-            )
-        return token_positions
-
-
-# TODO: Does not work reliably. Figure this out, or remove!
-def causal_mask_for_chunk_3d(
+def causal_mask_for_chunk(
     batch: torch.Tensor,
     head: torch.Tensor,
     q_idx: torch.Tensor,
     kv_idx: torch.Tensor,
-    input_pos: torch.Tensor,
-    token_positions: torch.Tensor,
+    offset: int,
     sliding_window_size: Optional[int],
 ) -> torch.Tensor:
-    """
-    This is based on :func:`keys_values.attention_utils.mask_slice_bool`,
-    which implements `boolmask = A < B`, of shape
-    `(batch_size, n_head, q_len, kv_len)`.
-
-    The semantics of boolean is flipped here, we need to return
-    `A[batch, head, q_idx, kv_idx] >= B[batch, head, q_idx, kv_idx]`.
-
-    """
-    # result = left_arg >= right_arg, where
-    # left_arg = A[batch, head, q_idx, kv_idx],
-    # right_arg = B[batch, head, q_idx, kv_idx]
-    left_arg = q_idx + input_pos
-    right_arg = token_positions[batch, head, kv_idx]
-    result = left_arg >= right_arg
-    if sliding_window_size is not None:
-        extra_mask = (left_arg - sliding_window_size) < right_arg
-        result = result & extra_mask
-    return result
-
-
-# TODO: Does not work reliably. Figure this out, or remove!
-def causal_mask_for_chunk_1d(
-    batch: torch.Tensor,
-    head: torch.Tensor,
-    q_idx: torch.Tensor,
-    kv_idx: torch.Tensor,
-    input_pos: torch.Tensor,
-    token_positions: torch.Tensor,
-    sliding_window_size: Optional[int],
-) -> torch.Tensor:
-    """
-    Variant for `token_positions.ndim == 1`.
-
-    """
-    left_arg = q_idx + input_pos
-    right_arg = token_positions[kv_idx]
-    result = left_arg >= right_arg
-    if sliding_window_size is not None:
-        extra_mask = (left_arg - sliding_window_size) < right_arg
-        result = result & extra_mask
-    return result
-
-
-def causal_mask_for_chunk_notp(
-    batch: torch.Tensor,
-    head: torch.Tensor,
-    q_idx: torch.Tensor,
-    kv_idx: torch.Tensor,
-    input_pos: int,
-    sliding_window_size: Optional[int],
-) -> torch.Tensor:
-    """
-    Variant without `token_positions`, which means that
-    `token_positions == arange(kv_len)`. Also, `input_pos` is a fixed argument
-    here, not a variable tensor.
-
-    """
-    left_arg = q_idx + input_pos
+    left_arg = q_idx + offset
     result = left_arg >= kv_idx
     if sliding_window_size is not None:
         extra_mask = (left_arg - sliding_window_size) < kv_idx
@@ -348,135 +216,43 @@ def causal_mask_for_chunk_notp(
     return result
 
 
-# TODO: Case `tp_ndim > 0` does not work reliably. Figure this out or remove.
-# The case `tp_ndim == 0` does not need a class, because the block mask has no
-# variable inputs.
-class BlockMaskForChunk:
-    """
-    Represents `BlockMask` object for inference with KV cache pattern
-    (`q_len < kv_len`), along with captured tensors `input_pos` and
-    `token_positions` (latter only if `tp_ndim > 0`). Depending on `tp_ndim`,
-    `token_positions` is 3D (3) or 1D (1).
-
-    """
-
-    def __init__(
-        self,
-        q_len: int,
-        kv_len: int,
-        batch_size: int,
-        n_head: int,
-        device: torch.device,
-        sliding_window_size: Optional[int],
-        tp_ndim: int,
-    ):
-        assert tp_ndim in (0, 1, 3)
-        tp_is_3d = tp_ndim == 3
-        tp_is_none = tp_ndim == 0
-        kwargs = dict(device=device, dtype=torch.int32)
-        self.n_head = n_head
-        if tp_is_none:
-            self.input_pos = None
-            self.token_positions = None
-            mask_mod = partial(
-                causal_mask_for_chunk_notp,
-                input_pos=kv_len - q_len,
-                sliding_window_size=sliding_window_size,
-            )
-        else:
-            self.input_pos = torch.tensor(0, **kwargs)
-            self.token_positions = torch.zeros(
-                (batch_size, n_head, kv_len) if tp_is_3d else (kv_len,),
-                **kwargs,
-            )
-            mask_mod = partial(
-                causal_mask_for_chunk_3d if tp_is_3d else causal_mask_for_chunk_1d,
-                input_pos=self.input_pos,
-                token_positions=self.token_positions,
-                sliding_window_size=sliding_window_size,
-            )
-        self.block_mask = create_block_mask(
-            mask_mod,
-            B=batch_size if tp_is_3d else None,
-            H=n_head if tp_is_3d else None,
-            Q_LEN=q_len,
-            KV_LEN=kv_len,
-            device=device,
-        )
-
-    def __call__(
-        self,
-        input_pos: int,
-        token_positions: Optional[torch.Tensor],
-    ) -> BlockMask:
-        if self.input_pos is not None:
-            self.input_pos.copy_(input_pos)
-            token_positions = transform_token_positions(token_positions, self.n_head)
-            self.token_positions[:] = token_positions
-        return self.block_mask
-
-
 class FlexAttnForChunkManager(FlexAttnManager):
-    """
-    Maintains `BlockMask` objects and compiled `flex_attention` for inference
-    with KV cache pattern (`q_len < kv_len`), for different
-    `(q_len, kv_len, batch_size, n_head, device)` values.
-
-    Each entry also has `input_pos` and `token_positions` as inputs, but
-    they are captured tensors (they do not determine the shapes, just the
-    mask content),
-    see: https://pytorch.org/blog/flexattention-for-inference/.
-
-    """
-
-    def __init__(
-        self,
-        debug_flexatt_no_compile: bool = False,
-    ):
-        super().__init__(debug_flexatt_no_compile)
+    def __init__(self):
+        super().__init__()
 
     def _unpack_kwargs(
         self,
         **kwargs,
-    ) -> Tuple[int, int, int, int, Optional[torch.Tensor]]:
+    ) -> Tuple[int, int, int]:
         unpacked_args = []
         for name in (
             "q_len",
             "batch_size",
             "n_head",
-            "input_pos",
         ):
             if name not in kwargs:
                 raise ValueError(f"{name} is required")
             unpacked_args.append(kwargs[name])
-        unpacked_args.append(kwargs.get("token_positions"))
         return tuple(unpacked_args)
-
-    @staticmethod
-    def get_tp_ndim(token_positions: Optional[torch.Tensor]) -> int:
-        if token_positions is None:
-            return 0
-        else:
-            return 1 if is_index_1d(token_positions) else 3
 
     def _get_args(
         self,
         kv_len: int,
         device: torch.device,
+        requires_grad: bool,
         sliding_window_size: Optional[int],
         als_signature: Optional[int],
         **kwargs,
     ) -> tuple:
-        q_len, batch_size, n_head, _, token_positions = self._unpack_kwargs(**kwargs)
-        tp_ndim = self.get_tp_ndim(token_positions)
+        q_len, batch_size, n_head = self._unpack_kwargs(**kwargs)
         return (
             q_len,
             kv_len,
             batch_size,
             n_head,
             device,
+            requires_grad,
             sliding_window_size,
-            tp_ndim,
             als_signature,
         )
 
@@ -486,70 +262,40 @@ class FlexAttnForChunkManager(FlexAttnManager):
         device: torch.device,
         sliding_window_size: Optional[int],
         **kwargs,
-    ) -> Union[BlockMask, "BlockMaskForChunk"]:
-        args = self._get_args(
-            kv_len,
-            device,
-            sliding_window_size,
-            None,
-            **kwargs,
+    ) -> BlockMask:
+        q_len = self._unpack_kwargs(**kwargs)[0]
+        mask_mod = partial(
+            causal_mask_for_chunk,
+            offset=kv_len - q_len,
+            sliding_window_size=sliding_window_size,
         )
-        return BlockMaskForChunk(*args[:-1])
-
-    def _create_final_attn_fn(
-        self,
-        attn_fn: Callable,
-        score_mod: Optional[ScoreModifier],
-        block_mask: Union[BlockMask, "BlockMaskForChunk"],
-        kv_len: int,
-        device: torch.device,
-        sliding_window_size: Optional[int],
-        **kwargs,
-    ) -> FlexAttnWithBlockMask:
-        _, _, _, input_pos, token_positions = self._unpack_kwargs(**kwargs)
-        return partial(
-            attn_fn,
-            score_mod=score_mod,
-            block_mask=block_mask(input_pos, token_positions),
+        return create_block_mask(
+            mask_mod,
+            B=None,
+            H=None,
+            Q_LEN=q_len,
+            KV_LEN=kv_len,
+            device=device,
         )
 
 
 # TODO: Further args concerning `flex_attention`
-# TODO: Figure out `reorder_kv=False` case or remove!
 class FlexAttentionArgs:
     """
     Maintains managers (for prefill and chunk computations).
 
     Args:
-        reorder_kv: If `True`, `token_positions` is taken into account by
-            reordering `key`, `value` in
-            :func:`keys_values.flex_attention.scaled_dot_product_attention_flexatt`,
-            the argument is ignored here. Defaults to `True`.
-            Note: `reorder_kv=False` not supported at the moment!
-        extend_kv: If `True` we extend `key, value` to `n_head`. This avoids
-            GQA, which may not be implemented correctly.
-        debug_flexatt_no_compile: If true, `flex_attention` is not compiled.
-            Only for debugging (slow and requires lots of memory).
+        extend_kv: If `True` we always extend `key, value` to `n_head`. This
+            needs more memory, only use if the default does not work.
 
     """
 
     def __init__(
         self,
-        reorder_kv: bool = True,
         extend_kv: bool = False,
-        debug_flexatt_no_compile: bool = False,
     ):
-        if not reorder_kv:
-            raise NotImplementedError(
-                "At present, 'reorder_k=False' does not work reliably, do not use."
-            )
-        self.attn_prefill_manager = FlexAttnForPrefillManager(
-            debug_flexatt_no_compile,
-        )
-        self.attn_chunk_manager = FlexAttnForChunkManager(
-            debug_flexatt_no_compile,
-        )
-        self.reorder_kv = reorder_kv
+        self.attn_prefill_manager = FlexAttnForPrefillManager()
+        self.attn_chunk_manager = FlexAttnForChunkManager()
         self.extend_kv = extend_kv
 
     def attn_fn(
@@ -559,30 +305,34 @@ class FlexAttentionArgs:
         batch_size: int,
         n_head: int,
         device: torch.device,
+        requires_grad: bool,
         sliding_window_size: Optional[int],
         attention_logit_softcapping: Optional[float],
         input_pos: int,
-        token_positions: Optional[torch.Tensor],
-    ) -> FlexAttnWithBlockMask:
+    ) -> Tuple[FlexAttnWithBlockMask, bool]:
         if input_pos == 0:
-            return self.attn_prefill_manager(
-                kv_len=kv_len,
-                device=device,
-                sliding_window_size=sliding_window_size,
-                attention_logit_softcapping=attention_logit_softcapping,
+            return (
+                self.attn_prefill_manager(
+                    kv_len=kv_len,
+                    device=device,
+                    requires_grad=requires_grad,
+                    sliding_window_size=sliding_window_size,
+                    attention_logit_softcapping=attention_logit_softcapping,
+                )[0],
+                False,
             )
         else:
-            return self.attn_chunk_manager(
+            _attn_fn, extend_kv = self.attn_chunk_manager(
                 kv_len=kv_len,
                 device=device,
+                requires_grad=requires_grad,
                 sliding_window_size=sliding_window_size,
                 attention_logit_softcapping=attention_logit_softcapping,
                 q_len=q_len,
                 batch_size=batch_size,
                 n_head=n_head,
-                input_pos=input_pos,
-                token_positions=None if self.reorder_kv else token_positions,
             )
+            return _attn_fn, extend_kv or self.extend_kv
 
 
 def scaled_dot_product_attention_flexatt(
@@ -648,30 +398,30 @@ def scaled_dot_product_attention_flexatt(
             raise ValueError(
                 f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
             )
-    if token_positions is not None and flexatt_args.reorder_kv:
+    if token_positions is not None:
         key, value, sort_index = reorder_key_value(key, value, token_positions)
-        token_positions = None
     else:
         sort_index = None
     enable_gqa = n_query_groups < n_head
-    if flexatt_args.extend_kv and enable_gqa:
+    requires_grad = query.requires_grad or key.requires_grad or value.requires_grad
+    attn_fn, extend_kv = flexatt_args.attn_fn(
+        q_len=q_len,
+        kv_len=kv_len,
+        batch_size=batch_size,
+        n_head=n_head,
+        device=query.device,
+        requires_grad=requires_grad,
+        sliding_window_size=sliding_window_size,
+        attention_logit_softcapping=attention_logit_softcapping,
+        input_pos=input_pos,
+    )
+    if enable_gqa and extend_kv:
         key = repeat_interleave(key, n_head)
         value = repeat_interleave(value, n_head)
         enable_gqa = False
     if annotation_callback is not None:
         annotation_callback(key, value, sort_index)
 
-    attn_fn = flexatt_args.attn_fn(
-        q_len=q_len,
-        kv_len=kv_len,
-        batch_size=batch_size,
-        n_head=n_head,
-        device=query.device,
-        sliding_window_size=sliding_window_size,
-        attention_logit_softcapping=attention_logit_softcapping,
-        input_pos=input_pos,
-        token_positions=token_positions,
-    )
     return attn_fn(
         query=query,
         key=key,

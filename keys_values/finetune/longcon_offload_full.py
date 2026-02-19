@@ -87,7 +87,7 @@ def setup(
     yarn_rope: bool = True,
     sdpa: SDPAArgs = SDPAArgs(
         flex_attention=True,
-        flex_extend_kv=True,
+        flex_extend_kv=False,
     ),
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
