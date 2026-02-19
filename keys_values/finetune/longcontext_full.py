@@ -180,7 +180,7 @@ def setup(
     yarn_rope: bool = True,
     sdpa: SDPAArgs = SDPAArgs(
         flex_attention=True,
-        flex_extend_kv=True,
+        flex_extend_kv=False,
     ),
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
@@ -1237,6 +1237,11 @@ def fit(
                 lengths=total_lengths,
             )
             throughput.compute_and_log(step=state["iter_num"])
+            if gpu_scheduler is not None:
+                learning_rate = gpu_scheduler.get_last_lr()[0]
+            else:
+                assert cpu_scheduler is not None
+                learning_rate = cpu_scheduler.get_last_lr()[0]
             metrics = {
                 "loss": loss,
                 "iter": state["iter_num"],
@@ -1246,7 +1251,7 @@ def fit(
                 "tokens": token_counts["raw_tokens_plus_prompt_template"],
                 "total_tokens": token_counts["raw_tokens_plus_prompt_template"]
                 * fabric.world_size,
-                "learning_rate": gpu_scheduler.get_last_lr()[0],
+                "learning_rate": learning_rate,
                 **log_memory_all_devices(),
             }
             if isinstance(val_loss, torch.Tensor):

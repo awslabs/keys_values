@@ -156,7 +156,6 @@ def test_flexatt_working(tp_ndim):
         print(attn_outputs.sum().item())
 
 
-# TODO: Extend to `reorder_kv=False` if this works
 @_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
     "n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size, attention_logit_softcapping, tp_ndim, atol",
@@ -199,7 +198,6 @@ def test_comparison(
     batch_size = 2
     head_size = 32
     num_chunks = 2
-    reorder_kv = True
     device = torch.device("cuda", 0)
 
     config = Config.from_name(
@@ -276,7 +274,7 @@ def test_comparison(
         input_pos += q_len
 
     # Competitors
-    flexatt_args = FlexAttentionArgs(reorder_kv=reorder_kv)
+    flexatt_args = FlexAttentionArgs()
     names = ["no_flexatt", "flexatt"]
     mhas = [
         MultiHeadSelfAttention(config),
