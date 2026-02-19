@@ -273,7 +273,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
             mask_mod,
             B=None,
             H=None,
-            Q_LEN=kv_len,
+            Q_LEN=q_len,
             KV_LEN=kv_len,
             device=device,
         )
