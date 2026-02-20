@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/).
 <a name="v0.1.0"></a>
 ## [0.1.0] - 2026-02-20
 
+Thanks to all contributors:
+@mseeger, @Jantory, @wesk
+
 ### New Features
 * Key-value cache abstraction to extend `LitGPT` models for long-context inference
   and fine-tuning
