@@ -18,7 +18,7 @@ from io import StringIO
 from pathlib import Path
 from pstats import SortKey, Stats
 import time
-from typing import Optional, Dict, Any, Tuple, Union, List
+from typing import Optional, Dict, Any, Tuple, Union, List, Callable
 
 import torch
 
@@ -233,6 +233,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         offload_device: Optional[torch.device] = None,
         offload_grad_accum: Optional[CPUOffloadAccumulateGradients] = None,
         layer_checkpoint_chunk_size: Optional[int] = None,
+        track_unmatched_annotations: Optional[Callable[[int, int], bool]] = None,
         debug_gpt_model: Optional[GPT] = None,
         debug_store_intermediates: bool = False,
         debug_profile_forward: bool = False,
@@ -298,6 +299,11 @@ class LongContextGradientModel(LongContextInferenceModel):
                 checkpoints are quantized. Quantization is done in chunks of
                 this length. Determines GPU memory requirements. A value close
                 to the cache length is recommended.
+            track_unmatched_annotations: If given, we track for each unmatched
+                pack argument the annotations it was matched against. We
+                print this information for `(layer_idx, chunk_idx)` such that
+                `track_unmatched_annotations(layer_idx, chunk_idx)` is `True`,
+                where `chunk_idx` is the first chunk in the cell.
 
         """
         if head_model is None:
@@ -391,6 +397,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 "layer_checkpoint_chunk_size must be given if qname != 'default'"
             )
         self._layer_checkpoint_chunk_size = layer_checkpoint_chunk_size
+        self._track_unmatched_annotations = track_unmatched_annotations
         self._work_device = None
         self._debug_gpt_model = debug_gpt_model
         if debug_store_intermediates:
@@ -670,6 +677,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 config=self.config,
                 batch_size=self.batch_size,
                 arrays_cleanup=arrays_cleanup,
+                track_unmatched_annotations=self._track_unmatched_annotations is not None,
                 **self._autograd_hooks_kwargs,
             )
         elif self._use_arrays_cleanup:
@@ -883,17 +891,26 @@ class LongContextGradientModel(LongContextInferenceModel):
             if total_num_unmatched == 0:
                 print("\nSuccess: All pack arguments were matched in all cells.\n")
             else:
+                # We suppress outputs for the very first chunk (`fci == 0`),
+                # because there is no matching for this one anyway
+                def info_per_row(num, idx, n_ma, n_cmp, n_unm, n_4d) -> List[str]:
+                    fli, fci = idx
+                    result = [f"{num:3d} unmatched in ({fli:2d},{fci:3d}): {n_ma:3d} matches, {n_cmp:3d} comparisons, {n_unm:3d} scatter/cat, {n_4d:3d} 4D indexes"]
+                    if self._track_unmatched_annotations is not None and self._track_unmatched_annotations(fli, fci):
+                        log = self._annotation_usage_logs[idx]
+                        for a in log.unmatched_pack_args:
+                            result.append(f"  {a.id:3d}: {a.unmatched_annotations}")
+                    return result
+
                 lines = (
                     [
-                        "\nThere were unmatched pack arguments in some cells. Use --kv_cache.verbose all for full information."
+                        "\nThere were unmatched pack arguments in some cells. Use --verbose all for full information."
                     ]
                     + [
-                        f"{num} unmatched in ({fli},{fci}): {n_ma} matches, {n_cmp} comparisons, {n_unm} scatter/cat, {n_4d} 4D indexes"
-                        for (
-                            fli,
-                            fci,
-                        ), num, n_ma, n_cmp, n_4d, n_unm in num_unmatched_args
-                        if num > 0
+                        row
+                        for idx, num, n_ma, n_cmp, n_4d, n_unm in num_unmatched_args
+                        if num > 0 and (idx[1] > 0 or n_ma > 0 or n_cmp > 0)
+                        for row in info_per_row(num, idx, n_ma, n_cmp, n_unm, n_4d)
                     ]
                     + [""]
                 )

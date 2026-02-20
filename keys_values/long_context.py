@@ -711,7 +711,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self.chunk_sizes = chunk_sizes
         # Select chunks per cell. If `chunks_per_cell_multiplier == 1`, the
         # maximum chunk length is chosen so that the size of embeddings of
-        # this length are equal to the maximum cache buffers size,
+        # this length are equal to the maximum cache buffer size,
         if self._debug_single_cell_per_row:
             # This is used for unit testing only: Force single cell per row.
             # Do not use!

@@ -27,14 +27,14 @@ from keys_values.utils import shape_to_tuple, expand_index, repeat_interleave
 # matching.
 MAX_DELTA_TRANS_LENGTH = 32
 
-_ANNOTATION_KIND_VALUES = {
-    "cat-key",
-    "cat-value",
-    "ext-key",
-    "ext-value",
-    "padded-query",
-    "scatter-key",
-    "scatter-value",
+_ANNOTATION_KIND_TO_SHORT = {
+    "cat-key": "c-k",
+    "cat-value": "c-v",
+    "ext-key": "e-k",
+    "ext-value": "e-v",
+    "padded-query": "pad-q",
+    "scatter-key": "s-k",
+    "scatter-value": "s-v",
 }
 
 
@@ -132,8 +132,12 @@ class NodeAnnotation:
     @staticmethod
     def kind_is_valid(kind: str):
         assert (
-            kind in _ANNOTATION_KIND_VALUES
-        ), f"kind = '{kind}', must be in {_ANNOTATION_KIND_VALUES}"
+            kind in _ANNOTATION_KIND_TO_SHORT
+        ), f"kind = '{kind}', must be in {list(_ANNOTATION_KIND_TO_SHORT.keys())}"
+
+    def fingerprint(self) -> str:
+        kind_short = _ANNOTATION_KIND_TO_SHORT[self.kind]
+        return f"{kind_short}({self.layer_idx},{self.chunk_idx})"
 
 
 class NodeAnnotationForLog:

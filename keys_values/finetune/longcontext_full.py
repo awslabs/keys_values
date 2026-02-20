@@ -85,6 +85,7 @@ from keys_values.finetune.utils import (
     print_message,
     check_kv_cache,
     create_optimizer,
+    may_match_twice_factory,
 )
 from keys_values.generate.base import generate
 from keys_values.gpu_memory import RecordGPUMemory
@@ -886,12 +887,11 @@ def wrap_gpt_model(
             "sdpa_kernels": cache_kwargs["sdpa_kernels"],
             "use_old_cache": grad.use_old_cache,
         }
+        autograd_hooks_kwargs: Dict[str, Any] = dict(
+            may_match_twice=may_match_twice_factory(grad, gpt_model),
+        )
         if grad.max_match_trials_pack_arg is not None:
-            autograd_hooks_kwargs = dict(
-                max_match_trials_pack_arg=grad.max_match_trials_pack_arg,
-            )
-        else:
-            autograd_hooks_kwargs = None
+            autograd_hooks_kwargs["max_match_trials_pack_arg"] = grad.max_match_trials_pack_arg
         if cpu_offload_device is not None:
             common_kwargs["head_model"] = head_model.to(device=cpu_offload_device)
             offload_grad_accum = CPUOffloadAccumulateGradients(
@@ -916,6 +916,10 @@ def wrap_gpt_model(
                 + add_msg,
                 fabric,
             )
+        # DEBUG
+        #track_unmatched_annotations = lambda layer_idx, chunk_idx: layer_idx in (0, 35)
+        # END DEBUG
+        may_match_twice = may_match_twice_factory(grad, gpt_model)
         model = LongContextGradientModel(
             **common_kwargs,
             layers_per_cell=grad.layers_per_cell,
@@ -929,6 +933,7 @@ def wrap_gpt_model(
             offload_device=cpu_offload_device,
             offload_grad_accum=offload_grad_accum,
             layer_checkpoint_chunk_size=layer_checkpoint_chunk_size,
+            track_unmatched_annotations=None,
             debug_profile_forward=profile_parts == "forward",
             debug_profile_backward=profile_parts == "backward",
             debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,

@@ -25,8 +25,10 @@ from litgpt.tokenizer import Tokenizer
 from litgpt.utils import choose_logger as _choose_logger, instantiate_torch_optimizer
 
 from keys_values.data.dataloader import MyDataLoader
-from keys_values.finetune.args import EvalArgs, KVCacheArgs, OptimizerArgs
+from keys_values.finetune.args import EvalArgs, KVCacheArgs, OptimizerArgs, GradientArgs
 from keys_values.head_model import HeadModel
+from keys_values.kvcache.gradient.annotation import NodeAnnotation
+from keys_values.kvcache.gradient.autograd_hooks import MayMatchTwiceType
 from keys_values.long_context import GPTAndHeadModel
 from keys_values.model import GPT
 from keys_values.utils import flush_io_streams
@@ -332,3 +334,46 @@ def create_optimizer(
         parameters,
         **optim_args.optimizer_kwargs(),
     )
+
+
+def _may_match_twice_flex_attention_sdpa(annotation: NodeAnnotation) -> bool:
+    """
+    With `flex_attention` and the new training replay cache, the "ext-*"
+    annotations match twice.
+
+    """
+    return annotation.is_ext
+
+
+def _may_match_twice_fused_eager_sdpa(annotation: NodeAnnotation) -> bool:
+    """
+    With the old training replay cache using our special fused eager SDPA, the
+    "scatter-*" annotations for chunk index 1 match twice.
+
+    """
+    return annotation.is_scatter and annotation.chunk_idx == 1
+
+
+def may_match_twice_factory(
+    grad: GradientArgs,
+    gpt_model: GPT,
+) -> MayMatchTwiceType:
+    """
+    Helper for :func:`wrap_gpt_model`. Selects the best `may_match_twice`
+    predicate for :class:`CellComputationAutogradHooks`.
+
+    Args:
+        grad: Arguments passed to :func:`wrap_gpt_model`.
+        gpt_model: GPT model passed to :func:`wrap_gpt_model`.
+
+    Returns:
+        `may_match_twice` predicate
+
+    """
+    if grad.use_old_cache:
+        print("Using _may_match_twice_fused_eager_sdpa")  # DEBUG
+        return _may_match_twice_fused_eager_sdpa
+    else:
+        # TODO: May still want to distinguish between different SDPA kernels?
+        print("Using _may_match_twice_flex_attention_sdpa")  # DEBUG
+        return _may_match_twice_flex_attention_sdpa

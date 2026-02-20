@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Union, Tuple, Dict, Optional, Set
+from typing import List, Union, Tuple, Dict, Optional, Set, Callable
 from dataclasses import dataclass, field, replace
 from collections import Counter
 
@@ -109,9 +109,26 @@ class PackHookArgument:
     x: torch.Tensor
     shape: Tuple[int, ...]
     count: int = 0
+    unmatched_annotations: List[str] = field(default_factory=list)
 
     def increase_count(self) -> "PackHookArgument":
-        return PackHookArgument(self.id, self.x, self.shape, self.count + 1)
+        return PackHookArgument(
+            self.id,
+            self.x,
+            self.shape,
+            self.count + 1,
+            self.unmatched_annotations,
+        )
+
+    def append_unmatched_annotation(self, annotation: NodeAnnotation) -> "PackHookArgument":
+        new_annotations = self.unmatched_annotations + [annotation.fingerprint()]
+        return PackHookArgument(
+            self.id,
+            self.x,
+            self.shape,
+            self.count,
+            new_annotations,
+        )
 
 
 @dataclass(frozen=True)
@@ -119,6 +136,7 @@ class UnmatchedPackHookArgument:
     id: int
     shape: Tuple[int, ...]
     dtype: torch.dtype
+    unmatched_annotations: List[str]
 
 
 @dataclass(frozen=True)
@@ -166,6 +184,7 @@ class AnnotationUsageLog:
     num_unmatched_scatter_cat: int
     unmatched_pack_args: List[UnmatchedPackHookArgument] = field(default_factory=list)
     unmatched_annotations: List[NodeAnnotationForLog] = field(default_factory=list)
+    track_unmatched_annotations_for_pack_args: bool = False
 
     def report(self) -> str:
         lines: List[str] = [
@@ -189,7 +208,9 @@ class AnnotationUsageLog:
         if self.unmatched_pack_args:
             lines.append("Remaining unmatched pack arguments:")
             for a in self.unmatched_pack_args:
-                lines.append(f"  {a.id}: {a.shape}, {a.dtype}")
+                lines.append(f"  {a.id:3d}: {a.shape}, {a.dtype}")
+                if self.track_unmatched_annotations_for_pack_args:
+                    lines.append("       " + str(a.unmatched_annotations))
         else:
             lines.append("All pack arguments have been used.")
 
@@ -274,12 +295,11 @@ class CleanupArraysAutogradHooks(AutogradHooks):
         self._arrays_cleanup.reset()
 
 
+MayMatchTwiceType = Callable[[NodeAnnotation], bool]
+
+
 class CellComputationAutogradHooks(AutogradHooks):
     """
-    Attention: Everything below only works properly if the operators
-    :class:`SDPAFunction` or :class:`KVCacheUpdateAndSDPAFunction` are used
-    instead of the standard MHA.
-
     When running `autograd` on a cell, consisting of a number of layers and a
     number of token chunks, the largest variables are keys and values of the
     full KV cache size, with shape
@@ -291,10 +311,10 @@ class CellComputationAutogradHooks(AutogradHooks):
 
     https://pytorch.org/tutorials/intermediate/autograd_saved_tensors_hooks_tutorial.html
 
-    This works as interplay with :class:`TrainingAttnWeightsReplayCache`, which
-    implements the part of the forward pass where these large tensor nodes are
-    created. Each such node is given an annotation of type
-    :class:`NodeAnnotation`.
+    This works as interplay with :class:`TrainingAttnWeightsReplayCache` (or
+    :class:`TrainingAttnWeightsReplayCacheOld`), which implements the part of
+    the forward pass where these large tensor nodes are created. Each such node
+    is given an annotation of type :class:`NodeAnnotation`.
 
     Matching annotations to :meth:`pack_hook` arguments:
 
@@ -386,11 +406,13 @@ class CellComputationAutogradHooks(AutogradHooks):
         `a = gather(x_new, index[:num2])`
         `x = scatter(x_new, cat(index, positions), cat(delta_rev, a))`
 
-    Annotations matched several times:
+    Some annotations can be matched twice:
 
-    Several pack arguments can match to the same annotation. We do not remove
-    an annotation once matched, but just mark it (using `match_id`).
-    We also count IDs return more than once in `_id_counts`. In
+    There are annotations which match different pack arguments. Normally,
+    annotations are removed with the first match. But if `may_match_twice` is
+    given and `may_match_twice(annotation) == True`, the annotation is kept
+    around, marking it with `match_id`. When matched the second time, this ID
+    is returned. We also count IDs returned more than once in `_id_counts`. In
     :meth:`unpack_hook`, we store unpacked tensors in `_id_to_unpacked` so they
     can be returned once more for a duplicate.
 
@@ -426,9 +448,11 @@ class CellComputationAutogradHooks(AutogradHooks):
         self,
         config: Config,
         batch_size: int,
+        may_match_twice: Optional[MayMatchTwiceType] = None,
         max_match_trials_pack_arg: int = 6,
         log_all_shapes: bool = False,
         debug_test_args: bool = False,
+        track_unmatched_annotations: bool = False,
         arrays_cleanup: Optional[ArraysForCleanup] = None,
         track_largest_shape: bool = False,
     ):
@@ -436,6 +460,10 @@ class CellComputationAutogradHooks(AutogradHooks):
         Args:
             config: Model configuration
             batch_size: Batch size
+            may_match_twice: If given, this is a predicate to decide which
+                annotations are kept around for a second match (see above).
+                Defaults to no annotation being matched twice, which typically
+                increases the number of unmatched pack arguments.
             max_match_trials_pack_arg: Arguments of :meth:`pack_hook` are matched
                 against annotations. A pack argument is removed (and not
                 packed) if it is not matched after this number of
@@ -444,6 +472,11 @@ class CellComputationAutogradHooks(AutogradHooks):
             log_all_shapes: See header comment. Defaults to `False`
             debug_test_args: If `True`, pack args are stored with annotations.
                 This is only for testing!
+            track_unmatched_annotations: If `True`, we track for every pack
+                argument the annotations (i.e., fingerprint containing `kind,
+                layer_idx, chunk_idx`) it was matched against. For the remaining
+                unmatched pack arguments, this lists all annotations the argument
+                was unsuccessfully matched against.
 
         """
         self.batch_size = batch_size
@@ -486,6 +519,10 @@ class CellComputationAutogradHooks(AutogradHooks):
         self.debug_print_annotations = False
         self._track_largest_shape = track_largest_shape
         self._largest_shape = None
+        self._track_unmatched_annotations = track_unmatched_annotations
+        if may_match_twice is None:
+            may_match_twice = lambda annotation: False
+        self._may_match_twice = may_match_twice
 
     def initialize_cell(
         self,
@@ -670,6 +707,7 @@ class CellComputationAutogradHooks(AutogradHooks):
             num_unmatched_scatter_cat=self._num_unmatched_scatter_cat,
             unmatched_pack_args=self._unmatched_pack_args.copy(),
             unmatched_annotations=remaining_annotations,
+            track_unmatched_annotations_for_pack_args=self._track_unmatched_annotations,
         )
 
     def debug_log_args(self) -> Optional[List[Tuple[torch.Tensor, NodeAnnotation]]]:
@@ -768,7 +806,6 @@ class CellComputationAutogradHooks(AutogradHooks):
                 print(f"_unpack_from_annotation: {str(annotation)}")
             buffer = self._unpack_padded_query(annotation)
         else:
-            # TODO: Squeeze in "reorder-*" here!!
             # - Same role as "ext-*". Mut exclusive?
             layer_idx = annotation.layer_idx
             chunk_idx = annotation.chunk_idx
@@ -969,18 +1006,23 @@ class CellComputationAutogradHooks(AutogradHooks):
                     else:
                         # Avoids attempts to match in the future
                         annotation.does_not_match.add(pack_arg.id)
+                        if was_compared and self._track_unmatched_annotations:
+                            pack_arg = pack_arg.append_unmatched_annotation(annotation)
 
                 if parg_matched_to is not None:
-                    # We do not delete a matched annotation, but mark it. This
-                    # way, we can detect multiple matches
+                    # Matched annotation is either removed or used once more
                     ind, idd = parg_matched_to
                     annotation = self._node_annotations.nodes[ind]
-                    if annotation.match_id is None:
+                    if annotation.match_id is None and self._may_match_twice(annotation):
+                        # Mark annotation to allow for a second match
                         annotation = replace(
                             annotation,
                             match_id=idd,
                         )
                         self._node_annotations.nodes[ind] = annotation
+                    else:
+                        # Remove matched annotation
+                        self._node_annotations.nodes.pop(ind)
                 else:
                     # Pack argument was not matched
                     if was_compared:
@@ -1158,6 +1200,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                     id=pack_arg.id,
                     shape=shape_to_tuple(pack_arg.x),
                     dtype=pack_arg.x.dtype,
+                    unmatched_annotations=pack_arg.unmatched_annotations,
                 )
             )
             if self._arrays_cleanup is not None:
