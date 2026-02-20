@@ -25,6 +25,14 @@ LABELS_NAME = "labels"
 
 POSITION_NAME = "position"
 
+LIT_MODEL_FNAME = "lit_model.pth"
+
+HEAD_MODEL_FNAME = "head_model.pth"
+
+LORA_WEIGHTS_FNAME = "lit_model.lora.pth"
+
+LORA_WEIGHTS_FNAME_OLD = "lit_model.pth.lora"
+
 
 class LongContextDataset(Dataset):
     """

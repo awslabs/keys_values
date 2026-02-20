@@ -27,14 +27,14 @@ from keys_values.utils import shape_to_tuple, expand_index, repeat_interleave
 # matching.
 MAX_DELTA_TRANS_LENGTH = 32
 
-_ANNOTATION_KIND_VALUES = {
-    "cat-key",
-    "cat-value",
-    "ext-key",
-    "ext-value",
-    "padded-query",
-    "scatter-key",
-    "scatter-value",
+_ANNOTATION_KIND_TO_SHORT = {
+    "cat-key": "c-k",
+    "cat-value": "c-v",
+    "ext-key": "e-k",
+    "ext-value": "e-v",
+    "padded-query": "pad-q",
+    "scatter-key": "s-k",
+    "scatter-value": "s-v",
 }
 
 
@@ -132,8 +132,12 @@ class NodeAnnotation:
     @staticmethod
     def kind_is_valid(kind: str):
         assert (
-            kind in _ANNOTATION_KIND_VALUES
-        ), f"kind = '{kind}', must be in {_ANNOTATION_KIND_VALUES}"
+            kind in _ANNOTATION_KIND_TO_SHORT
+        ), f"kind = '{kind}', must be in {list(_ANNOTATION_KIND_TO_SHORT.keys())}"
+
+    def fingerprint(self) -> str:
+        kind_short = _ANNOTATION_KIND_TO_SHORT[self.kind]
+        return f"{kind_short}({self.layer_idx},{self.chunk_idx})"
 
 
 class NodeAnnotationForLog:
@@ -225,7 +229,7 @@ def create_ext_annotations(
 def apply_ext_annotation(
     buffer: torch.Tensor,
     annotation: NodeAnnotation,
-    n_head: int,
+    target_dim1: int,
 ):
     """
     Applies annotation to buffer, for kind "ext-*".
@@ -233,7 +237,7 @@ def apply_ext_annotation(
     Args:
         buffer: Buffer before reordering and/or extension
         annotation: Annotation of "ext-*" kind
-        n_head: Number of heads
+        target_dim1: Returned buffer must have `shape[1] == target_dim1`
 
     Returns:
         Buffer after reordering and/or extension
@@ -248,5 +252,5 @@ def apply_ext_annotation(
     sort_index = None if extra_info is None else extra_info.get("sort_index")
     if sort_index is not None:
         buffer = reorder_buffer_given_sort_index(buffer, sort_index)
-    buffer = repeat_interleave(buffer, n_head)
+    buffer = repeat_interleave(buffer, n_head=target_dim1)
     return buffer

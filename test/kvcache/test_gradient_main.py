@@ -21,6 +21,11 @@ import lightning as L
 from litgpt.config import Config
 from litgpt.utils import _RunIf
 
+from keys_values.finetune.utils import (
+    may_match_twice_flex_attention_sdpa,
+    may_match_twice_fused_eager_sdpa,
+)
+from keys_values.flex_attention import FlexAttentionArgs
 from keys_values.head_model import CrossEntropyOnLogits, SequenceClassification
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
@@ -100,8 +105,13 @@ def test_complete_gradient_computation(
         cache_length=cache_lengths[0],
         dtype=dtype,
     )
+    if device == torch.device("cpu"):
+        mha_kwargs = dict()
+    else:
+        mha_kwargs = dict(flexatt_args=FlexAttentionArgs())
+    cache_kwargs.update(mha_kwargs)
     with torch.device(device):
-        gpt_model = GPT(config)
+        gpt_model = GPT(config, **mha_kwargs)
         gpt_model.apply(gpt_model._init_weights)  # Initialization
     gpt_model.assign_kv_caches(
         [
@@ -113,6 +123,11 @@ def test_complete_gradient_computation(
             )
             for block_idx, cache_length in enumerate(cache_lengths)
         ]
+    )
+    may_match_twice = may_match_twice_fused_eager_sdpa if use_old_cache else may_match_twice_flex_attention_sdpa
+    autograd_hooks_kwargs = dict(
+        max_match_trials_pack_arg=4,
+        may_match_twice=may_match_twice,
     )
 
     # Create data batches
@@ -151,7 +166,7 @@ def test_complete_gradient_computation(
             chunk_size=chunk_size,
             qname=qname,
             train_cache_kwargs=dict(use_old_cache=use_old_cache),
-            autograd_hooks_kwargs=dict(max_match_trials_pack_arg=4),
+            autograd_hooks_kwargs=autograd_hooks_kwargs,
             debug_single_cell_per_row=debug_flag,
             debug_dont_use_autograd_hooks=debug_flag,
         )
