@@ -24,21 +24,19 @@ from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import choose_logger as _choose_logger, instantiate_torch_optimizer
 
+from keys_values.data.base import (
+    LIT_MODEL_FNAME,
+    HEAD_MODEL_FNAME,
+    LORA_WEIGHTS_FNAME,
+)
 from keys_values.data.dataloader import MyDataLoader
-from keys_values.finetune.args import EvalArgs, KVCacheArgs, OptimizerArgs
+from keys_values.finetune.args import EvalArgs, KVCacheArgs, OptimizerArgs, GradientArgs
 from keys_values.head_model import HeadModel
+from keys_values.kvcache.gradient.annotation import NodeAnnotation
+from keys_values.kvcache.gradient.autograd_hooks import MayMatchTwiceType
 from keys_values.long_context import GPTAndHeadModel
 from keys_values.model import GPT
 from keys_values.utils import flush_io_streams
-
-
-LIT_MODEL_FNAME = "lit_model.pth"
-
-HEAD_MODEL_FNAME = "head_model.pth"
-
-LORA_WEIGHTS_FNAME = "lit_model.lora.pth"
-
-LORA_WEIGHTS_FNAME_OLD = "lit_model.pth.lora"
 
 
 def debug_print_param_names(model: GPT):
@@ -332,3 +330,44 @@ def create_optimizer(
         parameters,
         **optim_args.optimizer_kwargs(),
     )
+
+
+def may_match_twice_flex_attention_sdpa(annotation: NodeAnnotation) -> bool:
+    """
+    With `flex_attention` and the new training replay cache, the "ext-*"
+    annotations match twice. The same holds for the new training replay cache
+    with zero-padded query SDPA.
+
+    """
+    return annotation.is_ext
+
+
+def may_match_twice_fused_eager_sdpa(annotation: NodeAnnotation) -> bool:
+    """
+    With the old training replay cache using our special fused eager SDPA, the
+    "scatter-*" annotations for chunk index 1 match twice.
+
+    """
+    return annotation.is_scatter and annotation.chunk_idx == 1
+
+
+def may_match_twice_factory(
+    grad: GradientArgs,
+    gpt_model: GPT,
+) -> MayMatchTwiceType:
+    """
+    Helper for :func:`wrap_gpt_model`. Selects the best `may_match_twice`
+    predicate for :class:`CellComputationAutogradHooks`.
+
+    Args:
+        grad: Arguments passed to :func:`wrap_gpt_model`.
+        gpt_model: GPT model passed to :func:`wrap_gpt_model`.
+
+    Returns:
+        `may_match_twice` predicate
+
+    """
+    if grad.use_old_cache:
+        return may_match_twice_fused_eager_sdpa
+    else:
+        return may_match_twice_flex_attention_sdpa

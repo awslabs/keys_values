@@ -520,7 +520,9 @@ Note that GPU memory requirements do not strongly depend on `chunk_size`.
 Finally, if `--kv_cache.randomize_chunk_sizes True` is used, then chunk sizes
 after the first are picked at random from a distribution with mean
 `kv_cache.chunk_size`. The idea behind randomized chunk sizes is to ensure the
-model does not adapt to a fixed chunk size.
+model does not adapt to a fixed chunk size. Note that randomization can lead
+to less efficient computations with `flex_attention` SDPA, since compiled
+expressions are maintained for different chunk sizes.
 
 ### Optimizer
 

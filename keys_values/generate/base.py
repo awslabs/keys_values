@@ -39,7 +39,7 @@ from litgpt.utils import (
     load_checkpoint,
 )
 
-from keys_values.finetune.utils import LIT_MODEL_FNAME
+from keys_values.data.base import LIT_MODEL_FNAME
 from keys_values.kvcache.factory import (
     deallocate_kv_cache_buffers_of_model,
     KVCacheFactory,

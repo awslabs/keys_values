@@ -43,6 +43,12 @@ from keys_values.attention_utils import (
     SDPA_KERNELS_BEST_ORDERING,
 )
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME
+from keys_values.data.base import (
+    LIT_MODEL_FNAME,
+    HEAD_MODEL_FNAME,
+    LORA_WEIGHTS_FNAME,
+    LORA_WEIGHTS_FNAME_OLD,
+)
 from keys_values.data.evaluation import (
     TASK_NAME,
     ORIG_IDX_NAME,
@@ -55,10 +61,6 @@ from keys_values.finetune.longcontext_full import (
     wrap_gpt_model,
 )
 from keys_values.finetune.utils import (
-    LIT_MODEL_FNAME,
-    HEAD_MODEL_FNAME,
-    LORA_WEIGHTS_FNAME,
-    LORA_WEIGHTS_FNAME_OLD,
     check_kv_cache,
     adapt_requires_grad,
 )

@@ -36,6 +36,7 @@ HEAD_OR_INITIAL_TENSORS_MAX_BYTES = 2**31
 
 CLOSEBY_THRESHOLD = 4
 
+NUM_RANDOM_CHUNK_SIZE_VALUES = 5
 
 def create_chunk_sizes(
     gpt_model: GPT,
@@ -51,6 +52,16 @@ def create_chunk_sizes(
       all caches
     - For every cache, its cache length must be the union of initial chunks,
       so that no cache length falls in the middle of a chunk
+
+    If `randomize_chunk_sizes == True`, chunk sizes after the first are
+    randomized. Randomization is done as follows:
+
+    - Sample 5 different values from `U([L, R])`, where
+      `L = chunk_size - chunk_size // 2`, `R =  chunk_size + chunk_size // 2`
+    - Each chunk size is drawn randomly from these 5
+
+    This is done to limit the number of different chunk sizes, which has
+    advantages for `flex_attention` SDPA.
 
     """
     mpl = min(c.max_prefill_length for c in gpt_model.get_kv_caches())
@@ -71,9 +82,16 @@ def create_chunk_sizes(
         step = chunk_size // 2
         min_val = max(chunk_size - step, 1)
         max_val = min(chunk_size + step, points_to_cover[0])
+        if randomize_chunk_sizes:
+            random_sizes = torch.randint(
+                min_val, max_val + 1, (NUM_RANDOM_CHUNK_SIZE_VALUES,),
+            )
+        else:
+            random_sizes = None
         while num_done < seq_length:
             if randomize_chunk_sizes:
-                c_size = randint_torch(min_val, max_val)
+                ind = randint_torch(0, NUM_RANDOM_CHUNK_SIZE_VALUES - 1)
+                c_size = random_sizes[ind].item()
             else:
                 c_size = chunk_size
             c_size = min(c_size, seq_length - num_done)
@@ -711,7 +729,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self.chunk_sizes = chunk_sizes
         # Select chunks per cell. If `chunks_per_cell_multiplier == 1`, the
         # maximum chunk length is chosen so that the size of embeddings of
-        # this length are equal to the maximum cache buffers size,
+        # this length are equal to the maximum cache buffer size,
         if self._debug_single_cell_per_row:
             # This is used for unit testing only: Force single cell per row.
             # Do not use!

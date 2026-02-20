@@ -21,6 +21,10 @@ import pytest
 from litgpt.config import Config
 
 from keys_values.kvcache.base import KVCacheParams
+from keys_values.finetune.utils import (
+    may_match_twice_flex_attention_sdpa,
+    may_match_twice_fused_eager_sdpa,
+)
 from keys_values.kvcache.gradient.accumulate import GradientAccumulator
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.cell import GetInputSlice, WriteOutputsSlice
@@ -91,13 +95,13 @@ def args_gradient_row_of_cells():
                     ([4, 8, 8, 8, 12], tol_kwargs),
                     ([8, 14, 14, 16, 12], tol_kwargs2),
                     ([4, 8, 8, 12], tol_kwargs),
-                    ([12, 18, 18, 12], tol_kwargs),
+                    ([16, 26, 26, 12], tol_kwargs),
                     ([4, 8, 8, 8, 12], tol_kwargs),
-                    ([12, 18, 18, 18, 12], tol_kwargs3),
+                    ([16, 26, 26, 20, 12], tol_kwargs3),
                     ([4, 8, 8, 12], tol_kwargs),
-                    ([12, 18, 18, 12], tol_kwargs),
+                    ([16, 26, 26, 12], tol_kwargs),
                     ([4, 8, 8, 8, 12], tol_kwargs),
-                    ([12, 18, 18, 18, 12], tol_kwargs3),
+                    ([16, 26, 26, 20, 12], tol_kwargs3),
                 ],
             ),
         )
@@ -232,9 +236,11 @@ def test_gradient_row_of_cells(
 
     # Setup gradient accumulator
     if use_autograd_hooks:
+        may_match_twice = may_match_twice_fused_eager_sdpa if use_old_cache else may_match_twice_flex_attention_sdpa
         autograd_hooks = CellComputationAutogradHooks(
             config=config,
             batch_size=batch_size,
+            may_match_twice=may_match_twice,
             debug_test_args=debug_test_args,
         )
         autograd_hooks.debug_print_annotations = True
