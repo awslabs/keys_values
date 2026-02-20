@@ -1,5 +1,5 @@
 [project]
-name = "keys_values"
+name = "keys-vals"
 dynamic = ["version"]
 description = "Efficient Inference, Fine-tuning and Key-Value Caching on top of LitGPT"
 authors = [
