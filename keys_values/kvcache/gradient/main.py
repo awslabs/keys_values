@@ -677,7 +677,8 @@ class LongContextGradientModel(LongContextInferenceModel):
                 config=self.config,
                 batch_size=self.batch_size,
                 arrays_cleanup=arrays_cleanup,
-                track_unmatched_annotations=self._track_unmatched_annotations is not None,
+                track_unmatched_annotations=self._track_unmatched_annotations
+                is not None,
                 **self._autograd_hooks_kwargs,
             )
         elif self._use_arrays_cleanup:
@@ -895,8 +896,13 @@ class LongContextGradientModel(LongContextInferenceModel):
                 # because there is no matching for this one anyway
                 def info_per_row(num, idx, n_ma, n_cmp, n_unm, n_4d) -> List[str]:
                     fli, fci = idx
-                    result = [f"{num:3d} unmatched in ({fli:2d},{fci:3d}): {n_ma:3d} matches, {n_cmp:3d} comparisons, {n_unm:3d} scatter/cat, {n_4d:3d} 4D indexes"]
-                    if self._track_unmatched_annotations is not None and self._track_unmatched_annotations(fli, fci):
+                    result = [
+                        f"{num:3d} unmatched in ({fli:2d},{fci:3d}): {n_ma:3d} matches, {n_cmp:3d} comparisons, {n_unm:3d} scatter/cat, {n_4d:3d} 4D indexes"
+                    ]
+                    if (
+                        self._track_unmatched_annotations is not None
+                        and self._track_unmatched_annotations(fli, fci)
+                    ):
                         log = self._annotation_usage_logs[idx]
                         for a in log.unmatched_pack_args:
                             result.append(f"  {a.id:3d}: {a.unmatched_annotations}")

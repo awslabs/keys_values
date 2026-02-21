@@ -891,7 +891,9 @@ def wrap_gpt_model(
             may_match_twice=may_match_twice_factory(grad, gpt_model),
         )
         if grad.max_match_trials_pack_arg is not None:
-            autograd_hooks_kwargs["max_match_trials_pack_arg"] = grad.max_match_trials_pack_arg
+            autograd_hooks_kwargs["max_match_trials_pack_arg"] = (
+                grad.max_match_trials_pack_arg
+            )
         if cpu_offload_device is not None:
             common_kwargs["head_model"] = head_model.to(device=cpu_offload_device)
             offload_grad_accum = CPUOffloadAccumulateGradients(
@@ -917,7 +919,7 @@ def wrap_gpt_model(
                 fabric,
             )
         # DEBUG
-        #track_unmatched_annotations = lambda layer_idx, chunk_idx: layer_idx in (0, 35)
+        # track_unmatched_annotations = lambda layer_idx, chunk_idx: layer_idx in (0, 35)
         # END DEBUG
         may_match_twice = may_match_twice_factory(grad, gpt_model)
         model = LongContextGradientModel(

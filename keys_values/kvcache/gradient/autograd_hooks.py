@@ -120,7 +120,9 @@ class PackHookArgument:
             self.unmatched_annotations,
         )
 
-    def append_unmatched_annotation(self, annotation: NodeAnnotation) -> "PackHookArgument":
+    def append_unmatched_annotation(
+        self, annotation: NodeAnnotation
+    ) -> "PackHookArgument":
         new_annotations = self.unmatched_annotations + [annotation.fingerprint()]
         return PackHookArgument(
             self.id,
@@ -1013,7 +1015,9 @@ class CellComputationAutogradHooks(AutogradHooks):
                     # Matched annotation is either removed or used once more
                     ind, idd = parg_matched_to
                     annotation = self._node_annotations.nodes[ind]
-                    if annotation.match_id is None and self._may_match_twice(annotation):
+                    if annotation.match_id is None and self._may_match_twice(
+                        annotation
+                    ):
                         # Mark annotation to allow for a second match
                         annotation = replace(
                             annotation,
