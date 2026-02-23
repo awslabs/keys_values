@@ -216,14 +216,13 @@ def mask_slice_bool(
 ) -> torch.Tensor:
     assert token_positions.ndim == 1
     kwargs = dict(device=token_positions.device, dtype=token_positions.dtype)
-    return (
-        torch.arange(
-            input_pos,
-            input_pos + num,
-            **kwargs,
-        ).view(-1, 1)
-        < token_positions.view(1, -1)
-    )
+    return torch.arange(
+        input_pos,
+        input_pos + num,
+        **kwargs,
+    ).view(
+        -1, 1
+    ) < token_positions.view(1, -1)
 
 
 def build_mask_slice(
@@ -266,7 +265,12 @@ def eager_scaled_dot_product_attention(
     attn_weights = attention_compute_scores(query32, key32) * scale_factor
     # Attention masking
     mask = build_mask_slice(
-        input_pos, q_len, token_positions, batch_size, n_head, dtype,
+        input_pos,
+        q_len,
+        token_positions,
+        batch_size,
+        n_head,
+        dtype,
     )
     attn_weights = attn_weights + mask
     attn_weights = F.softmax(attn_weights, dim=-1)
@@ -297,7 +301,9 @@ def main(
     value = torch.randn(*kv_shape, device=device, dtype=dtype)
     input_pos = cache_length
     start = input_pos + chunk_size - cache_length
-    token_positions = torch.randperm(cache_length, device=device, dtype=torch.int64) + start
+    token_positions = (
+        torch.randperm(cache_length, device=device, dtype=torch.int64) + start
+    )
     # Eager attention
     attn_outputs.append(
         eager_scaled_dot_product_attention(

@@ -16,13 +16,11 @@ from dataclasses import dataclass
 import time
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any, List, Tuple
+from typing import Dict, Literal, Optional, Union, Any, List, Tuple, Set
 
 import lightning as L
 import torch
-from lightning.fabric.plugins import BitsandbytesPrecision
 from lightning.fabric.strategies import DDPStrategy
-from torch.utils.data import DataLoader
 import yaml
 
 from litgpt.config import Config as ConfigFull
@@ -37,11 +35,7 @@ from litgpt.utils import (
     load_checkpoint,
 )
 
-from keys_values.array_limit import TemporaryArrayLimit
-from keys_values.attention_utils import (
-    DEFAULT_TMP_ARRAY_LIMIT_GB,
-    SDPA_KERNELS_BEST_ORDERING,
-)
+from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME
 from keys_values.data.base import (
     LIT_MODEL_FNAME,
@@ -54,15 +48,18 @@ from keys_values.data.evaluation import (
     ORIG_IDX_NAME,
     EvaluationTasks,
     EvaluationWithTasksHelper,
+    EvaluationDataLoader,
 )
-from keys_values.finetune.args import KVCacheArgs
+from keys_values.finetune.args import KVCacheArgs, SDPAArgs
 from keys_values.finetune.batch_transform import BatchTransformFactory
 from keys_values.finetune.longcontext_full import (
     wrap_gpt_model,
+    get_mha_and_cache_kwargs,
 )
 from keys_values.finetune.utils import (
     check_kv_cache,
     adapt_requires_grad,
+    print_with_rank_and_timestamp,
 )
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.long_context import (
@@ -70,7 +67,6 @@ from keys_values.long_context import (
 )
 from keys_values.lora import GPT as GPTLoRA
 from keys_values.model import GPT as GPTFull
-from keys_values.pos_encoding import position_encoding_factory
 from keys_values.utils import (
     flush_io_streams,
     VerbosityLevels,
@@ -95,32 +91,82 @@ class ConfigLoRA_OLD(ConfigLoRA):
     start_of_layer_hook: Optional[callable] = None
 
 
+def remove_keys(
+    kwargs: Dict[str, Any],
+    names: Set[str],
+) -> Dict[str, Any]:
+    return {k: v for k, v in kwargs.items() if k not in names}
+
+
+def cleanup_longbench_v2_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    return remove_keys(
+        kwargs,
+        {"num_workers", "include_multiturn_conversations"},
+    )
+
+
+def cleanup_kvcache_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    return remove_keys(
+        kwargs,
+        {"layers_per_cell", "single_tokens_for_targets"},
+    )
+
+
 def setup(
     out_dir: Path,
     model_type: Literal["full", "lora"] = "lora",
     devices: Union[int, str] = 1,
-    num_nodes: int = 1,
     seed: int = 1337,
     access_token: Optional[str] = None,
     batch_size: Optional[int] = None,
     kv_cache: Optional[KVCacheArgs] = None,
+    sdpa: Optional[SDPAArgs] = None,
     verbose: Optional[str] = None,
     attention_forward_temp_size_gb: Optional[float] = None,
 ) -> None:
     """Evaluate a range of model checkpoints on a test set
+
+    The aim is to compute an evaluation metric on a test dataset on a number
+    of checkpoints, typically those stored along a training run. Each such
+    checkpoint is called a "task" here. We compute evaluation metric parts on
+    batches, which is indexed by a test dataset batch and task. Each such
+    batch gives rise to a result file. At the end, result files can be
+    collected and the score values per task can be computed by reduction.
+
+    This script can be run any number of times, and each run can use several
+    devices. A run with multiple devices should behave the same as separate
+    runs on each device. The different runs organize via file locks, so
+    batches which are locked or already done, are simply skipped over. At
+    present, all these runs must have access to the same file system, but this
+    could be improved, e.g. by reading from S3 or using ECS.
+
+    How things work:
+
+    * Checkpoints are loaded starting from `out_dir`. We look for
+        subdirectories "step-[0-9]{6}" and "final". If "final" is present,
+        this becomes the first task. A task is represented by its path.
+    * The test dataset is provided in the configuration (each checkpoint must
+        have the same configuration). Batches of size `batch_size` are formed,
+        by sorting sequences by tokenized length and starting from the
+        shortest ones. We then iterate over dataset batches (inner) and tasks
+        (outer).
+    * We write result files for every batch, to
+        `<task-path>/eval/eval/eval_metrics_<suffix>.csv`, see
+        :class:`EvaluationWithTasksHelper`.
 
     Arguments:
         out_dir: Directory from where to load checkpoints. Checkpoints are
             looked for in subdirectories "step-[0-9]{6}" and "final".
         model_type: Either "full" or "lora".
         devices: How many devices/GPUs to use.
-        num_nodes: How many nodes the code is being run on.
         seed: The random seed to use for reproducibility.
         access_token: Optional API token to access models with restrictions.
         batch_size: Size for test set batches. Only if you like to overwrite
             the configuration stored with the checkpoints
         kv_cache: Configuration for the KV caches. Only if you like to overwrite
             the configuration stored with the checkpoints
+        sdpa: Configuration for SDPA kernel. Only if you like to overwrite the
+            configuration stored with the checkpoints
         verbose: Verbosity level for logging outputs. Only if you like to
             overwrite the configuration stored with the checkpoints
         attention_forward_temp_size_gb: Size of GPU memory buffers (in GB) used
@@ -128,6 +174,14 @@ def setup(
             stored with the checkpoints
 
     """
+    devices = parse_devices(devices)
+    if torch.cuda.is_available():
+        if not (1 <= devices <= torch.cuda.device_count()):
+            raise ValueError(
+                f"devices = {devices}, must be in [1, {torch.cuda.device_count()}]"
+            )
+    elif devices != 1:
+        raise ValueError("CUDA is not available, can only do devices = 1")
     # Collect evaluation tasks
     eval = EvaluationTasks(out_dir, model_type)
     if not eval.tasks:
@@ -152,44 +206,58 @@ def setup(
         raise ValueError(
             f"Currently, this script supports --data LongBenchV2 only, but got {hyp_pars['data']['class_path']}"
         )
-    data = LongBenchV2(**hyp_pars["data"]["init_args"])
+    data = LongBenchV2(**cleanup_longbench_v2_kwargs(hyp_pars["data"]["init_args"]))
     if data.metadata_dir is None:
         data.metadata_dir = str(out_dir / "data")
         print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
     if data.test_set_tag is None:
         data.test_set_tag = "rest"
         print(f"Setting LongBenchV2.test_set_tag to {data.test_set_tag}")
-    devices = parse_devices(devices)
     if batch_size is None:
         batch_size = hyp_pars["evals"]["micro_batch_size"]
         if batch_size is None:
             batch_size = 8
     if kv_cache is None:
-        kv_cache = KVCacheArgs(**hyp_pars["kv_cache"])
+        kv_cache = KVCacheArgs(**cleanup_kvcache_kwargs(hyp_pars["kv_cache"]))
+    elif kv_cache.cache_kwargs is None:
+        kv_cache.cache_kwargs = dict()
+    if sdpa is None:
+        if "sdpa" in hyp_pars:
+            kwargs = hyp_pars["sdpa"]
+        else:
+            kwargs = dict(
+                flex_attention=True,
+                flex_extend_kv=False,
+            )
+        sdpa = SDPAArgs(**kwargs)
     check_kv_cache(kv_cache)
     check_valid_checkpoint_dir(checkpoint_dir)
     if verbose is None:
-        verbose = hyp_pars["verbose"]
+        verbose = hyp_pars.get("verbose")
         if verbose is None:
-            verbose = VerbosityLevels.SOME.value
+            verbose = kv_cache.verbose
+            if verbose is None:
+                verbose = VerbosityLevels.SOME.value
     verbose = VerbosityLevels(verbose)
     if attention_forward_temp_size_gb is None:
-        attention_forward_temp_size_gb = hyp_pars["attention_forward_temp_size_gb"]
+        attention_forward_temp_size_gb = hyp_pars.get("attention_forward_temp_size_gb")
         if attention_forward_temp_size_gb is None:
-            attention_forward_temp_size_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
-    yarn_rope = hyp_pars["yarn_rope"]
+            attention_forward_temp_size_gb = kv_cache.attention_forward_temp_size_gb
+            if attention_forward_temp_size_gb is None:
+                attention_forward_temp_size_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
+    yarn_rope = hyp_pars.get("yarn_rope")
     if yarn_rope is None:
         yarn_rope = True
 
     precision = hyp_pars["precision"] or get_default_supported_precision(training=True)
-    if devices * num_nodes > 1:
+    if devices > 1:
         strategy = DDPStrategy(static_graph=True, broadcast_buffers=False)
     else:
         strategy = "auto"
 
     fabric = L.Fabric(
         devices=devices,
-        num_nodes=num_nodes,
+        num_nodes=1,
         strategy=strategy,
         precision=precision,
     )
@@ -202,6 +270,7 @@ def setup(
         out_dir=out_dir,
         batch_size=batch_size,
         kv_cache=kv_cache,
+        sdpa=sdpa,
         model_type=model_type,
         model_config=model_config,
         eval_tasks=eval.tasks,
@@ -220,6 +289,7 @@ def main(
     out_dir: Path,
     batch_size: int,
     kv_cache: KVCacheArgs,
+    sdpa: SDPAArgs,
     model_type: str,
     model_config: ModelConfiguration,
     eval_tasks: List[str],
@@ -228,6 +298,11 @@ def main(
     attention_forward_temp_size_gb: float,
     yarn_rope: bool,
 ) -> None:
+    is_lora = model_type == "lora"
+    if torch.cuda.is_available():
+        device = torch.device("cuda", fabric.local_rank)
+    else:
+        device = torch.device("cpu")
     tokenizer = Tokenizer(checkpoint_dir)
     # Test dataloader is over cross product of test dataset and evaluation
     # tasks
@@ -251,51 +326,28 @@ def main(
     fabric.seed_everything(seed)  # same seed for every process to init model (FSDP)
 
     with fabric.init_module(empty_init=(fabric.world_size > 1)):
-        # Order of preference for SDPA kernels
-        fabric.print(
-            f"Setting limit attention_forward_temp_size_gb to {attention_forward_temp_size_gb} GB"
+        mha_kwargs = get_mha_and_cache_kwargs(
+            attention_forward_temp_size_gb,
+            model_config.config,
+            kv_cache.cache_kwargs,
+            sdpa,
+            yarn_rope,
+            fabric,
         )
-        tmp_array_limit_forward = TemporaryArrayLimit(
-            init_val=attention_forward_temp_size_gb,
-            name="attention_forward_temp_size_gb",
-        )
-        mha_kwargs = {
-            "sdpa_kernels": SDPA_KERNELS_BEST_ORDERING,
-            "tmp_array_limit_gb": tmp_array_limit_forward,
-            "pos_encoding": position_encoding_factory(
-                model_config.config,
-                do_yarn=yarn_rope,
-            ),
-        }
-        if "sdpa_kernels" not in kv_cache.cache_kwargs:
-            kv_cache.cache_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
-        kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
-        kv_cache.cache_kwargs["pos_encoding"] = mha_kwargs["pos_encoding"]
-        if model_type == "full":
-            gpt_model = GPTFull(model_config.config, **mha_kwargs)
-        else:
-            gpt_model = GPTLoRA(model_config.config, **mha_kwargs)
-            if isinstance(fabric.strategy.precision, BitsandbytesPrecision):
-                from bitsandbytes.nn import StableEmbedding
-
-                old_embedding = gpt_model.transformer.wte
-                new_wte = StableEmbedding(
-                    old_embedding.num_embeddings,
-                    old_embedding.embedding_dim,
-                )
-                with torch.no_grad():
-                    new_wte.weight.copy_(old_embedding.weight)
-                gpt_model.transformer.wte = new_wte.to(
-                    device=old_embedding.weight.device,
-                    dtype=old_embedding.weight.dtype,
-                )
-        head_model = HeadModelFactory.create(
-            name=model_config.head_model_name,
-            config=model_config.config,
-            data=data,
-            **model_config.head_model_kwargs,
-        )
-        if model_type == "lora":
+        dtype = fabric_precision_to_dtype(fabric._precision.precision)
+        torch.set_default_dtype(dtype)
+        with torch.device(device):
+            if not is_lora:
+                gpt_model = GPTFull(model_config.config, **mha_kwargs)
+            else:
+                gpt_model = GPTLoRA(model_config.config, **mha_kwargs)
+            head_model = HeadModelFactory.create(
+                name=model_config.head_model_name,
+                config=model_config.config,
+                data=data,
+                **model_config.head_model_kwargs,
+            )
+        if is_lora:
             mark_only_lora_as_trainable(gpt_model)
         adapt_requires_grad(gpt_model, head_model)
         model = wrap_gpt_model(
@@ -306,10 +358,10 @@ def main(
             verbose=verbose,
             attention_backward_temp_size_gb=None,
             max_batch_size=batch_size,
-            dtype=fabric_precision_to_dtype(fabric._precision.precision),
+            dtype=dtype,
             fabric=fabric,
+            # model_kwargs=dict(debug_store_intermediates=True),  # DEBUG!
         )
-    model = fabric.setup_module(model)
 
     # Load base model
     file_path = checkpoint_dir / LIT_MODEL_FNAME
@@ -319,14 +371,15 @@ def main(
     file_path = checkpoint_dir / HEAD_MODEL_FNAME
     if file_path.exists():
         load_checkpoint(fabric, model.head_model, file_path, strict=True)
-    # DEBUG:
-    print("Check model weights for base model")
-    debug_check_weights(model.gpt_model)
 
     # Loop over test set batches
+    # Note: `test_dataloader` returns the same batches on each rank. We use
+    # a file lock to assign a batch to the first rank asking for a batch.
+    # Others skip any batch that is locked or already done.
     tasks_helper = EvaluationWithTasksHelper(out_dir, data.test_set_tag)
     current_task = None
-    for batch in test_dataloader:
+    test_dataiter = iter(test_dataloader)
+    for batch in test_dataiter:
         if not batch:
             print("Empty batch: Continue")
             continue
@@ -337,12 +390,15 @@ def main(
             print(f"Batch {task}, {orig_idxs} already done or in progress: Skipping")
             continue
         try:
-            print(f"Running inference for batch {task}, {orig_idxs}")
+            print_with_rank_and_timestamp(
+                f"Running inference for batch {task}, {orig_idxs}",
+                fabric.global_rank,
+            )
+            if test_dataloader.delay_tokenization:
+                # Tokenization only happens here
+                batch = test_dataiter.fetch_full(batch)
             batch = batch_transform(batch)
             if task != current_task:
-                # DEBUG:
-                if model_type == "lora":
-                    lora_before = debug_lora_get_weights(model.gpt_model)
                 task_path = out_dir / task
                 print(f"New task {task}: Load model checkpoint from {task_path}")
                 load_model_checkpoint(
@@ -352,34 +408,48 @@ def main(
                     fabric=fabric,
                 )
                 current_task = task
-                # DEBUG:
-                print("Check model weights after loading checkpoint")
-                debug_check_weights(model.gpt_model)
-                # DEBUG:
-                if model_type == "lora":
-                    debug_lora_compare_weights(model.gpt_model, lora_before)
             # DEBUG
-            print("*** longcontext_eval.main:")
-            first = batch[INPUT_IDS_NAME][0, :]
-            for second, label in zip(
-                batch[INPUT_IDS_NAME][1:, :],
-                batch["targets"],
-            ):
-                print(f"{label.item()}: {(first != second).sum().item()}")
-                first = second
+            # cpu_device = torch.device("cpu")
+            # gpt_state_dict = {
+            #    k: v.to(cpu_device) for k, v in model.gpt_model.state_dict().items()
+            # }
+            # head_state_dict = {
+            #    k: v.to(cpu_device) for k, v in model.head_model.state_dict().items()
+            # }
             # END DEBUG
             t0 = time.perf_counter()
             # One entry per batch dimension:
-            loss_values = model(batch[INPUT_IDS_NAME], batch["targets"])
+            with torch.no_grad():
+                loss_values = model(batch[INPUT_IDS_NAME], batch["targets"])
             loss_value = loss_values.mean().item()
             eval_time = time.perf_counter() - t0
-            print(
+            print_with_rank_and_timestamp(
                 f"Batch {task}, {orig_idxs}: loss = {loss_value:.3f}, "
-                f"eval_time = {eval_time * 1000:.2f} ms"
+                f"eval_time = {eval_time * 1000:.2f} ms",
+                fabric.global_rank,
             )
             flush_io_streams()
             print(f"Storing to {eval_metrics_path}")
             store_eval_metrics(loss_values, batch, eval_metrics_path)
+            # DEBUG
+            # if batch[ORIG_IDX_NAME][0] == 0:
+            #    debug_intermediates = model.debug_intermediates
+            # else:
+            #    debug_intermediates = None
+            # debug_store_or_compare_state(
+            #    batch,
+            #    loss_values,
+            #    gpt_state_dict,
+            #    head_state_dict,
+            #    eval_metrics_path,
+            #    debug_intermediates=debug_intermediates,
+            # )
+            # Stop after storing state including the one for [0,1,2,3]:
+            # States with debug_intermediates are very large!
+            # if devices > 1 or batch[ORIG_IDX_NAME][0] == 0:
+            #    print("DEBUG: Terminating!")
+            #    exit(0)
+            # END DEBUG
         except Exception as ex:
             print("Caught exception during evaluation:\n" + str(ex))
             eval_metrics_path.unlink(missing_ok=True)
@@ -394,11 +464,12 @@ def get_dataloader(
     batch_size: int,
     devices: int,
     fabric: Optional[L.Fabric] = None,
-) -> DataLoader:
+) -> EvaluationDataLoader:
     """
     Creates data loader for cross product of test dataset with evaluation
     tasks. Each evaluation task corresponds to a model checkpoint written
-    during or at the end of fine-tuning. See :class:`EvaluationTasks`.
+    during or at the end of fine-tuning. See :class:`EvaluationTasks` and
+    :class:`EvaluationDataLoader` for more details.
 
     Args:
         data: LongBenchV2 dataset
@@ -406,6 +477,7 @@ def get_dataloader(
         eval_tasks: List of evaluation tasks
         head_model: Head model name
         batch_size: Size of test batches
+        devices: Number of devices to use
         fabric: Fabric
 
     Returns:
@@ -419,6 +491,7 @@ def get_dataloader(
         tokenizer=tokenizer,
         batch_size=batch_size,
         num_devices=num_devices,
+        rank=None if fabric is None else fabric.local_rank,
         head_model=head_model,
         test_batch_size=batch_size,
         eval_tasks=eval_tasks,
@@ -428,8 +501,6 @@ def get_dataloader(
             data.prepare_data()
     data.setup()
     test_dataloader = data.test_dataloader(num_devices=devices)
-    if fabric is not None:
-        test_dataloader = fabric.setup_dataloaders(test_dataloader)
     return test_dataloader
 
 
@@ -518,82 +589,93 @@ def store_eval_metrics(
             writer.writerow([idx, task, loss.item()])
 
 
-def _is_zero(x: torch.Tensor) -> bool:
-    return (x != 0).sum().item() == 0
+def _debug_compare_dicts(
+    a: Dict[str, torch.Tensor],
+    b: Dict[str, torch.Tensor],
+    verbose: bool = False,
+):
+    a_names = set(a.keys())
+    b_names = set(b.keys())
+    diff_ab = a_names - b_names
+    if diff_ab:
+        raise ValueError(f"Names in A, not in B: {diff_ab}")
+    diff_ba = b_names - a_names
+    if diff_ba:
+        raise ValueError(f"Names in B, not in A: {diff_ba}")
+    for name in a_names:
+        try:
+            if verbose:
+                print("    " + name)
+            torch.testing.assert_close(a[name], b[name])
+        except AssertionError as e:
+            print(f"Significant differences A vs B for {name}")
+            raise e
 
 
-def debug_check_weights(gpt_model: GPTFull):
-    is_lora = isinstance(gpt_model, GPTLoRA)
-
-    def weight(mod: torch.nn.Module) -> torch.Tensor:
-        if is_lora:
-            return mod.linear.weight
-        else:
-            return mod.weight
-
-    if _is_zero(gpt_model.transformer.wte.weight):
-        print("wte = 0")
-    for block_idx, block in enumerate(gpt_model.transformer.h):
-        if _is_zero(weight(block.attn.qkv)):
-            print(f"attn.qkv[{block_idx}] = 0")
-        if _is_zero(weight(block.attn.proj)):
-            print(f"attn.proj[{block_idx}] = 0")
-        if _is_zero(weight(block.mlp.fc_1)):
-            print(f"mlp.fc_1[{block_idx}] = 0")
-        if _is_zero(weight(block.mlp.fc_2)):
-            print(f"mlp.fc_2[{block_idx}] = 0")
-        if _is_zero(weight(block.mlp.proj)):
-            print(f"mlp.proj[{block_idx}] = 0")
-    if _is_zero(weight(gpt_model.lm_head)):
-        print("lm_head = 0")
-
-
-def debug_lora_get_weights(gpt_model: GPTLoRA) -> Dict[str, Any]:
-    result = {
-        "fixed": {
-            "attn.qkv": gpt_model.transformer.h[6].attn.qkv.linear.weight,
-            "attn.proj": gpt_model.transformer.h[10].attn.proj.linear.weight,
-            "mlp.fc_1": gpt_model.transformer.h[2].mlp.fc_1.linear.weight,
-            "mlp.fc_2": gpt_model.transformer.h[12].mlp.fc_2.linear.weight,
-            "mlp.proj": gpt_model.transformer.h[5].mlp.proj.linear.weight,
+def debug_store_or_compare_state(
+    batch: Dict[str, Any],
+    loss_values: torch.Tensor,
+    gpt_state_dict: Dict[str, torch.Tensor],
+    head_state_dict: Dict[str, torch.Tensor],
+    eval_metrics_path: Path,
+    debug_intermediates: Optional[Dict[str, torch.Tensor]] = None,
+):
+    state_path = eval_metrics_path.parent / (eval_metrics_path.stem + ".pth")
+    do_compare = state_path.exists()
+    cpu_device = torch.device("cpu")
+    state = {
+        INPUT_IDS_NAME: batch[INPUT_IDS_NAME].to(cpu_device),
+        "targets": batch["targets"].to(cpu_device),
+        "gpt_state_dict": gpt_state_dict,
+        "head_state_dict": head_state_dict,
+        "loss_values": loss_values.to(cpu_device),
+    }
+    if debug_intermediates is not None:
+        state["intermediates"] = debug_intermediates
+    if not do_compare:
+        print(f"DEBUG: Storing state to {state_path}")
+        if "intermediates" in state:
+            print("       [also intermediates]")
+        torch.save(state, state_path)
+    else:
+        print(f"DEBUG: Loading A state from {state_path}")
+        comp_state = torch.load(state_path, map_location=cpu_device)
+        for name in (
+            INPUT_IDS_NAME,
+            "targets",
+            "gpt_state_dict",
+            "head_state_dict",
+            "loss_values",
+        ):
+            if name not in comp_state:
+                raise IndexError(f"A state does not contain {name} field")
+        do_intermediates = (
+            debug_intermediates is not None and "intermediates" in comp_state
+        )
+        if debug_intermediates is not None and not do_intermediates:
+            print(
+                "DEBUG: WARNING: State A does not contain debug_intermediates, so cannot compare them"
+            )
+        print("DEBUG: Comparing A state against current state (B):")
+        a_data = {
+            INPUT_IDS_NAME: comp_state[INPUT_IDS_NAME],
+            "targets": comp_state["targets"],
         }
-    }
-    lora_result = {
-        "attn.qkv_a": gpt_model.transformer.h[6].attn.qkv.lora_A,
-        "attn.qkv_b": gpt_model.transformer.h[6].attn.qkv.lora_B,
-    }
-    config = gpt_model.config
-    if config.lora_projection:
-        lora_result.update(
-            {
-                "attn.proj_a": gpt_model.transformer.h[10].attn.proj.lora_A,
-                "attn.proj_b": gpt_model.transformer.h[10].attn.proj.lora_B,
-            }
-        )
-    if config.lora_mlp:
-        lora_result.update(
-            {
-                "mlp.fc_1_a": gpt_model.transformer.h[2].mlp.fc_1.lora_A,
-                "mlp.fc_1_b": gpt_model.transformer.h[2].mlp.fc_1.lora_B,
-                "mlp.fc_2_a": gpt_model.transformer.h[12].mlp.fc_2.lora_A,
-                "mlp.fc_2_b": gpt_model.transformer.h[12].mlp.fc_2.lora_B,
-                "mlp.proj_a": gpt_model.transformer.h[5].mlp.proj.lora_A,
-                "mlp.proj_b": gpt_model.transformer.h[5].mlp.proj.lora_B,
-            }
-        )
-    result["lora"] = lora_result
-    return result
-
-
-def debug_lora_compare_weights(gpt_model: GPTLoRA, before: Dict[str, Any]):
-    after = debug_lora_get_weights(gpt_model)
-    for name, val1 in before["fixed"].items():
-        val2 = after["fixed"][name]
-        diff = (val1 != val2).sum().item()
-        if diff != 0:
-            print(f"Fixed: {name} different ({diff} / {val1.numel()})")
-    for name, val1 in before["lora"].items():
-        val2 = after["lora"][name]
-        diff = (val1 == val2).sum().item()
-        if diff == 0:
-            print(f"LoRA: {name} the same")
+        b_data = {
+            INPUT_IDS_NAME: state[INPUT_IDS_NAME],
+            "targets": state["targets"],
+        }
+        for name, a_dict, b_dict in (
+            ("data_batch", a_data, b_data),
+            ("gpt_state_dict", comp_state["gpt_state_dict"], state["gpt_state_dict"]),
+            (
+                "head_state_dict",
+                comp_state["head_state_dict"],
+                state["head_state_dict"],
+            ),
+            ("intermediates", comp_state["intermediates"], state["intermediates"]),
+        ):
+            print(f"Comparing {name} dictionaries:")
+            _debug_compare_dicts(a_dict, b_dict, verbose=True)
+        print("Comparing loss_values:")
+        torch.testing.assert_close(comp_state["loss_values"], state["loss_values"])
