@@ -962,6 +962,18 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         """
         raise NotImplementedError()
 
+    def fix_dtype_of_score_buffers(self):
+        """
+        Iterates over registered score buffers. If any does not have
+        `dtype == float32`, it is replaced by one with that `dtype`.
+
+        This special method is needed because `Lightning Fabric` has the
+        annoying property of changing `dtype` of registered buffers if
+        a model is wrapped with `fabric.setup`.
+
+        """
+        raise NotImplementedError()
+
     def _set_next_positions_to_free_slots(self):
         """
         If `current_length < cache_length`, this method sets `_next_positions`

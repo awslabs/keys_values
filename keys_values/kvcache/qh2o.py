@@ -123,6 +123,11 @@ class QuantizedH2OKVCache(H2OKVCache):
     def _score_buffer_names(cls) -> List[str]:
         return super()._score_buffer_names() + ["q_errors"]
 
+    def fix_dtype_of_score_buffers(self):
+        super().fix_dtype_of_score_buffers()
+        if self.q_errors.dtype != torch.float32:
+            self.q_errors = self.q_errors.to(torch.float32)
+
     def _compute_quantization_errors(
         self,
         key: torch.Tensor,
@@ -134,6 +139,8 @@ class QuantizedH2OKVCache(H2OKVCache):
             shape = key.shape[:-1]
             if out.shape != shape:
                 raise ValueError(f"out.shape = {out.shape}, must be {shape}")
+            if out.dtype != torch.float32:
+                raise ValueError(f"out.dtype = {out.dtype}, must be torch.float32")
         num = key.shape[2]
         bsz = self._scratch_blocksize
         parts = []
@@ -142,7 +149,7 @@ class QuantizedH2OKVCache(H2OKVCache):
             _key = key[:, :, start:end, :]
             _value = value[:, :, start:end, :]
             part_kandv = self.kv_buffers.quantization_error(_key, _value)
-            part = part_kandv[0] + part_kandv[1]
+            part = part_kandv[0].to(torch.float32) + part_kandv[1].to(torch.float32)
             if write_out:
                 out[:, :, start:end] = part
             else:
@@ -266,6 +273,11 @@ class QuantizedVLengthH2OKVCache(QuantizedH2OKVCache, VLengthInstantScoreMixin):
     @classmethod
     def _score_buffer_names(cls) -> List[str]:
         return super()._score_buffer_names() + [cls.get_name_v_norm()]
+
+    def fix_dtype_of_score_buffers(self):
+        super().fix_dtype_of_score_buffers()
+        if self.v_norm.dtype != torch.float32:
+            self.v_norm = self.v_norm.to(torch.float32)
 
     @classmethod
     def _parameter_names(cls) -> List[str]:

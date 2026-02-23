@@ -85,6 +85,7 @@ from keys_values.finetune.utils import (
     check_kv_cache,
     create_optimizer,
     may_match_twice_factory,
+    fix_dtype_of_score_buffers,
 )
 from keys_values.generate.base import generate
 from keys_values.gpu_memory import RecordGPUMemory
@@ -686,6 +687,11 @@ def main(
             )
     else:
         model = fabric.setup(model)
+        # After `fabric.setup`, the score buffers in
+        # :class:`AttnWeightsKVCache` KV cache have their `dtype`
+        # changed to the default dtype. We need to change them back to
+        # `float32`.
+        fix_dtype_of_score_buffers(model.gpt_model)
         optimizer = instantiate_torch_optimizer(
             optimizer.name,
             model.parameters(),
