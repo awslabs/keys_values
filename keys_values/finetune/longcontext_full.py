@@ -550,32 +550,14 @@ def main(
         os.makedirs(out_dir, exist_ok=True)
 
     with fabric.init_module(empty_init=(fabric.world_size > 1)):
-        # Order of preference for SDPA kernels
-        limit_gb = attention_forward_temp_size_gb
-        if limit_gb is None:
-            limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
-        print_message(
-            f"Setting limit attention_forward_temp_size_gb to {limit_gb} GB",
+        mha_kwargs = get_mha_and_cache_kwargs(
+            attention_forward_temp_size_gb,
+            config,
+            kv_cache.cache_kwargs,
+            sdpa,
+            yarn_rope,
             fabric,
         )
-        tmp_array_limit_forward = TemporaryArrayLimit(
-            init_val=limit_gb,
-            name="attention_forward_temp_size_gb",
-        )
-        mha_kwargs = dict(
-            tmp_array_limit_gb=tmp_array_limit_forward,
-            pos_encoding=position_encoding_factory(config, do_yarn=yarn_rope),
-        )
-        if "sdpa_kernels" in kv_cache.cache_kwargs:
-            mha_kwargs["sdpa_kernels"] = kv_cache.cache_kwargs["sdpa_kernels"]
-        else:
-            mha_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
-        if sdpa.flex_attention:
-            # The block mask managers (for prefill, for chunks) are shared
-            # among all multi-head attention blocks
-            flexatt_args = FlexAttentionArgs(extend_kv=sdpa.flex_extend_kv)
-            mha_kwargs["flexatt_args"] = flexatt_args
-        kv_cache.cache_kwargs.update(mha_kwargs)
         dtype = fabric_precision_to_dtype(fabric._precision.precision)
         torch.set_default_dtype(dtype)
         if do_cpu_offload:
@@ -817,6 +799,43 @@ def main(
             save_prompt_style(data.prompt_style, save_dir)
 
 
+def get_mha_and_cache_kwargs(
+    attention_forward_temp_size_gb: Optional[float],
+    config: Union[ConfigFull, ConfigLoRA],
+    cache_kwargs: Dict[str, Any],
+    sdpa: SDPAArgs,
+    yarn_rope: bool,
+    fabric: Optional[L.Fabric],
+) -> Dict[str, Any]:
+    # Order of preference for SDPA kernels
+    limit_gb = attention_forward_temp_size_gb
+    if limit_gb is None:
+        limit_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
+    print_message(
+        f"Setting limit attention_forward_temp_size_gb to {limit_gb} GB",
+        fabric,
+    )
+    tmp_array_limit_forward = TemporaryArrayLimit(
+        init_val=limit_gb,
+        name="attention_forward_temp_size_gb",
+    )
+    mha_kwargs: Dict[str, Any] = dict(
+        tmp_array_limit_gb=tmp_array_limit_forward,
+        pos_encoding=position_encoding_factory(config, do_yarn=yarn_rope),
+    )
+    if "sdpa_kernels" in cache_kwargs:
+        mha_kwargs["sdpa_kernels"] = cache_kwargs["sdpa_kernels"]
+    else:
+        mha_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
+    if sdpa.flex_attention:
+        # The block mask managers (for prefill, for chunks) are shared
+        # among all multi-head attention blocks
+        flexatt_args = FlexAttentionArgs(extend_kv=sdpa.flex_extend_kv)
+        mha_kwargs["flexatt_args"] = flexatt_args
+    cache_kwargs.update(mha_kwargs)
+    return mha_kwargs
+
+
 def wrap_gpt_model(
     gpt_model: Union[GPTFull, GPTLoRA],
     head_model: HeadModel,
@@ -832,6 +851,7 @@ def wrap_gpt_model(
     offload_num_devices: int = 1,
     fabric: Optional[L.Fabric] = None,
     debug_dont_use_autograd_hooks: bool = False,
+    model_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Union[LongContextGradientModel, LongContextInferenceModel]:
     model_for_training = grad is not None
     print_message(
@@ -873,6 +893,8 @@ def wrap_gpt_model(
         verbose=verbose,
         tmp_array_limit_gb=tmp_array_limit_gb,
     )
+    if model_kwargs is not None:
+        common_kwargs.update(model_kwargs)
     if model_for_training:
         # Temp array size limit can be different for backward and forward
         limit_gb = attention_backward_temp_size_gb
