@@ -873,7 +873,9 @@ class CellComputationAutogradHooks(AutogradHooks):
                         kind,
                     )
                 # Sanity check
-                assert annot.shape == buffer.shape, f"annot.kind = {annot.kind}: annot.shape={annot.shape}, buffer.shape={buffer.shape}, must be the same!"
+                assert (
+                    annot.shape == buffer.shape
+                ), f"annot.kind = {annot.kind}: annot.shape={annot.shape}, buffer.shape={buffer.shape}, must be the same!"
             # Sanity check
             final_idx = self._node_annotations.get_final(layer_idx, kind)[1]
             if final_idx != chunk_idx:

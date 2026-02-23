@@ -236,7 +236,11 @@ def test_gradient_row_of_cells(
 
     # Setup gradient accumulator
     if use_autograd_hooks:
-        may_match_twice = may_match_twice_fused_eager_sdpa if use_old_cache else may_match_twice_flex_attention_sdpa
+        may_match_twice = (
+            may_match_twice_fused_eager_sdpa
+            if use_old_cache
+            else may_match_twice_flex_attention_sdpa
+        )
         autograd_hooks = CellComputationAutogradHooks(
             config=config,
             batch_size=batch_size,

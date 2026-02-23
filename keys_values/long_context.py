@@ -38,6 +38,7 @@ CLOSEBY_THRESHOLD = 4
 
 NUM_RANDOM_CHUNK_SIZE_VALUES = 5
 
+
 def create_chunk_sizes(
     gpt_model: GPT,
     seq_length: int,
@@ -84,7 +85,9 @@ def create_chunk_sizes(
         max_val = min(chunk_size + step, points_to_cover[0])
         if randomize_chunk_sizes:
             random_sizes = torch.randint(
-                min_val, max_val + 1, (NUM_RANDOM_CHUNK_SIZE_VALUES,),
+                min_val,
+                max_val + 1,
+                (NUM_RANDOM_CHUNK_SIZE_VALUES,),
             )
         else:
             random_sizes = None
