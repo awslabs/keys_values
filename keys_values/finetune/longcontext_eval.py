@@ -20,7 +20,6 @@ from typing import Dict, Literal, Optional, Union, Any, List, Tuple
 
 import lightning as L
 import torch
-from lightning.fabric.plugins import BitsandbytesPrecision
 from lightning.fabric.strategies import DDPStrategy
 from torch.utils.data import DataLoader
 import yaml
@@ -37,11 +36,7 @@ from litgpt.utils import (
     load_checkpoint,
 )
 
-from keys_values.array_limit import TemporaryArrayLimit
-from keys_values.attention_utils import (
-    DEFAULT_TMP_ARRAY_LIMIT_GB,
-    SDPA_KERNELS_BEST_ORDERING,
-)
+from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME
 from keys_values.data.base import (
     LIT_MODEL_FNAME,
@@ -55,14 +50,16 @@ from keys_values.data.evaluation import (
     EvaluationTasks,
     EvaluationWithTasksHelper,
 )
-from keys_values.finetune.args import KVCacheArgs
+from keys_values.finetune.args import KVCacheArgs, SDPAArgs
 from keys_values.finetune.batch_transform import BatchTransformFactory
 from keys_values.finetune.longcontext_full import (
     wrap_gpt_model,
+    get_mha_and_cache_kwargs,
 )
 from keys_values.finetune.utils import (
     check_kv_cache,
     adapt_requires_grad,
+    fix_dtype_of_score_buffers,
 )
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.long_context import (
@@ -70,7 +67,6 @@ from keys_values.long_context import (
 )
 from keys_values.lora import GPT as GPTLoRA
 from keys_values.model import GPT as GPTFull
-from keys_values.pos_encoding import position_encoding_factory
 from keys_values.utils import (
     flush_io_streams,
     VerbosityLevels,
@@ -104,6 +100,7 @@ def setup(
     access_token: Optional[str] = None,
     batch_size: Optional[int] = None,
     kv_cache: Optional[KVCacheArgs] = None,
+    sdpa: Optional[SDPAArgs] = None,
     verbose: Optional[str] = None,
     attention_forward_temp_size_gb: Optional[float] = None,
 ) -> None:
@@ -121,6 +118,8 @@ def setup(
             the configuration stored with the checkpoints
         kv_cache: Configuration for the KV caches. Only if you like to overwrite
             the configuration stored with the checkpoints
+        sdpa: Configuration for SDPA kernel. Only if you like to overwrite the
+            configuration stored with the checkpoints
         verbose: Verbosity level for logging outputs. Only if you like to
             overwrite the configuration stored with the checkpoints
         attention_forward_temp_size_gb: Size of GPU memory buffers (in GB) used
@@ -166,18 +165,27 @@ def setup(
             batch_size = 8
     if kv_cache is None:
         kv_cache = KVCacheArgs(**hyp_pars["kv_cache"])
+    if sdpa is None:
+        if "sdpa" in hyp_pars:
+            kwargs = hyp_pars["sdpa"]
+        else:
+            kwargs = dict(
+                flex_attention=True,
+                flex_extend_kv=False,
+            )
+        sdpa = SDPAArgs(**kwargs)
     check_kv_cache(kv_cache)
     check_valid_checkpoint_dir(checkpoint_dir)
     if verbose is None:
-        verbose = hyp_pars["verbose"]
+        verbose = hyp_pars.get("verbose")
         if verbose is None:
             verbose = VerbosityLevels.SOME.value
     verbose = VerbosityLevels(verbose)
     if attention_forward_temp_size_gb is None:
-        attention_forward_temp_size_gb = hyp_pars["attention_forward_temp_size_gb"]
+        attention_forward_temp_size_gb = hyp_pars.get("attention_forward_temp_size_gb")
         if attention_forward_temp_size_gb is None:
             attention_forward_temp_size_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
-    yarn_rope = hyp_pars["yarn_rope"]
+    yarn_rope = hyp_pars.get("yarn_rope")
     if yarn_rope is None:
         yarn_rope = True
 
@@ -202,6 +210,7 @@ def setup(
         out_dir=out_dir,
         batch_size=batch_size,
         kv_cache=kv_cache,
+        sdpa=sdpa,
         model_type=model_type,
         model_config=model_config,
         eval_tasks=eval.tasks,
@@ -220,6 +229,7 @@ def main(
     out_dir: Path,
     batch_size: int,
     kv_cache: KVCacheArgs,
+    sdpa: SDPAArgs,
     model_type: str,
     model_config: ModelConfiguration,
     eval_tasks: List[str],
@@ -228,6 +238,7 @@ def main(
     attention_forward_temp_size_gb: float,
     yarn_rope: bool,
 ) -> None:
+    is_lora = model_type == "lora"
     tokenizer = Tokenizer(checkpoint_dir)
     # Test dataloader is over cross product of test dataset and evaluation
     # tasks
@@ -251,51 +262,25 @@ def main(
     fabric.seed_everything(seed)  # same seed for every process to init model (FSDP)
 
     with fabric.init_module(empty_init=(fabric.world_size > 1)):
-        # Order of preference for SDPA kernels
-        fabric.print(
-            f"Setting limit attention_forward_temp_size_gb to {attention_forward_temp_size_gb} GB"
+        mha_kwargs = get_mha_and_cache_kwargs(
+            attention_forward_temp_size_gb,
+            model_config.config,
+            kv_cache.cache_kwargs,
+            sdpa,
+            yarn_rope,
+            fabric,
         )
-        tmp_array_limit_forward = TemporaryArrayLimit(
-            init_val=attention_forward_temp_size_gb,
-            name="attention_forward_temp_size_gb",
-        )
-        mha_kwargs = {
-            "sdpa_kernels": SDPA_KERNELS_BEST_ORDERING,
-            "tmp_array_limit_gb": tmp_array_limit_forward,
-            "pos_encoding": position_encoding_factory(
-                model_config.config,
-                do_yarn=yarn_rope,
-            ),
-        }
-        if "sdpa_kernels" not in kv_cache.cache_kwargs:
-            kv_cache.cache_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
-        kv_cache.cache_kwargs["tmp_array_limit_gb"] = tmp_array_limit_forward
-        kv_cache.cache_kwargs["pos_encoding"] = mha_kwargs["pos_encoding"]
-        if model_type == "full":
+        if not is_lora:
             gpt_model = GPTFull(model_config.config, **mha_kwargs)
         else:
             gpt_model = GPTLoRA(model_config.config, **mha_kwargs)
-            if isinstance(fabric.strategy.precision, BitsandbytesPrecision):
-                from bitsandbytes.nn import StableEmbedding
-
-                old_embedding = gpt_model.transformer.wte
-                new_wte = StableEmbedding(
-                    old_embedding.num_embeddings,
-                    old_embedding.embedding_dim,
-                )
-                with torch.no_grad():
-                    new_wte.weight.copy_(old_embedding.weight)
-                gpt_model.transformer.wte = new_wte.to(
-                    device=old_embedding.weight.device,
-                    dtype=old_embedding.weight.dtype,
-                )
         head_model = HeadModelFactory.create(
             name=model_config.head_model_name,
             config=model_config.config,
             data=data,
             **model_config.head_model_kwargs,
         )
-        if model_type == "lora":
+        if is_lora:
             mark_only_lora_as_trainable(gpt_model)
         adapt_requires_grad(gpt_model, head_model)
         model = wrap_gpt_model(
@@ -310,6 +295,11 @@ def main(
             fabric=fabric,
         )
     model = fabric.setup_module(model)
+    # After `fabric.setup`, the score buffers in
+    # :class:`AttnWeightsKVCache` KV cache have their `dtype`
+    # changed to the default dtype. We need to change them back to
+    # `float32`.
+    fix_dtype_of_score_buffers(model.gpt_model)
 
     # Load base model
     file_path = checkpoint_dir / LIT_MODEL_FNAME
@@ -319,9 +309,10 @@ def main(
     file_path = checkpoint_dir / HEAD_MODEL_FNAME
     if file_path.exists():
         load_checkpoint(fabric, model.head_model, file_path, strict=True)
-    # DEBUG:
+    # DEBUG
     print("Check model weights for base model")
     debug_check_weights(model.gpt_model)
+    # END DEBUG
 
     # Loop over test set batches
     tasks_helper = EvaluationWithTasksHelper(out_dir, data.test_set_tag)
@@ -340,9 +331,10 @@ def main(
             print(f"Running inference for batch {task}, {orig_idxs}")
             batch = batch_transform(batch)
             if task != current_task:
-                # DEBUG:
+                # DEBUG
                 if model_type == "lora":
                     lora_before = debug_lora_get_weights(model.gpt_model)
+                # END DEBUG
                 task_path = out_dir / task
                 print(f"New task {task}: Load model checkpoint from {task_path}")
                 load_model_checkpoint(
@@ -352,12 +344,12 @@ def main(
                     fabric=fabric,
                 )
                 current_task = task
-                # DEBUG:
+                # DEBUG
                 print("Check model weights after loading checkpoint")
                 debug_check_weights(model.gpt_model)
-                # DEBUG:
                 if model_type == "lora":
                     debug_lora_compare_weights(model.gpt_model, lora_before)
+                # END DEBUG
             # DEBUG
             print("*** longcontext_eval.main:")
             first = batch[INPUT_IDS_NAME][0, :]
