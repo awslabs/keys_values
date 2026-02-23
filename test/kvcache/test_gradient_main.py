@@ -124,7 +124,11 @@ def test_complete_gradient_computation(
             for block_idx, cache_length in enumerate(cache_lengths)
         ]
     )
-    may_match_twice = may_match_twice_fused_eager_sdpa if use_old_cache else may_match_twice_flex_attention_sdpa
+    may_match_twice = (
+        may_match_twice_fused_eager_sdpa
+        if use_old_cache
+        else may_match_twice_flex_attention_sdpa
+    )
     autograd_hooks_kwargs = dict(
         max_match_trials_pack_arg=4,
         may_match_twice=may_match_twice,
