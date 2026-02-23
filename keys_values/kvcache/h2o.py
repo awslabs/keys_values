@@ -139,6 +139,10 @@ class H2OKVCache(AttnWeightsKVCache):
     def _score_buffer_names(cls) -> List[str]:
         return ["scores"]
 
+    def fix_dtype_of_score_buffers(self):
+        if self.scores.dtype != torch.float32:
+            self.scores = self.scores.to(torch.float32)
+
     def _compute_scores(
         self,
         attn_weights: torch.Tensor,
@@ -230,7 +234,7 @@ class H2OKVCache(AttnWeightsKVCache):
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         sz_total, dct_sz = super().size_estimate()
-        sz_sc = 0.0
+        sz_sc = 0
         for scores, name in self._score_buffers():
             sz = int(bitsize_of(scores))
             dct_sz[name] = sz
@@ -438,6 +442,11 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
     @classmethod
     def _score_buffer_names(cls) -> List[str]:
         return super()._score_buffer_names() + [cls.get_name_v_norm()]
+
+    def fix_dtype_of_score_buffers(self):
+        super().fix_dtype_of_score_buffers()
+        if self.v_norm.dtype != torch.float32:
+            self.v_norm = self.v_norm.to(torch.float32)
 
     @classmethod
     def _parameter_names(cls) -> List[str]:

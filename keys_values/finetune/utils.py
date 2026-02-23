@@ -371,3 +371,16 @@ def may_match_twice_factory(
         return may_match_twice_fused_eager_sdpa
     else:
         return may_match_twice_flex_attention_sdpa
+
+
+def fix_dtype_of_score_buffers(gpt_model: GPT):
+    """
+    This function is needed to undo the annoying property of `fabric.setup`
+    to change the score buffer dtypes.
+
+    """
+    from keys_values.kvcache.attn_weights import AttnWeightsKVCache
+
+    for cache in gpt_model.get_kv_caches():
+        if isinstance(cache, AttnWeightsKVCache):
+            cache.fix_dtype_of_score_buffers()
