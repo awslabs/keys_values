@@ -17,19 +17,18 @@ from pathlib import Path
 import json
 
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import random_split
 from tqdm import tqdm
 
 from litgpt.data import DataModule
 from litgpt.prompts import Default
 from litgpt.tokenizer import Tokenizer
 
-from keys_values.data.base import pad_dataset, ReorderWrapperDataset
+from keys_values.data.base import pad_dataset
 from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.evaluation import (
     SimilarSequenceLengthWithTasksSampler,
     EvaluationDataLoader,
-    get_wrapped_collate_fn,
 )
 from keys_values.data.iterators import SimilarSequenceLengthSampler
 from keys_values.data.sequence_classification import (
@@ -416,7 +415,6 @@ class LongBenchV2(DataModule):
         else:
             # Cross product between test dataset and evaluation tasks (these
             # are typically different model checkpoints)
-            collate_fn = get_wrapped_collate_fn(self._get_collate_fn())
             return EvaluationDataLoader(
                 dataset=self.test_dataset,
                 batch_sampler=SimilarSequenceLengthWithTasksSampler(
@@ -424,7 +422,7 @@ class LongBenchV2(DataModule):
                     micro_batch_size=self.test_batch_size,
                     num_tasks=len(self._test_eval_tasks),
                 ),
-                collate_fn=collate_fn,
+                collate_fn=self._get_collate_fn(),
                 eval_tasks=self._test_eval_tasks,
             )
 

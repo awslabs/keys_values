@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import time
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any, List, Tuple
+from typing import Dict, Literal, Optional, Union, Any, List, Tuple, Set
 
 import lightning as L
 import torch
@@ -91,11 +91,27 @@ class ConfigLoRA_OLD(ConfigLoRA):
     start_of_layer_hook: Optional[callable] = None
 
 
+def remove_keys(
+    kwargs: Dict[str, Any], names: Set[str],
+) -> Dict[str, Any]:
+    return {k: v for k, v in kwargs.items() if k not in names}
+
+
+def cleanup_longbench_v2_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    return remove_keys(kwargs, {"num_workers"})
+
+
+def cleanup_kvcache_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    return remove_keys(
+        kwargs,
+        {"layers_per_cell", "single_tokens_for_targets"},
+    )
+
+
 def setup(
     out_dir: Path,
     model_type: Literal["full", "lora"] = "lora",
     devices: Union[int, str] = 1,
-    num_nodes: int = 1,
     seed: int = 1337,
     access_token: Optional[str] = None,
     batch_size: Optional[int] = None,
@@ -106,12 +122,39 @@ def setup(
 ) -> None:
     """Evaluate a range of model checkpoints on a test set
 
+    The aim is to compute an evaluation metric on a test dataset on a number
+    of checkpoints, typically those stored along a training run. Each such
+    checkpoint is called a "task" here. We compute evaluation metric parts on
+    batches, which is indexed by a test dataset batch and task. Each such
+    batch gives rise to a result file. At the end, result files can be
+    collected and the score values per task can be computed by reduction.
+
+    This script can be run any number of times, and each run can use several
+    devices. A run with multiple devices should behave the same as separate
+    runs on each device. The different runs organize via file locks, so
+    batches which are locked or already done, are simply skipped over. At
+    present, all these runs must have access to the same file system, but this
+    could be improved, e.g. by reading from S3 or using ECS.
+
+    How things work:
+
+    * Checkpoints are loaded starting from `out_dir`. We look for
+        subdirectories "step-[0-9]{6}" and "final". If "final" is present,
+        this becomes the first task. A task is represented by its path.
+    * The test dataset is provided in the configuration (each checkpoint must
+        have the same configuration). Batches of size `batch_size` are formed,
+        by sorting sequences by tokenized length and starting from the
+        shortest ones. We then iterate over dataset batches (inner) and tasks
+        (outer).
+    * We write result files for every batch, to
+        `<task-path>/eval/eval/eval_metrics_<suffix>.csv`, see
+        :class:`EvaluationWithTasksHelper`.
+
     Arguments:
         out_dir: Directory from where to load checkpoints. Checkpoints are
             looked for in subdirectories "step-[0-9]{6}" and "final".
         model_type: Either "full" or "lora".
         devices: How many devices/GPUs to use.
-        num_nodes: How many nodes the code is being run on.
         seed: The random seed to use for reproducibility.
         access_token: Optional API token to access models with restrictions.
         batch_size: Size for test set batches. Only if you like to overwrite
@@ -128,7 +171,7 @@ def setup(
 
     """
     devices = parse_devices(devices)
-    if torch.cuda_is_available():
+    if torch.cuda.is_available():
         if not (1 <= devices <= torch.cuda.device_count()):
             raise ValueError(
                 f"devices = {devices}, must be in [1, {torch.cuda.device_count()}]"
@@ -159,7 +202,7 @@ def setup(
         raise ValueError(
             f"Currently, this script supports --data LongBenchV2 only, but got {hyp_pars['data']['class_path']}"
         )
-    data = LongBenchV2(**hyp_pars["data"]["init_args"])
+    data = LongBenchV2(**cleanup_longbench_v2_kwargs(hyp_pars["data"]["init_args"]))
     if data.metadata_dir is None:
         data.metadata_dir = str(out_dir / "data")
         print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
@@ -171,7 +214,9 @@ def setup(
         if batch_size is None:
             batch_size = 8
     if kv_cache is None:
-        kv_cache = KVCacheArgs(**hyp_pars["kv_cache"])
+        kv_cache = KVCacheArgs(**cleanup_kvcache_kwargs(hyp_pars["kv_cache"]))
+    elif kv_cache.cache_kwargs is None:
+        kv_cache.cache_kwargs = dict()
     if sdpa is None:
         if "sdpa" in hyp_pars:
             kwargs = hyp_pars["sdpa"]
@@ -186,25 +231,29 @@ def setup(
     if verbose is None:
         verbose = hyp_pars.get("verbose")
         if verbose is None:
-            verbose = VerbosityLevels.SOME.value
+            verbose = kv_cache.verbose
+            if verbose is None:
+                verbose = VerbosityLevels.SOME.value
     verbose = VerbosityLevels(verbose)
     if attention_forward_temp_size_gb is None:
         attention_forward_temp_size_gb = hyp_pars.get("attention_forward_temp_size_gb")
         if attention_forward_temp_size_gb is None:
-            attention_forward_temp_size_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
+            attention_forward_temp_size_gb = kv_cache.attention_forward_temp_size_gb
+            if attention_forward_temp_size_gb is None:
+                attention_forward_temp_size_gb = DEFAULT_TMP_ARRAY_LIMIT_GB
     yarn_rope = hyp_pars.get("yarn_rope")
     if yarn_rope is None:
         yarn_rope = True
 
     precision = hyp_pars["precision"] or get_default_supported_precision(training=True)
-    if devices * num_nodes > 1:
+    if devices > 1:
         strategy = DDPStrategy(static_graph=True, broadcast_buffers=False)
     else:
         strategy = "auto"
 
     fabric = L.Fabric(
         devices=devices,
-        num_nodes=num_nodes,
+        num_nodes=1,
         strategy=strategy,
         precision=precision,
     )
@@ -428,6 +477,7 @@ def get_dataloader(
         tokenizer=tokenizer,
         batch_size=batch_size,
         num_devices=num_devices,
+        rank=None if fabric is None else fabric.local_rank,
         head_model=head_model,
         test_batch_size=batch_size,
         eval_tasks=eval_tasks,

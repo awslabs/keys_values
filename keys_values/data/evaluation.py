@@ -30,7 +30,7 @@ from keys_values.data.dataloader import Collator
 from keys_values.data.iterators import BatchSampler
 
 
-EVAL_METRICS_FNAME = "eval_metrics_{}.csv"
+EVAL_METRICS_FNAME = "eval/eval_metrics_{}.csv"
 
 REGEX_TASKNAME = re.compile(r"step-[0-9]{6}|final")
 
@@ -100,59 +100,6 @@ class EvaluationTasks:
             return False
         else:
             return True
-
-
-# TODO: Remove this one!
-class EvaluationWithTasksDataset(Dataset):
-    """
-    Wrapper class which enables evaluations over several tasks.
-
-    Spans cross product of original dataset items with tasks. A task is given
-    by a string, which in our case is a path.
-
-    Why the dependence on `num_devices`? If more than 1 device is used, the
-    case ordering needs to be modified by :class:`ReorderWrapperDataset`.
-    This happens in periods of size `batch_size * num_devices`. We need to
-    avoid that a batch sent to a device contains cases from different tasks.
-
-    """
-
-    def __init__(
-        self,
-        dataset: Dataset,
-        tasks: List[str],
-        batch_size: int,
-        num_devices: int = 1,
-    ):
-        self._dataset = dataset
-        self._tasks = tasks
-        self._num_orig_cases = len(dataset)
-        unit = batch_size * num_devices
-        self._num_orig_cases_padded = int(math.ceil(self._num_orig_cases / unit)) * unit
-        self._num_cases = self._num_orig_cases_padded * len(tasks)
-
-    @property
-    def orig_dataset(self) -> Dataset:
-        return self._dataset
-
-    def __len__(self) -> int:
-        return self._num_cases
-
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
-        if not (0 <= idx < self._num_cases):
-            raise IndexError(
-                f"index {idx} out of range, must be in [0, {self._num_cases})"
-            )
-        task = self._tasks[idx // self._num_orig_cases_padded]
-        orig_idx = idx % self._num_orig_cases_padded
-        if orig_idx < self._num_orig_cases:
-            return {
-                **self._dataset[orig_idx],
-                ORIG_IDX_NAME: orig_idx,
-                TASK_NAME: task,
-            }
-        else:
-            return dict()
 
 
 class EvaluationWithTasksHelper:
@@ -227,33 +174,8 @@ class EvaluationWithTasksHelper:
             return file_path
 
 
-def get_wrapped_collate_fn(orig_collate_fn: CollateFnType) -> CollateFnType:
-    return partial(_wrapped_collate_fn, orig_collate_fn=orig_collate_fn)
-
-
-def _wrapped_collate_fn(
-    samples: List[Dict[str, Any]],
-    orig_collate_fn: CollateFnType,
-) -> Dict[str, Any]:
-    samples = [elem for elem in samples if elem]
-    if not samples:
-        return dict()  # Empty batch can happen
-    tasks = set(elem[TASK_NAME] for elem in samples)
-    if len(tasks) > 1:
-        raise IndexError(
-            f"Batch must only have single {TASK_NAME} value, but has {tasks}"
-        )
-    task = next(iter(tasks))
-    orig_collated_samples = orig_collate_fn(samples)
-    orig_idxs = [elem[ORIG_IDX_NAME] for elem in samples]
-    return {
-        **orig_collated_samples,
-        ORIG_IDX_NAME: orig_idxs,
-        TASK_NAME: task,
-    }
-
-
 ResultType = Tuple[List[int], int]
+
 
 class SimilarSequenceLengthWithTasksIterator(Iterator[ResultType]):
     def __init__(
