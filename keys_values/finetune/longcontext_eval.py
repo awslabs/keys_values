@@ -21,7 +21,6 @@ from typing import Dict, Literal, Optional, Union, Any, List, Tuple
 import lightning as L
 import torch
 from lightning.fabric.strategies import DDPStrategy
-from torch.utils.data import DataLoader
 import yaml
 
 from litgpt.config import Config as ConfigFull
@@ -49,6 +48,7 @@ from keys_values.data.evaluation import (
     ORIG_IDX_NAME,
     EvaluationTasks,
     EvaluationWithTasksHelper,
+    EvaluationDataLoader,
 )
 from keys_values.finetune.args import KVCacheArgs, SDPAArgs
 from keys_values.finetune.batch_transform import BatchTransformFactory
@@ -59,7 +59,7 @@ from keys_values.finetune.longcontext_full import (
 from keys_values.finetune.utils import (
     check_kv_cache,
     adapt_requires_grad,
-    fix_dtype_of_score_buffers,
+    print_with_rank_and_timestamp,
 )
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.long_context import (
@@ -127,6 +127,14 @@ def setup(
             stored with the checkpoints
 
     """
+    devices = parse_devices(devices)
+    if torch.cuda_is_available():
+        if not (1 <= devices <= torch.cuda.device_count()):
+            raise ValueError(
+                f"devices = {devices}, must be in [1, {torch.cuda.device_count()}]"
+            )
+    elif devices != 1:
+        raise ValueError("CUDA is not available, can only do devices = 1")
     # Collect evaluation tasks
     eval = EvaluationTasks(out_dir, model_type)
     if not eval.tasks:
@@ -158,7 +166,6 @@ def setup(
     if data.test_set_tag is None:
         data.test_set_tag = "rest"
         print(f"Setting LongBenchV2.test_set_tag to {data.test_set_tag}")
-    devices = parse_devices(devices)
     if batch_size is None:
         batch_size = hyp_pars["evals"]["micro_batch_size"]
         if batch_size is None:
@@ -239,6 +246,10 @@ def main(
     yarn_rope: bool,
 ) -> None:
     is_lora = model_type == "lora"
+    if torch.cuda.is_available():
+        device = torch.device("cuda", fabric.local_rank)
+    else:
+        device = torch.device("cpu")
     tokenizer = Tokenizer(checkpoint_dir)
     # Test dataloader is over cross product of test dataset and evaluation
     # tasks
@@ -270,16 +281,19 @@ def main(
             yarn_rope,
             fabric,
         )
-        if not is_lora:
-            gpt_model = GPTFull(model_config.config, **mha_kwargs)
-        else:
-            gpt_model = GPTLoRA(model_config.config, **mha_kwargs)
-        head_model = HeadModelFactory.create(
-            name=model_config.head_model_name,
-            config=model_config.config,
-            data=data,
-            **model_config.head_model_kwargs,
-        )
+        dtype = fabric_precision_to_dtype(fabric._precision.precision)
+        torch.set_default_dtype(dtype)
+        with torch.device(device):
+            if not is_lora:
+                gpt_model = GPTFull(model_config.config, **mha_kwargs)
+            else:
+                gpt_model = GPTLoRA(model_config.config, **mha_kwargs)
+            head_model = HeadModelFactory.create(
+                name=model_config.head_model_name,
+                config=model_config.config,
+                data=data,
+                **model_config.head_model_kwargs,
+            )
         if is_lora:
             mark_only_lora_as_trainable(gpt_model)
         adapt_requires_grad(gpt_model, head_model)
@@ -291,15 +305,9 @@ def main(
             verbose=verbose,
             attention_backward_temp_size_gb=None,
             max_batch_size=batch_size,
-            dtype=fabric_precision_to_dtype(fabric._precision.precision),
+            dtype=dtype,
             fabric=fabric,
         )
-    model = fabric.setup_module(model)
-    # After `fabric.setup`, the score buffers in
-    # :class:`AttnWeightsKVCache` KV cache have their `dtype`
-    # changed to the default dtype. We need to change them back to
-    # `float32`.
-    fix_dtype_of_score_buffers(model.gpt_model)
 
     # Load base model
     file_path = checkpoint_dir / LIT_MODEL_FNAME
@@ -315,6 +323,9 @@ def main(
     # END DEBUG
 
     # Loop over test set batches
+    # Note: `test_dataloader` returns the same batches on each rank. We use
+    # a file lock to assign a batch to the first rank asking for a batch.
+    # Others skip any batch that is locked or already done.
     tasks_helper = EvaluationWithTasksHelper(out_dir, data.test_set_tag)
     current_task = None
     for batch in test_dataloader:
@@ -328,7 +339,10 @@ def main(
             print(f"Batch {task}, {orig_idxs} already done or in progress: Skipping")
             continue
         try:
-            print(f"Running inference for batch {task}, {orig_idxs}")
+            print_with_rank_and_timestamp(
+                f"Running inference for batch {task}, {orig_idxs}",
+                fabric.global_rank,
+            )
             batch = batch_transform(batch)
             if task != current_task:
                 # DEBUG
@@ -365,9 +379,10 @@ def main(
             loss_values = model(batch[INPUT_IDS_NAME], batch["targets"])
             loss_value = loss_values.mean().item()
             eval_time = time.perf_counter() - t0
-            print(
+            print_with_rank_and_timestamp(
                 f"Batch {task}, {orig_idxs}: loss = {loss_value:.3f}, "
-                f"eval_time = {eval_time * 1000:.2f} ms"
+                f"eval_time = {eval_time * 1000:.2f} ms",
+                fabric.global_rank,
             )
             flush_io_streams()
             print(f"Storing to {eval_metrics_path}")
@@ -386,11 +401,12 @@ def get_dataloader(
     batch_size: int,
     devices: int,
     fabric: Optional[L.Fabric] = None,
-) -> DataLoader:
+) -> EvaluationDataLoader:
     """
     Creates data loader for cross product of test dataset with evaluation
     tasks. Each evaluation task corresponds to a model checkpoint written
-    during or at the end of fine-tuning. See :class:`EvaluationTasks`.
+    during or at the end of fine-tuning. See :class:`EvaluationTasks` and
+    :class:`EvaluationDataLoader` for more details.
 
     Args:
         data: LongBenchV2 dataset
@@ -398,6 +414,7 @@ def get_dataloader(
         eval_tasks: List of evaluation tasks
         head_model: Head model name
         batch_size: Size of test batches
+        devices: Number of devices to use
         fabric: Fabric
 
     Returns:
@@ -420,8 +437,6 @@ def get_dataloader(
             data.prepare_data()
     data.setup()
     test_dataloader = data.test_dataloader(num_devices=devices)
-    if fabric is not None:
-        test_dataloader = fabric.setup_dataloaders(test_dataloader)
     return test_dataloader
 
 

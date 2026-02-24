@@ -27,7 +27,8 @@ from litgpt.tokenizer import Tokenizer
 from keys_values.data.base import pad_dataset, ReorderWrapperDataset
 from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.evaluation import (
-    EvaluationWithTasksDataset,
+    SimilarSequenceLengthWithTasksSampler,
+    EvaluationDataLoader,
     get_wrapped_collate_fn,
 )
 from keys_values.data.iterators import SimilarSequenceLengthSampler
@@ -280,78 +281,75 @@ class LongBenchV2(DataModule):
                 record["num_tokens_instruction"] for record in test_data
             ]
 
-        if not self._is_sequence_classification:
-            self.train_dataset = SFTDataset(
+        # Padding depends on whether we run evaluation only
+        # (`_test_eval_tasks` given) or as part of training
+        if self._test_eval_tasks is not None:
+            pad_num_devices = 1
+        else:
+            pad_num_devices = self.num_devices
+        train_kwargs = dict(
+            data=pad_dataset(
+                train_data,
+                batch_size=self.batch_size,
+                num_devices=self.num_devices,
+            ),
+            tokenizer=self.tokenizer,
+            prompt_style=Default(),
+            max_seq_length=self.max_seq_length,
+        )
+        val_kwargs = dict(
+            data=pad_dataset(
+                val_data,
+                batch_size=self.val_batch_size,
+                num_devices=self.num_devices,
+            ),
+            tokenizer=self.tokenizer,
+            prompt_style=Default(),
+            max_seq_length=self.max_seq_length,
+        )
+        if test_data is not None:
+            test_kwargs = dict(
                 data=pad_dataset(
-                    train_data,
-                    batch_size=self.batch_size,
-                    num_devices=self.num_devices,
+                    test_data,
+                    batch_size=self.test_batch_size,
+                    num_devices=pad_num_devices,
                 ),
                 tokenizer=self.tokenizer,
                 prompt_style=Default(),
-                max_seq_length=self.max_seq_length,
+                max_seq_length=-1,
+            )
+        else:
+            test_kwargs = None
+        if not self._is_sequence_classification:
+            self.train_dataset = SFTDataset(
+                **train_kwargs,
                 mask_prompt=self.mask_prompt,
                 ignore_index=self.ignore_index,
             )
             self.val_dataset = SFTDataset(
-                data=pad_dataset(
-                    val_data,
-                    batch_size=self.batch_size,
-                    num_devices=self.num_devices,
-                ),
-                tokenizer=self.tokenizer,
-                prompt_style=Default(),
-                max_seq_length=self.max_seq_length,
+                **val_kwargs,
                 mask_prompt=self.mask_prompt,
                 ignore_index=self.ignore_index,
             )
             if test_data is not None:
                 self.test_dataset = SFTDataset(
-                    data=pad_dataset(
-                        test_data,
-                        batch_size=self.batch_size,
-                        num_devices=self.num_devices,
-                    ),
-                    tokenizer=self.tokenizer,
-                    prompt_style=Default(),
-                    max_seq_length=-1,
+                    **test_kwargs,
                     mask_prompt=self.mask_prompt,
                     ignore_index=self.ignore_index,
                 )
         else:
             self.train_dataset = SequenceClassificationDataset(
-                data=pad_dataset(
-                    train_data,
-                    batch_size=self.batch_size,
-                    num_devices=self.num_devices,
-                ),
-                tokenizer=self.tokenizer,
-                prompt_style=Default(),
+                **train_kwargs,
                 class_labels=CLASS_LABELS,
-                max_seq_length=self.max_seq_length,
             )
             self.val_dataset = SequenceClassificationDataset(
-                data=pad_dataset(
-                    val_data,
-                    batch_size=self.batch_size,
-                    num_devices=self.num_devices,
-                ),
-                tokenizer=self.tokenizer,
-                prompt_style=Default(),
+                **val_kwargs,
                 class_labels=CLASS_LABELS,
-                max_seq_length=self.max_seq_length,
             )
             if test_data is not None:
                 self.test_dataset = SequenceClassificationDataset(
-                    data=pad_dataset(
-                        test_data,
-                        batch_size=self.batch_size,
-                        num_devices=self.num_devices,
-                    ),
-                    tokenizer=self.tokenizer,
-                    prompt_style=Default(),
+                    **test_kwargs,
                     class_labels=CLASS_LABELS,
-                    max_seq_length=-1,
                 )
 
     def _get_collate_fn(self):
@@ -396,7 +394,7 @@ class LongBenchV2(DataModule):
             collate_fn=self._get_collate_fn(),
         )
 
-    def test_dataloader(self, num_devices: int = 1) -> Union[DataLoader, MyDataLoader]:
+    def test_dataloader(self, num_devices: int = 1) -> Union[MyDataLoader, EvaluationDataLoader]:
         if self.test_dataset is None:
             raise IndexError("Test dataset is not defined. Use 'test_set_tag'")
         assert self._sequence_lengths is not None
@@ -416,25 +414,18 @@ class LongBenchV2(DataModule):
                 collate_fn=self._get_collate_fn(),
             )
         else:
-            # TODO: Use _sequence_lengths["test"]
             # Cross product between test dataset and evaluation tasks (these
             # are typically different model checkpoints)
             collate_fn = get_wrapped_collate_fn(self._get_collate_fn())
-            _test_dataset = EvaluationWithTasksDataset(
+            return EvaluationDataLoader(
                 dataset=self.test_dataset,
-                tasks=self._test_eval_tasks,
-                batch_size=self.test_batch_size,
-                num_devices=num_devices,
-            )
-            return DataLoader(
-                ReorderWrapperDataset(
-                    _test_dataset,
-                    num_devices=num_devices,
-                    batch_size=self.test_batch_size,
+                batch_sampler=SimilarSequenceLengthWithTasksSampler(
+                    sequence_lengths=self._sequence_lengths["test"],
+                    micro_batch_size=self.test_batch_size,
+                    num_tasks=len(self._test_eval_tasks),
                 ),
-                batch_size=self.test_batch_size,
-                shuffle=False,
                 collate_fn=collate_fn,
+                eval_tasks=self._test_eval_tasks,
             )
 
     def head_model_kwargs(self, name: str) -> Dict[str, Any]:
