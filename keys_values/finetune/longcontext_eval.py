@@ -360,7 +360,7 @@ def main(
             max_batch_size=batch_size,
             dtype=dtype,
             fabric=fabric,
-            # model_kwargs=dict(debug_store_intermediates=True),  # DEBUG!
+            model_kwargs=dict(debug_store_intermediates=True),  # DEBUG!
         )
 
     # Load base model
@@ -409,13 +409,13 @@ def main(
                 )
                 current_task = task
             # DEBUG
-            # cpu_device = torch.device("cpu")
-            # gpt_state_dict = {
-            #    k: v.to(cpu_device) for k, v in model.gpt_model.state_dict().items()
-            # }
-            # head_state_dict = {
-            #    k: v.to(cpu_device) for k, v in model.head_model.state_dict().items()
-            # }
+            cpu_device = torch.device("cpu")
+            gpt_state_dict = {
+               k: v.to(cpu_device) for k, v in model.gpt_model.state_dict().items()
+            }
+            head_state_dict = {
+               k: v.to(cpu_device) for k, v in model.head_model.state_dict().items()
+            }
             # END DEBUG
             t0 = time.perf_counter()
             # One entry per batch dimension:
@@ -432,23 +432,23 @@ def main(
             print(f"Storing to {eval_metrics_path}")
             store_eval_metrics(loss_values, batch, eval_metrics_path)
             # DEBUG
-            # if batch[ORIG_IDX_NAME][0] == 0:
-            #    debug_intermediates = model.debug_intermediates
-            # else:
-            #    debug_intermediates = None
-            # debug_store_or_compare_state(
-            #    batch,
-            #    loss_values,
-            #    gpt_state_dict,
-            #    head_state_dict,
-            #    eval_metrics_path,
-            #    debug_intermediates=debug_intermediates,
-            # )
+            if batch[ORIG_IDX_NAME][0] == 0:
+               debug_intermediates = model.debug_intermediates
+            else:
+               debug_intermediates = None
+            debug_store_or_compare_state(
+               batch,
+               loss_values,
+               gpt_state_dict,
+               head_state_dict,
+               eval_metrics_path,
+               debug_intermediates=debug_intermediates,
+            )
             # Stop after storing state including the one for [0,1,2,3]:
             # States with debug_intermediates are very large!
-            # if devices > 1 or batch[ORIG_IDX_NAME][0] == 0:
-            #    print("DEBUG: Terminating!")
-            #    exit(0)
+            if devices > 1 or batch[ORIG_IDX_NAME][0] == 0:
+               print("DEBUG: Terminating!")
+               exit(0)
             # END DEBUG
         except Exception as ex:
             print("Caught exception during evaluation:\n" + str(ex))
