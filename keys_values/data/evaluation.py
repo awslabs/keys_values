@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from filelock import FileLock, Timeout
-from functools import partial
 import math
 from pathlib import Path
 import re
-from typing import List, Dict, Any, Callable, Optional, Iterator, Tuple
+from typing import List, Dict, Any, Optional, Iterator, Tuple
 
 import torch
 from torch.utils.data import Dataset
