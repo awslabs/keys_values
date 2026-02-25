@@ -15,7 +15,7 @@ from typing import Tuple, List, Dict, Optional, Any
 
 import torch
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.kvcache.basics import KVCache
 from keys_values.kvcache.buffers import KVCacheBuffers

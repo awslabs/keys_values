@@ -53,7 +53,7 @@ def setup(
     lora: LoRAARgs = LoRAARgs(
         r=8,
         alpha=16,
-        dropout=0.05,
+        dropout=0,
         query=True,
         key=False,
         value=True,

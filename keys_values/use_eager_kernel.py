@@ -19,7 +19,7 @@ from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 from scipy.spatial import KDTree
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.attention import UseEagerPredicate
 

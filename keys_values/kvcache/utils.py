@@ -76,7 +76,3 @@ def storage_id(x: torch.Tensor) -> int:
 
     """
     return x.untyped_storage().data_ptr()
-
-
-def for_debug(x: torch.Tensor) -> torch.Tensor:
-    return x.detach().clone().to(device=torch.device("cpu"))

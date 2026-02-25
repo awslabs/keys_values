@@ -16,7 +16,7 @@ from typing import Optional, Union, List
 import torch
 import torch.nn.functional as F
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.utils import copy_parameters
 

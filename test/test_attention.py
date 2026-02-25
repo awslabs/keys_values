@@ -21,7 +21,7 @@ import pytest
 import torch
 from torch.nn import functional as F
 
-from litgpt.config import Config
+from keys_values.config import Config
 from litgpt.model import (
     apply_rope,
     build_rope_cache,

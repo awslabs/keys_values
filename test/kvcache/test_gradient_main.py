@@ -18,7 +18,7 @@ import torch
 import pytest
 import lightning as L
 
-from litgpt.config import Config
+from keys_values.config import Config
 from litgpt.utils import _RunIf
 
 from keys_values.finetune.utils import (

@@ -20,15 +20,15 @@ https://arxiv.org/abs/2303.16199
 
 Port for LitGPT
 """
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from typing_extensions import Self
 
 import torch
 import torch.nn as nn
 
-from litgpt.adapter import Config
-
 from keys_values.attention import DefaultKeysAndValues, MultiHeadSelfAttention
+from keys_values.config import Config as BaseConfig
 from keys_values.kvcache.base import KVCache
 from keys_values.model import (
     GPT as BaseModel,
@@ -36,6 +36,12 @@ from keys_values.model import (
     CausalSelfAttention as BaseCausalSelfAttention,
 )
 from keys_values.use_eager_kernel import transform_mha_kwargs
+
+
+@dataclass
+class Config(BaseConfig):
+    adapter_prompt_length: int = 10
+    adapter_start_layer: int = 2
 
 
 class GPT(BaseModel):

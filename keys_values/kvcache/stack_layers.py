@@ -15,7 +15,7 @@ from typing import Tuple, Iterable, Dict, Any, List, Union
 
 import torch
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.kvcache.base import KVCache
 from keys_values.model import Block, GPT
@@ -39,6 +39,7 @@ class CellBlocks:
         self,
         x: torch.Tensor,
         idx: torch.Tensor,
+        **forward_kwargs,
     ) -> torch.Tensor:
         batch_size, chunk_len, n_embd = x.shape
         if n_embd != self.config.n_embd:
@@ -57,7 +58,7 @@ class CellBlocks:
             self._check_kv_cache(cache, block_idx, batch_size, chunk_len)
         # Loop over blocks
         for block_idx, block, block_kwargs in self.blocks_with_kwargs():
-            x = block(x, token_idx=idx, **block_kwargs)
+            x = block(x, token_idx=idx, **block_kwargs, **forward_kwargs)
 
         return x
 

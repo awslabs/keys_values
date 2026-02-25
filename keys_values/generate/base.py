@@ -26,7 +26,7 @@ import torch._dynamo.config
 import torch._inductor.config
 from lightning.fabric.plugins import BitsandbytesPrecision
 
-from litgpt.config import Config
+from keys_values.config import Config
 from litgpt.generate.base import sample
 from litgpt.prompts import PromptStyle, has_prompt_style, load_prompt_style
 from litgpt.tokenizer import Tokenizer

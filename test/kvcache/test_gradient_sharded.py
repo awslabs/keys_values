@@ -18,16 +18,17 @@ import torch
 import pytest
 
 from litgpt.config import name_to_config
-from litgpt.lora import Config, mark_only_lora_as_trainable
+from litgpt.lora import mark_only_lora_as_trainable
 from litgpt.utils import _RunIf
 
+from keys_values.debug_utils import DebugIntermediates, debug_intermediates_all
 from keys_values.head_model import HeadModel
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.gradient.accumulate import copy_requires_grad
 from keys_values.kvcache.gradient.main import LongContextGradientModel
 from keys_values.kvcache.test_utils import create_kv_cache, copy_gradients
-from keys_values.lora import GPT
+from keys_values.lora import GPT, Config
 from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
 from keys_values.optimize.model_factory import (
     GPTShardCellBlock,
@@ -156,7 +157,9 @@ def test_gradient_sharded(
                 chunk_size=chunk_size,
                 qname="default",
                 debug_gpt_model=debug_gpt_model,
-                debug_store_intermediates=debug_store_intermediates,
+                debug_intermediates=DebugIntermediates(
+                    predicate=debug_intermediates_all,
+                ),
                 **lcg_kwargs,
             )
         )
@@ -189,7 +192,7 @@ def test_gradient_sharded(
         loss_values.append(loss.detach())
         gradients.append(copy_gradients(model.gpt_model, device=torch.device("cpu")))
         if debug_store_intermediates:
-            debug_intermediates.append(model.debug_intermediates)
+            debug_intermediates.append(model.debug_intermediates.entries)
     # Compare the two
     print("\nComparing loss values:")
     torch.testing.assert_close(loss_values[0], loss_values[1])

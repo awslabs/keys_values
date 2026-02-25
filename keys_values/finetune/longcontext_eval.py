@@ -23,9 +23,8 @@ import torch
 from lightning.fabric.strategies import DDPStrategy
 import yaml
 
-from litgpt.config import Config as ConfigFull
 from litgpt.data import DataModule
-from litgpt.lora import Config as ConfigLoRA, mark_only_lora_as_trainable
+from litgpt.lora import mark_only_lora_as_trainable
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     auto_download_checkpoint,
@@ -36,6 +35,7 @@ from litgpt.utils import (
 )
 
 from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
+from keys_values.config import Config as ConfigFull
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME
 from keys_values.data.base import (
     LIT_MODEL_FNAME,
@@ -65,7 +65,7 @@ from keys_values.head_model_factory import HeadModelFactory
 from keys_values.long_context import (
     LongContextInferenceModel,
 )
-from keys_values.lora import GPT as GPTLoRA
+from keys_values.lora import GPT as GPTLoRA, Config as ConfigLoRA
 from keys_values.model import GPT as GPTFull
 from keys_values.utils import (
     flush_io_streams,
@@ -123,6 +123,7 @@ def setup(
     sdpa: Optional[SDPAArgs] = None,
     verbose: Optional[str] = None,
     attention_forward_temp_size_gb: Optional[float] = None,
+    lora_dropout: Optional[float] = None,
 ) -> None:
     """Evaluate a range of model checkpoints on a test set
 
@@ -172,6 +173,8 @@ def setup(
         attention_forward_temp_size_gb: Size of GPU memory buffers (in GB) used
             in naive SDPA. Only if you like to overwrite the configuration
             stored with the checkpoints
+        lora_dropout: If given and `model_type == "lora"`, this overwrites the
+            `config.lora_dropout` values. Pass 0 to switch dropout off
 
     """
     devices = parse_devices(devices)
@@ -195,6 +198,12 @@ def setup(
         task_path=out_dir / eval.tasks[0],
         model_type=model_type,
     )
+    if model_type == "lora" and lora_dropout is not None:
+        if lora_dropout < 0:
+            raise ValueError(f"lora_dropout {lora_dropout}, must be non-negative")
+        if model_config.config.lora_dropout != lora_dropout:
+            print(f"Changing config.lora_dropout from {model_config.config.lora_dropout} to {lora_dropout}")
+        model_config.config.lora_dropout = lora_dropout
     # Base model checkpoint
     checkpoint_dir = auto_download_checkpoint(
         model_name=hyp_pars["checkpoint_dir"],
@@ -350,6 +359,18 @@ def main(
         if is_lora:
             mark_only_lora_as_trainable(gpt_model)
         adapt_requires_grad(gpt_model, head_model)
+        # DEBUG:
+        # def debug_intermediates_predicate(
+        #    kind, block_idx, start, end, rel_start, rel_end,
+        # ):
+        #    return kind == "wte" or (
+        #        kind == "block" and block_idx == 0 and start == 0
+        #    )
+        # model_kwargs = dict(
+        #    debug_intermediates = DebugIntermediates(
+        #        predicate=debug_intermediates_predicate,
+        #    )
+        # )
         model = wrap_gpt_model(
             gpt_model=gpt_model,
             head_model=head_model,
@@ -360,7 +381,7 @@ def main(
             max_batch_size=batch_size,
             dtype=dtype,
             fabric=fabric,
-            # model_kwargs=dict(debug_store_intermediates=True),  # DEBUG!
+            model_kwargs=None,
         )
 
     # Load base model
@@ -379,6 +400,10 @@ def main(
     tasks_helper = EvaluationWithTasksHelper(out_dir, data.test_set_tag)
     current_task = None
     test_dataiter = iter(test_dataloader)
+    if devices > 1:
+        # Ensure that lock for first batch is not checked at exactly the same
+        # time by all devices
+        time.sleep(0.05 * fabric.global_rank)
     for batch in test_dataiter:
         if not batch:
             print("Empty batch: Continue")
@@ -411,10 +436,10 @@ def main(
             # DEBUG
             # cpu_device = torch.device("cpu")
             # gpt_state_dict = {
-            #    k: v.to(cpu_device) for k, v in model.gpt_model.state_dict().items()
+            #   k: v.to(cpu_device) for k, v in model.gpt_model.state_dict().items()
             # }
             # head_state_dict = {
-            #    k: v.to(cpu_device) for k, v in model.head_model.state_dict().items()
+            #   k: v.to(cpu_device) for k, v in model.head_model.state_dict().items()
             # }
             # END DEBUG
             t0 = time.perf_counter()
@@ -432,23 +457,23 @@ def main(
             print(f"Storing to {eval_metrics_path}")
             store_eval_metrics(loss_values, batch, eval_metrics_path)
             # DEBUG
-            # if batch[ORIG_IDX_NAME][0] == 0:
-            #    debug_intermediates = model.debug_intermediates
+            # if batch[ORIG_IDX_NAME][0] == 0 and model.debug_intermediates is not None:
+            #   debug_intermediates = model.debug_intermediates.entries
             # else:
-            #    debug_intermediates = None
+            #   debug_intermediates = None
             # debug_store_or_compare_state(
-            #    batch,
-            #    loss_values,
-            #    gpt_state_dict,
-            #    head_state_dict,
-            #    eval_metrics_path,
-            #    debug_intermediates=debug_intermediates,
+            #   batch,
+            #   loss_values,
+            #   gpt_state_dict,
+            #   head_state_dict,
+            #   eval_metrics_path,
+            #   debug_intermediates=debug_intermediates,
             # )
             # Stop after storing state including the one for [0,1,2,3]:
             # States with debug_intermediates are very large!
             # if devices > 1 or batch[ORIG_IDX_NAME][0] == 0:
-            #    print("DEBUG: Terminating!")
-            #    exit(0)
+            #   print("DEBUG: Terminating!")
+            #   exit(0)
             # END DEBUG
         except Exception as ex:
             print("Caught exception during evaluation:\n" + str(ex))
@@ -587,95 +612,3 @@ def store_eval_metrics(
         writer.writerow(fieldnames)
         for idx, loss in zip(batch[ORIG_IDX_NAME], loss_values):
             writer.writerow([idx, task, loss.item()])
-
-
-def _debug_compare_dicts(
-    a: Dict[str, torch.Tensor],
-    b: Dict[str, torch.Tensor],
-    verbose: bool = False,
-):
-    a_names = set(a.keys())
-    b_names = set(b.keys())
-    diff_ab = a_names - b_names
-    if diff_ab:
-        raise ValueError(f"Names in A, not in B: {diff_ab}")
-    diff_ba = b_names - a_names
-    if diff_ba:
-        raise ValueError(f"Names in B, not in A: {diff_ba}")
-    for name in a_names:
-        try:
-            if verbose:
-                print("    " + name)
-            torch.testing.assert_close(a[name], b[name])
-        except AssertionError as e:
-            print(f"Significant differences A vs B for {name}")
-            raise e
-
-
-def debug_store_or_compare_state(
-    batch: Dict[str, Any],
-    loss_values: torch.Tensor,
-    gpt_state_dict: Dict[str, torch.Tensor],
-    head_state_dict: Dict[str, torch.Tensor],
-    eval_metrics_path: Path,
-    debug_intermediates: Optional[Dict[str, torch.Tensor]] = None,
-):
-    state_path = eval_metrics_path.parent / (eval_metrics_path.stem + ".pth")
-    do_compare = state_path.exists()
-    cpu_device = torch.device("cpu")
-    state = {
-        INPUT_IDS_NAME: batch[INPUT_IDS_NAME].to(cpu_device),
-        "targets": batch["targets"].to(cpu_device),
-        "gpt_state_dict": gpt_state_dict,
-        "head_state_dict": head_state_dict,
-        "loss_values": loss_values.to(cpu_device),
-    }
-    if debug_intermediates is not None:
-        state["intermediates"] = debug_intermediates
-    if not do_compare:
-        print(f"DEBUG: Storing state to {state_path}")
-        if "intermediates" in state:
-            print("       [also intermediates]")
-        torch.save(state, state_path)
-    else:
-        print(f"DEBUG: Loading A state from {state_path}")
-        comp_state = torch.load(state_path, map_location=cpu_device)
-        for name in (
-            INPUT_IDS_NAME,
-            "targets",
-            "gpt_state_dict",
-            "head_state_dict",
-            "loss_values",
-        ):
-            if name not in comp_state:
-                raise IndexError(f"A state does not contain {name} field")
-        do_intermediates = (
-            debug_intermediates is not None and "intermediates" in comp_state
-        )
-        if debug_intermediates is not None and not do_intermediates:
-            print(
-                "DEBUG: WARNING: State A does not contain debug_intermediates, so cannot compare them"
-            )
-        print("DEBUG: Comparing A state against current state (B):")
-        a_data = {
-            INPUT_IDS_NAME: comp_state[INPUT_IDS_NAME],
-            "targets": comp_state["targets"],
-        }
-        b_data = {
-            INPUT_IDS_NAME: state[INPUT_IDS_NAME],
-            "targets": state["targets"],
-        }
-        for name, a_dict, b_dict in (
-            ("data_batch", a_data, b_data),
-            ("gpt_state_dict", comp_state["gpt_state_dict"], state["gpt_state_dict"]),
-            (
-                "head_state_dict",
-                comp_state["head_state_dict"],
-                state["head_state_dict"],
-            ),
-            ("intermediates", comp_state["intermediates"], state["intermediates"]),
-        ):
-            print(f"Comparing {name} dictionaries:")
-            _debug_compare_dicts(a_dict, b_dict, verbose=True)
-        print("Comparing loss_values:")
-        torch.testing.assert_close(comp_state["loss_values"], state["loss_values"])

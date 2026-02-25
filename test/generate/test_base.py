@@ -26,7 +26,7 @@ import torch
 import yaml
 
 from keys_values.long_context import LongContextInferenceModel
-from litgpt.config import Config
+from keys_values.config import Config
 
 import keys_values.generate.base as generate
 from keys_values.model import GPT
