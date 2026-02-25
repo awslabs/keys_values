@@ -16,7 +16,7 @@ from typing import Dict, Optional, Tuple, List, Any
 
 import torch
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.attention import (
     DefaultKeysAndValues,

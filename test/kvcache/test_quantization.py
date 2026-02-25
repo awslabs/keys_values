@@ -19,7 +19,7 @@ import torch
 from torch.linalg import vector_norm
 import pytest
 
-from litgpt.config import Config
+from keys_values.config import Config
 from litgpt.utils import _RunIf
 
 from keys_values.kvcache.base import KVCacheParams

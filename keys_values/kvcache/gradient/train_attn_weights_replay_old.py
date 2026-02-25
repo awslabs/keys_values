@@ -16,12 +16,13 @@ from typing import Optional, Tuple, Dict, Any
 
 import torch
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.attention import (
     KeysAndValues,
     DefaultKeysAndValues,
 )
+from keys_values.debug_utils import for_debug
 from keys_values.kvcache.attn_weights import (
     update_token_positions,
     UpdateTokenPositionsGracePeriod,
@@ -39,7 +40,6 @@ from keys_values.kvcache.gradient.sdpa_op import (
     KVCacheCatUpdateAndSDPAFunction,
     KVCacheScatterUpdateAndSDPAFunction,
 )
-from keys_values.kvcache.utils import for_debug
 from keys_values.utils import expand_index, shape_to_tuple
 
 

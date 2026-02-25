@@ -24,6 +24,7 @@ import torch
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import MultiHeadSelfAttention
+from keys_values.debug_utils import DebugIntermediates
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.factory import (
     deallocate_kv_cache_buffers_of_model,
@@ -235,7 +236,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         layer_checkpoint_chunk_size: Optional[int] = None,
         track_unmatched_annotations: Optional[Callable[[int, int], bool]] = None,
         debug_gpt_model: Optional[GPT] = None,
-        debug_store_intermediates: bool = False,
+        debug_intermediates: Optional[DebugIntermediates] = None,
         debug_profile_forward: bool = False,
         debug_profile_backward: bool = False,
     ):
@@ -321,7 +322,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             tmp_array_limit_gb,
             set_max_seq_length,
             debug_single_cell_per_row,
-            debug_store_intermediates,
+            debug_intermediates,
         )
         self.single_tokens_for_targets = single_tokens_for_targets
         if qname is None:
@@ -400,10 +401,12 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._track_unmatched_annotations = track_unmatched_annotations
         self._work_device = None
         self._debug_gpt_model = debug_gpt_model
-        if debug_store_intermediates:
+        if self.debug_intermediates is not None:
+            # For `debug_intermediates` in backward, we just pass the
+            # `entries` dict. This is not selective then
             self._train_cache_kwargs = dict(
                 self._train_cache_kwargs,
-                debug_intermediates=self.debug_intermediates,
+                debug_intermediates=self.debug_intermediates.entries,
             )
         self._debug_profile_forward = debug_profile_forward
         self._debug_profile_backward = debug_profile_backward
@@ -580,7 +583,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             verbose=self.verbose,
             tmp_array_limit_gb=self._tmp_array_limit_gb,
             debug_single_cell_per_row=self._debug_single_cell_per_row,
-            debug_store_intermediates=self.debug_intermediates is not None,
+            debug_intermediates=self.debug_intermediates,
         )
 
     def _init_members_from_tokens(

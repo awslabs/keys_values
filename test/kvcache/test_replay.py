@@ -18,7 +18,7 @@ from typing import Dict, Any
 import torch
 import pytest
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.kvcache.attn_weights import AttnWeightsKVCache
 from keys_values.kvcache.base import KVCacheParams

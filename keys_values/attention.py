@@ -18,7 +18,7 @@ import torch
 from torch.nn import functional as F
 from torch.nn.attention import SDPBackend
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention_utils import (

@@ -607,20 +607,23 @@ library (and would be very happy for help, see
 * PyTorch `flex_attention` SDPA: We use
   `torch.nn.attention.flex_attention.flex_attention`, see
   [keys_values/flex_attention.py](./keys_values/flex_attention.py) for details.
-  Use `--sdpa.flex_attention True` to activate these kernels. We support
-  `config.sliding_window_size` and `config.attention_logit_softcapping` with
-  these fast kernels. We also reorder `key`, `query` so that the new entries
-  (corresponding to `query`) are on the right end. Cannot return attention
-  weights.
+  These kernels are the default. We support `config.sliding_window_size` and
+  `config.attention_logit_softcapping` with them. We also reorder `key`,
+  `query` so that the new entries (corresponding to `query`) are on the right
+  end. Cannot return attention weights.
+  
 * Query-padded PyTorch SDPA: We use
   `torch.nn.functional.scaled_dot_product_attention`, but pad `query` with
   zeroes on the left to obtain the square "training" case. We also reorder
   `key`, `query` so that the new entries (corresponding to `query`) are on
-  the right end. Cannot return attention weights.
+  the right end. Cannot return attention weights. Use
+  `--sdpa.flex_attention False` to activate these kernels. 
 * Naive blockwise SDPA: We use an own implementation
   [scaled_dot_product_attention_in_blocks](./keys_values/attention.py#L477).
   The computation is done in blocks so that no more than `tmp_array_limit_gb`
-  GB of GPU memory is needed for the temporary buffers.
+  GB of GPU memory is needed for the temporary buffers. These kernels are
+  used for `forward` when attention weights are required, and for `backward`
+  if `--grad.use_old_cache True`.
 
 We ran an experiment for many different `kv_len` to determine from which
 `q_len` value onwards query-padded SDPA is faster than naive SDPA. However, if
@@ -629,13 +632,13 @@ large `q_len`.
 
 Note that SDPA for the initial prefill call always uses the fast PyTorch SDPA.
 This is because no scores are computed then, and so attention weights are not
-needed even for H2O policies.
+needed even for H2O policies. This kernel is also faster than `flex_attention`
+in the prefill case.
 
 Relevant arguments are:
 
 * `sdpa.flex_attention`: Selects `flex_attention`. Otherwise, query-padded SDPA
-  is used. `sdpa.flex_mask_compile` and `sdpa.flex_extend_kv` are parameters
-  for `flex_attention`.
+  is used. `sdpa.flex_extend_kv` is a parameter for `flex_attention`.
 * `attention_forward_temp_size_gb`: Size limit (in GB) for temporary buffers
   in naive SDPA, used in `forward` pass.
 * `attention_backward_temp_size_gb`: Same size limit, but for SDPA computations

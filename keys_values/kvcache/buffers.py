@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import torch
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.attention import KeysAndValues, DefaultKeysAndValues
 from keys_values.kvcache.base import KVCacheParams

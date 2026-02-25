@@ -13,7 +13,7 @@
 # limitations under the License.
 import torch
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.head_model import CrossEntropyOnLogits

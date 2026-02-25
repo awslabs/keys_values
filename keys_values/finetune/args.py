@@ -336,7 +336,7 @@ class LoRAARgs:
 
     r: int = 8
     alpha: int = 16
-    dropout: float = 0.05
+    dropout: float = 0
     query: bool = True
     key: bool = False
     value: bool = True

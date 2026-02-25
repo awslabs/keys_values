@@ -18,7 +18,7 @@ from typing import List
 import torch
 import numpy as np
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.attention_utils import SDPA_KERNELS_BEST_ORDERING
 from keys_values.kvcache.base import KVCacheParams

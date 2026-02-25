@@ -18,7 +18,7 @@ import math
 import pytest
 import torch
 
-from litgpt.config import Config
+from keys_values.config import Config
 from litgpt.utils import _RunIf
 
 from keys_values.attention import MultiHeadSelfAttention, DefaultKeysAndValues

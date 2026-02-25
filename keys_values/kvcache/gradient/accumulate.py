@@ -17,7 +17,7 @@ from functools import partial
 
 import torch
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.attention import do_softcapping
 from keys_values.head_model import HeadModel

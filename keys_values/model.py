@@ -18,13 +18,15 @@
 Based on the nanoGPT implementation: https://github.com/karpathy/nanoGPT and
 https://github.com/EleutherAI/gpt-neox/tree/main/megatron/model.
 """
+import math
 from typing import Any, List, Optional, Union, Callable
 from typing_extensions import Self
 
 import torch
 import torch.nn as nn
+from torch.linalg import vector_norm
 
-from litgpt.config import Config
+from keys_values.config import Config
 from litgpt.scripts.convert_hf_checkpoint import qkv_reassemble
 
 from keys_values.attention import (
@@ -291,6 +293,7 @@ class GPT(nn.Module):
         self,
         idx: torch.Tensor,
         skip_lm_head: bool = False,
+        **forward_kwargs,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
         """
         There are two different contexts in which this method is called:
@@ -336,7 +339,7 @@ class GPT(nn.Module):
             if hook is not None:
                 # Call start of layer hook, passing detached layer input
                 hook(x.detach(), block_idx)
-            x = block(x, idx, self.mha)
+            x = block(x, idx, self.mha, **forward_kwargs)
 
         if hook is not None:
             # Hook is also called for the input to the head block
@@ -512,6 +515,7 @@ class Block(nn.Module):
         x: torch.Tensor,
         token_idx: torch.Tensor,
         mha: MultiHeadSelfAttention,
+        **forward_kwargs,
     ) -> torch.Tensor:
         """
         Non-parallel residual       Parallel residual
@@ -534,10 +538,21 @@ class Block(nn.Module):
         └───► +
         """
 
+        debug_intermediates = forward_kwargs.get("debug_intermediates")
+        do_debug = debug_intermediates is not None
         x_normed = self.norm_1(x)
         attention_output = self.post_attention_norm(
-            self.attn(x_normed, token_idx=token_idx, mha=mha)
+            self.attn(x_normed, token_idx=token_idx, mha=mha, **forward_kwargs)
         )
+        if do_debug:
+            debug_intermediates(
+                value=x_normed,
+                postfix="_attn_inp",
+            )
+            debug_intermediates(
+                value=attention_output,
+                postfix="_attn_outp",
+            )
         if self.config.parallel_residual:
             if not self.config.shared_attention_norm:
                 x_normed = self.norm_2(x)
@@ -545,7 +560,17 @@ class Block(nn.Module):
         else:
             x = attention_output + x
             x_normed = self.norm_2(x)
-        return self.post_mlp_norm(self.mlp(x_normed)) + x
+        x_mlp = self.post_mlp_norm(self.mlp(x_normed))
+        if do_debug:
+            debug_intermediates(
+                value=x_normed,
+                postfix="_mlp_inp",
+            )
+            debug_intermediates(
+                value=x_mlp,
+                postfix="_mlp_outp",
+            )
+        return x_mlp + x
 
 
 class CausalSelfAttention(nn.Module):
@@ -563,6 +588,11 @@ class CausalSelfAttention(nn.Module):
             * config.head_size,  # support for grouped/multi queries
             bias=config.bias or config.attn_bias,
         )
+
+        def qkv_apply(x: torch.Tensor, **kwargs) -> torch.Tensor:
+            return self.qkv(x)
+
+        self._qkv_apply = qkv_apply
         # output projection
         self.proj = nn.Linear(
             config.head_size * config.n_head, config.n_embd, bias=config.bias
@@ -594,6 +624,7 @@ class CausalSelfAttention(nn.Module):
         x: torch.Tensor,
         token_idx: torch.Tensor,
         mha: MultiHeadSelfAttention,
+        **forward_kwargs,
     ) -> torch.Tensor:
         """
         Args:
@@ -636,10 +667,12 @@ class CausalSelfAttention(nn.Module):
         rope_n_elem = self.config.rope_n_elem
         batch_size, num, _ = x.size()
         input_pos = None if self.kv_cache is None else self.kv_cache.input_pos
+        debug_intermediates = forward_kwargs.get("debug_intermediates")
+        do_debug = debug_intermediates is not None
 
         # Perform a single multiplication operation using a combined QKV matrix to calculate `query`, `key`, and `value`
         # instead of individually multiplying the input `x` with the respective weight matrices.
-        qkv = self.qkv(x)
+        qkv = self._qkv_apply(x, **forward_kwargs)
 
         # Define query, key and value sizes.
         # If grouped/multi query is enabled, these sizes are not equal (see the diagram above).
@@ -647,10 +680,32 @@ class CausalSelfAttention(nn.Module):
         key_size = n_query_groups * head_size
         # Split qkv into query, key and value matrices.
         q, k, v = qkv.split((query_size, key_size, key_size), dim=-1)
+        if do_debug:
+            debug_intermediates(
+                value=q,
+                postfix="_attn_q",
+            )
+            debug_intermediates(
+                value=k,
+                postfix="_attn_k",
+            )
+            debug_intermediates(
+                value=v,
+                postfix="_attn_v",
+            )
 
         if self.config.norm_qk and self.config.norm_qk_type == "olmo2":
             q = self.norm_q(q)
             k = self.norm_k(k)
+            if do_debug:
+                debug_intermediates(
+                    value=q,
+                    postfix="_attn_q_norm",
+                )
+                debug_intermediates(
+                    value=k,
+                    postfix="_attn_k_norm",
+                )
 
         # The original GQA paper is followed here and the term query groups is used.
         # alternative notation: Query groups are also referred to as KV groups.
@@ -668,17 +723,28 @@ class CausalSelfAttention(nn.Module):
         k = k.transpose(1, 2)  # (batch_size, n_query_groups, num, hs)
         v = v.transpose(1, 2)  # (batch_size, n_query_groups, num, hs)
 
-        if self.config.norm_qk and self.config.norm_qk_type == "default":
+        if self.config.norm_qk and self.config.norm_qk_type != "olmo2":
             q = self.norm_q(q)
             k = self.norm_k(k)
+            if do_debug:
+                debug_intermediates(
+                    value=q,
+                    postfix="_attn_q_norm",
+                )
+                debug_intermediates(
+                    value=k,
+                    postfix="_attn_k_norm",
+                )
 
         # Unlike standard positional embeddings rotary embeddings must be applied at every layer.
         if rope_n_elem > 0:
             _input_pos = 0 if input_pos is None else input_pos
+            # Send `forward_kwargs` to only one of them
             q_roped = mha.pos_encoding(
                 q[..., :rope_n_elem],
                 input_pos=_input_pos,
                 block_idx=self.block_idx,
+                **forward_kwargs,
             )
             k_roped = mha.pos_encoding(
                 k[..., :rope_n_elem],
@@ -687,6 +753,15 @@ class CausalSelfAttention(nn.Module):
             )
             q = torch.cat((q_roped, q[..., rope_n_elem:]), dim=-1)
             k = torch.cat((k_roped, k[..., rope_n_elem:]), dim=-1)
+            if do_debug:
+                debug_intermediates(
+                    value=q,
+                    postfix="_attn_q_rope",
+                )
+                debug_intermediates(
+                    value=k,
+                    postfix="_attn_k_rope",
+                )
 
         # Inner part of multi-head self-attention computation
         # SDPA kernels need contiguous tensors to work most efficiently, or
@@ -713,6 +788,11 @@ class CausalSelfAttention(nn.Module):
         # Output projection
         # check_for_nan(y, "CausalSelfAttention.forward", "y")
         y = self._transform_output(y, query=q, mha=mha)
+        if do_debug:
+            debug_intermediates(
+                value=y,
+                postfix="_attn_y",
+            )
         return self.proj(y)  # (batch_size, num, n_embd)
 
     def _transform_output(
@@ -755,3 +835,32 @@ class CausalSelfAttention(nn.Module):
                 )
 
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+
+class RMSNorm(nn.Module):
+    def __init__(
+        self,
+        size: int,
+        dim: int = -1,
+        eps: float = 1e-8,
+        add_unit_offset: bool = False,
+    ) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(size, dtype=torch.float32))
+        self.eps = eps
+        self.dim = dim
+        self.add_unit_offset = add_unit_offset
+        self._factor = 1.0 / math.sqrt(size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dtype = x.dtype
+        x = x.to(dtype=torch.float32)
+        norm_x = vector_norm(x, dim=self.dim, keepdim=True) * self._factor
+        x = x / (norm_x + self.eps)
+        weight = (self.weight + 1) if self.add_unit_offset else self.weight
+        shape = [1] * x.ndim
+        shape[self.dim] = -1
+        return (x * weight.view(*shape)).to(dtype=dtype)
+
+    def reset_parameters(self) -> None:
+        nn.init.ones_(self.weight)

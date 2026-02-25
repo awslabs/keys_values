@@ -55,14 +55,16 @@ pretrained weights and thus fine-tune the model.
 The goal of this approach is to move weight updates into a separate matrix which is decomposed with
 two matrices of a lower rank.
 """
-from typing import Any, Dict, Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple, Union, Type
 from typing_extensions import Self
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
+import litgpt
 from litgpt.lora import (
-    Config,
     LoRALinear,
     LoRAQKVLinear as BaseLoRAQKVLinear,
     create_lora_linear,
@@ -71,12 +73,41 @@ from litgpt.scripts.convert_hf_checkpoint import qkv_reassemble
 from litgpt.utils import map_old_state_dict_weights
 
 from keys_values.attention import MultiHeadSelfAttention
+from keys_values.config import Config as BaseConfig
 from keys_values.kvcache.base import KVCache
 from keys_values.model import GPT as BaseModel
 from keys_values.model import Block as BaseBlock
 from keys_values.model import CausalSelfAttention as BaseCausalSelfAttention
 from keys_values.use_eager_kernel import transform_mha_kwargs
 from keys_values.utils import check_for_nan
+
+
+@dataclass
+class Config(BaseConfig):
+    """
+    Args:
+        lora_r: rank of the weight update matrices. To make sense of using LoRA the rank should be smaller than the rank of
+            the weights of the model. The rank can be as low as 1: https://arxiv.org/pdf/2106.09685.pdf (section 7.2)
+        lora_alpha: alpha is needed for scaling updates as alpha/r
+            "This scaling helps to reduce the need to retune hyperparameters when we vary r"
+            https://arxiv.org/pdf/2106.09685.pdf (section 4.1)
+        lora_dropout: dropout that is applied on the input in the LoRA branch (before multiplying by matrix A)
+        lora_*: whether to apply LoRA to the specified weights or not
+    """
+
+    lora_r: int = 0
+    lora_alpha: int = 1
+    lora_dropout: float = 0.0
+    lora_query: bool = False
+    lora_key: bool = False
+    lora_value: bool = False
+    lora_projection: bool = False
+    lora_mlp: bool = False
+    lora_head: bool = False
+
+    @property
+    def mlp_class(self) -> Type:
+        return getattr(litgpt.lora, self.mlp_class_name)
 
 
 class LoRAQKVLinear(BaseLoRAQKVLinear):
@@ -173,6 +204,57 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
             self.scaling = self.lora_alpha / self.r
 
             self.reset_parameters()
+
+    # Taken from `litgpt.lora`. We add `debug_intermediates` annotation.
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        debug_intermediates = kwargs.get("debug_intermediates")
+        do_debug = debug_intermediates is not None
+
+        # Let's assume that:
+        # ⚬ x: (64, 64, 128) or (batch_size, context_length, embedding_size)
+        # ⚬ self.linear.weight: (384, 128) or (3 * embedding_size, embedding_size)
+        # ⚬ self.lora_A.data: (4, 128)
+        # ⚬ self.lora_B.data: (256, 2)
+
+        # if weights are merged or LoRA is disabled (r <= 0 or all `enable_lora` are False) - it's only a regular nn.Linear forward pass;
+        # otherwise in addition do the forward pass with LoRA weights and add it's output to the output from pretrained weights
+        pretrained = self.linear(x)
+        if do_debug:
+            debug_intermediates(
+                value=pretrained,
+                postfix="_attn_qkv_pretrained",
+            )
+        if self.r == 0 or not any(self.enable_lora) or self.merged:
+            return pretrained
+        after_A = F.linear(
+            self.lora_dropout(x), self.lora_A
+        )  # (64, 64, 128) @ (4, 128) -> (64, 64, 4)
+        # For F.conv1d:
+        # ⚬ input: input tensor of shape (mini-batch, in_channels, iW)
+        # ⚬ weight: filters of shape (out_channels, in_channels/groups, kW)
+        after_B = self.conv1d(
+            after_A.transpose(-2, -1),  # (64, 64, 4) -> (64, 4, 64)
+            self.lora_B.unsqueeze(-1),  # (256, 2) -> (256, 2, 1)
+        ).transpose(
+            -2, -1
+        )  # (64, 4, 64) @ (256, 2, 1) -> (64, 256, 64) -> (64, 64, 256)
+        lora = (
+            self.zero_pad(after_B) * self.scaling
+        )  # (64, 64, 256) after zero_pad (64, 64, 384)
+        if do_debug:
+            debug_intermediates(
+                value=after_A,
+                postfix="_attn_qkv_after_a",
+            )
+            debug_intermediates(
+                value=after_B,
+                postfix="_attn_qkv_after_b",
+            )
+            debug_intermediates(
+                value=lora,
+                postfix="_attn_qkv_lora",
+            )
+        return pretrained + lora
 
     def check_for_nan(
         self,
@@ -317,6 +399,11 @@ class CausalSelfAttention(BaseCausalSelfAttention):
             n_head=config.n_head,
             n_query_groups=config.n_query_groups,
         )
+
+        def qkv_apply(x: torch.Tensor, **kwargs) -> torch.Tensor:
+            return self.qkv(x, **kwargs)
+
+        self._qkv_apply = qkv_apply
         # output projection
         self.proj = create_lora_linear(
             config,

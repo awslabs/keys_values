@@ -20,24 +20,34 @@ https://arxiv.org/abs/2304.15010
 
 Port for LitGPT
 """
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Type
 
 import torch
 import torch.nn as nn
 from typing_extensions import Self
 
-from litgpt.adapter_v2 import AdapterV2Linear, Config
+import litgpt
+from litgpt.adapter_v2 import AdapterV2Linear
 from litgpt.scripts.convert_hf_checkpoint import qkv_reassemble
 from litgpt.utils import map_old_state_dict_weights
 
 from keys_values.adapter import (
     GPT as BaseModel,
+    Config as BaseConfig,
     CausalSelfAttention as BaseCausalSelfAttention,
 )
 from keys_values.attention import MultiHeadSelfAttention
 from keys_values.kvcache.base import KVCache
 from keys_values.model import Block as BaseBlock
 from keys_values.use_eager_kernel import transform_mha_kwargs
+
+
+@dataclass
+class Config(BaseConfig):
+    @property
+    def mlp_class(self) -> Type:
+        return getattr(litgpt.adapter_v2, self.mlp_class_name)
 
 
 class GPT(BaseModel):
