@@ -50,7 +50,6 @@ ORIG_IDX_NAME = "orig_idx"
 
 TASK_NAME = "task"
 
-CollateFnType = Callable[[List[Dict[str, Any]]], Dict[str, Any]]
 
 
 class EvaluationTasks:
@@ -75,6 +74,8 @@ class EvaluationTasks:
                         self._tasks.append(child.name)
                     else:
                         include_final = True
+        # Sort to obtain unique ordering
+        self._tasks = sorted(self._tasks)
         # If "final" is present, it should come first, so we get the final
         # eval results before others
         if include_final:
@@ -290,6 +291,7 @@ class EvaluationDataLoaderIterator(Iterator[Dict[str, Any]]):
         batch_sampler: SimilarSequenceLengthWithTasksSampler,
         collate_fn: Collator,
         eval_tasks: List[str],
+        delay_tokenization: bool,
     ):
         if len(eval_tasks) != batch_sampler.num_tasks:
             raise ValueError(f"len(eval_tasks) = {len(eval_tasks)} != {batch_sampler.num_tasks} = batch_sampler.num_tasks")
@@ -297,6 +299,7 @@ class EvaluationDataLoaderIterator(Iterator[Dict[str, Any]]):
         self.batch_sampler = batch_sampler
         self.collate_fn = collate_fn
         self.eval_tasks = eval_tasks
+        self.delay_tokenization = delay_tokenization
         self._batch_iter = iter(batch_sampler)
         dataset_size = self._batch_iter.dataset_size
         if len(dataset) != dataset_size:
@@ -304,28 +307,49 @@ class EvaluationDataLoaderIterator(Iterator[Dict[str, Any]]):
 
     def __next__(self) -> Dict[str, Any]:
         inds, task_idx = next(self._batch_iter)
-        result = self.collate_fn([self.dataset[idx] for idx in inds])
-        result[TASK_NAME] = self.eval_tasks[task_idx]
-        result[ORIG_IDX_NAME] = inds
+        result = {
+            TASK_NAME: self.eval_tasks[task_idx],
+            ORIG_IDX_NAME: inds,
+        }
+        if not self.delay_tokenization:
+            result = self.fetch_full(result)
         return result
+
+    def fetch_full(self, partial_batch: Dict[str, Any]) -> Dict[str, Any]:
+        inds = partial_batch[ORIG_IDX_NAME]
+        result = self.collate_fn([self.dataset[idx] for idx in inds])
+        return {**partial_batch, **result}
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         return self
 
 
 class EvaluationDataLoader:
+    """
+    Data loader for pure evaluation runs over several tasks (i.e.,
+    checkpoints).
+
+    If `delay_tokenization == True`, the batch returned has only
+    :const:`TASK_NAME` and :const:`ORIG_IDX_NAME` fields set, this
+    does not require tokenization. The remaining fields can be obtained
+    by calling :meth:`fetch_full`. Use this to be able to skip already
+    processed or locked batches rapidly.
+
+    """
     def __init__(
         self,
         dataset: Dataset,
         batch_sampler: SimilarSequenceLengthWithTasksSampler,
         collate_fn: Collator,
         eval_tasks: List[str],
+        delay_tokenization: bool = False,
     ):
         self._iter_kwargs = {
             "dataset": dataset,
             "batch_sampler": batch_sampler,
             "collate_fn": collate_fn,
             "eval_tasks": eval_tasks,
+            "delay_tokenization": delay_tokenization,
         }
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
@@ -337,3 +361,7 @@ class EvaluationDataLoader:
     @property
     def batch_size(self) -> int:
         return self._iter_kwargs["batch_sampler"].batch_size
+
+    @property
+    def delay_tokenization(self) -> bool:
+        return self._iter_kwargs["delay_tokenization"]

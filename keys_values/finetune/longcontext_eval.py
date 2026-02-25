@@ -98,7 +98,10 @@ def remove_keys(
 
 
 def cleanup_longbench_v2_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    return remove_keys(kwargs, {"num_workers"})
+    return remove_keys(
+        kwargs,
+        {"num_workers", "include_multiturn_conversations"},
+    )
 
 
 def cleanup_kvcache_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -377,7 +380,8 @@ def main(
     # Others skip any batch that is locked or already done.
     tasks_helper = EvaluationWithTasksHelper(out_dir, data.test_set_tag)
     current_task = None
-    for batch in test_dataloader:
+    test_dataiter = iter(test_dataloader)
+    for batch in test_dataiter:
         if not batch:
             print("Empty batch: Continue")
             continue
@@ -392,6 +396,9 @@ def main(
                 f"Running inference for batch {task}, {orig_idxs}",
                 fabric.global_rank,
             )
+            if test_dataloader.delay_tokenization:
+                # Tokenization only happens here
+                batch = test_dataiter.fetch_full(batch)
             batch = batch_transform(batch)
             if task != current_task:
                 # DEBUG

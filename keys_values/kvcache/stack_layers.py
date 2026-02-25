@@ -103,6 +103,7 @@ class CellBlocks:
                     )
             else:
                 if kv_cache.max_forward_length() < chunk_len:
+                    print(f"UUPS: kv_cache.input_pos = {kv_cache.input_pos}")  # DEBUG
                     raise ValueError(
                         f"KV cache for layer {block_idx}: chunk_len = {chunk_len}, must be <= max_forward_length() = {kv_cache.max_forward_length()}"
                     )
