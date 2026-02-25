@@ -16,7 +16,8 @@ from dataclasses import dataclass
 import time
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any, List, Tuple, Set
+import re
+from typing import Dict, Literal, Optional, Union, Any, List, Tuple, Set, Callable
 
 import lightning as L
 import torch
@@ -592,6 +593,7 @@ def store_eval_metrics(
 def _debug_compare_dicts(
     a: Dict[str, torch.Tensor],
     b: Dict[str, torch.Tensor],
+    sort_key: Optional[Callable[[str], Any]] = None,
     verbose: bool = False,
 ):
     a_names = set(a.keys())
@@ -602,7 +604,7 @@ def _debug_compare_dicts(
     diff_ba = b_names - a_names
     if diff_ba:
         raise ValueError(f"Names in B, not in A: {diff_ba}")
-    for name in a_names:
+    for name in sorted(a_names, key=sort_key):
         try:
             if verbose:
                 print("    " + name)
@@ -610,6 +612,31 @@ def _debug_compare_dicts(
         except AssertionError as e:
             print(f"Significant differences A vs B for {name}")
             raise e
+
+
+# Keys in debug_intermediates are:
+#   forward_wte_{start}:{end}
+#   forward_block{block_idx}_{start}:{end}_{rel_start}:{rel_end}
+#   forward_loss_{start}:{end}_{rel_start}:{rel_end}
+
+REGEX_FORW_WTE = re.compile(r"forward_wte_(\d+):\d+$")
+
+REGEX_FORW_BLOCK = re.compile(r"forward_block(\d+)_(\d+):\d+_(\d+):\d+$")
+
+REGEX_FORW_LOSS = re.compile(r"forward_loss_(\d+):\d+_(\d+):\d+$")
+
+
+def sort_key_debug_intermediates(name: str) -> Tuple[int, int, int, int]:
+    m = REGEX_FORW_WTE.match(name)
+    if m:
+        return 0, int(m.group(1)), 0, 0
+    m = REGEX_FORW_BLOCK.match(name)
+    if m:
+        return 1, int(m.group(1)), int(m.group(2)), int(m.group(3))
+    m = REGEX_FORW_LOSS.match(name)
+    if m:
+        return 2, int(m.group(1)), int(m.group(2)), 0
+    raise ValueError(f"Invalid name: {name}")
 
 
 def debug_store_or_compare_state(
@@ -665,17 +692,23 @@ def debug_store_or_compare_state(
             INPUT_IDS_NAME: state[INPUT_IDS_NAME],
             "targets": state["targets"],
         }
-        for name, a_dict, b_dict in (
-            ("data_batch", a_data, b_data),
-            ("gpt_state_dict", comp_state["gpt_state_dict"], state["gpt_state_dict"]),
+        dict_tuples = [
+            ("data_batch", a_data, b_data, None),
+            ("gpt_state_dict", comp_state["gpt_state_dict"], state["gpt_state_dict"], None),
             (
                 "head_state_dict",
                 comp_state["head_state_dict"],
                 state["head_state_dict"],
+                None,
             ),
-            ("intermediates", comp_state["intermediates"], state["intermediates"]),
-        ):
+        ]
+        if do_intermediates:
+            dict_tuples.append(
+                ("intermediates", comp_state["intermediates"], state["intermediates"], sort_key_debug_intermediates),
+            )
+        for name, a_dict, b_dict, sort_key in dict_tuples:
             print(f"Comparing {name} dictionaries:")
-            _debug_compare_dicts(a_dict, b_dict, verbose=True)
-        print("Comparing loss_values:")
-        torch.testing.assert_close(comp_state["loss_values"], state["loss_values"])
+            _debug_compare_dicts(a_dict, b_dict, sort_key, verbose=True)
+        if do_intermediates:
+            print("Comparing loss_values:")
+            torch.testing.assert_close(comp_state["loss_values"], state["loss_values"])
