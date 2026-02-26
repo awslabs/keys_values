@@ -32,6 +32,7 @@ class PositionEncoding:
         x: torch.Tensor,
         input_pos: int,
         block_idx: int,
+        **kwargs,
     ) -> torch.Tensor:
         """
         Encodes `x` (queries, keys) corresponding to token positions
@@ -178,6 +179,7 @@ class LinearPositionEncoding(PositionEncoding):
         x: torch.Tensor,
         input_pos: int,
         block_idx: int,
+        **kwargs,
     ) -> torch.Tensor:
         if x.ndim < 2 or x.shape[-1] != self.n_elem:
             raise ValueError(
@@ -199,6 +201,14 @@ class LinearPositionEncoding(PositionEncoding):
             ind = self.rope_indices[block_idx]
             cos = self._cos[input_pos : (input_pos + x_len), :, ind].unsqueeze(0)
             sin = self._sin[input_pos : (input_pos + x_len), :, ind].unsqueeze(0)
+        debug_intermediates = kwargs.get("debug_intermediates")
+        if debug_intermediates is not None:
+            debug_intermediates(
+                value=cos, postfix="_rope_cos",
+            )
+            debug_intermediates(
+                value=sin, postfix="_rope_sin",
+            )
         return apply_rope(x=x, cos=cos, sin=sin)
 
 

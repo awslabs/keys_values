@@ -196,6 +196,10 @@ def setup(
         task_path=out_dir / eval.tasks[0],
         model_type=model_type,
     )
+    # DEBUG
+    model_config.config.own_rms_norm_implementation = True
+    print("Switching config.own_rms_norm_implementation = True")
+    # END DEBUG
     # Base model checkpoint
     checkpoint_dir = auto_download_checkpoint(
         model_name=hyp_pars["checkpoint_dir"],

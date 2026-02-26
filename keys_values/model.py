@@ -723,10 +723,12 @@ class CausalSelfAttention(nn.Module):
         # Unlike standard positional embeddings rotary embeddings must be applied at every layer.
         if rope_n_elem > 0:
             _input_pos = 0 if input_pos is None else input_pos
+            # Send `forward_kwargs` to only one of them
             q_roped = mha.pos_encoding(
                 q[..., :rope_n_elem],
                 input_pos=_input_pos,
                 block_idx=self.block_idx,
+                **forward_kwargs,
             )
             k_roped = mha.pos_encoding(
                 k[..., :rope_n_elem],
