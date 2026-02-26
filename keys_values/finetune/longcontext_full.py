@@ -30,9 +30,8 @@ import torch
 from torchmetrics import RunningMean
 
 from litgpt.args import TrainArgs
-from litgpt.config import Config as ConfigFull
 from litgpt.data import DataModule
-from litgpt.lora import Config as ConfigLoRA, mark_only_lora_as_trainable
+from litgpt.lora import mark_only_lora_as_trainable
 from litgpt.prompts import save_prompt_style
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
@@ -57,6 +56,7 @@ from keys_values.attention_utils import (
     DEFAULT_TMP_ARRAY_LIMIT_GB,
     SDPA_KERNELS_BEST_ORDERING,
 )
+from keys_values.config import Config as ConfigFull
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME, MyDataLoader
 from keys_values.data.base import LIT_MODEL_FNAME, HEAD_MODEL_FNAME
 from keys_values.flex_attention import FlexAttentionArgs
@@ -105,7 +105,7 @@ from keys_values.long_context import (
     GPTAndHeadModel,
     LongContextInferenceModel,
 )
-from keys_values.lora import GPT as GPTLoRA
+from keys_values.lora import GPT as GPTLoRA, Config as ConfigLoRA
 from keys_values.model import GPT as GPTFull
 from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.optimize.model_factory import BlockComponentName

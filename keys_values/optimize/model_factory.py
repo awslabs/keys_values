@@ -17,16 +17,16 @@ from typing import Dict, List, Optional, Union, Tuple, Iterable, Any
 import torch
 import torch.nn as nn
 
-from litgpt.config import Config as ConfigFull
-from litgpt.lora import (
-    LoRALinear,
-    create_lora_linear,
-    Config as ConfigLoRA,
-)
+from litgpt.lora import LoRALinear, create_lora_linear
 
 from keys_values.attention import MultiHeadSelfAttention
+from keys_values.config import Config as ConfigFull
 from keys_values.kvcache.stack_layers import CellBlocks
-from keys_values.lora import GPT as GPTLoRA, Block as BlockLoRA
+from keys_values.lora import (
+    GPT as GPTLoRA,
+    Block as BlockLoRA,
+    Config as ConfigLoRA,
+)
 from keys_values.model import GPT as GPTFull, Block as BlockFull
 from keys_values.optimize.module_wrapper import (
     AccessWeightsGradients,

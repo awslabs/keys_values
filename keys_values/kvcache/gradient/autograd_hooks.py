@@ -17,7 +17,7 @@ from collections import Counter
 
 import torch
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.kvcache.base import KVCacheReplayLog
 from keys_values.kvcache.gradient.annotation import (

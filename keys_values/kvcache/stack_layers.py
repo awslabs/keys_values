@@ -15,7 +15,7 @@ from typing import Tuple, Iterable, Dict, Any, List, Union
 
 import torch
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.kvcache.base import KVCache
 from keys_values.model import Block, GPT

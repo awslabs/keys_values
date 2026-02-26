@@ -18,7 +18,7 @@ from itertools import accumulate
 import torch
 import torch.nn as nn
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.attention import DefaultKeysAndValues
 from keys_values.debug_utils import for_debug

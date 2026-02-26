@@ -55,14 +55,15 @@ pretrained weights and thus fine-tune the model.
 The goal of this approach is to move weight updates into a separate matrix which is decomposed with
 two matrices of a lower rank.
 """
-from typing import Any, Dict, Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple, Union, Type
 from typing_extensions import Self
 
 import torch
 import torch.nn as nn
 
+import litgpt
 from litgpt.lora import (
-    Config,
     LoRALinear,
     LoRAQKVLinear as BaseLoRAQKVLinear,
     create_lora_linear,
@@ -71,12 +72,41 @@ from litgpt.scripts.convert_hf_checkpoint import qkv_reassemble
 from litgpt.utils import map_old_state_dict_weights
 
 from keys_values.attention import MultiHeadSelfAttention
+from keys_values.config import Config as BaseConfig
 from keys_values.kvcache.base import KVCache
 from keys_values.model import GPT as BaseModel
 from keys_values.model import Block as BaseBlock
 from keys_values.model import CausalSelfAttention as BaseCausalSelfAttention
 from keys_values.use_eager_kernel import transform_mha_kwargs
 from keys_values.utils import check_for_nan
+
+
+@dataclass
+class Config(BaseConfig):
+    """
+    Args:
+        lora_r: rank of the weight update matrices. To make sense of using LoRA the rank should be smaller than the rank of
+            the weights of the model. The rank can be as low as 1: https://arxiv.org/pdf/2106.09685.pdf (section 7.2)
+        lora_alpha: alpha is needed for scaling updates as alpha/r
+            "This scaling helps to reduce the need to retune hyperparameters when we vary r"
+            https://arxiv.org/pdf/2106.09685.pdf (section 4.1)
+        lora_dropout: dropout that is applied on the input in the LoRA branch (before multiplying by matrix A)
+        lora_*: whether to apply LoRA to the specified weights or not
+    """
+
+    lora_r: int = 0
+    lora_alpha: int = 1
+    lora_dropout: float = 0.0
+    lora_query: bool = False
+    lora_key: bool = False
+    lora_value: bool = False
+    lora_projection: bool = False
+    lora_mlp: bool = False
+    lora_head: bool = False
+
+    @property
+    def mlp_class(self) -> Type:
+        return getattr(litgpt.lora, self.mlp_class_name)
 
 
 class LoRAQKVLinear(BaseLoRAQKVLinear):

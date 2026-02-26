@@ -13,7 +13,7 @@
 # limitations under the License.
 from typing import Tuple, Optional
 
-from litgpt.config import Config
+from keys_values.config import Config
 from litgpt.data import DataModule
 
 from keys_values.data import LongBenchV2

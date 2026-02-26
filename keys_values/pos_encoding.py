@@ -14,7 +14,7 @@
 import math
 from typing import Optional, Dict, Any
 
-from litgpt.config import Config
+from keys_values.config import Config
 from litgpt.model import build_rope_cache, apply_rope
 
 import torch

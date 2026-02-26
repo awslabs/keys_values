@@ -19,7 +19,7 @@ from torch.linalg import vector_norm
 import pytest
 
 from keys_values.long_context import LongContextInferenceModel
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.attention import DefaultKeysAndValues
 from keys_values.head_model import CrossEntropyOnLogits

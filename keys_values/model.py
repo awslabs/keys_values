@@ -18,13 +18,15 @@
 Based on the nanoGPT implementation: https://github.com/karpathy/nanoGPT and
 https://github.com/EleutherAI/gpt-neox/tree/main/megatron/model.
 """
+import math
 from typing import Any, List, Optional, Union, Callable
 from typing_extensions import Self
 
 import torch
 import torch.nn as nn
+from torch.linalg import vector_norm
 
-from litgpt.config import Config
+from keys_values.config import Config
 from litgpt.scripts.convert_hf_checkpoint import qkv_reassemble
 
 from keys_values.attention import (
@@ -707,7 +709,7 @@ class CausalSelfAttention(nn.Module):
         k = k.transpose(1, 2)  # (batch_size, n_query_groups, num, hs)
         v = v.transpose(1, 2)  # (batch_size, n_query_groups, num, hs)
 
-        if self.config.norm_qk and self.config.norm_qk_type == "default":
+        if self.config.norm_qk and self.config.norm_qk_type != "olmo2":
             q = self.norm_q(q)
             k = self.norm_k(k)
             if do_debug:
@@ -812,3 +814,32 @@ class CausalSelfAttention(nn.Module):
                 )
 
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+
+class RMSNorm(nn.Module):
+    def __init__(
+        self,
+        size: int,
+        dim: int = -1,
+        eps: float = 1e-8,
+        add_unit_offset: bool = False,
+    ) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(size, dtype=torch.float32))
+        self.eps = eps
+        self.dim = dim
+        self.add_unit_offset = add_unit_offset
+        self._factor = 1.0 / math.sqrt(size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dtype = x.dtype
+        x = x.to(dtype=torch.float32)
+        norm_x = vector_norm(x, dim=self.dim, keepdim=True) * self._factor
+        x = x / (norm_x + self.eps)
+        weight = (1 + self.weight) if self.add_unit_offset else self.weight
+        shape = [1] * x.ndim
+        shape[self.dim] = -1
+        return (x * weight.view(*shape)).to(dtype=dtype)
+
+    def reset_parameters(self) -> None:
+        nn.init.ones_(self.weight)

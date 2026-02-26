@@ -19,7 +19,7 @@ import torch
 from torch.nn import functional as F
 import pytest
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.attention import MultiHeadSelfAttention
 from keys_values.attention_utils import (

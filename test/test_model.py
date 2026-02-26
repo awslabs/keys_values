@@ -50,7 +50,7 @@ from transformers.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
 from transformers.models.qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 import litgpt.config as config_module
-from litgpt.config import Config
+from keys_values.config import Config
 from litgpt.scripts.convert_hf_checkpoint import (
     copy_weights_falcon,
     copy_weights_gemma_2,

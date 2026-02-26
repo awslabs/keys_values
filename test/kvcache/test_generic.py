@@ -18,7 +18,7 @@ import re
 import torch
 import pytest
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.factory import KVCacheFactory, split_name

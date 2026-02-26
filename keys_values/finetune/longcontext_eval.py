@@ -23,9 +23,8 @@ import torch
 from lightning.fabric.strategies import DDPStrategy
 import yaml
 
-from litgpt.config import Config as ConfigFull
 from litgpt.data import DataModule
-from litgpt.lora import Config as ConfigLoRA, mark_only_lora_as_trainable
+from litgpt.lora import mark_only_lora_as_trainable
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     auto_download_checkpoint,
@@ -36,6 +35,7 @@ from litgpt.utils import (
 )
 
 from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
+from keys_values.config import Config as ConfigFull
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME
 from keys_values.data.base import (
     LIT_MODEL_FNAME,
@@ -66,7 +66,7 @@ from keys_values.head_model_factory import HeadModelFactory
 from keys_values.long_context import (
     LongContextInferenceModel,
 )
-from keys_values.lora import GPT as GPTLoRA
+from keys_values.lora import GPT as GPTLoRA, Config as ConfigLoRA
 from keys_values.model import GPT as GPTFull
 from keys_values.utils import (
     flush_io_streams,

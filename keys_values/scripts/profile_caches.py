@@ -18,7 +18,7 @@ from typing import List, Tuple
 
 import torch
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.kvcache.base import KVCacheParams

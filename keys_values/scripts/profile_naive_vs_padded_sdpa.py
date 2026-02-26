@@ -20,7 +20,7 @@ from typing import List, Dict, Any, Tuple, Set
 from scipy.optimize import root_scalar
 import torch
 
-from litgpt.config import Config
+from keys_values.config import Config
 
 from keys_values.attention import (
     scaled_dot_product_attention_in_blocks,
