@@ -50,7 +50,7 @@ from keys_values.data.evaluation import (
     EvaluationWithTasksHelper,
     EvaluationDataLoader,
 )
-from keys_values.debug_utils import debug_store_or_compare_state
+from keys_values.debug_utils import debug_store_or_compare_state, DebugIntermediates
 from keys_values.finetune.args import KVCacheArgs, SDPAArgs
 from keys_values.finetune.batch_transform import BatchTransformFactory
 from keys_values.finetune.longcontext_full import (
@@ -351,6 +351,10 @@ def main(
         if is_lora:
             mark_only_lora_as_trainable(gpt_model)
         adapt_requires_grad(gpt_model, head_model)
+        # DEBUG:
+        debug_intermediates = DebugIntermediates(
+            predicate=lambda kind, block_idx, start, end, rel_start, rel_end: True,
+        )
         model = wrap_gpt_model(
             gpt_model=gpt_model,
             head_model=head_model,
@@ -361,7 +365,7 @@ def main(
             max_batch_size=batch_size,
             dtype=dtype,
             fabric=fabric,
-            model_kwargs=dict(debug_store_intermediates=True),  # DEBUG!
+            model_kwargs=dict(debug_intermediates=debug_intermediates),  # DEBUG!
         )
 
     # Load base model
@@ -433,8 +437,8 @@ def main(
             print(f"Storing to {eval_metrics_path}")
             store_eval_metrics(loss_values, batch, eval_metrics_path)
             # DEBUG
-            if batch[ORIG_IDX_NAME][0] == 0:
-               debug_intermediates = model.debug_intermediates
+            if batch[ORIG_IDX_NAME][0] == 0 and model.debug_intermediates is not None:
+               debug_intermediates = model.debug_intermediates.entries
             else:
                debug_intermediates = None
             debug_store_or_compare_state(

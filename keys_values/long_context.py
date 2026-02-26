@@ -19,6 +19,7 @@ import torch
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import MultiHeadSelfAttention
+from keys_values.debug_utils import DebugIntermediates
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.base import DefaultKVCache
 from keys_values.kvcache.factory import deallocate_kv_cache_buffers_of_model
@@ -486,7 +487,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
         set_max_seq_length: bool = True,
         debug_single_cell_per_row: bool = False,
-        debug_store_intermediates: bool = False,
+        debug_intermediates: Optional[DebugIntermediates] = None,
         debug_no_deallocate_buffers: bool = False,
     ):
         """
@@ -526,7 +527,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 batch. If :meth:`forward` is called with `targets=None`, then
                 `gpt_model.max_seq_length` is not changed in any case.
             debug_single_cell_per_row: Internal option, used for unit testing.
-            debug_store_intermediates: For debugging/testing. Intermediates of
+            debug_intermediates: For debugging/testing. Intermediates of
                 forward computation are stored.
             debug_no_deallocate_buffers: For debugging/testing. KV cache
                 buffers are not deallocated at the end of :meth:`forward`.
@@ -559,10 +560,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self._set_max_seq_length = set_max_seq_length
         self._record_gpu_memory_snapshots = None
         self._record_gpu_memory_kind = None
-        if debug_store_intermediates:
-            self.debug_intermediates = dict()
-        else:
-            self.debug_intermediates = None
+        self.debug_intermediates = debug_intermediates
         self._debug_no_deallocate_buffers = debug_no_deallocate_buffers
 
     @staticmethod
@@ -883,10 +881,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 if self.config.scale_embeddings:
                     embeddings = embeddings * alpha
                 if self.debug_intermediates is not None:
-                    name = f"forward_wte_{start}:{end}"
-                    self.debug_intermediates[name] = (
-                        embeddings.detach().clone().to(device=torch.device("cpu"))
-                    )
+                    self.debug_intermediates.store_wte(embeddings, start, end)
                 # Loop over layers
                 for block_idx, block in enumerate(model_blocks):
                     # Layer input checkpointing
@@ -903,9 +898,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         idx = input_ids[:, abs_start : (abs_start + ch_size)]
                         y = block.forward(x=x, idx=idx)
                         if self.debug_intermediates is not None:
-                            name = f"forward_block{block_idx}_{start}:{end}_{rel_start}:{rel_end}"
-                            self.debug_intermediates[name] = (
-                                y.detach().clone().to(device=torch.device("cpu"))
+                            self.debug_intermediates.store_block(
+                                y, block_idx, start, end, rel_start, rel_end,
                             )
                         new_embed_parts.append(y)
                         if not compute_loss:
@@ -952,11 +946,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         loss_full = loss_part + loss_full
                         input_pos += ch_size
                         if self.debug_intermediates is not None:
-                            name = f"forward_loss_{start}:{end}_{rel_start}:{rel_end}"
-                            self.debug_intermediates[name] = (
-                                loss_part.detach()
-                                .clone()
-                                .to(device=torch.device("cpu"))
+                            self.debug_intermediates.store_loss(
+                                loss_part, start, end, rel_start, rel_end,
                             )
                 else:
                     # `logits_final_chunk` has final layer outputs for last

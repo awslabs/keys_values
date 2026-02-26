@@ -21,6 +21,112 @@ import torch
 from keys_values.data import INPUT_IDS_NAME
 
 
+REGEX_FORW_WTE = re.compile(r"forward_wte_(\d+):(\d+)$")
+
+REGEX_FORW_BLOCK = re.compile(r"forward_block(\d+)_(\d+):(\d+)_(\d+):(\d+)$")
+
+REGEX_FORW_LOSS = re.compile(r"forward_loss_(\d+):(\d+)_(\d+):(\d+)$")
+
+
+DebugIntermediatesPredicate = Callable[[str, int, int, int, int, int], bool]
+
+
+class DebugIntermediates:
+    """
+    Maintains a dictionary of tensors, used to store and compare intermediate
+    results obtained during a long context inference forward pass. Used mainly
+    in :class:`LongContextInferenceModel`, or in components of the model for
+    fine-grained intermediates.
+
+    Values are stored only if
+    `predicate(kind, block_idx, start, end, rel_start, rel_end)` evaluates to
+    `True`. Here, `kind` is "wte", "block", "loss". Arguments which are
+    undefined for a `kind` value, should be ignored by the predicate.
+
+    """
+    def __init__(self, predicate: DebugIntermediatesPredicate):
+        self._predicate = predicate
+        self.entries: Dict[str, torch.Tensor] = dict()
+
+    def clear(self):
+        self.entries.clear()
+
+    @staticmethod
+    def _get_value(value: torch.Tensor) -> torch.Tensor:
+        return value.detach().to(device=torch.device("cpu")).clone()
+
+    def store_wte(
+        self,
+        value: torch.Tensor,
+        start: int,
+        end: int,
+    ):
+        if self._predicate("wte", 0, start, end, 0, 0):
+            name = self.wte_name(start, end)
+            self.entries[name] = self._get_value(value)
+
+    @staticmethod
+    def wte_name(start: int, end: int) -> str:
+        return f"forward_wte_{start}:{end}"
+
+    @staticmethod
+    def wte_match(name: str) -> Optional[Tuple[int, int]]:
+        m = REGEX_FORW_WTE.match(name)
+        if m is not None:
+            return tuple(int(x) for x in m.groups())
+        else:
+            return None
+
+    def store_block(
+        self,
+        value: torch.Tensor,
+        block_idx: int,
+        start: int,
+        end: int,
+        rel_start: int,
+        rel_end: int,
+    ):
+        if self._predicate("block", block_idx, start, end, rel_start, rel_end):
+            name = self.block_name(block_idx, start, end, rel_start, rel_end)
+            self.entries[name] = self._get_value(value)
+
+    @staticmethod
+    def block_name(block_idx: int, start: int, end: int, rel_start: int, rel_end: int) -> str:
+        return f"forward_block{block_idx}_{start}:{end}_{rel_start}:{rel_end}"
+
+    @staticmethod
+    def block_match(name: str) -> Optional[Tuple[int, int, int, int, int]]:
+        m = REGEX_FORW_BLOCK.match(name)
+        if m is not None:
+            return tuple(int(x) for x in m.groups())
+        else:
+            return None
+
+    def store_loss(
+        self,
+        value: torch.Tensor,
+        start: int,
+        end: int,
+        rel_start: int,
+        rel_end: int,
+    ):
+        if self._predicate("loss", 0, start, end, rel_start, rel_end):
+            name = self.loss_name(start, end, rel_start, rel_end)
+            self.entries[name] = self._get_value(value)
+
+    @staticmethod
+    def loss_name(start: int, end: int, rel_start: int, rel_end: int) -> str:
+        return f"forward_loss_{start}:{end}_{rel_start}:{rel_end}"
+
+    @staticmethod
+    def loss_match(name: str) -> Optional[Tuple[int, int, int, int]]:
+        m = REGEX_FORW_LOSS.match(name)
+        if m is not None:
+            return tuple(int(x) for x in m.groups())
+        else:
+            return None
+
+
 QUANTILES = [0.01, 0.5, 0.9, 0.99]
 
 
@@ -148,28 +254,16 @@ def debug_compare_dicts(
             raise e
 
 
-# Keys in debug_intermediates are:
-#   forward_wte_{start}:{end}
-#   forward_block{block_idx}_{start}:{end}_{rel_start}:{rel_end}
-#   forward_loss_{start}:{end}_{rel_start}:{rel_end}
-
-REGEX_FORW_WTE = re.compile(r"forward_wte_(\d+):\d+$")
-
-REGEX_FORW_BLOCK = re.compile(r"forward_block(\d+)_(\d+):\d+_(\d+):\d+$")
-
-REGEX_FORW_LOSS = re.compile(r"forward_loss_(\d+):\d+_(\d+):\d+$")
-
-
 def sort_key_debug_intermediates(name: str) -> Tuple[int, int, int, int]:
-    m = REGEX_FORW_WTE.match(name)
-    if m:
-        return 0, int(m.group(1)), 0, 0
-    m = REGEX_FORW_BLOCK.match(name)
-    if m:
-        return 1, int(m.group(1)), int(m.group(2)), int(m.group(3))
-    m = REGEX_FORW_LOSS.match(name)
-    if m:
-        return 2, int(m.group(1)), int(m.group(2)), 0
+    res = DebugIntermediates.wte_match(name)
+    if res is not None:
+        return 0, res[0], 0, 0
+    res = DebugIntermediates.block_match(name)
+    if res is not None:
+        return 1, res[0], res[1], res[3]
+    res = DebugIntermediates.loss_match(name)
+    if res is not None:
+        return 2, res[0], res[2], 0
     raise ValueError(f"Invalid name: {name}")
 
 
