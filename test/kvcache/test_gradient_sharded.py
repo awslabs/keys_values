@@ -21,6 +21,7 @@ from litgpt.config import name_to_config
 from litgpt.lora import Config, mark_only_lora_as_trainable
 from litgpt.utils import _RunIf
 
+from keys_values.debug_utils import DebugIntermediates, debug_intermediates_all
 from keys_values.head_model import HeadModel
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
@@ -156,7 +157,9 @@ def test_gradient_sharded(
                 chunk_size=chunk_size,
                 qname="default",
                 debug_gpt_model=debug_gpt_model,
-                debug_store_intermediates=debug_store_intermediates,
+                debug_intermediates=DebugIntermediates(
+                    predicate=debug_intermediates_all,
+                ),
                 **lcg_kwargs,
             )
         )
@@ -189,7 +192,7 @@ def test_gradient_sharded(
         loss_values.append(loss.detach())
         gradients.append(copy_gradients(model.gpt_model, device=torch.device("cpu")))
         if debug_store_intermediates:
-            debug_intermediates.append(model.debug_intermediates)
+            debug_intermediates.append(model.debug_intermediates.entries)
     # Compare the two
     print("\nComparing loss values:")
     torch.testing.assert_close(loss_values[0], loss_values[1])

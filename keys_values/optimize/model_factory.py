@@ -428,6 +428,7 @@ class GPTShardOfBlocks(GPTFull):
         self,
         idx: torch.Tensor,
         skip_lm_head: bool = False,
+        **forward_kwargs,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
         raise NotImplementedError("Must not call `forward` for this object")
 

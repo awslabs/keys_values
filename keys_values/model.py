@@ -291,6 +291,7 @@ class GPT(nn.Module):
         self,
         idx: torch.Tensor,
         skip_lm_head: bool = False,
+        **forward_kwargs,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
         """
         There are two different contexts in which this method is called:
@@ -336,7 +337,7 @@ class GPT(nn.Module):
             if hook is not None:
                 # Call start of layer hook, passing detached layer input
                 hook(x.detach(), block_idx)
-            x = block(x, idx, self.mha)
+            x = block(x, idx, self.mha, **forward_kwargs)
 
         if hook is not None:
             # Hook is also called for the input to the head block
@@ -512,6 +513,7 @@ class Block(nn.Module):
         x: torch.Tensor,
         token_idx: torch.Tensor,
         mha: MultiHeadSelfAttention,
+        **forward_kwargs,
     ) -> torch.Tensor:
         """
         Non-parallel residual       Parallel residual
@@ -534,10 +536,15 @@ class Block(nn.Module):
         └───► +
         """
 
+        debug_intermediates = forward_kwargs.get("debug_intermediates")
         x_normed = self.norm_1(x)
         attention_output = self.post_attention_norm(
-            self.attn(x_normed, token_idx=token_idx, mha=mha)
+            self.attn(x_normed, token_idx=token_idx, mha=mha, **forward_kwargs)
         )
+        if debug_intermediates is not None:
+            debug_intermediates(
+                value=attention_output, postfix="_attn_outp",
+            )
         if self.config.parallel_residual:
             if not self.config.shared_attention_norm:
                 x_normed = self.norm_2(x)
@@ -545,7 +552,12 @@ class Block(nn.Module):
         else:
             x = attention_output + x
             x_normed = self.norm_2(x)
-        return self.post_mlp_norm(self.mlp(x_normed)) + x
+        x_mlp = self.post_mlp_norm(self.mlp(x_normed))
+        if debug_intermediates is not None:
+            debug_intermediates(
+                value=x_mlp, postfix="_mlp_outp",
+            )
+        return x_mlp + x
 
 
 class CausalSelfAttention(nn.Module):
@@ -594,6 +606,7 @@ class CausalSelfAttention(nn.Module):
         x: torch.Tensor,
         token_idx: torch.Tensor,
         mha: MultiHeadSelfAttention,
+        **forward_kwargs,
     ) -> torch.Tensor:
         """
         Args:

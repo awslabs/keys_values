@@ -21,6 +21,7 @@ import torch.nn as nn
 from litgpt.config import Config
 
 from keys_values.attention import DefaultKeysAndValues
+from keys_values.debug_utils import for_debug
 from keys_values.kvcache.base import KVCacheReplayLog, DefaultKVCache
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.train_attn_weights_replay_old import (
@@ -30,7 +31,6 @@ from keys_values.kvcache.gradient.train_attn_weights_replay import (
     TrainingAttnWeightsReplayCache,
 )
 from keys_values.kvcache.stack_layers import CellBlocks
-from keys_values.kvcache.utils import for_debug
 
 GetInputSlice = Callable[[int, int], torch.Tensor]
 

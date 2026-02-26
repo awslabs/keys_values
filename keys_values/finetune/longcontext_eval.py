@@ -352,8 +352,14 @@ def main(
             mark_only_lora_as_trainable(gpt_model)
         adapt_requires_grad(gpt_model, head_model)
         # DEBUG:
+        def debug_intermediates_predicate(
+            kind, block_idx, start, end, rel_start, rel_end,
+        ):
+            return kind == "wte" or (
+                kind == "block" and block_idx == 0 and start == 0
+            )
         debug_intermediates = DebugIntermediates(
-            predicate=lambda kind, block_idx, start, end, rel_start, rel_end: True,
+            predicate=debug_intermediates_predicate,
         )
         model = wrap_gpt_model(
             gpt_model=gpt_model,

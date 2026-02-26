@@ -892,15 +892,31 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     new_embed_parts = []
                     # Innermost loop over chunks per cell
                     for rel_start, rel_end in chunks_for_cell.chunk_ranges:
+                        if self.debug_intermediates is not None:
+                            def callback(
+                                value: torch.Tensor,
+                                postfix: Optional[str] = None,
+                            ):
+                                self.debug_intermediates.store_block(
+                                    value,
+                                    block_idx,
+                                    start,
+                                    end,
+                                    rel_start,
+                                    rel_end,
+                                    postfix,
+                                )
+                        else:
+                            callback = None
                         ch_size = rel_end - rel_start
                         x = embeddings[:, rel_start:rel_end, :]
                         abs_start = start + rel_start
                         idx = input_ids[:, abs_start : (abs_start + ch_size)]
-                        y = block.forward(x=x, idx=idx)
+                        y = block.forward(
+                            x=x, idx=idx, debug_intermediates=callback,
+                        )
                         if self.debug_intermediates is not None:
-                            self.debug_intermediates.store_block(
-                                y, block_idx, start, end, rel_start, rel_end,
-                            )
+                            callback(value=y)
                         new_embed_parts.append(y)
                         if not compute_loss:
                             # We need the final layer output for the last chunk
