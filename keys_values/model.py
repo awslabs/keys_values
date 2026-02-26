@@ -537,11 +537,15 @@ class Block(nn.Module):
         """
 
         debug_intermediates = forward_kwargs.get("debug_intermediates")
+        do_debug = debug_intermediates is not None
         x_normed = self.norm_1(x)
         attention_output = self.post_attention_norm(
             self.attn(x_normed, token_idx=token_idx, mha=mha, **forward_kwargs)
         )
-        if debug_intermediates is not None:
+        if do_debug:
+            debug_intermediates(
+                value=x_normed, postfix="_attn_inp",
+            )
             debug_intermediates(
                 value=attention_output, postfix="_attn_outp",
             )
@@ -553,7 +557,10 @@ class Block(nn.Module):
             x = attention_output + x
             x_normed = self.norm_2(x)
         x_mlp = self.post_mlp_norm(self.mlp(x_normed))
-        if debug_intermediates is not None:
+        if do_debug:
+            debug_intermediates(
+                value=x_normed, postfix="_mlp_inp",
+            )
             debug_intermediates(
                 value=x_mlp, postfix="_mlp_outp",
             )
@@ -649,6 +656,8 @@ class CausalSelfAttention(nn.Module):
         rope_n_elem = self.config.rope_n_elem
         batch_size, num, _ = x.size()
         input_pos = None if self.kv_cache is None else self.kv_cache.input_pos
+        debug_intermediates = forward_kwargs.get("debug_intermediates")
+        do_debug = debug_intermediates is not None
 
         # Perform a single multiplication operation using a combined QKV matrix to calculate `query`, `key`, and `value`
         # instead of individually multiplying the input `x` with the respective weight matrices.
@@ -660,10 +669,27 @@ class CausalSelfAttention(nn.Module):
         key_size = n_query_groups * head_size
         # Split qkv into query, key and value matrices.
         q, k, v = qkv.split((query_size, key_size, key_size), dim=-1)
+        if do_debug:
+            debug_intermediates(
+                value=q, postfix="_attn_q",
+            )
+            debug_intermediates(
+                value=k, postfix="_attn_k",
+            )
+            debug_intermediates(
+                value=v, postfix="_attn_v",
+            )
 
         if self.config.norm_qk and self.config.norm_qk_type == "olmo2":
             q = self.norm_q(q)
             k = self.norm_k(k)
+            if do_debug:
+                debug_intermediates(
+                    value=q, postfix="_attn_q_norm",
+                )
+                debug_intermediates(
+                    value=k, postfix="_attn_k_norm",
+                )
 
         # The original GQA paper is followed here and the term query groups is used.
         # alternative notation: Query groups are also referred to as KV groups.
@@ -684,6 +710,13 @@ class CausalSelfAttention(nn.Module):
         if self.config.norm_qk and self.config.norm_qk_type == "default":
             q = self.norm_q(q)
             k = self.norm_k(k)
+            if do_debug:
+                debug_intermediates(
+                    value=q, postfix="_attn_q_norm",
+                )
+                debug_intermediates(
+                    value=k, postfix="_attn_k_norm",
+                )
 
         # Unlike standard positional embeddings rotary embeddings must be applied at every layer.
         if rope_n_elem > 0:
@@ -700,6 +733,13 @@ class CausalSelfAttention(nn.Module):
             )
             q = torch.cat((q_roped, q[..., rope_n_elem:]), dim=-1)
             k = torch.cat((k_roped, k[..., rope_n_elem:]), dim=-1)
+            if do_debug:
+                debug_intermediates(
+                    value=q, postfix="_attn_q_rope",
+                )
+                debug_intermediates(
+                    value=k, postfix="_attn_k_rope",
+                )
 
         # Inner part of multi-head self-attention computation
         # SDPA kernels need contiguous tensors to work most efficiently, or
@@ -726,6 +766,10 @@ class CausalSelfAttention(nn.Module):
         # Output projection
         # check_for_nan(y, "CausalSelfAttention.forward", "y")
         y = self._transform_output(y, query=q, mha=mha)
+        if do_debug:
+            debug_intermediates(
+                value=y, postfix="_attn_y",
+            )
         return self.proj(y)  # (batch_size, num, n_embd)
 
     def _transform_output(

@@ -283,7 +283,7 @@ def size_quantiles(x: torch.Tensor) -> str:
     return "|".join([f"{k:.2f}:{v:.2e}" for k, v in zip(QUANTILES, qvals_x)])
 
 
-MAX_NUM_CATCHES = 5
+MAX_NUM_CATCHES = 10
 
 
 def debug_compare_dicts(
