@@ -16,8 +16,7 @@ from dataclasses import dataclass
 import time
 from pathlib import Path
 from pprint import pprint
-import re
-from typing import Dict, Literal, Optional, Union, Any, List, Tuple, Set, Callable
+from typing import Dict, Literal, Optional, Union, Any, List, Tuple, Set
 
 import lightning as L
 import torch
@@ -51,6 +50,7 @@ from keys_values.data.evaluation import (
     EvaluationWithTasksHelper,
     EvaluationDataLoader,
 )
+from keys_values.debug_utils import debug_store_or_compare_state
 from keys_values.finetune.args import KVCacheArgs, SDPAArgs
 from keys_values.finetune.batch_transform import BatchTransformFactory
 from keys_values.finetune.longcontext_full import (
@@ -588,127 +588,3 @@ def store_eval_metrics(
         writer.writerow(fieldnames)
         for idx, loss in zip(batch[ORIG_IDX_NAME], loss_values):
             writer.writerow([idx, task, loss.item()])
-
-
-def _debug_compare_dicts(
-    a: Dict[str, torch.Tensor],
-    b: Dict[str, torch.Tensor],
-    sort_key: Optional[Callable[[str], Any]] = None,
-    verbose: bool = False,
-):
-    a_names = set(a.keys())
-    b_names = set(b.keys())
-    diff_ab = a_names - b_names
-    if diff_ab:
-        raise ValueError(f"Names in A, not in B: {diff_ab}")
-    diff_ba = b_names - a_names
-    if diff_ba:
-        raise ValueError(f"Names in B, not in A: {diff_ba}")
-    for name in sorted(a_names, key=sort_key):
-        try:
-            if verbose:
-                print("    " + name)
-            torch.testing.assert_close(a[name], b[name])
-        except AssertionError as e:
-            print(f"Significant differences A vs B for {name}")
-            raise e
-
-
-# Keys in debug_intermediates are:
-#   forward_wte_{start}:{end}
-#   forward_block{block_idx}_{start}:{end}_{rel_start}:{rel_end}
-#   forward_loss_{start}:{end}_{rel_start}:{rel_end}
-
-REGEX_FORW_WTE = re.compile(r"forward_wte_(\d+):\d+$")
-
-REGEX_FORW_BLOCK = re.compile(r"forward_block(\d+)_(\d+):\d+_(\d+):\d+$")
-
-REGEX_FORW_LOSS = re.compile(r"forward_loss_(\d+):\d+_(\d+):\d+$")
-
-
-def sort_key_debug_intermediates(name: str) -> Tuple[int, int, int, int]:
-    m = REGEX_FORW_WTE.match(name)
-    if m:
-        return 0, int(m.group(1)), 0, 0
-    m = REGEX_FORW_BLOCK.match(name)
-    if m:
-        return 1, int(m.group(1)), int(m.group(2)), int(m.group(3))
-    m = REGEX_FORW_LOSS.match(name)
-    if m:
-        return 2, int(m.group(1)), int(m.group(2)), 0
-    raise ValueError(f"Invalid name: {name}")
-
-
-def debug_store_or_compare_state(
-    batch: Dict[str, Any],
-    loss_values: torch.Tensor,
-    gpt_state_dict: Dict[str, torch.Tensor],
-    head_state_dict: Dict[str, torch.Tensor],
-    eval_metrics_path: Path,
-    debug_intermediates: Optional[Dict[str, torch.Tensor]] = None,
-):
-    state_path = eval_metrics_path.parent / (eval_metrics_path.stem + ".pth")
-    do_compare = state_path.exists()
-    cpu_device = torch.device("cpu")
-    state = {
-        INPUT_IDS_NAME: batch[INPUT_IDS_NAME].to(cpu_device),
-        "targets": batch["targets"].to(cpu_device),
-        "gpt_state_dict": gpt_state_dict,
-        "head_state_dict": head_state_dict,
-        "loss_values": loss_values.to(cpu_device),
-    }
-    if debug_intermediates is not None:
-        state["intermediates"] = debug_intermediates
-    if not do_compare:
-        print(f"DEBUG: Storing state to {state_path}")
-        if "intermediates" in state:
-            print("       [also intermediates]")
-        torch.save(state, state_path)
-    else:
-        print(f"DEBUG: Loading A state from {state_path}")
-        comp_state = torch.load(state_path, map_location=cpu_device)
-        for name in (
-            INPUT_IDS_NAME,
-            "targets",
-            "gpt_state_dict",
-            "head_state_dict",
-            "loss_values",
-        ):
-            if name not in comp_state:
-                raise IndexError(f"A state does not contain {name} field")
-        do_intermediates = (
-            debug_intermediates is not None and "intermediates" in comp_state
-        )
-        if debug_intermediates is not None and not do_intermediates:
-            print(
-                "DEBUG: WARNING: State A does not contain debug_intermediates, so cannot compare them"
-            )
-        print("DEBUG: Comparing A state against current state (B):")
-        a_data = {
-            INPUT_IDS_NAME: comp_state[INPUT_IDS_NAME],
-            "targets": comp_state["targets"],
-        }
-        b_data = {
-            INPUT_IDS_NAME: state[INPUT_IDS_NAME],
-            "targets": state["targets"],
-        }
-        dict_tuples = [
-            ("data_batch", a_data, b_data, None),
-            ("gpt_state_dict", comp_state["gpt_state_dict"], state["gpt_state_dict"], None),
-            (
-                "head_state_dict",
-                comp_state["head_state_dict"],
-                state["head_state_dict"],
-                None,
-            ),
-        ]
-        if do_intermediates:
-            dict_tuples.append(
-                ("intermediates", comp_state["intermediates"], state["intermediates"], sort_key_debug_intermediates),
-            )
-        for name, a_dict, b_dict, sort_key in dict_tuples:
-            print(f"Comparing {name} dictionaries:")
-            _debug_compare_dicts(a_dict, b_dict, sort_key, verbose=True)
-        if do_intermediates:
-            print("Comparing loss_values:")
-            torch.testing.assert_close(comp_state["loss_values"], state["loss_values"])
