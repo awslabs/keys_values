@@ -56,7 +56,6 @@ The goal of this approach is to move weight updates into a separate matrix which
 two matrices of a lower rank.
 """
 from dataclasses import dataclass
-import math
 from typing import Any, Dict, Optional, Tuple, Union, Type
 from typing_extensions import Self
 
@@ -127,10 +126,8 @@ class LoRALinear(BaseLoRALinear):
     # LoRA implemented in a dense layer
     def __init__(
         self,
-        # ↓ this part is for pretrained weights
         in_features: int,
         out_features: int,
-        # ↓ the remaining part is for LoRA
         r: int = 0,
         lora_alpha: int = 1,
         lora_dropout: float = 0.0,
@@ -192,16 +189,22 @@ class LoRALinear(BaseLoRALinear):
 
                 weight = self.linear.weight
                 # dequantize the pretrained weights
-                weight_data = bnb.functional.dequantize_4bit(weight.data, weight.quant_state).to(lora_data.dtype)
+                weight_data = bnb.functional.dequantize_4bit(
+                    weight.data, weight.quant_state
+                ).to(lora_data.dtype)
                 # add pretrained and LoRA weights
                 weight_data += lora_data
                 # assign updated weights and quantize by moving to CUDA device
-                self.linear.weight = bnb.nn.Params4bit(weight_data, requires_grad=False, **weight.__dict__)
+                self.linear.weight = bnb.nn.Params4bit(
+                    weight_data, requires_grad=False, **weight.__dict__
+                )
                 self.linear.weight.cuda(weight.device)
             else:
                 # self.linear might be on CPU and lora_data on CUDA
                 # the inplace add will preserve the dtype of linear.weight
-                self.linear.weight.data += lora_data.to(device=self.linear.weight.data.device)
+                self.linear.weight.data += lora_data.to(
+                    device=self.linear.weight.data.device
+                )
             self.merged = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -210,7 +213,11 @@ class LoRALinear(BaseLoRALinear):
         pretrained = self.linear(x)
         if self.r == 0 or self.merged:
             return pretrained
-        lora = (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
+        lora = (
+            self.lora_dropout(x)
+            @ self.lora_A.transpose(0, 1)
+            @ self.lora_B.transpose(0, 1)
+        ) * self.scaling
         if self.rms_norm is not None:
             lora = self.rms_norm(lora)
         return pretrained + lora
@@ -240,12 +247,9 @@ def create_lora_linear(
 
 
 class LoRAQKVLinear(BaseLoRAQKVLinear):
-    # LoRA implemented in a dense layer
     def __init__(
         self,
-        # ↓ this part is for pretrained weights
         in_features: int,
-        # ↓ the remaining part is for LoRA
         head_size: int,
         n_head: int,
         n_query_groups: int,
@@ -281,7 +285,7 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
             use_rms_norm: See :class:`Config` above
 
         """
-        super(LoRALinear, self).__init__(
+        super(BaseLoRALinear, self).__init__(
             r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout
         )
         out_features = head_size * (n_head + 2 * n_query_groups)
@@ -294,12 +298,6 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
         assert len(enable_lora) == 3
         self.enable_lora = enable_lora
 
-        # Actual trainable parameters
-        # To better understand initialization let's imagine that we have such parameters:
-        # ⚬ in_features: 128 (embeddings_size)
-        # ⚬ out_features: 384 (3 * embedding_size)
-        # ⚬ r: 2
-        # ⚬ enable_lora: [True, False, True]
         self._all_qkv_shapes = (
             # if `head_size` is explicitly specified in the config, `n_embd` (or `in_features`)
             # might not be equal to `head_size * n_head`, thus we use it directly here
@@ -308,27 +306,16 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
             head_size * n_query_groups,
         )
         if r > 0 and any(enable_lora):
-            self.lora_A = nn.Parameter(
-                torch.empty((r * sum(enable_lora), in_features))
-            )  # (4, 128)
+            self.lora_A = nn.Parameter(torch.empty((r * sum(enable_lora), in_features)))
             # qkv_shapes will be used to split a tensor with weights correctly
             self.qkv_shapes = [
                 s for s, e in zip(self._all_qkv_shapes, enable_lora) if e
             ]
-            self.lora_B = nn.Parameter(
-                torch.empty(sum(self.qkv_shapes), r)
-            )  # (256, 2))
+            self.lora_B = nn.Parameter(torch.empty(sum(self.qkv_shapes), r))
             if use_rms_norm:
                 self.rms_norm = RMSNorm(size=self.linear.out_features)
             else:
                 self.rms_norm = None
-            # Notes about shapes above
-            # - self.lora_A has shape (4, 128): 4 because rank is 2 and LoRA is applied only to two matrices;
-            # 128 is the input size of the x (embedding size). (4, 128) and not (128, 4) because later on in
-            # F.linear function weights are automatically transposed. In addition conv1d requires channels to
-            # be before seq length
-            # - self.lora_B has shape (256, 2): 256 because LoRA is applied only to two matrices, so the output is
-            # 128*2; 2 tells to have two channels per group for group convolution
 
             # Scaling:
             # This balances the pretrained model`s knowledge and the new task-specific adaptation
@@ -345,15 +332,6 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         debug_intermediates = kwargs.get("debug_intermediates")
         do_debug = debug_intermediates is not None
-
-        # Let's assume that:
-        # ⚬ x: (64, 64, 128) or (batch_size, context_length, embedding_size)
-        # ⚬ self.linear.weight: (384, 128) or (3 * embedding_size, embedding_size)
-        # ⚬ self.lora_A.data: (4, 128)
-        # ⚬ self.lora_B.data: (256, 2)
-
-        # if weights are merged or LoRA is disabled (r <= 0 or all `enable_lora` are False) - it's only a regular nn.Linear forward pass;
-        # otherwise in addition do the forward pass with LoRA weights and add it's output to the output from pretrained weights
         pretrained = self.linear(x)
         if do_debug:
             debug_intermediates(
@@ -362,21 +340,12 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
             )
         if self.r == 0 or not any(self.enable_lora) or self.merged:
             return pretrained
-        after_A = F.linear(
-            self.lora_dropout(x), self.lora_A
-        )  # (64, 64, 128) @ (4, 128) -> (64, 64, 4)
-        # For F.conv1d:
-        # ⚬ input: input tensor of shape (mini-batch, in_channels, iW)
-        # ⚬ weight: filters of shape (out_channels, in_channels/groups, kW)
+        after_A = F.linear(self.lora_dropout(x), self.lora_A)
         after_B = self.conv1d(
-            after_A.transpose(-2, -1),  # (64, 64, 4) -> (64, 4, 64)
-            self.lora_B.unsqueeze(-1),  # (256, 2) -> (256, 2, 1)
-        ).transpose(
-            -2, -1
-        )  # (64, 4, 64) @ (256, 2, 1) -> (64, 256, 64) -> (64, 64, 256)
-        lora_mod = (
-            self.zero_pad(after_B) * self.scaling
-        )  # (64, 64, 256) after zero_pad (64, 64, 384)
+            after_A.transpose(-2, -1),
+            self.lora_B.unsqueeze(-1),
+        ).transpose(-2, -1)
+        lora_mod = self.zero_pad(after_B) * self.scaling
         if do_debug:
             debug_intermediates(
                 value=after_A,
@@ -540,7 +509,6 @@ class CausalSelfAttention(BaseCausalSelfAttention):
             lora_dropout=config.lora_dropout,
             enable_lora=(config.lora_query, config.lora_key, config.lora_value),
             bias=config.bias or config.attn_bias,
-            # for MQA/GQA support
             head_size=config.head_size,
             n_head=config.n_head,
             n_query_groups=config.n_query_groups,
