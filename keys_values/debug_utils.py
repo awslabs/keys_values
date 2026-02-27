@@ -283,7 +283,7 @@ def size_quantiles(x: torch.Tensor) -> str:
     return "|".join([f"{k:.2f}:{v:.2e}" for k, v in zip(QUANTILES, qvals_x)])
 
 
-MAX_NUM_CATCHES = 10
+MAX_NUM_CATCHES = 50
 
 
 def debug_compare_dicts(
@@ -324,9 +324,9 @@ def debug_compare_dicts(
                 if len(exc_caught) >= MAX_NUM_CATCHES:
                     break
         if exc_caught:
-            print(f"Caught {len(exc_caught)} exceptions:")
+            print(f"\nCaught {len(exc_caught)} exceptions:")
             for name, msg in exc_caught:
-                print(f"    [{name}]\n{msg}")
+                print(f"\n    [{name}]\n{msg}")
             raise rethrow_ex
 
 

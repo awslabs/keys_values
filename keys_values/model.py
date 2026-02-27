@@ -584,6 +584,11 @@ class CausalSelfAttention(nn.Module):
             * config.head_size,  # support for grouped/multi queries
             bias=config.bias or config.attn_bias,
         )
+
+        def qkv_apply(x: torch.Tensor, **kwargs) -> torch.Tensor:
+            return self.qkv(x)
+
+        self._qkv_apply = qkv_apply
         # output projection
         self.proj = nn.Linear(
             config.head_size * config.n_head, config.n_embd, bias=config.bias
@@ -663,7 +668,7 @@ class CausalSelfAttention(nn.Module):
 
         # Perform a single multiplication operation using a combined QKV matrix to calculate `query`, `key`, and `value`
         # instead of individually multiplying the input `x` with the respective weight matrices.
-        qkv = self.qkv(x)
+        qkv = self._qkv_apply(x, **forward_kwargs)
 
         # Define query, key and value sizes.
         # If grouped/multi query is enabled, these sizes are not equal (see the diagram above).
@@ -838,7 +843,7 @@ class RMSNorm(nn.Module):
         x = x.to(dtype=torch.float32)
         norm_x = vector_norm(x, dim=self.dim, keepdim=True) * self._factor
         x = x / (norm_x + self.eps)
-        weight = (1 + self.weight) if self.add_unit_offset else self.weight
+        weight = (self.weight + 1) if self.add_unit_offset else self.weight
         shape = [1] * x.ndim
         shape[self.dim] = -1
         return (x * weight.view(*shape)).to(dtype=dtype)
