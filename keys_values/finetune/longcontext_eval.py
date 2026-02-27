@@ -202,7 +202,9 @@ def setup(
         if lora_dropout < 0:
             raise ValueError(f"lora_dropout {lora_dropout}, must be non-negative")
         if model_config.config.lora_dropout != lora_dropout:
-            print(f"Changing config.lora_dropout from {model_config.config.lora_dropout} to {lora_dropout}")
+            print(
+                f"Changing config.lora_dropout from {model_config.config.lora_dropout} to {lora_dropout}"
+            )
         model_config.config.lora_dropout = lora_dropout
     # Base model checkpoint
     checkpoint_dir = auto_download_checkpoint(
