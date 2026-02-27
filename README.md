@@ -249,8 +249,22 @@ Basic arguments are:
   - `eval.micro_batch_size`: Local batch size to be bused for validation. Overrides
     `train.micro_batch_size`. This can often be larger, because evaluation needs
     less GPU memory than training.
+
+### Full Fine-tuning or LoRA
+
+A basic decision is whether to fine-tune all model weights (using
+`finetune_long_full`, `finetune_offload_full`) or only LoRA adapter weights
+(using `finetune_long_full`, `finetune_offload_full`). The latter needs much
+less memory for gradients and can work better for small datasets. When using
+LoRA, the following arguments are important:
+
+* `lora.kind`: Selects the LoRA type from `("default", "rms_norm", "dora")`.
+  Here, `default` is standard LoRA as implemented in `LitGPT`. `rms_norm` is
+  a modification
+  [suggested by Sebastian Raschka](https://github.com/rasbt/dora-from-scratch/blob/main/Using-LinearDoRA.ipynb).
+  `dora` is [DoRA](https://arxiv.org/abs/2402.09353).
 * `lora.*`: Only for `finetune_long_lora`, `finetune_offload_lora` modes.
-  Controls LoRA parameterization of  base model. This is taken from `LitGPT`
+  Controls LoRA parameterization of base model. This is taken from `LitGPT`
   without modification. Most important ones:
   - `lora.r`: Rank of LoRA parameterization. One axis of LoRA parameters have
     this size.

@@ -60,6 +60,7 @@ def setup(
         projection=False,
         mlp=False,
         head=False,
+        kind="default",
     ),
     eval: EvalArgs = EvalArgs(
         interval=100,
@@ -201,6 +202,7 @@ def setup(
     """
     setup_internal(
         False,
+        setup,
         checkpoint_dir,
         out_dir,
         precision,

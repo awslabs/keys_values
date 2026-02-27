@@ -21,7 +21,7 @@ import os
 import time
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any, Tuple, List
+from typing import Dict, Literal, Optional, Union, Any, Tuple, List, Callable
 
 import lightning as L
 from lightning.fabric.strategies import DDPStrategy
@@ -31,7 +31,6 @@ from torchmetrics import RunningMean
 
 from litgpt.args import TrainArgs
 from litgpt.data import DataModule
-from litgpt.lora import mark_only_lora_as_trainable
 from litgpt.prompts import save_prompt_style
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
@@ -45,7 +44,6 @@ from litgpt.utils import (
     get_default_supported_precision,
     init_out_dir,
     instantiate_torch_optimizer,
-    load_checkpoint,
     num_parameters,
     parse_devices,
     select_sft_generate_example,
@@ -58,7 +56,6 @@ from keys_values.attention_utils import (
 )
 from keys_values.config import Config as ConfigFull
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME, MyDataLoader
-from keys_values.data.base import LIT_MODEL_FNAME, HEAD_MODEL_FNAME
 from keys_values.flex_attention import FlexAttentionArgs
 from keys_values.finetune.args import (
     EvalArgs,
@@ -78,6 +75,7 @@ from keys_values.finetune.utils import (
     get_dataloaders,
     validate_args,
     save_model_checkpoint,
+    load_model_checkpoint,
     choose_logger,
     adapt_requires_grad,
     print_with_rank_and_timestamp,
@@ -106,7 +104,11 @@ from keys_values.long_context import (
     GPTAndHeadModel,
     LongContextInferenceModel,
 )
-from keys_values.lora import GPT as GPTLoRA, Config as ConfigLoRA
+from keys_values.lora import (
+    GPT as GPTLoRA,
+    Config as ConfigLoRA,
+    mark_only_lora_as_trainable,
+)
 from keys_values.model import GPT as GPTFull
 from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.optimize.model_factory import BlockComponentName
@@ -288,6 +290,7 @@ def setup(
     """
     setup_internal(
         False,
+        setup,
         checkpoint_dir,
         out_dir,
         precision,
@@ -324,6 +327,7 @@ def setup(
 
 def setup_internal(
     do_cpu_offload: bool,
+    original_setup: Callable,
     checkpoint_dir: Path,
     out_dir: Path,
     precision: Optional[str],
@@ -443,6 +447,7 @@ def setup_internal(
             lora_projection=lora.projection,
             lora_mlp=lora.mlp,
             lora_head=lora.head,
+            lora_kind=lora.kind,
         )
 
     precision = precision or get_default_supported_precision(training=True)
@@ -478,6 +483,7 @@ def setup_internal(
     fabric.launch(
         main,
         do_cpu_offload=do_cpu_offload,
+        original_setup=original_setup,
         devices=devices,
         num_nodes=num_nodes,
         resume=resume,
@@ -509,9 +515,23 @@ def setup_internal(
     )
 
 
+def create_gpt_model(
+    config: Union[ConfigFull, ConfigLoRA],
+    **mha_kwargs,
+) -> Union[GPTFull, GPTLoRA]:
+    if not isinstance(config, ConfigLoRA):
+        gpt_model = GPTFull(config, **mha_kwargs)
+    else:
+        gpt_model = GPTLoRA(config, **mha_kwargs)
+        mark_only_lora_as_trainable(gpt_model, lora_kind=config.lora_kind)
+    gpt_model.apply(gpt_model._init_weights)
+    return gpt_model
+
+
 def main(
     fabric: L.Fabric,
     do_cpu_offload: bool,
+    original_setup: Callable,
     devices: int,
     num_nodes: int,
     resume: Union[bool, Literal["auto"], Path],
@@ -593,37 +613,27 @@ def main(
         if do_cpu_offload:
             # We create the GPT model on the device, then copy. This is faster
             with torch.device(cpu_offload_device):
-                if not is_lora:
-                    gpt_model = GPTFull(config, **mha_kwargs)
-                else:
-                    gpt_model = GPTLoRA(config, **mha_kwargs)
+                gpt_model = create_gpt_model(config, **mha_kwargs)
                 head_model = HeadModelFactory.create(
                     name=head_model_name,
                     config=config,
                     data=data,
                     **head_model_kwargs,
                 )
-                gpt_model.apply(gpt_model._init_weights)
             gpt_model = gpt_model.to(optim_device)
             wrap_kwargs = dict(
                 cpu_offload_device=cpu_offload_device,
                 offload_num_devices=devices,
             )
         else:
-            if not is_lora:
-                gpt_model = GPTFull(config, **mha_kwargs)
-            else:
-                gpt_model = GPTLoRA(config, **mha_kwargs)
+            gpt_model = create_gpt_model(config, **mha_kwargs)
             head_model = HeadModelFactory.create(
                 name=head_model_name,
                 config=config,
                 data=data,
                 **head_model_kwargs,
             )
-            gpt_model.apply(gpt_model._init_weights)
             wrap_kwargs = dict()
-        if is_lora:
-            mark_only_lora_as_trainable(gpt_model)
         adapt_requires_grad(gpt_model, head_model)
         batch_size = train.micro_batch_size
         if eval.micro_batch_size is not None:
@@ -725,18 +735,12 @@ def main(
 
     resume = find_resume_path(resume, out_dir)
     if resume:
+        # TODO: Such checkpoints of all of `state` are never stored. Can
+        # restart from model checkpoints by passing them as `checkpoint_dir`
         print_message(f"Resuming training from {resume}", fabric)
         fabric.load(resume, state)
     else:
-        print_message(f"Loading model checkpoint: {checkpoint_dir}", fabric)
-        file_path = checkpoint_dir / LIT_MODEL_FNAME
-        # strict=False because missing keys due to LoRA weights not contained in state dict
-        load_checkpoint(fabric, model.gpt_model, file_path, strict=not is_lora)
-        # If there are head model weights, load them as well. Otherwise, we use
-        # random initialization (or the head model may not have weights)
-        file_path = checkpoint_dir / HEAD_MODEL_FNAME
-        if file_path.exists():
-            load_checkpoint(fabric, model.head_model, file_path, strict=True)
+        load_model_checkpoint(fabric, model, checkpoint_dir)
         check_for_nan_module_weights(model.gpt_model)
 
     if profile_grad_times > 0 and fabric.global_rank == 0:
@@ -754,6 +758,7 @@ def main(
     train_time = time.perf_counter()
     token_counts = fit(
         fabric=fabric,
+        original_setup=original_setup,
         state=state,
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
@@ -827,7 +832,7 @@ def main(
     if fabric.global_rank == 0:
         # Copy checkpoint files from original checkpoint dir
         copy_config_files(checkpoint_dir, save_dir)
-        save_hyperparameters(setup, save_dir)
+        save_hyperparameters(original_setup, save_dir)
         if hasattr(data, "prompt_style"):
             save_prompt_style(data.prompt_style, save_dir)
 
@@ -1038,6 +1043,7 @@ def create_baseline_model(
 
 def fit(
     fabric: L.Fabric,
+    original_setup: Callable,
     state: Dict[str, Any],
     train_dataloader: MyDataLoader,
     val_dataloader: MyDataLoader,
@@ -1495,7 +1501,7 @@ def fit(
             save_model_checkpoint(fabric, model, interval_dir)
             if fabric.global_rank == 0:
                 copy_config_files(checkpoint_dir, interval_dir)
-                save_hyperparameters(setup, interval_dir)
+                save_hyperparameters(original_setup, interval_dir)
                 if hasattr(data, "prompt_style"):
                     save_prompt_style(data.prompt_style, interval_dir)
 

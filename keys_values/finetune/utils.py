@@ -22,7 +22,11 @@ import torch
 from litgpt.args import TrainArgs
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
-from litgpt.utils import choose_logger as _choose_logger, instantiate_torch_optimizer
+from litgpt.utils import (
+    choose_logger as _choose_logger,
+    instantiate_torch_optimizer,
+    load_checkpoint,
+)
 
 from keys_values.data.base import (
     LIT_MODEL_FNAME,
@@ -169,7 +173,7 @@ def validate_args(train: TrainArgs, eval: EvalArgs) -> None:
 def is_lora_model(model: GPTAndHeadModel) -> bool:
     from keys_values.lora import GPT as GPTLoRA
 
-    return isinstance(model, GPTLoRA)
+    return isinstance(model.gpt_model, GPTLoRA)
 
 
 def save_model_checkpoint(
@@ -198,6 +202,37 @@ def save_model_checkpoint(
             fabric,
         )
         fabric.save(file_path, state={"model": model.head_model})
+
+
+def load_model_checkpoint(
+    fabric: L.Fabric,
+    model: GPTAndHeadModel,
+    file_dir: Path,
+) -> None:
+    """
+    If `model.gpt_model` is of LoRA type, we assume that the underlying base
+    model has already been loaded, and we only load the additional LoRA
+    parameters. If there is no file for these, we initialize the LoRA
+    parameters.
+
+    """
+    if not is_lora_model(model):
+        print_message(f"Loading full model checkpoint: {file_dir}", fabric)
+        file_path = file_dir / LIT_MODEL_FNAME
+        load_checkpoint(fabric, model.gpt_model, file_path, strict=True)
+    else:
+        file_path = file_dir / LORA_WEIGHTS_FNAME
+        if file_path.exists():
+            print_message("Loading LoRA weights checkpoint", fabric)
+            load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
+        else:
+            print_message("Reset/initialize LoRA weights", fabric)
+            model.gpt_model.reset_lora_parameters()
+    # If there are head model weights, load them as well. Otherwise, we use
+    # random initialization (or the head model may not have weights)
+    file_path = file_dir / HEAD_MODEL_FNAME
+    if file_path.exists():
+        load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
 
 def choose_logger(
