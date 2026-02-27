@@ -56,6 +56,7 @@ The goal of this approach is to move weight updates into a separate matrix which
 two matrices of a lower rank.
 """
 from dataclasses import dataclass
+import math
 from typing import Any, Dict, Optional, Tuple, Union, Type
 from typing_extensions import Self
 
@@ -65,9 +66,8 @@ import torch.nn.functional as F
 
 import litgpt
 from litgpt.lora import (
-    LoRALinear,
     LoRAQKVLinear as BaseLoRAQKVLinear,
-    create_lora_linear,
+    LoRALinear as BaseLoRALinear,
 )
 from litgpt.scripts.convert_hf_checkpoint import qkv_reassemble
 from litgpt.utils import map_old_state_dict_weights
@@ -75,9 +75,12 @@ from litgpt.utils import map_old_state_dict_weights
 from keys_values.attention import MultiHeadSelfAttention
 from keys_values.config import Config as BaseConfig
 from keys_values.kvcache.base import KVCache
-from keys_values.model import GPT as BaseModel
-from keys_values.model import Block as BaseBlock
-from keys_values.model import CausalSelfAttention as BaseCausalSelfAttention
+from keys_values.model import (
+    GPT as BaseModel,
+    Block as BaseBlock,
+    CausalSelfAttention as BaseCausalSelfAttention,
+    RMSNorm,
+)
 from keys_values.use_eager_kernel import transform_mha_kwargs
 from keys_values.utils import check_for_nan
 
@@ -85,6 +88,14 @@ from keys_values.utils import check_for_nan
 @dataclass
 class Config(BaseConfig):
     """
+    If `lora_use_rms_norm == True`, we modify the LoRA blocks in a way
+    suggested by Sebastian Raschka:
+
+    https://github.com/rasbt/dora-from-scratch/blob/main/Using-LinearDoRA.ipynb
+
+    He refers to this as DoRA, but the modification is simpler than the original
+    DoRA, runs faster, but may work less well.
+
     Args:
         lora_r: rank of the weight update matrices. To make sense of using LoRA the rank should be smaller than the rank of
             the weights of the model. The rank can be as low as 1: https://arxiv.org/pdf/2106.09685.pdf (section 7.2)
@@ -93,6 +104,7 @@ class Config(BaseConfig):
             https://arxiv.org/pdf/2106.09685.pdf (section 4.1)
         lora_dropout: dropout that is applied on the input in the LoRA branch (before multiplying by matrix A)
         lora_*: whether to apply LoRA to the specified weights or not
+        lora_use_rms_norm: See above
     """
 
     lora_r: int = 0
@@ -104,10 +116,127 @@ class Config(BaseConfig):
     lora_projection: bool = False
     lora_mlp: bool = False
     lora_head: bool = False
+    lora_use_rms_norm: bool = False
 
     @property
     def mlp_class(self) -> Type:
         return getattr(litgpt.lora, self.mlp_class_name)
+
+
+class LoRALinear(BaseLoRALinear):
+    # LoRA implemented in a dense layer
+    def __init__(
+        self,
+        # ↓ this part is for pretrained weights
+        in_features: int,
+        out_features: int,
+        # ↓ the remaining part is for LoRA
+        r: int = 0,
+        lora_alpha: int = 1,
+        lora_dropout: float = 0.0,
+        use_rms_norm: bool = False,
+        **kwargs: Any,
+    ):
+        """LoRA wrapper around linear class.
+
+        This class has three weight matrices:
+            1. Pretrained weights are stored as `self.linear.weight`
+            2. LoRA A matrix as `self.lora_A`
+            3. LoRA B matrix as `self.lora_B`
+        Only LoRA's A and B matrices are updated, pretrained weights stay frozen.
+
+        Args:
+            in_features: number of input features of the pretrained weights
+            out_features: number of output features of the pretrained weights
+            r: rank of the weight update matrices. To make sense of using LoRA the rank should be smaller than the rank of
+                the weights of the model. The rank can be as low as 1: https://arxiv.org/pdf/2106.09685.pdf (section 7.2)
+            lora_alpha: alpha is needed for scaling updates as alpha/r
+                "This scaling helps to reduce the need to retune hyperparameters when we vary r"
+                https://arxiv.org/pdf/2106.09685.pdf (section 4.1)
+            lora_dropout: dropout that is applied on the input in the LoRA branch (before multiplying by matrix A)
+            use_rms_norm: See :class:`Config` above
+
+        """
+        super().__init__(
+            in_features,
+            out_features,
+            r,
+            lora_alpha,
+            lora_dropout,
+            **kwargs,
+        )
+        if r > 0 and use_rms_norm:
+            self.rms_norm = RMSNorm(size=self.linear.out_features)
+        else:
+            self.rms_norm = None
+
+    def reset_parameters(self) -> None:
+        super().reset_parameters()
+        if self.use_rms_norm is not None:
+            self.rms_norm.reset_parameters()
+
+    def get_lora_AB(self) -> torch.Tensor:
+        """Return merged lora_A and lora_B matrices with the same shape as the pretrained weights."""
+        return (self.lora_B @ self.lora_A) * self.scaling
+
+    def merge(self) -> None:
+        """Merges the LoRA weights into the full-rank weights (W = W + delta_W)."""
+        if self.rms_norm is not None:
+            raise NotImplementedError("merge not implemented yet for use_rms_norm=True")
+        if self.r > 0 and not self.merged:
+            pretrained_dtype = self.linear.weight.data.dtype
+            lora_data = self.get_lora_AB()
+            # if only the pretrained are in quantized form - dequantize, sum with LoRA and quantize the result
+            if pretrained_dtype == torch.uint8:
+                import bitsandbytes as bnb
+
+                weight = self.linear.weight
+                # dequantize the pretrained weights
+                weight_data = bnb.functional.dequantize_4bit(weight.data, weight.quant_state).to(lora_data.dtype)
+                # add pretrained and LoRA weights
+                weight_data += lora_data
+                # assign updated weights and quantize by moving to CUDA device
+                self.linear.weight = bnb.nn.Params4bit(weight_data, requires_grad=False, **weight.__dict__)
+                self.linear.weight.cuda(weight.device)
+            else:
+                # self.linear might be on CPU and lora_data on CUDA
+                # the inplace add will preserve the dtype of linear.weight
+                self.linear.weight.data += lora_data.to(device=self.linear.weight.data.device)
+            self.merged = True
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # if weights are merged or rank is less or equal to zero (LoRA is disabled) - it's only a regular nn.Linear forward pass;
+        # otherwise in addition do the forward pass with LoRA weights and add it's output to the output from pretrained weights
+        pretrained = self.linear(x)
+        if self.r == 0 or self.merged:
+            return pretrained
+        lora = (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
+        if self.rms_norm is not None:
+            lora = self.rms_norm(lora)
+        return pretrained + lora
+
+
+def create_lora_linear(
+    config: Config,
+    in_size: int,
+    out_size: int,
+    bias: Optional[Union[float, bool]] = None,
+    use_r: Optional[bool] = None,
+    use_rms_norm: bool = False,
+) -> LoRALinear:
+    if bias is None:
+        bias = config.bias
+    if use_r is None:
+        use_r = config.lora_mlp
+    return LoRALinear(
+        in_size,
+        out_size,
+        bias=bias,
+        r=(config.lora_r if use_r else 0),
+        lora_alpha=config.lora_alpha,
+        lora_dropout=config.lora_dropout,
+        use_rms_norm=use_rms_norm,
+    )
 
 
 class LoRAQKVLinear(BaseLoRAQKVLinear):
@@ -124,6 +253,7 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
         lora_alpha: int = 1,
         lora_dropout: float = 0.0,
         enable_lora: Union[bool, Tuple[bool, bool, bool]] = False,
+        use_rms_norm: bool = False,
         **kwargs: Any,
     ):
         """LoRA wrapper around linear class that is used for calculation of q, k and v matrices.
@@ -148,6 +278,8 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
             enable_lora: MergeLinear class is for attention mechanism where qkv are calculated with a single weight matrix. If we
                 don't want to apply LoRA we can set it as False. For example if we want to apply LoRA only to `query`
                 and `value` but keep `key` without weight updates we should pass `[True, False, True]`
+            use_rms_norm: See :class:`Config` above
+
         """
         super(LoRALinear, self).__init__(
             r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout
@@ -186,6 +318,10 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
             self.lora_B = nn.Parameter(
                 torch.empty(sum(self.qkv_shapes), r)
             )  # (256, 2))
+            if use_rms_norm:
+                self.rms_norm = RMSNorm(size=self.linear.out_features)
+            else:
+                self.rms_norm = None
             # Notes about shapes above
             # - self.lora_A has shape (4, 128): 4 because rank is 2 and LoRA is applied only to two matrices;
             # 128 is the input size of the x (embedding size). (4, 128) and not (128, 4) because later on in
@@ -238,7 +374,7 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
         ).transpose(
             -2, -1
         )  # (64, 4, 64) @ (256, 2, 1) -> (64, 256, 64) -> (64, 64, 256)
-        lora = (
+        lora_mod = (
             self.zero_pad(after_B) * self.scaling
         )  # (64, 64, 256) after zero_pad (64, 64, 384)
         if do_debug:
@@ -251,10 +387,17 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
                 postfix="_attn_qkv_after_b",
             )
             debug_intermediates(
-                value=lora,
+                value=lora_mod,
                 postfix="_attn_qkv_lora",
             )
-        return pretrained + lora
+        if self.rms_norm is not None:
+            lora_mod = self.rms_norm(lora_mod)
+            if do_debug:
+                debug_intermediates(
+                    value=lora_mod,
+                    postfix="_attn_qkv_dora",
+                )
+        return pretrained + lora_mod
 
     def check_for_nan(
         self,
@@ -296,6 +439,8 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
 
     def reset_parameters(self):
         super().reset_parameters()
+        if self.rms_norm is not None:
+            self.rms_norm.reset_parameters()
         self.check_for_nan()
 
 
@@ -312,6 +457,7 @@ class GPT(BaseModel):
             config.padded_vocab_size,
             bias=config.lm_head_bias,
             use_r=config.lora_head,
+            use_rms_norm=config.lora_use_rms_norm,
         )
         self.transformer = nn.ModuleDict(
             dict(
@@ -398,6 +544,7 @@ class CausalSelfAttention(BaseCausalSelfAttention):
             head_size=config.head_size,
             n_head=config.n_head,
             n_query_groups=config.n_query_groups,
+            use_rms_norm=config.lora_use_rms_norm,
         )
 
         def qkv_apply(x: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -410,6 +557,7 @@ class CausalSelfAttention(BaseCausalSelfAttention):
             config.head_size * config.n_head,
             config.n_embd,
             use_r=config.lora_projection,
+            use_rms_norm=config.lora_use_rms_norm,
         )
 
     def _load_from_state_dict(
