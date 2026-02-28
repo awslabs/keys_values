@@ -55,7 +55,6 @@ from litgpt.utils import _RunIf
 
 from keys_values.lora import (
     GPT as LoRAGPT,
-    CausalSelfAttention,
     Config,
     CausalSelfAttention as LoRACausalSelfAttention,
     mark_only_lora_as_trainable,
@@ -80,7 +79,7 @@ def test_lora_layer_replacement():
     assert isinstance(model.transformer.h[0].attn, LoRACausalSelfAttention)
     assert isinstance(model.transformer.h[1].attn, LoRACausalSelfAttention)
     assert isinstance(model.lm_head, LoRALinear)
-    assert isinstance(model.transformer.h[0].mlp.proj, LoRALinear)
+    assert isinstance(model.transformer.h[0].mlp.proj, LoRALinear), (type(model.transformer.h[0].mlp.proj),)
 
 
 def test_lora_merge():
@@ -1087,7 +1086,7 @@ def test_load_legacy_state_dict():
         lora_dropout=0.1,
     )
 
-    attention_1 = CausalSelfAttention(config=config, block_idx=0)
+    attention_1 = LoRACausalSelfAttention(config=config, block_idx=0)
 
     # make weights to be as-like in a legacy checkpoint, with `attn.attn.weight` instead of `attn.qkv.weight`
     # and make them interleaved
@@ -1099,7 +1098,7 @@ def test_load_legacy_state_dict():
         state_dict.pop("qkv.linear.bias"), config
     )
 
-    attention_2 = CausalSelfAttention(config=config, block_idx=0)
+    attention_2 = LoRACausalSelfAttention(config=config, block_idx=0)
     attention_2.load_state_dict(state_dict)
 
 

@@ -117,7 +117,7 @@ class LoRALinear(BaseLoRALinear):
 
     def reset_parameters(self) -> None:
         super().reset_parameters()
-        if self.use_rms_norm is not None:
+        if hasattr(self, "rms_norm") and self.rms_norm is not None:
             self.rms_norm.reset_parameters()
 
     def get_lora_AB(self) -> torch.Tensor:

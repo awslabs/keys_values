@@ -24,6 +24,7 @@ from litgpt.lora import mark_only_lora_as_trainable as litgpt_mark_only_lora_as_
 from litgpt.scripts.convert_hf_checkpoint import qkv_reassemble
 from litgpt.utils import map_old_state_dict_weights
 
+import keys_values
 from keys_values.attention import MultiHeadSelfAttention
 from keys_values.config import Config as BaseConfig
 from keys_values.dora_utils import DoRALinear, DoRAQKVLinear, DORA_SCALES_NAME
@@ -74,7 +75,7 @@ class Config(BaseConfig):
 
     @property
     def mlp_class(self) -> Type:
-        return getattr(litgpt.lora, self.mlp_class_name)
+        return getattr(keys_values.lora, self.mlp_class_name)
 
 
 def create_lora_linear(
@@ -83,7 +84,6 @@ def create_lora_linear(
     out_size: int,
     bias: Optional[Union[float, bool]] = None,
     use_r: Optional[bool] = None,
-    use_rms_norm: bool = False,
 ) -> LoRALinear:
     if bias is None:
         bias = config.bias
@@ -96,7 +96,7 @@ def create_lora_linear(
         r=(config.lora_r if use_r else 0),
         lora_alpha=config.lora_alpha,
         lora_dropout=config.lora_dropout,
-        use_rms_norm=use_rms_norm,
+        use_rms_norm=config.lora_kind == "rms_norm",
     )
 
 
@@ -122,24 +122,39 @@ def create_dora_linear(
     )
 
 
-def create_lm_head(config: Config) -> nn.Module:
-    if config.lora_kind != "dora":
-        return create_lora_linear(
-            config,
-            config.n_embd,
-            config.padded_vocab_size,
-            bias=config.lm_head_bias,
-            use_r=config.lora_head,
-            use_rms_norm=config.lora_kind == "rms_norm",
-        )
-    else:
+def create_lora_or_dora_linear(
+    config: Config,
+    in_size: int,
+    out_size: int,
+    bias: Optional[Union[float, bool]] = None,
+    use_r: Optional[bool] = None,
+):
+    if config.lora_kind == "dora":
         return create_dora_linear(
             config,
-            config.n_embd,
-            config.padded_vocab_size,
-            bias=config.lm_head_bias,
-            use_r=config.lora_head,
+            in_size,
+            out_size,
+            bias=bias,
+            use_r=use_r,
         )
+    else:
+        return create_lora_linear(
+            config,
+            in_size,
+            out_size,
+            bias=bias,
+            use_r=use_r,
+        )
+
+
+def create_lm_head(config: Config) -> nn.Module:
+    return create_lora_or_dora_linear(
+        config,
+        config.n_embd,
+        config.padded_vocab_size,
+        bias=config.lm_head_bias,
+        use_r=config.lora_head,
+    )
 
 
 class GPT(BaseModel):
@@ -234,14 +249,6 @@ def create_qkv_and_proj(
 
         def qkv_apply(x: torch.Tensor, **kwargs) -> torch.Tensor:
             return qkv(x, **kwargs)
-
-        proj = create_lora_linear(
-            config,
-            config.head_size * config.n_head,
-            config.n_embd,
-            use_r=config.lora_projection,
-            use_rms_norm=use_rms_norm,
-        )
     else:
         qkv = DoRAQKVLinear(
             in_features=config.n_embd,
@@ -256,13 +263,12 @@ def create_qkv_and_proj(
 
         def qkv_apply(x: torch.Tensor, **kwargs) -> torch.Tensor:
             return qkv(x)
-
-        proj = create_dora_linear(
-            config,
-            config.head_size * config.n_head,
-            config.n_embd,
-            use_r=config.lora_projection,
-        )
+    proj = create_lora_or_dora_linear(
+        config,
+        config.head_size * config.n_head,
+        config.n_embd,
+        use_r=config.lora_projection,
+    )
 
     return qkv, qkv_apply, proj
 
@@ -316,3 +322,69 @@ def mark_only_lora_as_trainable(
         for name, param in model.named_parameters():
             if DORA_SCALES_NAME in name:
                 param.requires_grad = True
+
+
+class GptNeoxMLP(litgpt.model.GptNeoxMLP):
+    def __init__(self, config: Config) -> None:
+        nn.Module.__init__(self)
+        self.fc = create_lora_or_dora_linear(config, config.n_embd, config.intermediate_size)
+        self.proj = create_lora_or_dora_linear(config, config.intermediate_size, config.n_embd)
+        self.config = config
+
+    def _load_from_state_dict(self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any) -> None:
+        """For compatibility with base checkpoints."""
+        mapping = {
+            "fc.weight": "fc.linear.weight",
+            "fc.bias": "fc.linear.bias",
+            "proj.weight": "proj.linear.weight",
+            "proj.bias": "proj.linear.bias",
+        }
+        state_dict = map_old_state_dict_weights(state_dict, mapping, prefix)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+
+class LLaMAMLP(litgpt.model.LLaMAMLP):
+    def __init__(self, config: Config, intermediate_size: Optional[int] = None) -> None:
+        nn.Module.__init__(self)
+        self.intermediate_size = intermediate_size or config.intermediate_size
+        self.fc_1 = create_lora_or_dora_linear(config, config.n_embd, self.intermediate_size)
+        self.fc_2 = create_lora_or_dora_linear(config, config.n_embd, self.intermediate_size)
+        self.proj = create_lora_or_dora_linear(config, self.intermediate_size, config.n_embd)
+        self.config = config
+
+    def _load_from_state_dict(self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any) -> None:
+        """For compatibility with base checkpoints."""
+        mapping = {
+            "fc_1.weight": "fc_1.linear.weight",
+            "fc_1.bias": "fc_1.linear.bias",
+            "fc_2.weight": "fc_2.linear.weight",
+            "fc_2.bias": "fc_2.linear.bias",
+            "proj.weight": "proj.linear.weight",
+            "proj.bias": "proj.linear.bias",
+        }
+        state_dict = map_old_state_dict_weights(state_dict, mapping, prefix)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+
+class GemmaMLP(LLaMAMLP):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_fc_1 = self.fc_1(x)
+        x_fc_2 = self.fc_2(x)
+        x = torch.nn.functional.gelu(x_fc_1, approximate=self.config.gelu_approximate) * x_fc_2
+        return self.proj(x)
+
+
+class LLaMAMoE(litgpt.model.LLaMAMoE):
+    def __init__(self, config: Config) -> None:
+        nn.Module.__init__(self)
+        self.gate = create_lora_or_dora_linear(config, config.n_embd, config.n_expert, bias=False)
+        self.experts = nn.ModuleList(
+            LLaMAMLP(config, intermediate_size=config.moe_intermediate_size) for _ in range(config.n_expert)
+        )
+        self.config = config
+
+    def _load_from_state_dict(self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any) -> None:
+        """For compatibility with base checkpoints."""
+        mapping = {"gate.weight": "gate.linear.weight"}
+        state_dict = map_old_state_dict_weights(state_dict, mapping, prefix)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
