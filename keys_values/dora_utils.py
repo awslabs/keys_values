@@ -86,6 +86,7 @@ class DoRALinear(LoRALinear):
         eps: float = 1e-9,
         **kwargs,
     ):
+        self._eps = eps
         super().__init__(
             in_features,
             out_features,
@@ -96,7 +97,6 @@ class DoRALinear(LoRALinear):
         )
         if self.linear.weight.data.dtype == torch.uint8:
             raise NotImplementedError("DoRA does not support quantized weights")
-        self._eps = eps
         if r > 0:
             self.lora_scales = nn.Parameter(self._init_scales())
         else:
@@ -107,7 +107,9 @@ class DoRALinear(LoRALinear):
 
     def reset_parameters(self) -> None:
         super().reset_parameters()
-        self.lora_scales.data[:] = self._init_scales()
+        if hasattr(self, "lora_scales") and self.lora_scales is not None:
+            self.lora_scales.data[:] = self._init_scales()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         do_lora = not(self.r == 0 or self.merged)
         return dora_forward(
@@ -143,6 +145,7 @@ class DoRAQKVLinear(LoRAQKVLinear):
         eps: float = 1e-9,
         **kwargs,
     ):
+        self._eps = eps
         super().__init__(
             in_features,
             head_size,
@@ -157,7 +160,6 @@ class DoRAQKVLinear(LoRAQKVLinear):
         )
         if self.linear.weight.data.dtype == torch.uint8:
             raise NotImplementedError("DoRA does not support quantized weights")
-        self._eps = eps
         if r > 0 and any(self.enable_lora):
             self.lora_scales = nn.Parameter(self._init_scales())
         else:
@@ -168,7 +170,8 @@ class DoRAQKVLinear(LoRAQKVLinear):
 
     def reset_parameters(self) -> None:
         super().reset_parameters()
-        self.lora_scales.data[:] = self._init_scales()
+        if hasattr(self, "lora_scales") and self.lora_scales is not None:
+            self.lora_scales.data[:] = self._init_scales()
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         do_lora = self.lora_scales is not None and not self.merged
