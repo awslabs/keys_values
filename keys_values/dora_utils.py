@@ -22,7 +22,8 @@ import torch.nn.functional as F
 from keys_values.lora_utils import LoRALinear, LoRAQKVLinear
 
 
-DORA_SCALES_NAME = "dora_scales"
+# Note: The prefix "lora_" is used elsewhere to single out LoRA parameters:
+DORA_SCALES_NAME = "lora_scales"
 
 
 def row_lengths(x: torch.Tensor, eps: float) -> torch.Tensor:
@@ -97,23 +98,23 @@ class DoRALinear(LoRALinear):
             raise NotImplementedError("DoRA does not support quantized weights")
         self._eps = eps
         if r > 0:
-            self.dora_scales = nn.Parameter(self._init_scales())
+            self.lora_scales = nn.Parameter(self._init_scales())
         else:
-            self.dora_scales = None
+            self.lora_scales = None
 
     def _init_scales(self) -> torch.Tensor:
         return row_lengths(self.linear.weight.data, self._eps)
 
     def reset_parameters(self) -> None:
         super().reset_parameters()
-        self.dora_scales.data[:] = self._init_scales()
+        self.lora_scales.data[:] = self._init_scales()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         do_lora = not(self.r == 0 or self.merged)
         return dora_forward(
             x=x,
             linear=self.linear,
             lora_ab=self.get_lora_AB() if do_lora else None,
-            scales=self.dora_scales,
+            scales=self.lora_scales,
             eps=self._eps,
         )
 
@@ -123,7 +124,7 @@ class DoRALinear(LoRALinear):
             dora_merge(
                 linear=self.linear,
                 lora_ab=self.get_lora_AB(),
-                scales=self.dora_scales,
+                scales=self.lora_scales,
                 eps=self._eps,
             )
             self.merged = True
@@ -158,34 +159,34 @@ class DoRAQKVLinear(LoRAQKVLinear):
             raise NotImplementedError("DoRA does not support quantized weights")
         self._eps = eps
         if r > 0 and any(self.enable_lora):
-            self.dora_scales = nn.Parameter(self._init_scales())
+            self.lora_scales = nn.Parameter(self._init_scales())
         else:
-            self.dora_scales = None
+            self.lora_scales = None
 
     def _init_scales(self) -> torch.Tensor:
         return row_lengths(self.linear.weight.data, self._eps)
 
     def reset_parameters(self) -> None:
         super().reset_parameters()
-        self.dora_scales.data[:] = self._init_scales()
+        self.lora_scales.data[:] = self._init_scales()
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        do_lora = self.dora_scales is not None and not self.merged
+        do_lora = self.lora_scales is not None and not self.merged
         return dora_forward(
             x=x,
             linear=self.linear,
             lora_ab=self.get_lora_AB() if do_lora else None,
-            scales=self.dora_scales,
+            scales=self.lora_scales,
             eps=self._eps,
         )
 
     def merge(self) -> None:
         """Merges the DoRA weights into the full-rank weights (W = W + delta_W)."""
-        if self.dora_scales is not None and not self.merged:
+        if self.lora_scales is not None and not self.merged:
             dora_merge(
                 linear=self.linear,
                 lora_ab=self.get_lora_AB(),
-                scales=self.dora_scales,
+                scales=self.lora_scales,
                 eps=self._eps,
             )
             self.merged = True

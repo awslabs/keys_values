@@ -484,6 +484,18 @@ def setup_internal(
     )
 
 
+def create_gpt_model(
+    config: Union[ConfigFull, ConfigLoRA], **mha_kwargs,
+) -> Union[GPTFull, GPTLoRA]:
+    if not isinstance(config, ConfigLoRA):
+        gpt_model = GPTFull(config, **mha_kwargs)
+    else:
+        gpt_model = GPTLoRA(config, **mha_kwargs)
+        mark_only_lora_as_trainable(gpt_model, lora_kind=config.lora_kind)
+    gpt_model.apply(gpt_model._init_weights)
+    return gpt_model
+
+
 def main(
     fabric: L.Fabric,
     do_cpu_offload: bool,
@@ -567,37 +579,27 @@ def main(
         if do_cpu_offload:
             # We create the GPT model on the device, then copy. This is faster
             with torch.device(cpu_offload_device):
-                if not is_lora:
-                    gpt_model = GPTFull(config, **mha_kwargs)
-                else:
-                    gpt_model = GPTLoRA(config, **mha_kwargs)
+                gpt_model = create_gpt_model(config, **mha_kwargs)
                 head_model = HeadModelFactory.create(
                     name=head_model_name,
                     config=config,
                     data=data,
                     **head_model_kwargs,
                 )
-                gpt_model.apply(gpt_model._init_weights)
             gpt_model = gpt_model.to(optim_device)
             wrap_kwargs = dict(
                 cpu_offload_device=cpu_offload_device,
                 offload_num_devices=devices,
             )
         else:
-            if not is_lora:
-                gpt_model = GPTFull(config, **mha_kwargs)
-            else:
-                gpt_model = GPTLoRA(config, **mha_kwargs)
+            gpt_model = create_gpt_model(config, **mha_kwargs)
             head_model = HeadModelFactory.create(
                 name=head_model_name,
                 config=config,
                 data=data,
                 **head_model_kwargs,
             )
-            gpt_model.apply(gpt_model._init_weights)
             wrap_kwargs = dict()
-        if is_lora:
-            mark_only_lora_as_trainable(gpt_model, lora_kind=config.lora_kind)
         adapt_requires_grad(gpt_model, head_model)
         batch_size = train.micro_batch_size
         if eval.micro_batch_size is not None:
