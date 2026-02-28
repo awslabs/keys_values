@@ -60,6 +60,7 @@ def setup(
         projection=False,
         mlp=False,
         head=False,
+        kind="default",
     ),
     eval: EvalArgs = EvalArgs(
         interval=100,

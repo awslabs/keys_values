@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any, List, Literal
 
 from litgpt.args import EvalArgs as _EvalArgs
 
@@ -66,7 +66,6 @@ class KVCacheArgs:
             this number of last recently inserted tokens are not evicted.
         init_grace_tokens: Only for `lastrec` cache policy. KV information for
             the first `init_grace_tokens` is not evicted.
-
     """
 
     name: str
@@ -166,7 +165,6 @@ class GradientArgs:
             uses quantization. We quantize / dequantize checkpoints in chunks
             of this length (along sequence axis). Larger values require more
             GPU memory.
-
     """
 
     layers_per_cell: int = 1
@@ -249,7 +247,6 @@ class OptimizerArgs:
         adam_betas: `(beta1, beta2)`, only for Adam optimizers
         adadelta_rho: Rho constant (Adadelta only)
         rmspprop_alpha: Alpha constant (RMSprop only)
-
     """
 
     name: Optional[str] = None
@@ -319,10 +316,20 @@ class OptimizerArgs:
 class LoRAARgs:
     """Command line arguments for LoRA fine-tuning
 
+    With `kind`, a number of variants of LoRA can be chosen:
+
+    * "default": Standard LoRA as implemented in `LitGPT`.
+    * "rms_norm": Modification suggested by Sebastian Raschka:
+        https://github.com/rasbt/dora-from-scratch/blob/main/Using-LinearDoRA.ipynb
+        He calls this DoRA, but the modification is simpler, runs faster, but
+        may work less well.
+    * "dora": DoRA, see :class:`keys_values.dora_utils.DoRALinear`. Note that
+        `lora_dropout` is ignored for this variant
+
     Args:
         r: LoRA rank
         alpha: LoRA alpha
-        dropout: LoRA dropout value
+        dropout: LoRA dropout value (not if `kind == "dora"`)
         query: Whether to apply LoRA to the query weights in attention
         key: Whether to apply LoRA to the key weights in attention
         value: Whether to apply LoRA to the value weights in attention
@@ -331,7 +338,7 @@ class LoRAARgs:
         mlp: Whether to apply LoRA to the weights of the MLP in the attention
             block.
         head: Whether to apply LoRA to linear output weights in the head.
-
+        kind: See above. Defaults to "default".
     """
 
     r: int = 8
@@ -343,6 +350,7 @@ class LoRAARgs:
     projection: bool = False
     mlp: bool = False
     head: bool = False
+    kind: Literal["default", "rms_norm", "dora"] = "default"
 
 
 @dataclass
@@ -353,7 +361,6 @@ class EvalArgs(_EvalArgs):
     Args:
         micro_batch_size: If given, this overrides `train.micro_batch_size`
             for evaluation
-
     """
 
     micro_batch_size: Optional[int] = None
@@ -376,7 +383,6 @@ class SDPAArgs:
         flex_extend_kv: If `True`, we apply `repeat_interleave` to
             `key, value` to avoid the GQA case. This may be needed to get
             around bugs in `flex_attention`.
-
     """
 
     flex_attention: bool = True

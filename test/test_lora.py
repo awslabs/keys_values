@@ -43,7 +43,6 @@ from litgpt.args import EvalArgs, TrainArgs
 from litgpt.data import Alpaca
 from litgpt.lora import (
     lora_filter,
-    mark_only_lora_as_trainable,
     merge_lora_weights,
 )
 from litgpt.scripts.convert_hf_checkpoint import (
@@ -58,10 +57,10 @@ from keys_values.lora import (
     GPT as LoRAGPT,
     CausalSelfAttention,
     Config,
-    LoRALinear,
-    LoRAQKVLinear,
     CausalSelfAttention as LoRACausalSelfAttention,
+    mark_only_lora_as_trainable,
 )
+from keys_values.lora_utils import LoRALinear, LoRAQKVLinear
 from keys_values.model import GPT as BaseGPT
 
 

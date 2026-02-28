@@ -24,7 +24,6 @@ from lightning.fabric.strategies import DDPStrategy
 import yaml
 
 from litgpt.data import DataModule
-from litgpt.lora import mark_only_lora_as_trainable
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     auto_download_checkpoint,
@@ -65,7 +64,11 @@ from keys_values.head_model_factory import HeadModelFactory
 from keys_values.long_context import (
     LongContextInferenceModel,
 )
-from keys_values.lora import GPT as GPTLoRA, Config as ConfigLoRA
+from keys_values.lora import (
+    GPT as GPTLoRA,
+    Config as ConfigLoRA,
+    mark_only_lora_as_trainable,
+)
 from keys_values.model import GPT as GPTFull
 from keys_values.utils import (
     flush_io_streams,
@@ -359,7 +362,9 @@ def main(
                 **model_config.head_model_kwargs,
             )
         if is_lora:
-            mark_only_lora_as_trainable(gpt_model)
+            mark_only_lora_as_trainable(
+                gpt_model, lora_kind=model_config.config.lora_kind,
+            )
         adapt_requires_grad(gpt_model, head_model)
         # DEBUG:
         # def debug_intermediates_predicate(

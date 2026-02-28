@@ -31,7 +31,6 @@ from torchmetrics import RunningMean
 
 from litgpt.args import TrainArgs
 from litgpt.data import DataModule
-from litgpt.lora import mark_only_lora_as_trainable
 from litgpt.prompts import save_prompt_style
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
@@ -105,7 +104,11 @@ from keys_values.long_context import (
     GPTAndHeadModel,
     LongContextInferenceModel,
 )
-from keys_values.lora import GPT as GPTLoRA, Config as ConfigLoRA
+from keys_values.lora import (
+    GPT as GPTLoRA,
+    Config as ConfigLoRA,
+    mark_only_lora_as_trainable,
+)
 from keys_values.model import GPT as GPTFull
 from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.optimize.model_factory import BlockComponentName
@@ -415,6 +418,7 @@ def setup_internal(
             lora_projection=lora.projection,
             lora_mlp=lora.mlp,
             lora_head=lora.head,
+            lora_kind=lora.kind,
         )
 
     precision = precision or get_default_supported_precision(training=True)
@@ -593,7 +597,7 @@ def main(
             gpt_model.apply(gpt_model._init_weights)
             wrap_kwargs = dict()
         if is_lora:
-            mark_only_lora_as_trainable(gpt_model)
+            mark_only_lora_as_trainable(gpt_model, lora_kind=config.lora_kind)
         adapt_requires_grad(gpt_model, head_model)
         batch_size = train.micro_batch_size
         if eval.micro_batch_size is not None:
