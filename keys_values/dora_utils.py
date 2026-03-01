@@ -45,9 +45,14 @@ def dora_forward(
     # `weight_norm` from the graph in order to save GPU memory
     weight_norm = row_lengths(merged_weight.detach(), eps)
     multipliers = (scales / weight_norm).unsqueeze(-1).to(dtype=merged_weight.dtype)
-    return F.linear(
-        x, merged_weight * multipliers, linear.bias,
-    )
+    if merged_weight.numel() <= x.numel():
+        return F.linear(x, merged_weight * multipliers, linear.bias)
+    else:
+        shape = [1] * (x.ndim - 1) + [-1]
+        y = F.linear(x, merged_weight) * multipliers.view(*shape)
+        if linear.bias is not None:
+            y = y + linear.bias.view(*shape)
+        return y
 
 
 def dora_merge(

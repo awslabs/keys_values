@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional
+from typing import List, Optional, Callable
 from pathlib import Path
 
 from litgpt.parser_config import (
@@ -22,16 +22,16 @@ from litgpt.parser_config import (
 
 def parser_commands() -> List[str]:
     return parser_commands_litgpt() + [
+        "eval_long",
         "finetune_long_full",
         "finetune_long_lora",
-        "eval_long",
         "finetune_offload_full",
         "finetune_offload_lora",
     ]
 
 
 def save_hyperparameters(
-    function: callable,
+    function: Callable,
     checkpoint_dir: Path,
     known_commands: Optional[List[str]] = None,
 ) -> None:

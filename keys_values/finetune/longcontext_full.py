@@ -21,7 +21,7 @@ import os
 import time
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any
+from typing import Dict, Literal, Optional, Union, Any, Callable
 
 import lightning as L
 from lightning.fabric.strategies import DDPStrategy
@@ -277,6 +277,7 @@ def setup(
     """
     setup_internal(
         False,
+        setup,
         checkpoint_dir,
         out_dir,
         precision,
@@ -312,6 +313,7 @@ def setup(
 
 def setup_internal(
     do_cpu_offload: bool,
+    original_setup: Callable,
     checkpoint_dir: Path,
     out_dir: Path,
     precision: Optional[str],
@@ -454,6 +456,7 @@ def setup_internal(
     fabric.launch(
         main,
         do_cpu_offload=do_cpu_offload,
+        original_setup=original_setup,
         devices=devices,
         num_nodes=num_nodes,
         resume=resume,
@@ -499,6 +502,7 @@ def create_gpt_model(
 def main(
     fabric: L.Fabric,
     do_cpu_offload: bool,
+    original_setup: Callable,
     devices: int,
     num_nodes: int,
     resume: Union[bool, Literal["auto"], Path],
@@ -728,6 +732,7 @@ def main(
     train_time = time.perf_counter()
     token_counts = fit(
         fabric=fabric,
+        original_setup=original_setup,
         state=state,
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
@@ -800,7 +805,7 @@ def main(
     if fabric.global_rank == 0:
         # Copy checkpoint files from original checkpoint dir
         copy_config_files(checkpoint_dir, save_dir)
-        save_hyperparameters(setup, save_dir)
+        save_hyperparameters(original_setup, save_dir)
         if hasattr(data, "prompt_style"):
             save_prompt_style(data.prompt_style, save_dir)
 
@@ -996,6 +1001,7 @@ def create_baseline_model(
 
 def fit(
     fabric: L.Fabric,
+    original_setup: Callable,
     state: Dict[str, Any],
     train_dataloader: MyDataLoader,
     val_dataloader: MyDataLoader,
@@ -1357,7 +1363,7 @@ def fit(
             save_model_checkpoint(fabric, model, interval_dir)
             if fabric.global_rank == 0:
                 copy_config_files(checkpoint_dir, interval_dir)
-                save_hyperparameters(setup, interval_dir)
+                save_hyperparameters(original_setup, interval_dir)
                 if hasattr(data, "prompt_style"):
                     save_prompt_style(data.prompt_style, interval_dir)
 

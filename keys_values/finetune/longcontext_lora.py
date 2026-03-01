@@ -196,6 +196,7 @@ def setup(
     """
     setup_internal(
         False,
+        setup,
         checkpoint_dir,
         out_dir,
         precision,
