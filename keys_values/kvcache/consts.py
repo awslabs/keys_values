@@ -13,34 +13,11 @@
 # limitations under the License.
 from typing import Tuple
 
-from keys_values.kvcache.basics import (
-    DenseKVCache,
-    LastRecentlyInsertedKVCache,
-)
-from keys_values.kvcache.h2o import (
-    H2OKVCache,
-    VLengthH2OKVCache,
-    H2OOriginalKVCache,
-)
-from keys_values.kvcache.qh2o import (
-    QuantizedH2OKVCache,
-    QuantizedVLengthH2OKVCache,
-)
 from keys_values.kvcache.quantize import (
     TorchBasicQuantizer,
     BitsAndBytesQuantizer,
 )
 
-
-_SUPPORTED_CACHES = (
-    ("dense", DenseKVCache, True),
-    ("lastrec", LastRecentlyInsertedKVCache, True),
-    ("h2o", H2OKVCache, True),
-    ("h2o-vlen", VLengthH2OKVCache, True),
-    ("qh2o", QuantizedH2OKVCache, False),
-    ("qh2o-vlen", QuantizedVLengthH2OKVCache, False),
-    ("h2o-orig", H2OOriginalKVCache, True),
-)
 
 SUPPORTED_QUANTIZERS = {
     "default": None,
@@ -48,13 +25,6 @@ SUPPORTED_QUANTIZERS = {
     "torch-quantized8": TorchBasicQuantizer,
     "bnb-quantized4": BitsAndBytesQuantizer,
     "bnb-quantized8": BitsAndBytesQuantizer,
-}
-
-SUPPORTED_CACHES = {
-    f"{name}-{quant}": typ
-    for quant in SUPPORTED_QUANTIZERS.keys()
-    for name, typ, do_def in _SUPPORTED_CACHES
-    if do_def or quant != "default"
 }
 
 

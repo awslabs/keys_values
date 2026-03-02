@@ -17,15 +17,27 @@ from typing import List, Dict, Any, Optional, Union, Tuple
 import torch
 
 from keys_values.config import Config
-
 from keys_values.kvcache.base import KVCache, KVCacheParams
-from keys_values.kvcache.basics import KVCacheWithBuffers
+from keys_values.kvcache.basics import (
+    KVCacheWithBuffers,
+    DenseKVCache,
+    LastRecentlyInsertedKVCache,
+)
 from keys_values.kvcache.buffers import (
     KVCacheBuffersParams,
     DefaultKVCacheBuffers,
 )
-from keys_values.kvcache.consts import SUPPORTED_CACHES, split_name
+from keys_values.kvcache.consts import split_name, SUPPORTED_QUANTIZERS
+from keys_values.kvcache.h2o import (
+    H2OKVCache,
+    VLengthH2OKVCache,
+    H2OOriginalKVCache,
+)
 from keys_values.kvcache.offloading import KVCacheOffloader
+from keys_values.kvcache.qh2o import (
+    QuantizedH2OKVCache,
+    QuantizedVLengthH2OKVCache,
+)
 from keys_values.kvcache.quant_buffers import (
     QuantizedKVCacheBuffers,
     DequantizedKVCacheBuffers,
@@ -33,6 +45,24 @@ from keys_values.kvcache.quant_buffers import (
     get_quant_kwargs,
 )
 from keys_values.model import GPT
+
+
+_SUPPORTED_CACHES = (
+    ("dense", DenseKVCache, True),
+    ("lastrec", LastRecentlyInsertedKVCache, True),
+    ("h2o", H2OKVCache, True),
+    ("h2o-vlen", VLengthH2OKVCache, True),
+    ("qh2o", QuantizedH2OKVCache, False),
+    ("qh2o-vlen", QuantizedVLengthH2OKVCache, False),
+    ("h2o-orig", H2OOriginalKVCache, True),
+)
+
+SUPPORTED_CACHES = {
+    f"{name}-{quant}": typ
+    for quant in SUPPORTED_QUANTIZERS.keys()
+    for name, typ, do_def in _SUPPORTED_CACHES
+    if do_def or quant != "default"
+}
 
 
 class KVCacheFactory:
