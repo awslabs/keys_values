@@ -893,6 +893,7 @@ def wrap_gpt_model(
             name=kv_cache.name,
             max_batch_size=max_batch_size,
             cache_length=kv_cache.cache_length,
+            dtype=dtype,
             cache_kwargs=cache_kwargs,
         )
     gpt_model.assign_kv_caches(kv_caches)

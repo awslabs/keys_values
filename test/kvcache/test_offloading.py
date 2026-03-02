@@ -43,6 +43,7 @@ def args_compare_forward() -> Tuple[str, List[tuple]]:
         [a + b for a, b in product(names_and_devices, setups)],
     )
 
+# TODO: embeddings are empty. WHY??
 @pytest.mark.parametrize(*args_compare_forward())
 def test_compare_forward(name, device, cache_length, chunk_size, seq_length):
     seed = 31415927
@@ -91,6 +92,7 @@ def test_compare_forward(name, device, cache_length, chunk_size, seq_length):
         name=name,
         max_batch_size=batch_size,
         cache_length=cache_length,
+        dtype=dtype,
         device=device,
         cache_kwargs=mha_kwargs,
     )
@@ -108,8 +110,10 @@ def test_compare_forward(name, device, cache_length, chunk_size, seq_length):
     head_model = HeadModelFactory.create(name=head_model_name, config=config)
     # Run forward w/o offloading
     loss_values = dict()
-    embeddings = dict()
+    embeddings = dict(yes=[], no=[])
     for kind, kv_caches in all_kv_caches.items():
+        print(kind)
+
         def layer_hook(x, block_idx):
             if block_idx > 0:
                 embeddings[kind].append(x.clone())
@@ -131,5 +135,6 @@ def test_compare_forward(name, device, cache_length, chunk_size, seq_length):
     ):
         print(f"Outputs of layer {block_idx}")
         torch.testing.assert_close(embd_no, embd_yes)
-    print("Loss values")
+    print(f"Loss values: {loss_values["no"]} vs {loss_values["yes"]}")
     torch.testing.assert_close(loss_values["no"], loss_values["yes"])
+    assert 1 == 0

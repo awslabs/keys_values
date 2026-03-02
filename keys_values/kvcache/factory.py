@@ -119,8 +119,8 @@ class KVCacheFactory:
             block_idx: Index of block (or layer) in model
             device: Device for cache objects. If not given, this is determined
                 with first usage
-            dtype: Data type for cache buffers (de-quantized). If not given,
-                this is determined with first usage
+            dtype: Data type for cache buffers (de-quantized). Must be given
+                for quantized buffers
             cache_kwargs: Additional keyword arguments for cache creation
 
         Returns:
@@ -157,6 +157,8 @@ class KVCacheFactory:
                 result = cache_type.from_config(**from_config_kwargs)
             else:
                 cache_params = KVCacheBuffersParams.from_params(params)
+                if dtype is None:
+                    raise ValueError(f"dtype must be given for quantized cache buffers ({qname})")
                 if device is not None:
                     cache_params = replace(cache_params, device=device)
                 allocate_buffers = cache_kwargs.get("allocate_buffers")
@@ -276,6 +278,8 @@ class KVCacheFactory:
                     for i, c_len in enumerate(cache_length)
                 ]
             else:
+                if dtype is None:
+                    raise ValueError(f"dtype must be given for quantized cache buffers ({qname})")
                 cache_params = KVCacheParams(
                     max_batch_size=max_batch_size,
                     n_query_groups=config.n_query_groups,
@@ -322,6 +326,7 @@ class KVCacheFactory:
         name: str,
         max_batch_size: int,
         cache_length: int,
+        dtype: torch.dtype,
         device: Optional[torch.device] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[KVCache], KVCacheOffloader]:
@@ -340,10 +345,9 @@ class KVCacheFactory:
             max_batch_size: Maximum batch size for caches
             cache_length: Number of slots in caches. Must be the same for
                 all caches
+            dtype: Data type for cache buffers (de-quantized)
             device: Device for cache objects. If not given, this is determined
                 with first usage
-            dtype: Data type for cache buffers (de-quantized). If not given,
-                this is determined with first usage
             cache_kwargs: Additional keyword arguments for cache creation
 
         Returns:
@@ -370,6 +374,7 @@ class KVCacheFactory:
                 cache_length=cache_length,
                 max_batch_size=max_batch_size,
                 qname=qname,
+                dtype=dtype,
                 device=device,
                 cache_kwargs=cache_kwargs,
                 dequant_kwargs=dequant_kwargs,

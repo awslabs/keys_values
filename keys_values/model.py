@@ -139,6 +139,7 @@ class GPT(nn.Module):
             raise IndexError("Some layers have KV caches assigned, but not all")
         return result
 
+
     def _num_layers(self) -> int:
         has_no_layers = self.transformer is None or not hasattr(self.transformer, "h")
         return 0 if has_no_layers else len(self.transformer.h)

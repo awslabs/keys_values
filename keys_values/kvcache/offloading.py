@@ -60,6 +60,7 @@ class KVCacheOffloader:
         cache_length: int,
         max_batch_size: int,
         qname: str,
+        dtype: torch.dtype,
         device: Optional[torch.device] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
         dequant_kwargs: Optional[Dict[str, Any]] = None,
@@ -76,13 +77,14 @@ class KVCacheOffloader:
             cache_length: Cache length
             max_batch_size: Maximum batch size
             qname: Quantization name
+            dtype: Source data type
             device: Device to use for buffers (except quantization states, which
                 are stored on CPU). If not given, this is determined with
                 first usage.
 
         """
         cache_params = KVCacheParams.from_config(
-            config, max_batch_size, cache_length,
+            config, max_batch_size, cache_length, dtype=dtype,
         )
         # Create cache buffers and quantizers
         self.cache_buffers = create_quantized_kv_buffers(
