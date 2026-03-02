@@ -19,9 +19,9 @@ from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.kvcache.factory import (
     KVCacheFactory,
-    split_name,
     cleanup_cache_kwargs,
 )
+from keys_values.kvcache.consts import split_name
 from keys_values.finetune.args import KVCacheArgs, GradientArgs
 from keys_values.kvcache.gradient.main import LongContextGradientModel
 from keys_values.model import GPT

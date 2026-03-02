@@ -11,22 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple, Optional, Dict, List
+from typing import Tuple, Optional, Dict, List, Any
 from inspect import isclass
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
 from keys_values.attention import KeysAndValues
+from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.buffers import (
     KVCacheBuffers,
     KVCacheBuffersParams,
     PositionsType,
 )
+from keys_values.kvcache.consts import SUPPORTED_QUANTIZERS
 from keys_values.kvcache.quantize.quantization import Quantizer
-from keys_values.kvcache.utils import (
-    smallest_covering_ranges,
-)
+from keys_values.kvcache.utils import smallest_covering_ranges
 from keys_values.utils import expand_index, bits_for_torch_dtype, bitsize_of
 
 
@@ -755,11 +755,13 @@ class DequantizedKVCacheBuffers:
                 a,
                 b,
                 self.k_buff[: self.batch_size, :, a:b, :],
+                buffers=cache,
             )
             cache.quantizer_v.quantize(
                 a,
                 b,
                 self.v_buff[: self.batch_size, :, a:b, :],
+                buffers=cache,
             )
         if self.debug_events is not None:
             slots = (
@@ -788,11 +790,13 @@ class DequantizedKVCacheBuffers:
             start=0,
             end=ecl,
             out=self.k_buff[: self.batch_size, :, :ecl, :],
+            buffers=cache,
         )
         cache.quantizer_v.dequantize(
             start=0,
             end=ecl,
             out=self.v_buff[: self.batch_size, :, :ecl, :],
+            buffers=cache,
         )
         if self.debug_events is not None:
             self.debug_events.append(
@@ -837,3 +841,113 @@ class DequantizedBufferKeysAndValues(KeysAndValues):
         if not self._buffers.buffers_are_allocated:
             raise IndexError("Associated buffer is not allocated")
         return self._buffers.v_buff[:batch_size, :, :current_length, :]
+
+
+def get_quant_kwargs(
+    params: KVCacheParams,
+    qname: str,
+    cache_kwargs: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], type[Quantizer], Dict[str, Any]]:
+    quantizer_type = SUPPORTED_QUANTIZERS[qname]
+    if quantizer_type is None:
+        raise NotImplementedError(f"Quantizer type {qname} currently not supported")
+    if cache_kwargs is None:
+        cache_kwargs = dict()
+    else:
+        cache_kwargs = cache_kwargs.copy()
+    try:
+        blocks_over_heads = cache_kwargs.pop("blocks_over_heads")
+    except KeyError:
+        blocks_over_heads = False
+    if (
+            blocks_over_heads is False
+            and params.head_size < quantizer_type.minimum_blocksize()
+    ):
+        print(
+            f"blocksize = {params.head_size} too small. Switching to blocks_over_heads = True."
+        )
+        blocks_over_heads = True
+    shape = (
+        params.max_batch_size,
+        params.n_query_groups,
+        params.cache_length,
+        params.head_size,
+    )
+    quant_kwargs = {
+        "shape": shape,
+        "source_dtype": params.dtype,
+        "num_bits": int(qname[-1]),
+        "blocks_over_heads": blocks_over_heads,
+        "tmp_array_limit_gb": cache_kwargs.get("tmp_array_limit_gb"),
+    }
+    return quant_kwargs, quantizer_type, cache_kwargs
+
+
+def create_quantized_kv_buffers(
+    qname: str,
+    cache_lengths: List[int],
+    cache_params: KVCacheParams,
+    cache_kwargs: Optional[Dict[str, Any]] = None,
+    dequant_kwargs: Optional[Dict[str, Any]] = None,
+    allocate_buffers: bool = False,
+    device: Optional[torch.device] = None,
+    first_block_idx: Optional[int] = None,
+    shared_quantizers: bool = False,
+) -> List[QuantizedKVCacheBuffers]:
+    """
+    Creates a list of :class:`QuantizedKVCacheBuffers` for cache lenghts in
+    `cache_lenghts`. All buffers share one :class:`DequantizedKVCacheBuffers`
+    object.
+
+    If `shared_quantizers == True`, we share a single `quantizer_k`,
+    `quantizer_v` pair among all buffers. This is a special case, see
+    :class:`KVCacheOffloader`. Can only be used if all `cache_lengths` entries
+    are the same. You need to set callbacks for the quantizers.
+
+    """
+    if shared_quantizers and not all(x == cache_lengths[0] for x in cache_lengths):
+        raise ValueError(f"cache_lengths = {cache_lengths} must all be the same if callback is given")
+    buffer_params = replace(
+        KVCacheBuffersParams.from_params(cache_params),
+        device=device,
+    )
+    max_cache_length = max(cache_lengths)
+    if dequant_kwargs is None:
+        dequant_kwargs = dict()
+    dequant_buffers = DequantizedKVCacheBuffers(
+        params=buffer_params,
+        cache_length=max_cache_length,
+        allocate_buffers=allocate_buffers,
+        **dequant_kwargs,
+    )
+    quant_buffers = []
+    quantizer_k = None
+    quantizer_v = None
+    for i, cache_length in enumerate(cache_lengths):
+        _cache_params = replace(
+            cache_params,
+            cache_length=cache_length,
+        )
+        quant_kwargs, quantizer_type, cache_kwargs = get_quant_kwargs(
+            _cache_params,
+            qname,
+            cache_kwargs,
+        )
+        quant_kwargs["allocate_buffers"] = allocate_buffers
+        quant_kwargs["device"] = device
+        if first_block_idx is not None:
+            kwargs = dict(debug_label=f"block{first_block_idx + i}")
+        else:
+            kwargs = dict()
+        if i == 0 or not shared_quantizers:
+            quantizer_k = quantizer_type(**quant_kwargs)
+            quantizer_v = quantizer_type(**quant_kwargs)
+        quant_buffers.append(
+            QuantizedKVCacheBuffers(
+                quantizer_k=quantizer_k,
+                quantizer_v=quantizer_v,
+                dequant_buffers=dequant_buffers,
+                **kwargs,
+            )
+        )
+    return quant_buffers

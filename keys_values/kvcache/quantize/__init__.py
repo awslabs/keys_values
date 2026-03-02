@@ -11,12 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from keys_values.kvcache.quantize.quantization import Quantizer
+from keys_values.kvcache.quantize.quantization import Quantizer, QuantizerCallback
 from keys_values.kvcache.quantize.pytorch import TorchBasicQuantizer
 from keys_values.kvcache.quantize.bitsandbytes import BitsAndBytesQuantizer
 
 __all__ = [
     "BitsAndBytesQuantizer",
     "Quantizer",
+    "QuantizerCallback",
     "TorchBasicQuantizer",
 ]

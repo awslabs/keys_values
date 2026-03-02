@@ -21,7 +21,8 @@ import pytest
 from keys_values.config import Config
 
 from keys_values.kvcache.base import KVCacheParams
-from keys_values.kvcache.factory import KVCacheFactory, split_name
+from keys_values.kvcache.factory import KVCacheFactory
+from keys_values.kvcache.consts import split_name
 from keys_values.kvcache.quantize.bitsandbytes import determine_blocksize
 from keys_values.kvcache.test_utils import (
     create_kv_cache,

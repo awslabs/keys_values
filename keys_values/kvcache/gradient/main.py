@@ -28,8 +28,8 @@ from keys_values.debug_utils import DebugIntermediates
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.factory import (
     deallocate_kv_cache_buffers_of_model,
-    SUPPORTED_QUANTIZERS,
 )
+from keys_values.kvcache.consts import SUPPORTED_QUANTIZERS
 from keys_values.kvcache.gradient.accumulate import GradientAccumulator
 from keys_values.kvcache.gradient.autograd_hooks import (
     CellComputationAutogradHooks,
