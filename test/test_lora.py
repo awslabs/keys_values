@@ -53,6 +53,7 @@ from litgpt.scripts.convert_hf_checkpoint import (
 from litgpt.scripts.convert_lit_checkpoint import qkv_reassemble as make_qkv_interleaved
 from litgpt.utils import _RunIf
 
+from keys_values.dora_utils import LORA_SCALES_NAME
 from keys_values.lora import (
     GPT as LoRAGPT,
     Config,
@@ -203,22 +204,29 @@ def test_lora_mqa_gqa():
     assert torch.count_nonzero(out[:, :, non_lora_ind]) == 0
 
 
-def test_lora_filter(tmp_path):
+@pytest.mark.parametrize("kind", ["default", "rms_norm", "dora"])
+def test_lora_filter(tmp_path, kind):
     fabric = Fabric(devices=1)
+    n_layer = 3
     model = LoRAGPT.from_name(
-        "pythia-14m", n_layer=3, lora_r=1, lora_query=True, lora_value=True
+        "pythia-14m",
+        n_layer=n_layer,
+        lora_r=1,
+        lora_query=True,
+        lora_value=True,
+        lora_kind=kind,
     )
     save_path = tmp_path / "model.pth"
     fabric.save(save_path, {"model": model}, filter={"model": lora_filter})
     saved = torch.load(save_path)["model"]
 
+    names = ("lora_A", "lora_B")
+    if kind == "dora":
+        names += (LORA_SCALES_NAME,)
     expected = {
-        "transformer.h.1.attn.qkv.lora_B",
-        "transformer.h.2.attn.qkv.lora_B",
-        "transformer.h.2.attn.qkv.lora_A",
-        "transformer.h.1.attn.qkv.lora_A",
-        "transformer.h.0.attn.qkv.lora_A",
-        "transformer.h.0.attn.qkv.lora_B",
+        f"transformer.h.{i}.attn.qkv.{name}"
+        for i in range(n_layer)
+        for name in names
     }
     assert set(saved) == expected
 

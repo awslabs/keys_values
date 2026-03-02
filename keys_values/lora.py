@@ -27,7 +27,7 @@ from litgpt.utils import map_old_state_dict_weights
 import keys_values
 from keys_values.attention import MultiHeadSelfAttention
 from keys_values.config import Config as BaseConfig
-from keys_values.dora_utils import DoRALinear, DoRAQKVLinear, DORA_SCALES_NAME
+from keys_values.dora_utils import DoRALinear, DoRAQKVLinear, LORA_SCALES_NAME
 from keys_values.kvcache.base import KVCache
 from keys_values.lora_utils import LoRALinear, LoRAQKVLinear
 from keys_values.model import (
@@ -320,7 +320,7 @@ def mark_only_lora_as_trainable(
     litgpt_mark_only_lora_as_trainable(model, bias)
     if lora_kind == "dora":
         for name, param in model.named_parameters():
-            if DORA_SCALES_NAME in name:
+            if LORA_SCALES_NAME in name:
                 param.requires_grad = True
 
 
