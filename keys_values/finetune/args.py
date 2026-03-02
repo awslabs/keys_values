@@ -16,7 +16,8 @@ from typing import Optional, Tuple, Dict, Any, List
 
 from litgpt.args import EvalArgs as _EvalArgs
 
-from keys_values.kvcache.factory import KVCacheFactory, split_name
+from keys_values.kvcache.factory import KVCacheFactory
+from keys_values.kvcache.consts import split_name
 from keys_values.utils import VerbosityLevels
 
 
@@ -66,7 +67,9 @@ class KVCacheArgs:
             this number of last recently inserted tokens are not evicted.
         init_grace_tokens: Only for `lastrec` cache policy. KV information for
             the first `init_grace_tokens` is not evicted.
-
+        cpu_offload: If `True`, KV cache buffers are offloaded to CPU during the
+            forward pass. At the moment, this is implemented only for quantized
+            KV cache buffers.
     """
 
     name: str
@@ -77,6 +80,7 @@ class KVCacheArgs:
     allocate_buffers: bool = False
     grace_period: int = 0
     init_grace_tokens: int = 0
+    cpu_offload: bool = False
     # Legacy (these are global args now)
     verbose: Optional[str] = None
     attention_forward_temp_size_gb: Optional[float] = None
@@ -96,6 +100,10 @@ class KVCacheArgs:
         if not (0 <= self.init_grace_tokens < self.cache_length):
             raise ValueError(
                 f"init_grace_tokens = {self.init_grace_tokens}, must be in [0, {self.cache_length}])"
+            )
+        if self.cpu_offload and split_name(self.name)[1] == "default":
+            raise NotImplementedError(
+                "CPU offloading (--kv_cache.cpu_offload True) is currently not supported for non-quantized KV cache buffers"
             )
         # Deprecated
         if self.verbose is None:

@@ -26,9 +26,9 @@ from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import MultiHeadSelfAttention
 from keys_values.debug_utils import DebugIntermediates
 from keys_values.head_model import HeadModel
+from keys_values.kvcache.consts import SUPPORTED_QUANTIZERS
 from keys_values.kvcache.factory import (
     deallocate_kv_cache_buffers_of_model,
-    SUPPORTED_QUANTIZERS,
 )
 from keys_values.kvcache.gradient.accumulate import GradientAccumulator
 from keys_values.kvcache.gradient.autograd_hooks import (
@@ -44,6 +44,7 @@ from keys_values.kvcache.gradient.cleanup import (
     ArraysForCleanup,
     protect_named_params_buffers_of_model,
 )
+from keys_values.kvcache.offloading import KVCacheOffloader
 from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
 from keys_values.long_context import (
@@ -221,6 +222,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         single_tokens_for_targets: bool = False,
         verbose: VerbosityLevels = VerbosityLevels.SOME,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        cache_offloader: Optional[KVCacheOffloader] = None,
         set_max_seq_length: bool = True,
         debug_single_cell_per_row: bool = False,
         qname: Optional[str] = None,
@@ -313,16 +315,17 @@ class LongContextGradientModel(LongContextInferenceModel):
                 "'LongContextInferenceModel' for inference only"
             )
         super().__init__(
-            gpt_model,
-            head_model,
-            chunk_size,
-            randomize_chunk_sizes,
-            chunks_per_cell_multiplier,
-            verbose,
-            tmp_array_limit_gb,
-            set_max_seq_length,
-            debug_single_cell_per_row,
-            debug_intermediates,
+            gpt_model=gpt_model,
+            head_model=head_model,
+            chunk_size=chunk_size,
+            randomize_chunk_sizes=randomize_chunk_sizes,
+            chunks_per_cell_multiplier=chunks_per_cell_multiplier,
+            verbose=verbose,
+            tmp_array_limit_gb=tmp_array_limit_gb,
+            cache_offloader=cache_offloader,
+            set_max_seq_length=set_max_seq_length,
+            debug_single_cell_per_row=debug_single_cell_per_row,
+            debug_intermediates=debug_intermediates,
         )
         self.single_tokens_for_targets = single_tokens_for_targets
         if qname is None:

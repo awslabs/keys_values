@@ -23,6 +23,7 @@ from keys_values.debug_utils import DebugIntermediates
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.base import DefaultKVCache
 from keys_values.kvcache.factory import deallocate_kv_cache_buffers_of_model
+from keys_values.kvcache.offloading import KVCacheOffloader
 from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
 from keys_values.model import GPT
@@ -485,6 +486,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         chunks_per_cell_multiplier: float = 1.0,
         verbose: VerbosityLevels = VerbosityLevels.SOME,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        cache_offloader: Optional[KVCacheOffloader] = None,
         set_max_seq_length: bool = True,
         debug_single_cell_per_row: bool = False,
         debug_intermediates: Optional[DebugIntermediates] = None,
@@ -519,6 +521,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 For ``VerbosityLevels.ALL``, we print deep diagnostic
                 information
             tmp_array_limit_gb: See above.
+            cache_offloader: If CPU offloading of KV cache buffers is used,
+                this must be supplied. It maintains the quantization states on
+                the CPU.
             set_max_seq_length: If `True`, we set `gpt_model.max_seq_length` to
                 the length of `input_ids` with each call of :meth:`forward`
                 for which `targets is not None`. The value is passed through
@@ -557,6 +562,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self.chunks_per_cell = None
         self.batch_size = None
         self._tmp_array_limit_gb = tmp_array_limit_gb
+        self.cache_offloader = cache_offloader
         self._set_max_seq_length = set_max_seq_length
         self._record_gpu_memory_snapshots = None
         self._record_gpu_memory_kind = None
@@ -889,6 +895,11 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         x=embeddings,
                         layer_idx=block_idx,
                     )
+                    if self.gpt_model.start_of_layer_hook is not None:
+                        self.gpt_model.start_of_layer_hook(
+                            embeddings.detach(),
+                            block_idx,
+                        )
                     new_embed_parts = []
                     # Innermost loop over chunks per cell
                     for rel_start, rel_end in chunks_for_cell.chunk_ranges:
@@ -932,6 +943,11 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     x=embeddings,
                     layer_idx=self.config.n_layer,
                 )
+                if self.gpt_model.start_of_layer_hook is not None:
+                    self.gpt_model.start_of_layer_hook(
+                        embeddings.detach(),
+                        self.config.n_layer,
+                    )
 
                 if compute_loss:
                     # Head model
@@ -979,6 +995,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     logits_final_chunk = self.gpt_model.lm_head(logits_final_chunk)
 
         write_back_cache_buffers(self.gpt_model)  # Just to be safe
+        if self.cache_offloader is not None:
+            self.cache_offloader.flush()
         if not (targets is None or self._debug_no_deallocate_buffers):
             if self.verbose is not VerbosityLevels.NONE:
                 print("\nDeallocate KV cache buffers")

@@ -21,7 +21,7 @@ import os
 import time
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any
+from typing import Dict, Literal, Optional, Union, Any, Tuple
 
 import lightning as L
 from lightning.fabric.strategies import DDPStrategy
@@ -91,16 +91,17 @@ from keys_values.generate.base import generate
 from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import HeadModel, CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
+from keys_values.kvcache.consts import split_name
 from keys_values.kvcache.factory import (
     KVCacheFactory,
     deallocate_kv_cache_buffers_of_model,
     cleanup_cache_kwargs,
-    split_name,
 )
 from keys_values.kvcache.gradient.main import (
     LongContextGradientModel,
     NaiveGPTAndHeadModel,
 )
+from keys_values.kvcache.offloading import KVCacheOffloader
 from keys_values.long_context import (
     GPTAndHeadModel,
     LongContextInferenceModel,
@@ -598,7 +599,7 @@ def main(
         batch_size = train.micro_batch_size
         if eval.micro_batch_size is not None:
             batch_size = max(batch_size, eval.micro_batch_size)
-        model = wrap_gpt_model(
+        model, cache_offloader = wrap_gpt_model(
             gpt_model=gpt_model,
             head_model=head_model,
             kv_cache=kv_cache,
@@ -650,6 +651,7 @@ def main(
         )
         state = {
             "model": model,
+            "cache_offloader": cache_offloader,
             "cpu_optimizer": cpu_optimizer,
             "cpu_scheduler": cpu_scheduler,
             "iter_num": 0,
@@ -685,6 +687,7 @@ def main(
         )
         state = {
             "model": model,
+            "cache_offloader": cache_offloader,
             "optimizer": optimizer,
             "scheduler": scheduler,
             "iter_num": 0,
@@ -852,7 +855,10 @@ def wrap_gpt_model(
     fabric: Optional[L.Fabric] = None,
     debug_dont_use_autograd_hooks: bool = False,
     model_kwargs: Optional[Dict[str, Any]] = None,
-) -> Union[LongContextGradientModel, LongContextInferenceModel]:
+) -> Tuple[
+    Union[LongContextGradientModel, LongContextInferenceModel],
+    Optional[KVCacheOffloader],
+]:
     model_for_training = grad is not None
     print_message(
         "Assigning KV caches to layers of model:\n"
@@ -874,14 +880,25 @@ def wrap_gpt_model(
     tmp_array_limit_gb = cache_kwargs.get("tmp_array_limit_gb")
     if tmp_array_limit_gb is not None:
         del cache_kwargs["tmp_array_limit_gb"]
-    kv_caches = KVCacheFactory.create(
-        gpt_model=gpt_model,
-        name=kv_cache.name,
-        max_batch_size=max_batch_size,
-        dtype=dtype,
-        cache_length=kv_cache.cache_length,
-        cache_kwargs=cache_kwargs,
-    )
+    if not kv_cache.cpu_offload:
+        kv_caches = KVCacheFactory.create(
+            gpt_model=gpt_model,
+            name=kv_cache.name,
+            max_batch_size=max_batch_size,
+            dtype=dtype,
+            cache_length=kv_cache.cache_length,
+            cache_kwargs=cache_kwargs,
+        )
+        cache_offloader = None
+    else:
+        kv_caches, cache_offloader = KVCacheFactory.create_cpu_offloading(
+            gpt_model=gpt_model,
+            name=kv_cache.name,
+            max_batch_size=max_batch_size,
+            cache_length=kv_cache.cache_length,
+            dtype=dtype,
+            cache_kwargs=cache_kwargs,
+        )
     gpt_model.assign_kv_caches(kv_caches)
     multiplier = 1.0 if grad is None else grad.chunks_per_cell_multiplier
     common_kwargs = dict(
@@ -892,6 +909,7 @@ def wrap_gpt_model(
         chunks_per_cell_multiplier=multiplier,
         verbose=verbose,
         tmp_array_limit_gb=tmp_array_limit_gb,
+        cache_offloader=cache_offloader,
     )
     if model_kwargs is not None:
         common_kwargs.update(model_kwargs)
@@ -966,7 +984,7 @@ def wrap_gpt_model(
         )
     else:
         model = LongContextInferenceModel(**common_kwargs)
-    return model
+    return model, cache_offloader
 
 
 def create_baseline_model(
@@ -1288,10 +1306,10 @@ def fit(
             if isinstance(val_loss, torch.Tensor):
                 val_loss = f"{val_loss:.3f}"
             print_message(
-                f"Epoch {metrics['epoch']} | iter {metrics['iter']} step {metrics['step']} |"
+                f"Epoch {metrics['epoch']} | iter {metrics['iter']:3d} step {metrics['step']:3d} |"
                 f" loss train: {metrics['loss']:.3f},"
                 f" val: {val_loss} |"
-                f" iter time: {metrics['iter_time'] * 1000:.2f} s"
+                f" iter time: {metrics['iter_time']:.3f} s"
                 f"{' (step)' if not is_accumulating else ''}",
                 fabric,
             )
@@ -1333,7 +1351,7 @@ def fit(
             )
             val_loss = f"{metrics['val_loss']:.3f}"
             print_message(
-                f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time: {metrics['val_time']:.3f} s",
+                f"Epoch {train_iterator.epoch} | iter {state['iter_num']:3d} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time: {metrics['val_time']:.3f} s",
                 fabric,
             )
             flush_io_streams()

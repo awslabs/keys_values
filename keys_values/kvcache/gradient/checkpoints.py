@@ -19,8 +19,10 @@ import torch
 
 from keys_values.attention import DefaultKeysAndValues
 from keys_values.kvcache.buffers import KVCacheBuffersParams, DefaultKVCacheBuffers
-from keys_values.kvcache.factory import create_quantized_kv_buffers
-from keys_values.kvcache.quant_buffers import QuantizedKVCacheBuffers
+from keys_values.kvcache.quant_buffers import (
+    QuantizedKVCacheBuffers,
+    create_quantized_kv_buffers,
+)
 from keys_values.model import GPT
 
 

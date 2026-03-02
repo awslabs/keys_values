@@ -62,9 +62,7 @@ from keys_values.finetune.utils import (
     print_with_rank_and_timestamp,
 )
 from keys_values.head_model_factory import HeadModelFactory
-from keys_values.long_context import (
-    LongContextInferenceModel,
-)
+from keys_values.long_context import LongContextInferenceModel
 from keys_values.lora import GPT as GPTLoRA, Config as ConfigLoRA
 from keys_values.model import GPT as GPTFull
 from keys_values.utils import (
@@ -373,7 +371,7 @@ def main(
         #        predicate=debug_intermediates_predicate,
         #    )
         # )
-        model = wrap_gpt_model(
+        model, cache_offloader = wrap_gpt_model(
             gpt_model=gpt_model,
             head_model=head_model,
             kv_cache=kv_cache,

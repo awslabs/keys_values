@@ -11,13 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from keys_values.kvcache.quantize.quantization import Quantizer, QuantizerCallback
-from keys_values.kvcache.quantize.pytorch import TorchBasicQuantizer
-from keys_values.kvcache.quantize.bitsandbytes import BitsAndBytesQuantizer
+from typing import Tuple
 
-__all__ = [
-    "BitsAndBytesQuantizer",
-    "Quantizer",
-    "QuantizerCallback",
-    "TorchBasicQuantizer",
-]
+from keys_values.kvcache.quantize import (
+    TorchBasicQuantizer,
+    BitsAndBytesQuantizer,
+)
+
+
+SUPPORTED_QUANTIZERS = {
+    "default": None,
+    "torch-quantized4": TorchBasicQuantizer,
+    "torch-quantized8": TorchBasicQuantizer,
+    "bnb-quantized4": BitsAndBytesQuantizer,
+    "bnb-quantized8": BitsAndBytesQuantizer,
+}
+
+
+def split_name(name: str) -> Tuple[str, str]:
+    for qname in SUPPORTED_QUANTIZERS.keys():
+        if name.endswith(qname):
+            return name[: -(len(qname) + 1)], qname
+    raise ValueError(f"Name {name} is not supported")
