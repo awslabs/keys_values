@@ -182,5 +182,5 @@ def quantizer_callback(
     if new_pos != current_pos:
         # Write back quantizer -> state
         quantizer_states[current_pos].copy_()
-        # Rstore state -> quantizer
+        # Restore state -> quantizer
         quantizer_states[new_pos].restore()

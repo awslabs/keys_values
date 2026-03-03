@@ -895,6 +895,10 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         x=embeddings,
                         layer_idx=block_idx,
                     )
+                    if self.gpt_model.start_of_layer_hook is not None:
+                        self.gpt_model.start_of_layer_hook(
+                            embeddings.detach(), block_idx,
+                        )
                     new_embed_parts = []
                     # Innermost loop over chunks per cell
                     for rel_start, rel_end in chunks_for_cell.chunk_ranges:
@@ -938,6 +942,10 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     x=embeddings,
                     layer_idx=self.config.n_layer,
                 )
+                if self.gpt_model.start_of_layer_hook is not None:
+                    self.gpt_model.start_of_layer_hook(
+                        embeddings.detach(), self.config.n_layer,
+                    )
 
                 if compute_loss:
                     # Head model

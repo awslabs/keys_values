@@ -43,7 +43,6 @@ def args_compare_forward() -> Tuple[str, List[tuple]]:
         [a + b for a, b in product(names_and_devices, setups)],
     )
 
-# TODO: embeddings are empty. WHY??
 @pytest.mark.parametrize(*args_compare_forward())
 def test_compare_forward(name, device, cache_length, chunk_size, seq_length):
     seed = 31415927
@@ -112,8 +111,6 @@ def test_compare_forward(name, device, cache_length, chunk_size, seq_length):
     loss_values = dict()
     embeddings = dict(yes=[], no=[])
     for kind, kv_caches in all_kv_caches.items():
-        print(kind)
-
         def layer_hook(x, block_idx):
             if block_idx > 0:
                 embeddings[kind].append(x.clone())
@@ -137,4 +134,3 @@ def test_compare_forward(name, device, cache_length, chunk_size, seq_length):
         torch.testing.assert_close(embd_no, embd_yes)
     print(f"Loss values: {loss_values["no"]} vs {loss_values["yes"]}")
     torch.testing.assert_close(loss_values["no"], loss_values["yes"])
-    assert 1 == 0
