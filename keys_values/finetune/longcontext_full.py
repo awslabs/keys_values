@@ -1306,10 +1306,10 @@ def fit(
             if isinstance(val_loss, torch.Tensor):
                 val_loss = f"{val_loss:.3f}"
             print_message(
-                f"Epoch {metrics['epoch']} | iter {metrics['iter']} step {metrics['step']} |"
+                f"Epoch {metrics['epoch']} | iter {metrics['iter']:3d} step {metrics['step']:3d} |"
                 f" loss train: {metrics['loss']:.3f},"
                 f" val: {val_loss} |"
-                f" iter time: {metrics['iter_time'] * 1000:.2f} s"
+                f" iter time: {metrics['iter_time']:.3f} s"
                 f"{' (step)' if not is_accumulating else ''}",
                 fabric,
             )
@@ -1351,7 +1351,7 @@ def fit(
             )
             val_loss = f"{metrics['val_loss']:.3f}"
             print_message(
-                f"Epoch {train_iterator.epoch} | iter {state['iter_num']} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time: {metrics['val_time']:.3f} s",
+                f"Epoch {train_iterator.epoch} | iter {state['iter_num']:3d} | val loss: {val_loss} | val ppl: {metrics['val_ppl']:.3f} | val_time: {metrics['val_time']:.3f} s",
                 fabric,
             )
             flush_io_streams()

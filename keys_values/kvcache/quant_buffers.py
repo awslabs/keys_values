@@ -87,7 +87,7 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
         self.quantizer_v = quantizer_v
         self.dequant_buffers = dequant_buffers
         self._debug_label = debug_label
-        self._block_idx = block_idx
+        self.block_idx = block_idx
 
     @property
     def device(self) -> Optional[torch.device]:
@@ -759,13 +759,13 @@ class DequantizedKVCacheBuffers:
                 a,
                 b,
                 self.k_buff[: self.batch_size, :, a:b, :],
-                block_idx=self._block_idx,
+                block_idx=cache.block_idx,
             )
             cache.quantizer_v.quantize(
                 a,
                 b,
                 self.v_buff[: self.batch_size, :, a:b, :],
-                block_idx=self._block_idx,
+                block_idx=cache.block_idx,
             )
         if self.debug_events is not None:
             slots = (
@@ -794,13 +794,13 @@ class DequantizedKVCacheBuffers:
             start=0,
             end=ecl,
             out=self.k_buff[: self.batch_size, :, :ecl, :],
-            block_idx=self._block_idx,
+            block_idx=cache.block_idx,
         )
         cache.quantizer_v.dequantize(
             start=0,
             end=ecl,
             out=self.v_buff[: self.batch_size, :, :ecl, :],
-            block_idx=self._block_idx,
+            block_idx=cache.block_idx,
         )
         if self.debug_events is not None:
             self.debug_events.append(
