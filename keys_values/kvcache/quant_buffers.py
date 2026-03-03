@@ -68,6 +68,7 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
         quantizer_v: Quantizer,
         dequant_buffers: "DequantizedKVCacheBuffers",
         debug_label: Optional[str] = None,
+        block_idx: Optional[int] = None,
     ):
         """
         Args:
@@ -75,6 +76,8 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
             quantizer_v: Quantizer for values
             dequant_buffers: Object used to store de-quantized content. Should
                 be shared between several quantized buffers.
+            block_idx: Index of layer the cache is used in the current model.
+                This is needed if CPU offloading is used.
 
         """
         cache_length = quantizer_k.shape[2]
@@ -84,6 +87,7 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
         self.quantizer_v = quantizer_v
         self.dequant_buffers = dequant_buffers
         self._debug_label = debug_label
+        self._block_idx = block_idx
 
     @property
     def device(self) -> Optional[torch.device]:
@@ -755,13 +759,13 @@ class DequantizedKVCacheBuffers:
                 a,
                 b,
                 self.k_buff[: self.batch_size, :, a:b, :],
-                buffers=cache,
+                block_idx=self._block_idx,
             )
             cache.quantizer_v.quantize(
                 a,
                 b,
                 self.v_buff[: self.batch_size, :, a:b, :],
-                buffers=cache,
+                block_idx=self._block_idx,
             )
         if self.debug_events is not None:
             slots = (
@@ -790,13 +794,13 @@ class DequantizedKVCacheBuffers:
             start=0,
             end=ecl,
             out=self.k_buff[: self.batch_size, :, :ecl, :],
-            buffers=cache,
+            block_idx=self._block_idx,
         )
         cache.quantizer_v.dequantize(
             start=0,
             end=ecl,
             out=self.v_buff[: self.batch_size, :, :ecl, :],
-            buffers=cache,
+            block_idx=self._block_idx,
         )
         if self.debug_events is not None:
             self.debug_events.append(
@@ -925,6 +929,7 @@ def create_quantized_kv_buffers(
     quant_buffers = []
     quantizer_k = None
     quantizer_v = None
+    offset = 0 if first_block_idx is None else first_block_idx
     for i, cache_length in enumerate(cache_lengths):
         _cache_params = replace(
             cache_params,
@@ -949,6 +954,7 @@ def create_quantized_kv_buffers(
                 quantizer_k=quantizer_k,
                 quantizer_v=quantizer_v,
                 dequant_buffers=dequant_buffers,
+                block_idx=i + offset,
                 **kwargs,
             )
         )

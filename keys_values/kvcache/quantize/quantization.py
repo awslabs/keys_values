@@ -17,10 +17,10 @@ import torch
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
-from keys_values.kvcache.buffers import KVCacheBuffersParams, KVCacheBuffers
+from keys_values.kvcache.buffers import KVCacheBuffersParams
 
 
-QuantizerCallback = Callable[[KVCacheBuffers, KVCacheBuffers], None]
+QuantizerCallback = Callable[[int, int], None]
 
 
 class Quantizer(torch.nn.Module):
@@ -54,12 +54,12 @@ class Quantizer(torch.nn.Module):
 
     In order to support sharing the same `quantizer_k`, `quantizer_v` between
     different :class:`QuantizedKVCacheBuffers` buffers, we provide the option
-    of a callback of the form `callback(new_buffers, current_buffers)`. If
-    this callback is used, we also maintain a reference to the calling
-    :class:`QuantizedKVCacheBuffers` in `current_buffers`. All methods
-    called by buffers have an additional `buffers` argument, which is required
-    if the callback is used. The callback is called at the start of each
-    method, passing `new_buffers=buffers`.
+    of a callback of the form `callback(new_block_idx, current_block_idx)`. If
+    this callback is used, we also maintain a reference to the `block_idx` of
+    the calling :class:`QuantizedKVCacheBuffers` in `current_block_idx`. All
+    methods called by buffers have an additional `block_idx` argument, which is
+    required if the callback is used. The callback is called at the start of
+    each method, passing `new_block_idx=block_idx`.
 
     """
 
@@ -78,7 +78,7 @@ class Quantizer(torch.nn.Module):
         self.blocks_over_heads = blocks_over_heads
         self._tmp_array_limit_gb = tmp_array_limit_gb
         self._callback = None
-        self.current_buffers = None
+        self.current_block_idx = None
 
     @property
     def device(self) -> Optional[torch.device]:
@@ -105,7 +105,7 @@ class Quantizer(torch.nn.Module):
         start: int,
         end: int,
         values: torch.Tensor,
-        buffers: Optional[KVCacheBuffers] = None,
+        block_idx: Optional[int] = None,
     ):
         """
         Quantizes slots `range(start, end)`, overwriting corresponding parts of
@@ -116,13 +116,14 @@ class Quantizer(torch.nn.Module):
             end: Determines slots `range(start, end)`
             values: New content to be quantized,
                 `(batch_size, n_query_groups, end - start, head_size)`
-           buffers: Calling :class:`QuantizedKVCacheBuffers` must pass `self`
-                if `callback` is used.
+            block_idx: Calling :class:`QuantizedKVCacheBuffers` must pass
+                `self._block_idx` if `callback` is used. This is the index of
+                the layer the cache is assigned to.
 
         """
         self._check_slots(start, end)
         self._check_shape_dtype(values, end - start, "values")
-        self._deal_with_callback(buffers)
+        self._deal_with_callback(block_idx)
         self._quantize(start, end, values)
 
     def _quantize(
@@ -138,7 +139,7 @@ class Quantizer(torch.nn.Module):
         start: int,
         end: int,
         out: Optional[torch.Tensor] = None,
-        buffers: Optional[KVCacheBuffers] = None,
+        block_idx: Optional[int] = None,
     ) -> torch.Tensor:
         """
         De-quantizes slots `range(start, end)`.
@@ -149,8 +150,9 @@ class Quantizer(torch.nn.Module):
             out: If given, must have shape
                 `(batch_size, n_query_groups, end - start, head_size)` and
                 source dtype. Result written there.
-            buffers: Calling :class:`QuantizedKVCacheBuffers` must pass `self`
-                if `callback` is used.
+            block_idx: Calling :class:`QuantizedKVCacheBuffers` must pass
+                `self._block_idx` if `callback` is used. This is the index of
+                the layer the cache is assigned to.
 
         Returns:
             De-quantized tensor of shape
@@ -161,7 +163,7 @@ class Quantizer(torch.nn.Module):
         self._check_slots(start, end)
         if out is not None:
             self._check_shape_dtype(out, end - start, "out")
-        self._deal_with_callback(buffers)
+        self._deal_with_callback(block_idx)
         return self._dequantize(start, end, out)
 
     def _dequantize(
@@ -255,15 +257,15 @@ class Quantizer(torch.nn.Module):
                 f"{name}.dtype = {values.dtype}, must be {self.source_dtype}"
             )
 
-    def _deal_with_callback(self, buffers: Optional[KVCacheBuffers]):
+    def _deal_with_callback(self, block_idx: Optional[int]):
         if self._callback is not None:
-            if buffers is None:
+            if block_idx is None:
                 raise ValueError(
                     "QuantizedKVCacheBuffers must pass buffers=self when calling Quantizer"
                 )
-            if self.current_buffers is not None:
-                self._callback(buffers, self.current_buffers)
-            self.current_buffers = buffers
+            if self.current_block_idx is not None:
+                self._callback(block_idx, self.current_block_idx)
+            self.current_block_idx = block_idx
 
     def create_quantizer_state(
         self,

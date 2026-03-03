@@ -889,9 +889,9 @@ def wrap_gpt_model(
             cache_length=kv_cache.cache_length,
             cache_kwargs=cache_kwargs,
         )
-        offloader = None
+        cache_offloader = None
     else:
-        kv_caches, offloader = KVCacheFactory.create_cpu_offloading(
+        kv_caches, cache_offloader = KVCacheFactory.create_cpu_offloading(
             gpt_model=gpt_model,
             name=kv_cache.name,
             max_batch_size=max_batch_size,
@@ -909,6 +909,7 @@ def wrap_gpt_model(
         chunks_per_cell_multiplier=multiplier,
         verbose=verbose,
         tmp_array_limit_gb=tmp_array_limit_gb,
+        cache_offloader=cache_offloader,
     )
     if model_kwargs is not None:
         common_kwargs.update(model_kwargs)
@@ -983,7 +984,7 @@ def wrap_gpt_model(
         )
     else:
         model = LongContextInferenceModel(**common_kwargs)
-    return model, offloader
+    return model, cache_offloader
 
 
 def create_baseline_model(

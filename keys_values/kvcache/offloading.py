@@ -18,11 +18,7 @@ import torch
 
 from keys_values.config import Config
 from keys_values.kvcache.base import KVCacheParams
-from keys_values.kvcache.buffers import KVCacheBuffers
-from keys_values.kvcache.quant_buffers import (
-    QuantizedKVCacheBuffers,
-    create_quantized_kv_buffers,
-)
+from keys_values.kvcache.quant_buffers import create_quantized_kv_buffers
 from keys_values.kvcache.quantize.quantization import (
     Quantizer,
     QuantizerState,
@@ -117,14 +113,12 @@ class KVCacheOffloader:
         quantizer_k.assign_callback(
             partial(
                 quantizer_callback,
-                cache_buffers=self.cache_buffers,
                 quantizer_states=self.quantizer_states_k,
             )
         )
         quantizer_v.assign_callback(
             partial(
                 quantizer_callback,
-                cache_buffers=self.cache_buffers,
                 quantizer_states=self.quantizer_states_v,
             )
         )
@@ -147,46 +141,16 @@ class KVCacheOffloader:
             (self.quantizer_k, self.quantizer_states_k),
             (self.quantizer_v, self.quantizer_states_v),
         ):
-            pos = find_pos_for_buffers(
-                buffers=quantizer.current_buffers,
-                cache_buffers=self.cache_buffers,
-                err_msg="Internal error in 'flush'",
-            )
-            self.quantizer_states_k[pos].copy_()
-
-
-def find_pos_for_buffers(
-    buffers: QuantizedKVCacheBuffers,
-    cache_buffers: List[QuantizedKVCacheBuffers],
-    err_msg: str,
-) -> int:
-    try:
-        pos = next(i for i, b in enumerate(cache_buffers) if b is buffers)
-    except StopIteration:
-        raise IndexError(err_msg)
-    return pos
+            states[quantizer.current_block_idx].copy_()
 
 
 def quantizer_callback(
-    new_buffers: KVCacheBuffers,
-    current_buffers: KVCacheBuffers,
-    cache_buffers: List[QuantizedKVCacheBuffers],
+    new_block_idx: int,
+    current_block_idx: int,
     quantizer_states: List[QuantizerState],
 ):
-    assert isinstance(new_buffers, QuantizedKVCacheBuffers)
-    assert isinstance(current_buffers, QuantizedKVCacheBuffers)
-    new_pos = find_pos_for_buffers(
-        new_buffers,
-        cache_buffers,
-        "Callback: new_buffers not found",
-    )
-    current_pos = find_pos_for_buffers(
-        current_buffers,
-        cache_buffers,
-        "Callback: new_buffers not found",
-    )
-    if new_pos != current_pos:
+    if new_block_idx != current_block_idx:
         # Write back quantizer -> state
-        quantizer_states[current_pos].copy_()
+        quantizer_states[current_block_idx].copy_()
         # Restore state -> quantizer
-        quantizer_states[new_pos].restore()
+        quantizer_states[new_block_idx].restore()
