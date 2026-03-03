@@ -21,7 +21,7 @@ import os
 import time
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any, Tuple
+from typing import Dict, Literal, Optional, Union, Any, Tuple, List
 
 import lightning as L
 from lightning.fabric.strategies import DDPStrategy
@@ -112,6 +112,11 @@ from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.optimize.model_factory import BlockComponentName
 from keys_values.parser_config import save_hyperparameters
 from keys_values.pos_encoding import position_encoding_factory
+from keys_values.size_log import (
+    SizeWeightsGradientsLog,
+    SizeLogMapper,
+    SizeLogMapperRule,
+)
 from keys_values.utils import (
     flush_io_streams,
     VerbosityLevels,
@@ -190,6 +195,7 @@ def setup(
     generate_with_eval: bool = False,
     profile_grad_times: int = 0,
     profile_parts: Optional[str] = None,
+    size_log_quantiles: Optional[str] = None,
     debug_dont_use_autograd_hooks: bool = False,
 ) -> None:
     """Finetune a model.
@@ -271,6 +277,11 @@ def setup(
         profile_parts: If given, we use `cProfile` to profile the first forward
             (if "forward") or first backward (if "backward") pass. Results are
             printed, then the program stops.
+        size_log_quantiles: If given, must be a list of quantile levels (between
+            0 and 1), as comma-separated string. In this case, we compute these
+            quantiles for all weights and gradients just before each update,
+            writing them to CSV files, see :class:`SizeWeightsGradientsLog` for
+            details.
 
     """
     setup_internal(
@@ -304,6 +315,7 @@ def setup(
         generate_with_eval,
         profile_grad_times,
         profile_parts,
+        size_log_quantiles,
         debug_dont_use_autograd_hooks,
     )
 
@@ -339,6 +351,7 @@ def setup_internal(
     generate_with_eval: bool,
     profile_grad_times: int,
     profile_parts: Optional[str],
+    size_log_quantiles: Optional[str],
     debug_dont_use_autograd_hooks: bool,
 ) -> None:
     if do_cpu_offload and not torch.cuda.is_available():
@@ -379,6 +392,18 @@ def setup_internal(
             train.global_batch_size = global_batch_size
     if profile_parts is not None and profile_parts not in ("forward", "backward"):
         raise ValueError("profile_parts: Must be 'forward' or 'backward'")
+    if size_log_quantiles is not None:
+        size_log_quantiles = sorted([float(x) for x in size_log_quantiles.split(",")])
+        if not size_log_quantiles or not all(0 <= x <= 1 for x in size_log_quantiles):
+            raise ValueError(
+                f"size_log_quantiles = {size_log_quantiles}, must have entries in [0, 1]"
+            )
+        if any(
+            x1 == x2 for x1, x2 in zip(size_log_quantiles[:-1], size_log_quantiles[1:])
+        ):
+            raise ValueError(
+                f"size_log_quantiles = {size_log_quantiles}, must not have duplicates"
+            )
     # Legacy arguments
     if verbose is None:
         if kv_cache.verbose is not None:
@@ -477,6 +502,7 @@ def setup_internal(
         generate_with_eval=generate_with_eval,
         profile_grad_times=profile_grad_times,
         profile_parts=profile_parts,
+        size_log_quantiles=size_log_quantiles,
         debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
     )
 
@@ -510,6 +536,7 @@ def main(
     generate_with_eval: bool,
     profile_grad_times: int,
     profile_parts: Optional[str],
+    size_log_quantiles: List[float],
     debug_dont_use_autograd_hooks: bool,
 ) -> None:
     validate_args(train, eval)
@@ -742,6 +769,7 @@ def main(
         record_gpu_memory_period=record_gpu_memory_period,
         generate_with_eval=generate_with_eval,
         profile_grad_params=profile_grad_params,
+        size_log_quantiles=size_log_quantiles,
     )
     training_time = time.perf_counter() - train_time
     output = create_finetuning_performance_report(
@@ -1025,6 +1053,7 @@ def fit(
     record_gpu_memory_period: int,
     generate_with_eval: bool,
     profile_grad_params: Optional[Dict[str, Any]],
+    size_log_quantiles: List[float],
 ) -> Dict[str, Any]:
     do_cpu_offloading = "cpu_optimizer" in state
     model = state["model"]
@@ -1127,6 +1156,47 @@ def fit(
     max_steps = train.max_steps or float("inf")
     train_iterator = CycleIterator(train_dataloader)
     throughput = ThroughputMonitor(fabric, window_size=50)
+    if size_log_quantiles is not None:
+        print_message(
+            f"Logging size distributions for weights and gradients: quantiles = {size_log_quantiles}",
+            fabric,
+        )
+        config = model.gpt_model.config
+        if not isinstance(config, ConfigLoRA):
+            # Rules to split qkv variables into q, k, v. Only for full
+            # fine-tuning
+            query_size = config.n_head * config.head_size
+            key_size = config.n_query_groups * config.head_size
+            rules = [
+                SizeLogMapperRule(
+                    postfix="qkv.weight",
+                    sizes_names=(
+                        (query_size, "q.weight"),
+                        (key_size, "k.weight"),
+                        (key_size, "v.weight"),
+                    ),
+                    dim=0,
+                ),
+                SizeLogMapperRule(
+                    postfix="qkv.bias",
+                    sizes_names=(
+                        (query_size, "q.bias"),
+                        (key_size, "k.bias"),
+                        (key_size, "v.bias"),
+                    ),
+                    dim=0,
+                ),
+            ]
+            mapper = SizeLogMapper(rules=rules)
+        else:
+            mapper = None
+        size_logs = SizeWeightsGradientsLog(
+            quantiles=size_log_quantiles,
+            path=out_dir,
+            mapper=mapper,
+        )
+    else:
+        size_logs = None
 
     # resume data loader state by fast-forwarding through all seen batches
     if resume:
@@ -1220,6 +1290,8 @@ def fit(
 
         running_loss.update(loss.detach().to(device=optim_device))
         flush_io_streams()
+        if size_logs is not None:
+            size_logs(model.gpt_model)
         if profile_grad_params is not None:
             records = model.profile_records()
             skip_names = ("path", "profile_grad_times")

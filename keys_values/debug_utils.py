@@ -14,7 +14,7 @@
 from math import ceil, floor
 import re
 from pathlib import Path
-from typing import Dict, Optional, Callable, Any, Tuple
+from typing import Dict, Optional, Callable, Any, Tuple, List
 
 import torch
 
@@ -284,11 +284,18 @@ def torch_quantile(  # noqa: PLR0913 (too many arguments)
     return out.squeeze() if dim_was_none else out.squeeze(dim)
 
 
-def size_quantiles(x: torch.Tensor) -> str:
+def size_quantiles_internal(
+    x: torch.Tensor,
+    quantiles: List[float],
+) -> List[float]:
     abs_x = (
         x.detach().to(device=torch.device("cpu"), dtype=torch.float32).flatten().abs()
     )
-    qvals_x = [torch_quantile(abs_x, q=q).item() for q in QUANTILES]
+    return [torch_quantile(abs_x, q=q).item() for q in quantiles]
+
+
+def size_quantiles(x: torch.Tensor) -> str:
+    qvals_x = size_quantiles_internal(x, QUANTILES)
     return "|".join([f"{k:.2f}:{v:.2e}" for k, v in zip(QUANTILES, qvals_x)])
 
 

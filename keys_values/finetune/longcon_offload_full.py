@@ -95,6 +95,7 @@ def setup(
     generate_with_eval: bool = False,
     profile_grad_times: int = 0,
     profile_parts: Optional[str] = None,
+    size_log_quantiles: Optional[str] = None,
     debug_dont_use_autograd_hooks: bool = False,
 ) -> None:
     """Finetune a model with CPU offloading
@@ -179,6 +180,11 @@ def setup(
         profile_parts: If given, we use `cProfile` to profile the first forward
             (if "forward") or first backward (if "backward") pass. Results are
             printed, then the program stops.
+        size_log_quantiles: If given, must be a list of quantile levels (between
+            0 and 1), as comma-separated string. In this case, we compute these
+            quantiles for all weights and gradients just before each update,
+            writing them to CSV files, see :class:`SizeWeightsGradientsLog` for
+            details.
 
     """
     setup_internal(
@@ -212,5 +218,6 @@ def setup(
         generate_with_eval,
         profile_grad_times,
         profile_parts,
+        size_log_quantiles,
         debug_dont_use_autograd_hooks,
     )
