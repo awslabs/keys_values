@@ -258,7 +258,9 @@ class Quantizer(torch.nn.Module):
     def _deal_with_callback(self, buffers: Optional[KVCacheBuffers]):
         if self._callback is not None:
             if buffers is None:
-                raise ValueError("QuantizedKVCacheBuffers must pass buffers=self when calling Quantizer")
+                raise ValueError(
+                    "QuantizedKVCacheBuffers must pass buffers=self when calling Quantizer"
+                )
             if self.current_buffers is not None:
                 self._callback(buffers, self.current_buffers)
             self.current_buffers = buffers

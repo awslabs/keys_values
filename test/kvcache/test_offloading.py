@@ -32,6 +32,7 @@ from keys_values.utils import randint_torch
 def _filter_name(name):
     return name.startswith("lastrec") and not name.endswith("-default")
 
+
 def args_compare_forward() -> Tuple[str, List[tuple]]:
     names_and_devices = cache_names_and_devices(filter_name=_filter_name)
     setups = [
@@ -42,6 +43,7 @@ def args_compare_forward() -> Tuple[str, List[tuple]]:
         "name, device, cache_length, chunk_size, seq_length",
         [a + b for a, b in product(names_and_devices, setups)],
     )
+
 
 @pytest.mark.parametrize(*args_compare_forward())
 def test_compare_forward(name, device, cache_length, chunk_size, seq_length):
@@ -111,6 +113,7 @@ def test_compare_forward(name, device, cache_length, chunk_size, seq_length):
     loss_values = dict()
     embeddings = dict(yes=[], no=[])
     for kind, kv_caches in all_kv_caches.items():
+
         def layer_hook(x, block_idx):
             if block_idx > 0:
                 embeddings[kind].append(x.clone())

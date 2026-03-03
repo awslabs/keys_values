@@ -81,7 +81,6 @@ class KVCacheArgs:
     grace_period: int = 0
     init_grace_tokens: int = 0
     cpu_offload: bool = False
-    verbose: Optional[VerbosityLevels] = None
     # Legacy (these are global args now)
     verbose: Optional[str] = None
     attention_forward_temp_size_gb: Optional[float] = None
@@ -103,7 +102,9 @@ class KVCacheArgs:
                 f"init_grace_tokens = {self.init_grace_tokens}, must be in [0, {self.cache_length}])"
             )
         if self.cpu_offload and split_name(self.name)[1] == "default":
-            raise NotImplementedError("CPU offloading (--kv_cache.cpu_offload True) is currently not supported for non-quantized KV cache buffers")
+            raise NotImplementedError(
+                "CPU offloading (--kv_cache.cpu_offload True) is currently not supported for non-quantized KV cache buffers"
+            )
         # Deprecated
         if self.verbose is None:
             self.verbose = VerbosityLevels.SOME.value

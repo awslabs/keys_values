@@ -54,6 +54,7 @@ class KVCacheOffloader:
     * We do not support offloading with non-quantized KV cache buffers.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -84,7 +85,10 @@ class KVCacheOffloader:
 
         """
         cache_params = KVCacheParams.from_config(
-            config, max_batch_size, cache_length, dtype=dtype,
+            config,
+            max_batch_size,
+            cache_length,
+            dtype=dtype,
         )
         # Create cache buffers and quantizers
         self.cache_buffers = create_quantized_kv_buffers(
@@ -157,9 +161,7 @@ def find_pos_for_buffers(
     err_msg: str,
 ) -> int:
     try:
-        pos = next(
-            i for i, b in enumerate(cache_buffers) if b is buffers
-        )
+        pos = next(i for i, b in enumerate(cache_buffers) if b is buffers)
     except StopIteration:
         raise IndexError(err_msg)
     return pos
@@ -174,10 +176,14 @@ def quantizer_callback(
     assert isinstance(new_buffers, QuantizedKVCacheBuffers)
     assert isinstance(current_buffers, QuantizedKVCacheBuffers)
     new_pos = find_pos_for_buffers(
-        new_buffers, cache_buffers, "Callback: new_buffers not found",
+        new_buffers,
+        cache_buffers,
+        "Callback: new_buffers not found",
     )
     current_pos = find_pos_for_buffers(
-        current_buffers, cache_buffers, "Callback: new_buffers not found",
+        current_buffers,
+        cache_buffers,
+        "Callback: new_buffers not found",
     )
     if new_pos != current_pos:
         # Write back quantizer -> state

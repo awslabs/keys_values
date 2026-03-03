@@ -855,7 +855,10 @@ def wrap_gpt_model(
     fabric: Optional[L.Fabric] = None,
     debug_dont_use_autograd_hooks: bool = False,
     model_kwargs: Optional[Dict[str, Any]] = None,
-) -> Tuple[Union[LongContextGradientModel, LongContextInferenceModel], Optional[KVCacheOffloader]]:
+) -> Tuple[
+    Union[LongContextGradientModel, LongContextInferenceModel],
+    Optional[KVCacheOffloader],
+]:
     model_for_training = grad is not None
     print_message(
         "Assigning KV caches to layers of model:\n"

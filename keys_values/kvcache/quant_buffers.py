@@ -860,8 +860,8 @@ def get_quant_kwargs(
     except KeyError:
         blocks_over_heads = False
     if (
-            blocks_over_heads is False
-            and params.head_size < quantizer_type.minimum_blocksize()
+        blocks_over_heads is False
+        and params.head_size < quantizer_type.minimum_blocksize()
     ):
         print(
             f"blocksize = {params.head_size} too small. Switching to blocks_over_heads = True."
@@ -906,7 +906,9 @@ def create_quantized_kv_buffers(
 
     """
     if shared_quantizers and not all(x == cache_lengths[0] for x in cache_lengths):
-        raise ValueError(f"cache_lengths = {cache_lengths} must all be the same if callback is given")
+        raise ValueError(
+            f"cache_lengths = {cache_lengths} must all be the same if callback is given"
+        )
     buffer_params = replace(
         KVCacheBuffersParams.from_params(cache_params),
         device=device,

@@ -158,7 +158,9 @@ class KVCacheFactory:
             else:
                 cache_params = KVCacheBuffersParams.from_params(params)
                 if dtype is None:
-                    raise ValueError(f"dtype must be given for quantized cache buffers ({qname})")
+                    raise ValueError(
+                        f"dtype must be given for quantized cache buffers ({qname})"
+                    )
                 if device is not None:
                     cache_params = replace(cache_params, device=device)
                 allocate_buffers = cache_kwargs.get("allocate_buffers")
@@ -279,7 +281,9 @@ class KVCacheFactory:
                 ]
             else:
                 if dtype is None:
-                    raise ValueError(f"dtype must be given for quantized cache buffers ({qname})")
+                    raise ValueError(
+                        f"dtype must be given for quantized cache buffers ({qname})"
+                    )
                 cache_params = KVCacheParams(
                     max_batch_size=max_batch_size,
                     n_query_groups=config.n_query_groups,
@@ -357,7 +361,9 @@ class KVCacheFactory:
         config = gpt_model.config
         cname, qname = split_name(name)
         if qname == "default":
-            raise ValueError(f"name = {name}: Offloading does not support default buffers, must be quantized")
+            raise ValueError(
+                f"name = {name}: Offloading does not support default buffers, must be quantized"
+            )
         cache_type = SUPPORTED_CACHES.get(name)
         if cache_type is not None:
             max_num_ranges = cache_kwargs.get("max_num_ranges")
