@@ -384,7 +384,8 @@ def setup_internal(
         data.metadata_dir = str(out_dir / "data")
         print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
     out_dir = init_out_dir(out_dir)
-    data.metadata_dir = str(init_out_dir(Path(data.metadata_dir)))
+    if data.metadata_dir is not None:
+        data.metadata_dir = str(init_out_dir(Path(data.metadata_dir)))
     if head_model_kwargs is None:
         head_model_kwargs = dict()
     devices = parse_devices(devices)
