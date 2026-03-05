@@ -412,6 +412,15 @@ class CausalSelfAttention(BaseCausalSelfAttention):
             use_r=config.lora_projection,
         )
 
+    def normalize_keys(self):
+        """
+        Normalizes the part of `qkv.bias` corresponding to keys to zero
+        mean. This does not change the MHA mapping.
+
+        """
+        if self.qkv_has_bias:
+            self.qkv.linear.bias.add_(-self.qkv.linear.bias.mean())
+
     def _load_from_state_dict(
         self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any
     ) -> None:

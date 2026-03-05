@@ -102,6 +102,7 @@ def setup(
         flex_attention=True,
         flex_extend_kv=False,
     ),
+    normalize_keys: bool = False,
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
     record_gpu_memory_period: int = 0,
@@ -167,6 +168,9 @@ def setup(
             `sdpa.flex_attention` to `True` to activate PyTorch
             `flex_attention`. Otherwise, the zero-padded query SDPA kernel is
             used.
+        normalize_keys: If `True`, we apply some additive normalization inside
+            multi-head self attention, which does not change the mapping, but
+            may lead to less numerical errors.
         record_gpu_memory_snapshots: If given, we record GPU memory traces in
             snapshots. This argument is the `max_entries` parameter, a good
             value is 50000 or 100000.
@@ -218,6 +222,7 @@ def setup(
         attention_backward_temp_size_gb,
         yarn_rope,
         sdpa,
+        normalize_keys,
         record_gpu_memory_snapshots,
         record_gpu_memory_kind,
         record_gpu_memory_period,

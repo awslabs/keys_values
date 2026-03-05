@@ -467,6 +467,20 @@ class GPT(nn.Module):
         )
         return model_copy
 
+    def normalize_params(self):
+        """
+        To be called after an optimizer update, or after loading some
+        checkpoint. Depending on the configuration, we normalize certain
+        weights in a way that leaves the forward mapping the same.
+
+        * If `config.normalize_keys == True`, we normalize the
+          keys parts of all `qkv.bias` vectors to zero mean.
+
+        """
+        if self.config.normalize_keys:
+            for block in self.transformer.h:
+                block.attn.normalize_keys()
+
 
 class Block(nn.Module):
     def __init__(
@@ -582,11 +596,12 @@ class CausalSelfAttention(nn.Module):
     ) -> None:
         super().__init__()
         # key, query and value projections for all heads, but in a batch
+        self.qkv_has_bias = config.bias or config.attn_bias
         self.qkv = nn.Linear(
             config.n_embd,
             (config.n_head + 2 * config.n_query_groups)
             * config.head_size,  # support for grouped/multi queries
-            bias=config.bias or config.attn_bias,
+            bias=self.qkv_has_bias,
         )
 
         def qkv_apply(x: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -768,6 +783,8 @@ class CausalSelfAttention(nn.Module):
         # even to work at all
         q = q.contiguous()
         k = k.contiguous()
+        if self.config.normalize_keys:
+            k = k - k.mean(dim=2, keepdim=True)
         v = v.contiguous()
         if self.kv_cache is None:
             # Default causal self-attention
@@ -794,6 +811,15 @@ class CausalSelfAttention(nn.Module):
                 postfix="_attn_y",
             )
         return self.proj(y)  # (batch_size, num, n_embd)
+
+    def normalize_keys(self):
+        """
+        Normalizes the part of `qkv.bias` corresponding to keys to zero
+        mean. This does not change the MHA mapping.
+
+        """
+        if self.qkv_has_bias:
+            self.qkv.bias.add_(-self.qkv.bias.mean())
 
     def _transform_output(
         self,

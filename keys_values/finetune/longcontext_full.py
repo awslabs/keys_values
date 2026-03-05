@@ -184,6 +184,7 @@ def setup(
         flex_attention=True,
         flex_extend_kv=False,
     ),
+    normalize_keys: bool = False,
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
     record_gpu_memory_period: int = 0,
@@ -247,6 +248,9 @@ def setup(
             `sdpa.flex_attention` to `True` to activate PyTorch
             `flex_attention`. Otherwise, the zero-padded query SDPA kernel is
             used.
+        normalize_keys: If `True`, we apply some additive normalization inside
+            multi-head self attention, which does not change the mapping, but
+            may lead to less numerical errors.
         record_gpu_memory_snapshots: If given, we record GPU memory traces in
             snapshots. This argument is the `max_entries` parameter, a good
             value is 50000 or 100000.
@@ -298,6 +302,7 @@ def setup(
         attention_backward_temp_size_gb,
         yarn_rope,
         sdpa,
+        normalize_keys,
         record_gpu_memory_snapshots,
         record_gpu_memory_kind,
         record_gpu_memory_period,
@@ -333,6 +338,7 @@ def setup_internal(
     attention_backward_temp_size_gb: Optional[float],
     yarn_rope: bool,
     sdpa: SDPAArgs,
+    normalize_keys: bool,
     record_gpu_memory_snapshots: Optional[int],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
@@ -417,6 +423,9 @@ def setup_internal(
             lora_mlp=lora.mlp,
             lora_head=lora.head,
         )
+    if normalize_keys:
+        print("Normalization of keys is active.")
+    config.normalize_keys = normalize_keys
 
     precision = precision or get_default_supported_precision(training=True)
     logger = choose_logger(
@@ -1255,6 +1264,7 @@ def fit(
                 gpu_optimizer.zero_grad(set_to_none=True)
                 gpu_scheduler.step()
             print_message("Optimizer update done.", fabric)
+            model.gpt_model.normalize_params()
             state["step_count"] += 1
             check_for_nan_module_weights(model.gpt_model)
 
