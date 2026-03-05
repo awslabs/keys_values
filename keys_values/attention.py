@@ -173,6 +173,15 @@ class MultiHeadSelfAttention:
     Use :class:`DefaultUseEagerKernel` for an optimized choice of
     `use_eager_kernel`.
 
+    Normalization of keys:
+
+    If `normalize_keys == True`, we normalize
+    ```
+        keys = keys - keys.mean(dim=2, keepdim=True)
+    ```
+    just before calling SDPA. This does not change the MHA mapping, but may
+    reduce numerical errors.
+
     """
 
     def __init__(
@@ -185,6 +194,7 @@ class MultiHeadSelfAttention:
         use_eager_kernel: Optional[UseEagerPredicate] = None,
         filter_sdpa_kernels: bool = True,
         flexatt_args: Optional[FlexAttentionArgs] = None,
+        normalize_keys: bool = False,
     ) -> None:
         self.config = config
         if pos_encoding is None:
@@ -207,6 +217,7 @@ class MultiHeadSelfAttention:
             use_eager_kernel = lambda kv_len, q_len: q_len < 512
         self._use_eager_kernel = use_eager_kernel
         self._flexatt_args = flexatt_args
+        self._normalize_keys = normalize_keys
 
     @property
     def sdpa_kernels(self) -> Union[SDPBackend, List[SDPBackend]]:
@@ -419,6 +430,7 @@ class MultiHeadSelfAttention:
                 token_positions=token_positions,
                 sdpa_kernels=self.sdpa_kernels,
                 do_filter_kernels=self._do_filter_kernels,
+                normalize_keys=self._normalize_keys,
                 annotation_callback=annotation_callback,
             )
             if self._do_filter_kernels:
@@ -435,6 +447,7 @@ class MultiHeadSelfAttention:
                 attention_logit_softcapping=self.config.attention_logit_softcapping,
                 input_pos=input_pos,
                 token_positions=token_positions,
+                normalize_keys=self._normalize_keys,
                 annotation_callback=annotation_callback,
             )
         elif sdpa_mode == SDPA_IMPL_PYTORCH:
@@ -446,10 +459,13 @@ class MultiHeadSelfAttention:
                     annotation_callback,
                     sort_index=None,
                 )
+            key, value = k_and_v.keys(), k_and_v.values()
+            if self._normalize_keys:
+                key = key - key.mean(dim=2, keepdim=True)
             attn_outputs, filtered_kernels = pytorch_scaled_dot_product_attention(
                 query=query,
-                key=k_and_v.keys(),
-                value=k_and_v.values(),
+                key=key,
+                value=value,
                 scale_factor=scale_factor,
                 sdpa_kernels=self.sdpa_kernels,
                 do_filter_kernels=self._do_filter_kernels,
@@ -475,6 +491,7 @@ class MultiHeadSelfAttention:
                 mask=mask,
                 attention_logit_softcapping=self.config.attention_logit_softcapping,
                 tmp_array_limit_gb=self.tmp_array_limit_gb_value(),
+                normalize_keys=self._normalize_keys,
             )
         if transpose_result:
             attn_outputs = attn_outputs.transpose(1, 2)
@@ -500,12 +517,15 @@ def eager_scaled_dot_product_attention(
     mask: Optional[torch.Tensor] = None,
     attention_logit_softcapping: Optional[float] = None,
     tmp_array_limit_gb: Optional[float] = None,
+    normalize_keys: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     if not use_blocking:
         dtype = query.dtype
         n_head = query.shape[1]
         query32 = query.to(torch.float32)
         key32 = k_and_v.keys().to(torch.float32)
+        if normalize_keys:
+            key32 = key32 - key32.mean(dim=2, keepdim=True)
         attn_weights = attention_compute_scores(query32, key32) * scale_factor
         attn_weights = do_softcapping(attn_weights, attention_logit_softcapping)
         if mask is not None:
@@ -538,6 +558,7 @@ def eager_scaled_dot_product_attention(
             token_positions=token_positions,
             sliding_window_size=sliding_window_size,
             tmp_array_limit_gb=tmp_array_limit_gb,
+            normalize_keys=normalize_keys,
         )
 
 
@@ -550,10 +571,13 @@ def scaled_dot_product_attention_in_blocks(
     token_positions: Optional[torch.Tensor],
     sliding_window_size: Optional[int],
     tmp_array_limit_gb: Optional[float] = None,
+    normalize_keys: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     device = query.device
     dtype = query.dtype
     key32 = k_and_v.keys().to(torch.float32)
+    if normalize_keys:
+        key32 = key32 - key32.mean(dim=2, keepdim=True)
     value32 = k_and_v.values().to(torch.float32)
     # Allocate temporary arrays and determine the number of slices.
     batch_size, n_head, q_len, _ = query.shape

@@ -183,8 +183,8 @@ def setup(
     sdpa: SDPAArgs = SDPAArgs(
         flex_attention=True,
         flex_extend_kv=False,
+        normalize_keys=False,
     ),
-    normalize_keys: bool = False,
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
     record_gpu_memory_period: int = 0,
@@ -248,9 +248,6 @@ def setup(
             `sdpa.flex_attention` to `True` to activate PyTorch
             `flex_attention`. Otherwise, the zero-padded query SDPA kernel is
             used.
-        normalize_keys: If `True`, we apply some additive normalization inside
-            multi-head self attention, which does not change the mapping, but
-            may lead to less numerical errors.
         record_gpu_memory_snapshots: If given, we record GPU memory traces in
             snapshots. This argument is the `max_entries` parameter, a good
             value is 50000 or 100000.
@@ -302,7 +299,6 @@ def setup(
         attention_backward_temp_size_gb,
         yarn_rope,
         sdpa,
-        normalize_keys,
         record_gpu_memory_snapshots,
         record_gpu_memory_kind,
         record_gpu_memory_period,
@@ -338,7 +334,6 @@ def setup_internal(
     attention_backward_temp_size_gb: Optional[float],
     yarn_rope: bool,
     sdpa: SDPAArgs,
-    normalize_keys: bool,
     record_gpu_memory_snapshots: Optional[int],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
@@ -376,6 +371,7 @@ def setup_internal(
         print(
             "Choosing optimizer AdamW with default learning rate. We recommend to at least tune optimizer.learning_rate"
         )
+        optimizer.normalize_keys_bias = sdpa.normalize_keys
     else:
         print(str(optimizer))
     if do_cpu_offload:
@@ -423,9 +419,12 @@ def setup_internal(
             lora_mlp=lora.mlp,
             lora_head=lora.head,
         )
-    if normalize_keys:
-        print("Normalization of keys is active.")
-    config.normalize_keys = normalize_keys
+    if sdpa.normalize_keys:
+        print("Normalization of keys in SDPA is active.")
+        if not optimizer.normalize_keys_bias:
+            print("Warning: optimizer.normalize_keys_bias = False, while sdpa.optiimer = True. Usually, they are the same.")
+    if optimizer.normalize_keys_bias:
+        print("Normalization of bias vectors in MHA keys map is active.")
 
     precision = precision or get_default_supported_precision(training=True)
     logger = choose_logger(
@@ -568,6 +567,7 @@ def main(
             yarn_rope,
             fabric,
         )
+        mha_kwargs["normalize_keys_bias"] = optimizer.normalize_keys_bias
         dtype = fabric_precision_to_dtype(fabric._precision.precision)
         torch.set_default_dtype(dtype)
         if do_cpu_offload:
@@ -712,6 +712,7 @@ def main(
         file_path = checkpoint_dir / LIT_MODEL_FNAME
         # strict=False because missing keys due to LoRA weights not contained in state dict
         load_checkpoint(fabric, model.gpt_model, file_path, strict=not is_lora)
+        model.gpt_model.normalize_params()
         # If there are head model weights, load them as well. Otherwise, we use
         # random initialization (or the head model may not have weights)
         file_path = checkpoint_dir / HEAD_MODEL_FNAME
@@ -834,6 +835,7 @@ def get_mha_and_cache_kwargs(
     mha_kwargs: Dict[str, Any] = dict(
         tmp_array_limit_gb=tmp_array_limit_forward,
         pos_encoding=position_encoding_factory(config, do_yarn=yarn_rope),
+        normalize_keys=sdpa.normalize_keys,
     )
     if "sdpa_kernels" in cache_kwargs:
         mha_kwargs["sdpa_kernels"] = cache_kwargs["sdpa_kernels"]

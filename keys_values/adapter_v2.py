@@ -52,7 +52,12 @@ class Config(BaseConfig):
 
 class GPT(BaseModel):
     # Copy & paste from :class:`model.GPT`. Note that :class:`Block` is new here.
-    def __init__(self, config: Config, **mha_kwargs) -> None:
+    def __init__(
+        self,
+        config: Config,
+        normalize_keys_bias: bool = False,
+        **mha_kwargs,
+    ) -> None:
         nn.Module.__init__(self)
         assert config.padded_vocab_size is not None
         self.config = config
@@ -79,6 +84,7 @@ class GPT(BaseModel):
         self._start_of_layer_hook = None
         # Have dense KV caches been created by `set_kv_cache`?
         self._default_kv_cache = False
+        self._normalize_keys_bias = normalize_keys_bias
 
     @classmethod
     def from_name(cls, name: str, **kwargs: Any) -> Self:
@@ -110,6 +116,20 @@ class GPT(BaseModel):
         model_copy.mha = self.mha
         return model_copy
 
+    def normalize_params(self):
+        """
+        To be called after an optimizer update, or after loading some
+        checkpoint. Depending on the configuration, we normalize certain
+        weights in a way that leaves the forward mapping the same.
+
+        * If `config.normalize_keys_bias == True`, we normalize the
+          keys parts of all `qkv.bias` vectors to zero mean.
+
+        """
+        if self._normalize_keys_bias:
+            for block in self.transformer.h:
+                block.attn.normalize_keys()
+
 
 class Block(BaseBlock):
     def __init__(
@@ -135,10 +155,11 @@ class CausalSelfAttention(BaseCausalSelfAttention):
         super().__init__(config, block_idx, kv_cache)
         # key, query, value projections for all heads, but in a batch
         shape = (config.n_head + 2 * config.n_query_groups) * config.head_size
+        self.qkv_has_bias = config.bias or config.attn_bias
         self.qkv = AdapterV2Linear(
             in_features=config.n_embd,
             out_features=shape,
-            bias=config.bias or config.attn_bias,
+            bias=self.qkv_has_bias,
         )
         # output projection
         self.proj = AdapterV2Linear(
@@ -146,6 +167,15 @@ class CausalSelfAttention(BaseCausalSelfAttention):
             config.n_embd,
             bias=config.bias,
         )
+
+    def normalize_keys(self):
+        """
+        Normalizes the part of `qkv.bias` corresponding to keys to zero
+        mean. This does not change the MHA mapping.
+
+        """
+        if self.qkv_has_bias:
+            self.qkv.linear.bias.add_(-self.qkv.linear.bias.mean())
 
     def _load_from_state_dict(
         self,

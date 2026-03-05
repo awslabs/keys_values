@@ -246,7 +246,13 @@ HAS_ALPHA = {
 
 @dataclass
 class OptimizerArgs:
-    """Command line arguments for optimizer
+    """Command line arguments for optimization
+
+    If `normalize_keys_bias == True`, we normalize `*.attn.qkv.bias` vectors
+    to mean zero after every update, and after loading a checkpoint. This does
+    not change the MHA mapping (and therefore, the model mapping), but may
+    reduce numerical errors.
+
     Args:
         name: Name of optimizer, one of :const:`SUPPORTED_OPTIMIZERS`
         learning_rate: Base learning rate
@@ -257,6 +263,7 @@ class OptimizerArgs:
         adam_betas: `(beta1, beta2)`, only for Adam optimizers
         adadelta_rho: Rho constant (Adadelta only)
         rmspprop_alpha: Alpha constant (RMSprop only)
+        normalize_keys_bias: See above
 
     """
 
@@ -269,6 +276,7 @@ class OptimizerArgs:
     adam_betas: Optional[Tuple[float, float]] = None
     adadelta_rho: Optional[float] = None
     rmspprop_alpha: Optional[float] = None
+    normalize_keys_bias: bool = False
 
     def __post_init__(self):
         if self.name is None:
@@ -377,6 +385,10 @@ class SDPAArgs:
     This error most often comes from a incorrect fake (aka meta) kernel for a custom op.
     ```
 
+    If `normalize_keys` is `True`, we normalize keys to have zero mean along
+    dimension 2 before calling SDPA. These normalizations do not change the
+    MHA mapping, but may be helpful to avoid numerical overflow.
+
     Args:
         flex_attention: Should PyTorch `flex_attention` be used? If not,
             we use PyTorch SDPA with zero-padded queries. Defaults to
@@ -384,8 +396,10 @@ class SDPAArgs:
         flex_extend_kv: If `True`, we apply `repeat_interleave` to
             `key, value` to avoid the GQA case. This may be needed to get
             around bugs in `flex_attention`.
+        normalize_keys: See above.
 
     """
 
     flex_attention: bool = True
     flex_extend_kv: bool = True
+    normalize_keys: bool = False

@@ -20,23 +20,9 @@ import torch
 from litgpt.config import Config as _Config
 
 
-# TODO: If `normalize_keys` works, may switch it on by default
 @dataclass
 class Config(_Config):
-    """
-    If `normalize_keys` is `True`, we normalize keys in multi-head attention in
-    two ways before calling SDPA:
-
-    * All `*.attn.qkv.bias` vectors are normalized to zero mean after every
-      update, and also when loading a checkpoint
-    * The `key` tensor is normalized to zero mean along dimension 2
-
-    These normalizations do not change the MHA mapping, but may be helpful to
-    avoid numerical overflow.
-
-    """
     own_rms_norm_implementation: bool = False
-    normalize_keys: bool = False
 
     @property
     def norm_class(self) -> Type:

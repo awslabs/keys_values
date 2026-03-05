@@ -345,6 +345,7 @@ def scaled_dot_product_attention_flexatt(
     attention_logit_softcapping: Optional[float],
     input_pos: int,
     token_positions: Optional[torch.Tensor],
+    normalize_keys: bool = False,
     annotation_callback: Optional[ReorderAnnotationCallback] = None,
 ) -> torch.Tensor:
     """
@@ -374,8 +375,12 @@ def scaled_dot_product_attention_flexatt(
         token_positions: Only if `input_pos > 0`. Contains token positions
             in KV cache, shape `(batch_size, n_query_groups, kv_len)`. If not
             given for `input_pos > 0`, it is equivalent to `arange(kv_len)`.
-        annotation_callback: If this is given and `key, value` are reordered,
-            the results are passed to this callback.
+        normalize_keys: If `True`, `key` is normalized by subtracting the
+            mean along `dim=2`.
+        annotation_callback: If this is given, `key, value` are passed just
+            before `flex_attention` is called. If they are reordered,
+            `sort_index` is passed as well. The callback needs to be aware
+            of `normalize_keys` (flag is not passed).
 
     Returns:
         Attention outputs, shape `(batch_size, n_heads, q_len, head_size)`
@@ -402,6 +407,8 @@ def scaled_dot_product_attention_flexatt(
         key, value, sort_index = reorder_key_value(key, value, token_positions)
     else:
         sort_index = None
+    if normalize_keys:
+        key = key - key.mean(dim=2, keepdim=True)
     enable_gqa = n_query_groups < n_head
     requires_grad = query.requires_grad or key.requires_grad or value.requires_grad
     attn_fn, extend_kv = flexatt_args.attn_fn(

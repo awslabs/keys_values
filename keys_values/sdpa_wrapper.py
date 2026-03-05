@@ -61,6 +61,7 @@ def scaled_dot_product_attention(
     token_positions: Optional[torch.Tensor],
     sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
     do_filter_kernels: bool = False,
+    normalize_keys: bool = False,
     annotation_callback: Optional[ReorderAnnotationCallback] = None,
 ) -> Tuple[torch.Tensor, Optional[List[SDPBackend]]]:
     """
@@ -97,8 +98,12 @@ def scaled_dot_product_attention(
             built up.
         sdpa_kernels: Kernels to be used for SDPA can be restricted by
             `sdpa_kernels`.
-        annotation_callback: If this is given and `key, value` are reordered,
-            the results are passed to this callback.
+        normalize_keys: If `True`, `key` is normalized by subtracting the
+            mean along `dim=2`.
+        annotation_callback: If this is given, `key, value` are passed just
+            before `PyTorch SDPA` is called. If they are reordered,
+            `sort_index` is passed as well. The callback needs to be aware
+            of `normalize_keys` (flag is not passed).
 
     Returns:
         Attention outputs, shape `(batch_size, n_heads, q_len, head_size)`
@@ -136,6 +141,8 @@ def scaled_dot_product_attention(
             value,
             token_positions.detach(),
         )
+    if normalize_keys:
+        key = key - key.mean(dim=2, keepdim=True)
 
     # At this point, the new entries in `key`, `value`, corresponding to the
     # `query` tokens, are on the right end. Causal masking works if `query`

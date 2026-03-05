@@ -51,11 +51,13 @@ class GPT(nn.Module):
     def __init__(
         self,
         config: Config,
+        normalize_keys_bias: bool = False,
         **mha_kwargs,
     ) -> None:
         """
         Args:
             config: Configuration parameters
+            normalize_keys_bias: See :class:`OptimizerArgs.normalize_keys_bias`
             mha_kwargs: Extra arguments passed to :class:`MultiHeadSelfAttention`.
                 For example, `pos_encoding` sets the position encoding.
 
@@ -86,6 +88,7 @@ class GPT(nn.Module):
         self._start_of_layer_hook = None
         # Have dense KV caches been created by `set_kv_caches`?
         self._default_kv_cache = False
+        self._normalize_keys_bias = normalize_keys_bias
 
     @property
     def max_seq_length(self) -> int:
@@ -473,11 +476,11 @@ class GPT(nn.Module):
         checkpoint. Depending on the configuration, we normalize certain
         weights in a way that leaves the forward mapping the same.
 
-        * If `config.normalize_keys == True`, we normalize the
+        * If `config.normalize_keys_bias == True`, we normalize the
           keys parts of all `qkv.bias` vectors to zero mean.
 
         """
-        if self.config.normalize_keys:
+        if self._normalize_keys_bias:
             for block in self.transformer.h:
                 block.attn.normalize_keys()
 
@@ -783,8 +786,6 @@ class CausalSelfAttention(nn.Module):
         # even to work at all
         q = q.contiguous()
         k = k.contiguous()
-        if self.config.normalize_keys:
-            k = k - k.mean(dim=2, keepdim=True)
         v = v.contiguous()
         if self.kv_cache is None:
             # Default causal self-attention
@@ -819,7 +820,7 @@ class CausalSelfAttention(nn.Module):
 
         """
         if self.qkv_has_bias:
-            self.qkv.bias.add_(-self.qkv.bias.mean())
+            self.qkv.bias.data.add_(-self.qkv.bias.data.mean())
 
     def _transform_output(
         self,

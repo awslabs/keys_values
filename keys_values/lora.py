@@ -301,7 +301,12 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
 
 class GPT(BaseModel):
     # Copy & paste from :class:`model.GPT`. Note that :class:`Block` is new here.
-    def __init__(self, config: Config, **mha_kwargs) -> None:
+    def __init__(
+        self,
+        config: Config,
+        normalize_keys_bias: bool = False,
+        **mha_kwargs,
+    ) -> None:
         nn.Module.__init__(self)
         assert config.padded_vocab_size is not None
         self.config = config
@@ -330,6 +335,7 @@ class GPT(BaseModel):
         self._start_of_layer_hook = None
         # Have dense KV caches been created by `set_kv_caches`?
         self._default_kv_cache = False
+        self._normalize_keys_bias = normalize_keys_bias
 
     @classmethod
     def from_name(cls, name: str, **kwargs: Any) -> Self:
@@ -364,6 +370,20 @@ class GPT(BaseModel):
     def check_for_nan(self, do_grads: bool = False) -> None:
         for block in self.transformer.h:
             block.attn.check_for_nan(do_grads)
+
+    def normalize_params(self):
+        """
+        To be called after an optimizer update, or after loading some
+        checkpoint. Depending on the configuration, we normalize certain
+        weights in a way that leaves the forward mapping the same.
+
+        * If `config.normalize_keys_bias == True`, we normalize the
+          keys parts of all `qkv.bias` vectors to zero mean.
+
+        """
+        if self._normalize_keys_bias:
+            for block in self.transformer.h:
+                block.attn.normalize_keys()
 
 
 class Block(BaseBlock):
