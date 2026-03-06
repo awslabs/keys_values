@@ -1196,13 +1196,13 @@ def fit(
                 StoreWeightsRule(
                     match=get_match_for_store_rule("k"),
                     name="attn_k_bias",
-                    shape=(config.n_head, config.head_size),
+                    shape=(config.n_query_groups, config.head_size),
                     num_layers=config.n_layer,
                 ),
                 StoreWeightsRule(
                     match=get_match_for_store_rule("q"),
                     name="attn_q_bias",
-                    shape=(config.n_query_groups, config.head_size),
+                    shape=(config.n_head, config.head_size),
                     num_layers=config.n_layer,
                 ),
             ]
@@ -1480,6 +1480,8 @@ def get_match_for_store_rule(kind: str) -> Callable[[str], Optional[int]]:
     def match(name: str) -> Optional[int]:
         m = regex.match(name)
         return None if m is None else int(m.group(1))
+
+    return match
 
 
 def validate_and_all_reduce(

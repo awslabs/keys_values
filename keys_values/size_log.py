@@ -110,6 +110,24 @@ class SizeLogMapper:
 
 @dataclass(frozen=True)
 class StoreWeightsRule:
+    """
+    Defines a rule to store weights (or gradients) for a certain parameter
+    (identified by name) across all layers of a :class:`GPT` model.
+
+    We store values reshaped to `shape`, then concatenated along a new
+    first dimension spanning the layers. For example, if the tensors in
+    each layer shape `(128,)`, `shape == (8, 16)`, and there are 24 layers,
+    the value stored under `name` has shape `(24, 8, 16)`. If `shape == None`
+    in this example, the final shape is `(24, 128)`. If `x` denotes the
+    final tensor, then `x[block_idx]` is the value for layer `block_idx`.
+
+    Args:
+        match: Matches name, returns layer index for a match, `None` otherwise.
+        name: Name to be used for storing values
+        shape: See above, optional
+        num_layers: Number of layers. If given, we check in :meth:`combine`
+            whether all layers have been collected
+    """
     match: Callable[[str], Optional[int]]
     name: str
     shape: Optional[Tuple[int, ...]]
@@ -121,13 +139,31 @@ class StoreWeightsRule:
         name: str,
         x: torch.Tensor,
     ):
+        """
+        Called for all entries from `model.named_parameters()`, extends the
+        overall list `parts`.
+
+        """
         pos = self.match(name)
         if pos is not None:
             if self.shape is not None:
-                x = x.reshape(*self.shape)
+                try:
+                    x = x.reshape(*self.shape)
+                except RuntimeError as ex:
+                    print(f"name = {name}, shape = {self.shape}, x.shape = {x.shape}")
+                    raise ex
             parts.append((self.name, pos, x))
 
     def combine(self, parts: List[Tuple[str, int, torch.Tensor]]) -> Optional[torch.Tensor]:
+        """
+        Assembles final tensor of shape `(num_layers, ...)` from parts list
+        collected with :meth:`collect`. If `num_layers` is given, we check that
+        all layers have been covered.
+
+        Args:
+            parts: List built up by :meth:`collect` called for all parameters
+                and all rules.
+        """
         sorted_parts = sorted(
             [(p[1], p[2]) for p in parts if p[0] == self.name],
             key=lambda x: x[0],
