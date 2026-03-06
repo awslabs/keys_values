@@ -14,7 +14,7 @@
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Callable
 
 import torch
 
@@ -30,6 +30,11 @@ TABLE_FNAMES = {
 NAMES_FNAMES = {
     "weight": "sizes/weight_names.csv",
     "grad": "sizes/gradient_names.csv",
+}
+
+STORE_VALUES_FNAMES = {
+    "weight": "sizes/stored_weights.pth",
+    "grad": "sizes/stored_gradients.pth",
 }
 
 ENTRIES_KEYS = ("weight", "grad")
@@ -103,6 +108,40 @@ class SizeLogMapper:
         return None
 
 
+@dataclass(frozen=True)
+class StoreWeightsRule:
+    match: Callable[[str], Optional[int]]
+    name: str
+    shape: Optional[Tuple[int, ...]]
+    num_layers: Optional[int]
+
+    def collect(
+        self,
+        parts: List[Tuple[str, int, torch.Tensor]],
+        name: str,
+        x: torch.Tensor,
+    ):
+        pos = self.match(name)
+        if pos is not None:
+            if self.shape is not None:
+                x = x.reshape(*self.shape)
+            parts.append((self.name, pos, x))
+
+    def combine(self, parts: List[Tuple[str, int, torch.Tensor]]) -> Optional[torch.Tensor]:
+        sorted_parts = sorted(
+            [(p[1], p[2]) for p in parts if p[0] == self.name],
+            key=lambda x: x[0],
+        )
+        # It is OK if the rule did not match anything. But if it matches, it
+        # must match in every layer
+        if not sorted_parts:
+            return None
+        inds, vals = zip(*sorted_parts)
+        if self.num_layers is not None and inds != tuple(range(0, self.num_layers)):
+            raise ValueError(f"StoreWeightsRule[{self.name}]: inds = {inds}, must be equal to 0:{self.num_layers}")
+        return torch.cat([x.unsqueeze(0) for x in vals], dim=0)
+
+
 class SizeWeightsGradientsLog:
     """
     Maintains a log in the form of two tables (stored as CSV files), containing
@@ -121,6 +160,23 @@ class SizeWeightsGradientsLog:
     should be called when gradients have been computed, but before weights are
     updated by the optimizer.
 
+    Mappers and split rules:
+
+    `mapper` can be used to split tensors of certain parameters (identified by
+    name postfix) into several tensors along a certain dimension. See
+    :class:`SizeLogMapper` for details. Example: We use this to split
+    `qkv.weight` and `qkv.bias` tensors into `q, k, v` parts.
+
+    Storing selected weights or gradients:
+
+    If `store_weights_rules` is given, each rule in this list maps to a
+    parameter appearing in every layer, for which weights are stored. The
+    weights tensor is reshaped according to the rule, then stacked along
+    dim 0 w.r.t. layers. We store all such tensors across steps in a
+    dictionary with keys `"{rule.name}_{step}"`. This dictionary is stored
+    to disk for each step.
+    `store_grads_rules` is the same, but for gradients (instead of weights).
+
     """
 
     def __init__(
@@ -128,6 +184,8 @@ class SizeWeightsGradientsLog:
         quantiles: List[float],
         path: Path,
         mapper: Optional[SizeLogMapper] = None,
+        store_weights_rules: Optional[List[StoreWeightsRule]] = None,
+        store_grads_rules: Optional[List[StoreWeightsRule]] = None,
         weight_column_names: Optional[Tuple[str, ...]] = None,
         grad_column_names: Optional[Tuple[str, ...]] = None,
     ):
@@ -151,12 +209,20 @@ class SizeWeightsGradientsLog:
                 f"grad_column_names = {grad_column_names}, must have length 4"
             )
         self.column_names = {
-            "weight": weight_column_names,
-            "grad": grad_column_names,
+            ENTRIES_KEYS[0]: weight_column_names,
+            ENTRIES_KEYS[1]: grad_column_names,
         }
         self.names: Dict[str, List[str]] = {k: None for k in ENTRIES_KEYS}
         self._name_pos: Dict[str, Dict[str, int]] = {k: None for k in ENTRIES_KEYS}
         self.mapper = mapper
+        self.store_rules = {
+            ENTRIES_KEYS[0]: [] if store_weights_rules is None else store_weights_rules,
+            ENTRIES_KEYS[1]: [] if store_grads_rules is None else store_grads_rules,
+        }
+        self._stored = {
+            ENTRIES_KEYS[0]: dict(),
+            ENTRIES_KEYS[1]: dict(),
+        }
         self.step = 0
 
     def _initialize(self, module: torch.nn.Module):
@@ -191,6 +257,7 @@ class SizeWeightsGradientsLog:
     def __call__(self, module: torch.nn.Module):
         self._initialize(module)
         new_entries = {k: [] for k in ENTRIES_KEYS}
+        new_stored = {k: [] for k in ENTRIES_KEYS}
         for name, param in module.named_parameters():
             for k in ENTRIES_KEYS:
                 inputs = []
@@ -220,6 +287,9 @@ class SizeWeightsGradientsLog:
                             for q, val in zip(self._quantile_names, qvals)
                         ]
                     )
+                    name = self.names[k][pos]
+                    for store_rule in self.store_rules[k]:
+                        store_rule.collect(new_stored[k], name, x)
 
         sort_key = lambda x: (x[1], float(x[2]))
         for k in ENTRIES_KEYS:
@@ -233,4 +303,18 @@ class SizeWeightsGradientsLog:
                 ],
                 table_path,
             )
+            # Weights to store
+            if new_stored[k]:
+                num_new = 0
+                for store_rule in self.store_rules[k]:
+                    combined = store_rule.combine(new_stored[k])
+                    if combined is not None:
+                        kname = store_rule.name + f"_{self.step}"
+                        self._stored[k][kname] = combined
+                        num_new += 1
+                if num_new > 0:
+                    store_path = self.path / STORE_VALUES_FNAMES[k]
+                    print(f"Append {num_new} entries to dictionary stored to {store_path}")
+                    torch.save(self._stored[k], store_path)
+
         self.step += 1

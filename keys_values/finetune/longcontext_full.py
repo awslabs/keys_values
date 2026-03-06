@@ -15,13 +15,14 @@
 import csv
 import dataclasses
 import gc
+import re
 
 import math
 import os
 import time
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any, Tuple, List
+from typing import Dict, Literal, Optional, Union, Any, Tuple, List, Callable
 
 import lightning as L
 from lightning.fabric.strategies import DDPStrategy
@@ -116,6 +117,7 @@ from keys_values.size_log import (
     SizeWeightsGradientsLog,
     SizeLogMapper,
     SizeLogMapperRule,
+    StoreWeightsRule,
 )
 from keys_values.utils import (
     flush_io_streams,
@@ -1188,12 +1190,33 @@ def fit(
                 ),
             ]
             mapper = SizeLogMapper(rules=rules)
+            # We also store weights and gradients for q.bias, k.bias,
+            # reshaping these vectors into matrices
+            store_weights_rules = [
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("k"),
+                    name="attn_k_bias",
+                    shape=(config.n_head, config.head_size),
+                    num_layers=config.n_layer,
+                ),
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("q"),
+                    name="attn_q_bias",
+                    shape=(config.n_query_groups, config.head_size),
+                    num_layers=config.n_layer,
+                ),
+            ]
+            store_grads_rules = store_weights_rules
         else:
             mapper = None
+            store_weights_rules = None
+            store_grads_rules = None
         size_logs = SizeWeightsGradientsLog(
             quantiles=size_log_quantiles,
             path=out_dir,
             mapper=mapper,
+            store_weights_rules=store_weights_rules,
+            store_grads_rules=store_grads_rules,
         )
     else:
         size_logs = None
@@ -1449,6 +1472,14 @@ def fit(
         key: fabric.all_reduce(token_counts[key], reduce_op="sum").item()
         for key in token_counts.keys()
     }
+
+
+def get_match_for_store_rule(kind: str) -> Callable[[str], Optional[int]]:
+    regex = re.compile(r"transformer\.h\.(\d+)\.attn\." + kind + r"\.bias$")
+
+    def match(name: str) -> Optional[int]:
+        m = regex.match(name)
+        return None if m is None else int(m.group(1))
 
 
 def validate_and_all_reduce(
