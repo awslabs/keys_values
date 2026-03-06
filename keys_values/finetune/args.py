@@ -263,7 +263,8 @@ class OptimizerArgs:
         adam_betas: `(beta1, beta2)`, only for Adam optimizers
         adadelta_rho: Rho constant (Adadelta only)
         rmspprop_alpha: Alpha constant (RMSprop only)
-        normalize_keys_bias: See above
+        normalize_keys_bias: See above. The default should be equal to
+            `SDPAArgs.normalize_keys`
 
     """
 
@@ -276,7 +277,7 @@ class OptimizerArgs:
     adam_betas: Optional[Tuple[float, float]] = None
     adadelta_rho: Optional[float] = None
     rmspprop_alpha: Optional[float] = None
-    normalize_keys_bias: bool = False
+    normalize_keys_bias: Optional[bool] = None
 
     def __post_init__(self):
         if self.name is None:

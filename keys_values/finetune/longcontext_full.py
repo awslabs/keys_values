@@ -371,9 +371,11 @@ def setup_internal(
         print(
             "Choosing optimizer AdamW with default learning rate. We recommend to at least tune optimizer.learning_rate"
         )
-        optimizer.normalize_keys_bias = sdpa.normalize_keys
     else:
         print(str(optimizer))
+    # If nothing else is stated, `normalize_keys_bias = normalize_keys`
+    if optimizer.normalize_keys_bias is None:
+        optimizer.normalize_keys_bias = sdpa.normalize_keys
     if do_cpu_offload:
         global_batch_size = train.micro_batch_size * devices
         if train.global_batch_size != global_batch_size:
@@ -422,7 +424,9 @@ def setup_internal(
     if sdpa.normalize_keys:
         print("Normalization of keys in SDPA is active.")
         if not optimizer.normalize_keys_bias:
-            print("Warning: optimizer.normalize_keys_bias = False, while sdpa.optiimer = True. Usually, they are the same.")
+            print(
+                "Warning: optimizer.normalize_keys_bias = False, while sdpa.optiimer = True. Usually, they are the same."
+            )
     if optimizer.normalize_keys_bias:
         print("Normalization of bias vectors in MHA keys map is active.")
 
