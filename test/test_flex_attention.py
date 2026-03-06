@@ -275,10 +275,11 @@ def test_comparison(
 
     # Competitors
     flexatt_args = FlexAttentionArgs()
-    names = ["no_flexatt", "flexatt"]
+    names = ["no_flexatt", "flexatt", "flexatt_norm"]
     mhas = [
         MultiHeadSelfAttention(config),
         MultiHeadSelfAttention(config, flexatt_args=flexatt_args),
+        MultiHeadSelfAttention(config, flexatt_args=flexatt_args, normalize_keys=True),
     ]
     attn_outputs = [[] for _ in range(num_chunks + 1)]
     for mha, name in zip(mhas, names):
@@ -302,3 +303,5 @@ def test_comparison(
         prefix = f"Chunk {i}: "
         print(prefix + "no_flexatt vs flexatt")
         torch.testing.assert_close(outputs[0], outputs[1], **test_kwargs)
+        print(prefix + "no_flexatt vs flexatt_norm")
+        torch.testing.assert_close(outputs[0], outputs[2], **test_kwargs)
