@@ -22,7 +22,7 @@ from keys_values.attention import (
     KeysAndValues,
     DefaultKeysAndValues,
 )
-from keys_values.debug_utils import for_debug
+from keys_values.tools.debug_utils import for_debug
 from keys_values.kvcache.attn_weights import (
     update_token_positions,
     UpdateTokenPositionsGracePeriod,

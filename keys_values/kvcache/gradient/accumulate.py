@@ -489,6 +489,7 @@ class GradientAccumulator:
                 # Forward-backward, using the autograd hooks (if given)
                 scalar_output = None
                 try:
+                    # with torch.autograd.detect_anomaly():  # DEBUG
                     if self.autograd_hooks is not None:
                         with torch.autograd.graph.saved_tensors_hooks(
                             lambda x: self.autograd_hooks.pack_hook(x),

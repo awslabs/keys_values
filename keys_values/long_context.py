@@ -19,7 +19,7 @@ import torch
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import MultiHeadSelfAttention
-from keys_values.debug_utils import DebugIntermediates
+from keys_values.tools.intermediates import DebugIntermediates
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.base import DefaultKVCache
 from keys_values.kvcache.factory import deallocate_kv_cache_buffers_of_model

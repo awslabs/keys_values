@@ -112,10 +112,12 @@ from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.optimize.model_factory import BlockComponentName
 from keys_values.parser_config import save_hyperparameters
 from keys_values.pos_encoding import position_encoding_factory
-from keys_values.size_log import (
+from keys_values.tools.size_log import (
     SizeWeightsGradientsLog,
     SizeLogMapper,
     SizeLogMapperRule,
+    StoreWeightsRule,
+    get_match_for_store_rule,
 )
 from keys_values.utils import (
     flush_io_streams,
@@ -1165,8 +1167,9 @@ def fit(
         if not isinstance(config, ConfigLoRA):
             # Rules to split qkv variables into q, k, v. Only for full
             # fine-tuning
-            query_size = config.n_head * config.head_size
-            key_size = config.n_query_groups * config.head_size
+            hs = config.head_size
+            query_size = config.n_head * hs
+            key_size = config.n_query_groups * hs
             rules = [
                 SizeLogMapperRule(
                     postfix="qkv.weight",
@@ -1188,12 +1191,62 @@ def fit(
                 ),
             ]
             mapper = SizeLogMapper(rules=rules)
+            # We also store weights and gradients for q.bias, k.bias,
+            # reshaping these vectors into matrices
+            store_weights_rules = [
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("attn.k.bias"),
+                    name="attn_k_bias",
+                    shape=(config.n_query_groups, hs),
+                    num_layers=config.n_layer,
+                ),
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("attn.q.bias"),
+                    name="attn_q_bias",
+                    shape=(config.n_head, hs),
+                    num_layers=config.n_layer,
+                ),
+            ]
+            if config.n_embd % hs == 0:
+                shape_norm1 = (config.n_embd // hs, hs)
+            else:
+                shape_norm1 = (1, config.n_embd)
+            store_grads_rules = [
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("attn.v.bias"),
+                    name="attn_v_bias",
+                    shape=(config.n_query_groups, hs),
+                    num_layers=config.n_layer,
+                ),
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("attn.v.weight"),
+                    name="attn_v_weights",
+                    shape=(key_size, config.n_embd),
+                    num_layers=config.n_layer,
+                ),
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("norm.1.weight"),
+                    name="norm_1_weights",
+                    shape=shape_norm1,
+                    num_layers=config.n_layer,
+                ),
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("attn.q.bias"),
+                    name="attn_q_bias",
+                    shape=(config.n_head, hs),
+                    num_layers=config.n_layer,
+                ),
+            ]
         else:
             mapper = None
+            store_weights_rules = None
+            store_grads_rules = None
         size_logs = SizeWeightsGradientsLog(
             quantiles=size_log_quantiles,
             path=out_dir,
             mapper=mapper,
+            store_weights_rules=store_weights_rules,
+            store_grads_rules=store_grads_rules,
         )
     else:
         size_logs = None
