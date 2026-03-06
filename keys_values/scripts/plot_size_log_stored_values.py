@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Callable
 
 import torch
 import numpy as np
@@ -286,9 +286,28 @@ def main(
     path: Path,
     layer_idxs: List[int],
     steps: List[int],
-    figs_fname_template: str,
+    figs_fname_template: Optional[str] = None,
+    name_filter: Optional[Callable[[str], bool]] = None,
 ):
+    """
+    Use this to create plots from data recorded by setting
+    `store_weights_rules`, `store_grads_rules` in
+    :class:`SizeWeightsGradientsLog`.
+
+    Args:
+        path: File stored by the logging tool
+        layer_idxs: List of layer indices to plot (rows of the plot)
+        steps: One plot is done for each step
+        figs_fname_template: If given, the plots are stored to files
+            `figs_fname_template.format(step)`
+        name_filter: If given, this is a filter for dictionary entries
+
+    """
     full_tensor_dict = torch.load(path, map_location=torch.device('cpu'))
+    if name_filter is not None:
+        full_tensor_dict = {
+            k: v for k, v in full_tensor_dict.items() if name_filter(k)
+        }
     for step in steps:
         tensor_dict = {
             k: torch.cat([v[i:(i + 1)] for i in layer_idxs], dim=0)
@@ -303,15 +322,17 @@ def main(
             palettes=["cividis", "coolwarm"],
             layer_idxs=layer_idxs,
         )
-        fname = figs_fname_template.format(step)
-        plt.savefig(fname, dpi=150, bbox_inches="tight")
+        if figs_fname_template is not None:
+            fname = figs_fname_template.format(step)
+            plt.savefig(fname, dpi=150, bbox_inches="tight")
         plt.show()
 
 
 if __name__ == "__main__":
     base_path = Path.home() / "tmp" / "debug" / "sizes"
-    path = base_path / "stored_weights.pth"
+    base_fname = "stored_weights"
+    path = base_path / (base_fname + ".pth")
     layer_idxs = [0, 1, 2, 3, 8]
     steps = list(range(20))
-    figs_fname_template = "./stored_weights_{}.png"
+    figs_fname_template = "./" + base_fname + "_{}.png"
     main(path, layer_idxs, steps, figs_fname_template)

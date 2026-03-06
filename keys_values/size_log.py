@@ -14,6 +14,7 @@
 import csv
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import List, Optional, Tuple, Dict, Callable
 
 import torch
@@ -67,7 +68,7 @@ class SizeLogMapperRule:
     def sub_names(self, name: str) -> Tuple[str, ...]:
         assert self.match(name)
         prefix = name[: -len(self.postfix)]
-        return tuple(prefix + n for n in self.names)
+        return tuple(prefix + x[1] for x in self.sizes_names)
 
     def __call__(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
         len = x.shape[self.dim]
@@ -144,15 +145,15 @@ class StoreWeightsRule:
         overall list `parts`.
 
         """
-        pos = self.match(name)
-        if pos is not None:
+        block_idx = self.match(name)
+        if block_idx is not None:
             if self.shape is not None:
                 try:
                     x = x.reshape(*self.shape)
                 except RuntimeError as ex:
                     print(f"name = {name}, shape = {self.shape}, x.shape = {x.shape}")
                     raise ex
-            parts.append((self.name, pos, x))
+            parts.append((self.name, block_idx, x))
 
     def combine(self, parts: List[Tuple[str, int, torch.Tensor]]) -> Optional[torch.Tensor]:
         """
@@ -248,8 +249,8 @@ class SizeWeightsGradientsLog:
             ENTRIES_KEYS[0]: weight_column_names,
             ENTRIES_KEYS[1]: grad_column_names,
         }
-        self.names: Dict[str, List[str]] = {k: None for k in ENTRIES_KEYS}
-        self._name_pos: Dict[str, Dict[str, int]] = {k: None for k in ENTRIES_KEYS}
+        self.names: Dict[str, Optional[List[str]]] = {k: None for k in ENTRIES_KEYS}
+        self._name_pos: Dict[str, Optional[Dict[str, int]]] = {k: None for k in ENTRIES_KEYS}
         self.mapper = mapper
         self.store_rules = {
             ENTRIES_KEYS[0]: [] if store_weights_rules is None else store_weights_rules,
@@ -341,6 +342,7 @@ class SizeWeightsGradientsLog:
             )
             # Weights to store
             if new_stored[k]:
+                print(f"len(new_stored[{k}]) = {len(new_stored[k])}")  # DEBUG
                 num_new = 0
                 for store_rule in self.store_rules[k]:
                     combined = store_rule.combine(new_stored[k])
@@ -352,5 +354,21 @@ class SizeWeightsGradientsLog:
                     store_path = self.path / STORE_VALUES_FNAMES[k]
                     print(f"Append {num_new} entries to dictionary stored to {store_path}")
                     torch.save(self._stored[k], store_path)
+                else:
+                    print(f"num_new = {num_new}")  # DEBUG
+            else:
+                print(f"new_stored[{k}] is empty")  # DEBUG
 
         self.step += 1
+
+
+def get_match_for_store_rule(postfix: str) -> Callable[[str], Optional[int]]:
+    regex = re.compile(
+        r"transformer\.h\.(\d+)\." + re.escape(postfix) + r"$"
+    )
+
+    def match(name: str) -> Optional[int]:
+        m = regex.match(name)
+        return None if m is None else int(m.group(1))
+
+    return match

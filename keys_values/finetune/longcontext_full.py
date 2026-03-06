@@ -15,14 +15,13 @@
 import csv
 import dataclasses
 import gc
-import re
 
 import math
 import os
 import time
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any, Tuple, List, Callable
+from typing import Dict, Literal, Optional, Union, Any, Tuple, List
 
 import lightning as L
 from lightning.fabric.strategies import DDPStrategy
@@ -118,6 +117,7 @@ from keys_values.size_log import (
     SizeLogMapper,
     SizeLogMapperRule,
     StoreWeightsRule,
+    get_match_for_store_rule,
 )
 from keys_values.utils import (
     flush_io_streams,
@@ -1167,8 +1167,9 @@ def fit(
         if not isinstance(config, ConfigLoRA):
             # Rules to split qkv variables into q, k, v. Only for full
             # fine-tuning
-            query_size = config.n_head * config.head_size
-            key_size = config.n_query_groups * config.head_size
+            hs = config.head_size
+            query_size = config.n_head * hs
+            key_size = config.n_query_groups * hs
             rules = [
                 SizeLogMapperRule(
                     postfix="qkv.weight",
@@ -1194,19 +1195,48 @@ def fit(
             # reshaping these vectors into matrices
             store_weights_rules = [
                 StoreWeightsRule(
-                    match=get_match_for_store_rule("k"),
+                    match=get_match_for_store_rule("attn.k.bias"),
                     name="attn_k_bias",
-                    shape=(config.n_query_groups, config.head_size),
+                    shape=(config.n_query_groups, hs),
                     num_layers=config.n_layer,
                 ),
                 StoreWeightsRule(
-                    match=get_match_for_store_rule("q"),
+                    match=get_match_for_store_rule("attn.q.bias"),
                     name="attn_q_bias",
-                    shape=(config.n_head, config.head_size),
+                    shape=(config.n_head, hs),
                     num_layers=config.n_layer,
                 ),
             ]
-            store_grads_rules = store_weights_rules
+            if config.n_embd % hs == 0:
+                shape = (config.n_embd // hs, hs)
+            else:
+                shape = (1, config.n_embd)
+            store_grads_rules = [
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("attn.v.bias"),
+                    name="attn_v_bias",
+                    shape=(config.n_query_groups, hs),
+                    num_layers=config.n_layer,
+                ),
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("attn.v.weight"),
+                    name="attn_v_weights",
+                    shape=None,
+                    num_layers=config.n_layer,
+                ),
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("norm.1.weight"),
+                    name="norm_1_weights",
+                    shape=shape,
+                    num_layers=config.n_layer,
+                ),
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("attn.q.bias"),
+                    name="attn_q_bias",
+                    shape=(config.n_head, hs),
+                    num_layers=config.n_layer,
+                ),
+            ]
         else:
             mapper = None
             store_weights_rules = None
@@ -1472,16 +1502,6 @@ def fit(
         key: fabric.all_reduce(token_counts[key], reduce_op="sum").item()
         for key in token_counts.keys()
     }
-
-
-def get_match_for_store_rule(kind: str) -> Callable[[str], Optional[int]]:
-    regex = re.compile(r"transformer\.h\.(\d+)\.attn\." + kind + r"\.bias$")
-
-    def match(name: str) -> Optional[int]:
-        m = regex.match(name)
-        return None if m is None else int(m.group(1))
-
-    return match
 
 
 def validate_and_all_reduce(
