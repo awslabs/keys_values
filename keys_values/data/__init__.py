@@ -13,12 +13,14 @@
 # limitations under the License.
 from keys_values.data.base import INPUT_IDS_NAME, LABELS_NAME
 from keys_values.data.dataloader import MyDataLoader
+from keys_values.data.helmet import Helmet
 from keys_values.data.iterators import BatchSampler, SimilarSequenceLengthSampler
 from keys_values.data.longbench_v2 import LongBenchV2
 
 
 __all__ = [
     "BatchSampler",
+    "Helmet",
     "INPUT_IDS_NAME",
     "LABELS_NAME",
     "LongBenchV2",
