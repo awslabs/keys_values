@@ -324,9 +324,9 @@ class SizeWeightsGradientsLog:
                             for q, val in zip(self._quantile_names, qvals)
                         ]
                     )
-                    name = self.names[k][pos]
+                    sub_name = self.names[k][pos]
                     for store_rule in self.store_rules[k]:
-                        store_rule.collect(new_stored[k], name, x)
+                        store_rule.collect(new_stored[k], sub_name, x)
 
         sort_key = lambda x: (x[1], float(x[2]))
         for k in ENTRIES_KEYS:
@@ -342,7 +342,6 @@ class SizeWeightsGradientsLog:
             )
             # Weights to store
             if new_stored[k]:
-                print(f"len(new_stored[{k}]) = {len(new_stored[k])}")  # DEBUG
                 num_new = 0
                 for store_rule in self.store_rules[k]:
                     combined = store_rule.combine(new_stored[k])
@@ -354,10 +353,6 @@ class SizeWeightsGradientsLog:
                     store_path = self.path / STORE_VALUES_FNAMES[k]
                     print(f"Append {num_new} entries to dictionary stored to {store_path}")
                     torch.save(self._stored[k], store_path)
-                else:
-                    print(f"num_new = {num_new}")  # DEBUG
-            else:
-                print(f"new_stored[{k}] is empty")  # DEBUG
 
         self.step += 1
 

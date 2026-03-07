@@ -1208,9 +1208,9 @@ def fit(
                 ),
             ]
             if config.n_embd % hs == 0:
-                shape = (config.n_embd // hs, hs)
+                shape_norm1 = (config.n_embd // hs, hs)
             else:
-                shape = (1, config.n_embd)
+                shape_norm1 = (1, config.n_embd)
             store_grads_rules = [
                 StoreWeightsRule(
                     match=get_match_for_store_rule("attn.v.bias"),
@@ -1221,13 +1221,13 @@ def fit(
                 StoreWeightsRule(
                     match=get_match_for_store_rule("attn.v.weight"),
                     name="attn_v_weights",
-                    shape=None,
+                    shape=(key_size, config.n_embd),
                     num_layers=config.n_layer,
                 ),
                 StoreWeightsRule(
                     match=get_match_for_store_rule("norm.1.weight"),
                     name="norm_1_weights",
-                    shape=shape,
+                    shape=shape_norm1,
                     num_layers=config.n_layer,
                 ),
                 StoreWeightsRule(
