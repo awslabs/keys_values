@@ -21,7 +21,7 @@ from litgpt.config import name_to_config
 from litgpt.lora import mark_only_lora_as_trainable
 from litgpt.utils import _RunIf
 
-from keys_values.debug_utils import DebugIntermediates, debug_intermediates_all
+from keys_values.tools.intermediates import debug_intermediates_all, DebugIntermediates
 from keys_values.head_model import HeadModel
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams

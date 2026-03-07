@@ -19,7 +19,7 @@ from typing import List, Optional, Tuple, Dict, Callable
 
 import torch
 
-from keys_values.debug_utils import size_quantiles_internal
+from keys_values.tools.debug_utils import size_quantiles_internal
 from keys_values.utils import append_results_to_csv
 
 

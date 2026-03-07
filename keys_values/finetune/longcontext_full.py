@@ -112,7 +112,7 @@ from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.optimize.model_factory import BlockComponentName
 from keys_values.parser_config import save_hyperparameters
 from keys_values.pos_encoding import position_encoding_factory
-from keys_values.size_log import (
+from keys_values.tools.size_log import (
     SizeWeightsGradientsLog,
     SizeLogMapper,
     SizeLogMapperRule,

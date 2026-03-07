@@ -31,7 +31,7 @@ from keys_values.kvcache.attn_weights import (
     UpdateTokenPositionsGracePeriod,
 )
 from keys_values.kvcache.base import DefaultKVCache, KVCacheReplayLog
-from keys_values.debug_utils import for_debug
+from keys_values.tools.debug_utils import for_debug
 from keys_values.kvcache.gradient.autograd_hooks import Annotations
 from keys_values.kvcache.gradient.annotation import (
     NodeAnnotation,
