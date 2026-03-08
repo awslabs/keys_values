@@ -23,6 +23,7 @@ from keys_values.tools.size_log import (
 )
 from keys_values.tools.tracker import (
     initialize_weights_tracker,
+    set_message_postfix,
     track,
 )
 
@@ -35,5 +36,6 @@ __all__ = [
     "StoreWeightsRule",
     "debug_intermediates_all",
     "initialize_weights_tracker",
+    "set_message_postfix",
     "track",
 ]

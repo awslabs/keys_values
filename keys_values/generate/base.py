@@ -26,12 +26,11 @@ import torch._dynamo.config
 import torch._inductor.config
 from lightning.fabric.plugins import BitsandbytesPrecision
 
-from keys_values.config import Config
+from litgpt.constants import _BITANDBYTES_AVAILABLE_NOT_EQUAL_0_42_0
 from litgpt.generate.base import sample
 from litgpt.prompts import PromptStyle, has_prompt_style, load_prompt_style
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
-    _BITANDBYTES_AVAILABLE_NOT_EQUAL_0_42_0,
     check_file_size_on_cpu_and_warn,
     check_valid_checkpoint_dir,
     extend_checkpoint_dir,
@@ -39,6 +38,7 @@ from litgpt.utils import (
     load_checkpoint,
 )
 
+from keys_values.config import Config
 from keys_values.data.base import LIT_MODEL_FNAME
 from keys_values.kvcache.factory import (
     deallocate_kv_cache_buffers_of_model,

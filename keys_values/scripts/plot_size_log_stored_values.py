@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License").
-# You may not use this file exc ept in compliance with the License.
+# You may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
@@ -294,6 +294,9 @@ def main(
     steps: List[int],
     figs_fname_template: Optional[str] = None,
     name_filter: Optional[Callable[[str], bool]] = None,
+    x_tick_spacing: Optional[int | Tuple[int, ...]] = None,
+    y_tick_spacing: Optional[int] = None,
+    palettes: Optional[List[str]] = None,
 ):
     """
     Use this to create plots from data recorded by setting
@@ -309,9 +312,17 @@ def main(
         name_filter: If given, this is a filter for dictionary entries
 
     """
+    if x_tick_spacing is None:
+        x_tick_spacing = (1, 4)
+    if y_tick_spacing is None:
+        y_tick_spacing = 10
     full_tensor_dict = torch.load(path, map_location=torch.device("cpu"))
     if name_filter is not None:
         full_tensor_dict = {k: v for k, v in full_tensor_dict.items() if name_filter(k)}
+    if not full_tensor_dict:
+        raise ValueError(
+            f"Dictionary loaded from {path} has no entries matching name_filter"
+        )
     for step in steps:
         tensor_dict = {
             k: torch.cat([v[i : (i + 1)] for i in layer_idxs], dim=0)
@@ -322,8 +333,9 @@ def main(
             tensor_dict,
             figsize_per_cell=(1.9, 1.25),
             col_spacing_ratio=0.6,
-            x_tick_spacing=(1, 4),
-            palettes=["cividis", "coolwarm"],
+            x_tick_spacing=x_tick_spacing,
+            y_tick_spacing=y_tick_spacing,
+            palettes=palettes,
             layer_idxs=layer_idxs,
         )
         if figs_fname_template is not None:
@@ -334,9 +346,22 @@ def main(
 
 if __name__ == "__main__":
     base_path = Path.home() / "tmp" / "debug" / "sizes"
-    base_fname = "stored_weights"
+    # base_fname = "stored_weights"
+    base_fname = "stored_gradients"
     path = base_path / (base_fname + ".pth")
     layer_idxs = [0, 1, 2, 3, 8]
+    palettes = ["cividis", "coolwarm"]
     steps = list(range(20))
     figs_fname_template = "./" + base_fname + "_{}.png"
-    main(path, layer_idxs, steps, figs_fname_template)
+    # name_filter = lambda name: "attn_v_weights" in name
+    name_filter = lambda name: "bias" in name
+    main(
+        path,
+        layer_idxs,
+        steps,
+        figs_fname_template,
+        name_filter=name_filter,
+        x_tick_spacing=(1, 4),
+        y_tick_spacing=10,
+        palettes=palettes,
+    )

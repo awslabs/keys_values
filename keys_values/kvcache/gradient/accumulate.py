@@ -20,6 +20,7 @@ import torch
 from keys_values.config import Config
 
 from keys_values.attention import do_softcapping
+from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.base import KVCacheReplayLog, DefaultKVCache
 from keys_values.kvcache.basics import KVCacheWithBuffers
@@ -48,10 +49,8 @@ from keys_values.kvcache.gradient.checkpoints import (
     KVCacheBufferQuantizedCheckpoints,
     KVCacheBufferDefaultCheckpoints,
 )
-from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.gradient.inference_replay import inference_replay_cache_factory
 from keys_values.kvcache.stack_layers import CellBlocks
-from keys_values.utils import VerbosityLevels
 from keys_values.long_context import (
     get_chunks_for_cells,
     get_chunk_of_targets,
@@ -59,6 +58,7 @@ from keys_values.long_context import (
     HEAD_OR_INITIAL_TENSORS_MAX_BYTES,
 )
 from keys_values.model import GPT
+from keys_values.utils import VerbosityLevels
 
 
 def checkpoint_hook(

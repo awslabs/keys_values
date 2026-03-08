@@ -1220,13 +1220,13 @@ def fit(
                 ),
                 StoreWeightsRule(
                     match=get_match_for_store_rule("attn.v.weight"),
-                    name="attn_v_weights",
+                    name="attn_v_weight",
                     shape=(key_size, config.n_embd),
                     num_layers=config.n_layer,
                 ),
                 StoreWeightsRule(
-                    match=get_match_for_store_rule("norm.1.weight"),
-                    name="norm_1_weights",
+                    match=get_match_for_store_rule("norm_1.weight"),
+                    name="norm_1_weight",
                     shape=shape_norm1,
                     num_layers=config.n_layer,
                 ),

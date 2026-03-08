@@ -18,8 +18,6 @@ import torch
 from torch.nn import functional as F
 from torch.nn.attention import SDPBackend
 
-from keys_values.config import Config
-
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention_utils import (
     attention_compute_scores,
@@ -31,6 +29,7 @@ from keys_values.attention_utils import (
     slice_as_flat,
     pytorch_scaled_dot_product_attention,
 )
+from keys_values.config import Config
 from keys_values.flex_attention import (
     scaled_dot_product_attention_flexatt,
     FlexAttentionArgs,

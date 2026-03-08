@@ -31,22 +31,33 @@ class WeightsTracker:
     def initialize(self, file_name: str, threshold: Optional[float] = None):
         self.file_name = file_name
         self.threshold = threshold
+        self.message_postfix: Optional[str] = None
 
-    def __call__(self, x: torch.Tensor):
+    def __call__(
+        self,
+        x: torch.Tensor,
+        msg: Optional[str] = None,
+    ) -> torch.Tensor:
         if self.file_name is not None:
             # Check for NaNs
             x_det = x.detach()
             if torch.isnan(x_det).any():
                 torch.save(x_det, self.file_name)
-                raise AssertionError(
-                    f"Tensor: {torch.isnan(x_det).sum()} of {x_det.numel()} entries are NaN"
-                )
+                _msg = f"Tensor: {torch.isnan(x_det).sum()} of {x_det.numel()} entries are NaN"
+                if msg is not None:
+                    _msg += ": " + msg
+                if self.message_postfix is not None:
+                    _msg += ": " + self.message_postfix
+                raise AssertionError(_msg)
             if self.threshold is not None:
                 if (torch.abs(x_det) > self.threshold).any():
                     torch.save(x_det, self.file_name)
-                    raise AssertionError(
-                        f"Tensor: No NaNs, but {(torch.abs(x_det) > self.threshold).sum()} of {x_det.numel()} entries are |elem| > {self.threshold}"
-                    )
+                    _msg = f"Tensor: No NaNs, but {(torch.abs(x_det) > self.threshold).sum()} of {x_det.numel()} entries are |elem| > {self.threshold}"
+                    if msg is not None:
+                        _msg += ": " + msg
+                    if self.message_postfix is not None:
+                        _msg += ": " + self.message_postfix
+                    raise AssertionError(_msg)
         return x
 
 
@@ -69,7 +80,7 @@ def initialize_weights_tracker(
     WEIGHTS_TRACKER.initialize(file_name, threshold)
 
 
-def track(x: torch.Tensor) -> torch.Tensor:
+def track(x: torch.Tensor, msg: Optional[str] = None) -> torch.Tensor:
     """
     Wrap any tensor you like to track.
 
@@ -79,4 +90,8 @@ def track(x: torch.Tensor) -> torch.Tensor:
     `keys_values.kvcache.gradient.accumulate`.
 
     """
-    return WEIGHTS_TRACKER(x)
+    return WEIGHTS_TRACKER(x, msg)
+
+
+def set_message_postfix(postfix: Optional[str]):
+    WEIGHTS_TRACKER.message_postfix = postfix
