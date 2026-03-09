@@ -1158,12 +1158,15 @@ def fit(
     max_steps = train.max_steps or float("inf")
     train_iterator = CycleIterator(train_dataloader)
     throughput = ThroughputMonitor(fabric, window_size=50)
-    if size_log_quantiles is not None:
+    if size_log_quantiles is not None and fabric.global_rank == 0:
         print_message(
             f"Logging size distributions for weights and gradients: quantiles = {size_log_quantiles}",
             fabric,
         )
         config = model.gpt_model.config
+        mapper = None
+        store_weights_rules = None
+        store_grads_rules = None
         if not isinstance(config, ConfigLoRA):
             # Rules to split qkv variables into q, k, v. Only for full
             # fine-tuning
@@ -1193,54 +1196,52 @@ def fit(
             mapper = SizeLogMapper(rules=rules)
             # We also store weights and gradients for q.bias, k.bias,
             # reshaping these vectors into matrices
-            store_weights_rules = [
-                StoreWeightsRule(
-                    match=get_match_for_store_rule("attn.k.bias"),
-                    name="attn_k_bias",
-                    shape=(config.n_query_groups, hs),
-                    num_layers=config.n_layer,
-                ),
-                StoreWeightsRule(
-                    match=get_match_for_store_rule("attn.q.bias"),
-                    name="attn_q_bias",
-                    shape=(config.n_head, hs),
-                    num_layers=config.n_layer,
-                ),
-            ]
-            if config.n_embd % hs == 0:
-                shape_norm1 = (config.n_embd // hs, hs)
-            else:
-                shape_norm1 = (1, config.n_embd)
-            store_grads_rules = [
-                StoreWeightsRule(
-                    match=get_match_for_store_rule("attn.v.bias"),
-                    name="attn_v_bias",
-                    shape=(config.n_query_groups, hs),
-                    num_layers=config.n_layer,
-                ),
-                StoreWeightsRule(
-                    match=get_match_for_store_rule("attn.v.weight"),
-                    name="attn_v_weight",
-                    shape=(key_size, config.n_embd),
-                    num_layers=config.n_layer,
-                ),
-                StoreWeightsRule(
-                    match=get_match_for_store_rule("norm_1.weight"),
-                    name="norm_1_weight",
-                    shape=shape_norm1,
-                    num_layers=config.n_layer,
-                ),
-                StoreWeightsRule(
-                    match=get_match_for_store_rule("attn.q.bias"),
-                    name="attn_q_bias",
-                    shape=(config.n_head, hs),
-                    num_layers=config.n_layer,
-                ),
-            ]
-        else:
-            mapper = None
-            store_weights_rules = None
-            store_grads_rules = None
+            do_store_weights = False
+            if do_store_weights:
+                store_weights_rules = [
+                    StoreWeightsRule(
+                        match=get_match_for_store_rule("attn.k.bias"),
+                        name="attn_k_bias",
+                        shape=(config.n_query_groups, hs),
+                        num_layers=config.n_layer,
+                    ),
+                    StoreWeightsRule(
+                        match=get_match_for_store_rule("attn.q.bias"),
+                        name="attn_q_bias",
+                        shape=(config.n_head, hs),
+                        num_layers=config.n_layer,
+                    ),
+                ]
+                if config.n_embd % hs == 0:
+                    shape_norm1 = (config.n_embd // hs, hs)
+                else:
+                    shape_norm1 = (1, config.n_embd)
+                store_grads_rules = [
+                    StoreWeightsRule(
+                        match=get_match_for_store_rule("attn.v.bias"),
+                        name="attn_v_bias",
+                        shape=(config.n_query_groups, hs),
+                        num_layers=config.n_layer,
+                    ),
+                    StoreWeightsRule(
+                        match=get_match_for_store_rule("attn.v.weight"),
+                        name="attn_v_weight",
+                        shape=(key_size, config.n_embd),
+                        num_layers=config.n_layer,
+                    ),
+                    StoreWeightsRule(
+                        match=get_match_for_store_rule("norm_1.weight"),
+                        name="norm_1_weight",
+                        shape=shape_norm1,
+                        num_layers=config.n_layer,
+                    ),
+                    StoreWeightsRule(
+                        match=get_match_for_store_rule("attn.q.bias"),
+                        name="attn_q_bias",
+                        shape=(config.n_head, hs),
+                        num_layers=config.n_layer,
+                    ),
+                ]
         size_logs = SizeWeightsGradientsLog(
             quantiles=size_log_quantiles,
             path=out_dir,

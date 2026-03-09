@@ -54,7 +54,8 @@ def _append_results_to_csv(
         return False
     finally:
         lock.release()
-        lock_path.unlink()
+        if lock_path.exists():
+            lock_path.unlink()
         return True
 
 
