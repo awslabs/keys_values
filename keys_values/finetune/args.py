@@ -392,7 +392,16 @@ class SDPAArgs:
         flex_extend_kv: If `True`, we apply `repeat_interleave` to
             `key, value` to avoid the GQA case. This may be needed to get
             around bugs in `flex_attention`.
+        flex_num_q_lens: If given, this is the number of `q_len` values for
+            which different graphs are compiled. Zero-padding of the `query`
+            argument is used then. If not given, each different `q_len` value
+            gets its own graph (not recommended).
     """
 
     flex_attention: bool = True
     flex_extend_kv: bool = True
+    flex_num_q_lens: Optional[int] = None
+
+    def __post_init__(self):
+        if self.flex_num_q_lens is not None and self.flex_num_q_lens <= 0:
+            raise ValueError("flex_num_q_lens must be positive")

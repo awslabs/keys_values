@@ -653,6 +653,17 @@ Relevant arguments are:
 
 * `sdpa.flex_attention`: Selects `flex_attention`. Otherwise, query-padded SDPA
   is used. `sdpa.flex_extend_kv` is a parameter for `flex_attention`.
+* `sdpa.flex_num_q_lens`: `flex_attention` works by compiling graphs for certain
+  input sizes (which is expensive), using them over and over. We typically use
+  one graph for prefill calls, several ones for subsequent chunks of different
+  lengths. The most frequent chunk length is `kv_cache.chunk_size`, but the
+  final chunks in batches may all have different lengths. We limit the number of
+  graphs to at most `sdpa.flex_num_q_lens + 1`, namely `sdpa.flex_num_q_lens`
+  at equal spacing (the last one being `kv_cache.chunk_size`), and one for
+  length 1 (used to generate single tokens). We use zero-padding to the next
+  supported chunk length.
+  If this is set to `None`, this limiting mechanism is not used. This may lead
+  to `torch._dynamo.exc.FailOnRecompileLimitHit` errors.
 * `attention_forward_temp_size_gb`: Size limit (in GB) for temporary buffers
   in naive SDPA, used in `forward` pass.
 * `attention_backward_temp_size_gb`: Same size limit, but for SDPA computations
