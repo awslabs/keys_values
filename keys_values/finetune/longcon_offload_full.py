@@ -88,6 +88,7 @@ def setup(
     sdpa: SDPAArgs = SDPAArgs(
         flex_attention=True,
         flex_extend_kv=False,
+        flex_num_q_lens=4,
     ),
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
