@@ -205,15 +205,22 @@ def setup(
     """Finetune a model.
 
     Arguments:
-        checkpoint_dir: The path to the base model's checkpoint directory to load for finetuning.
+        checkpoint_dir: The path to the base model's checkpoint directory to
+            load for finetuning. In general, this will be the Hugging Face
+            model name. Use `resume` to restart fine-tuning from a checkpoint
+            stored along the way
         out_dir: Directory in which to save checkpoints and logs. If running in a Lightning Studio Job, look for it in
             /teamspace/jobs/<job-name>/share.
         precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
         devices: How many devices/GPUs to use
         num_nodes: How many nodes the code is being run on.
-        resume: Path to a checkpoint directory to resume from in case training was interrupted, or ``True`` to resume
-            from the latest checkpoint in ``out_dir``. An error will be raised if no checkpoint is found. Passing
-            ``'auto'`` will resume from the latest checkpoint but not error if no checkpoint exists.
+        resume: Path to a checkpoint directory to resume from in case training
+            was interrupted, or ``True`` to resume from the latest checkpoint in
+            ``out_dir``. An error will be raised if no checkpoint is found. Passing
+            ``'auto'`` will resume from the latest checkpoint but not error if
+            no checkpoint exists.
+            Note: At present, we do not store the optimizer state as part of the
+            checkpoint, so fine-tuning is started from scratch from there.
         data: Data-related arguments. If not provided, the default is
             ``keys_values.data.LongBenchV2``.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
@@ -733,15 +740,13 @@ def main(
             "step_count": 0,
         }
 
-    resume = find_resume_path(resume, out_dir)
-    if resume:
-        # TODO: Such checkpoints of all of `state` are never stored. Can
-        # restart from model checkpoints by passing them as `checkpoint_dir`
-        print_message(f"Resuming training from {resume}", fabric)
-        fabric.load(resume, state)
-    else:
-        load_model_checkpoint(fabric, model, checkpoint_dir)
-        check_for_nan_module_weights(model.gpt_model)
+    resume_dir = find_resume_path(resume, out_dir)
+    if not resume_dir:
+        resume_dir = None
+    elif isinstance(resume_dir, Path):
+        resume_dir = resume_dir.parent
+    load_model_checkpoint(fabric, model, checkpoint_dir, resume_dir)
+    check_for_nan_module_weights(model.gpt_model)
 
     if profile_grad_times > 0 and fabric.global_rank == 0:
         thresh = grad.max_match_trials_pack_arg
@@ -765,7 +770,6 @@ def main(
         batch_transform=batch_transform,
         devices=devices,
         num_nodes=num_nodes,
-        resume=resume,
         checkpoint_dir=checkpoint_dir,
         out_dir=out_dir,
         train=train,
@@ -1050,7 +1054,6 @@ def fit(
     batch_transform: BatchTransform,
     devices: int,
     num_nodes: int,
-    resume: Union[bool, Literal["auto"], Path],
     checkpoint_dir: Path,
     out_dir: Path,
     train: TrainArgs,
@@ -1257,23 +1260,6 @@ def fit(
         )
     else:
         size_logs = None
-
-    # resume data loader state by fast-forwarding through all seen batches
-    if resume:
-        resume_t0 = time.perf_counter()
-        for resume_iter in range(initial_iter):
-            next(train_iterator)
-            if resume_iter % 1000 == 0:
-                print_message(
-                    f"Resuming dataset: {resume_iter} / {initial_iter}",
-                    fabric,
-                )
-        fabric.barrier()
-        print_message(
-            f"Resuming data loader finished. Took {time.perf_counter() - resume_t0:.1f}"
-            f" seconds to reach iteration {initial_iter}.",
-            fabric,
-        )
 
     running_loss = RunningMean(
         window=train.gradient_accumulation_iters(devices, num_nodes),

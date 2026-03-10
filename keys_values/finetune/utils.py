@@ -207,22 +207,18 @@ def save_model_checkpoint(
 def load_model_checkpoint(
     fabric: L.Fabric,
     model: GPTAndHeadModel,
-    file_dir: Path,
+    checkpoint_dir: Path,
+    resume_dir: Optional[Path] = None,
 ) -> None:
-    """
-    If `model.gpt_model` is of LoRA type, we assume that the underlying base
-    model has already been loaded, and we only load the additional LoRA
-    parameters. If there is no file for these, we initialize the LoRA
-    parameters.
-
-    """
-    if not is_lora_model(model):
-        print_message(f"Loading full model checkpoint: {file_dir}", fabric)
-        file_path = file_dir / LIT_MODEL_FNAME
-        load_checkpoint(fabric, model.gpt_model, file_path, strict=True)
-    else:
-        file_path = file_dir / LORA_WEIGHTS_FNAME
-        if file_path.exists():
+    is_lora = is_lora_model(model)
+    file_path = checkpoint_dir / LIT_MODEL_FNAME
+    if not is_lora and resume_dir is not None:
+        file_path = resume_dir / LIT_MODEL_FNAME
+    print_message(f"Loading model checkpoint: {file_path}", fabric)
+    load_checkpoint(fabric, model.gpt_model, file_path, strict=not is_lora)
+    if is_lora:
+        if resume_dir is not None:
+            file_path = resume_dir / LORA_WEIGHTS_FNAME
             print_message("Loading LoRA weights checkpoint", fabric)
             load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
         else:
@@ -230,9 +226,10 @@ def load_model_checkpoint(
             model.gpt_model.reset_lora_parameters()
     # If there are head model weights, load them as well. Otherwise, we use
     # random initialization (or the head model may not have weights)
-    file_path = file_dir / HEAD_MODEL_FNAME
-    if file_path.exists():
-        load_checkpoint(fabric, model.head_model, file_path, strict=True)
+    if resume_dir is not None:
+        file_path = resume_dir / HEAD_MODEL_FNAME
+        if file_path.exists():
+            load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
 
 def choose_logger(
