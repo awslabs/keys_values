@@ -37,6 +37,7 @@ def setup(
     out_dir: Path = Path(DEFAULT_OUT_DIR),
     precision: Optional[str] = None,
     devices: Union[int, str] = 1,
+    resume: Union[bool, Literal["auto"], Path] = False,
     data: Optional[DataModule] = None,
     train: TrainArgs = TrainArgs(
         save_interval=1000,
@@ -107,12 +108,21 @@ def setup(
     use of `fabric.all_reduce`.
 
     Arguments:
-        checkpoint_dir: The path to the base model's checkpoint directory to load for finetuning.
+        checkpoint_dir: The path to the base model's checkpoint directory to
+            load for finetuning. In general, this will be the Hugging Face
+            model name. Use `resume` to restart fine-tuning from a checkpoint
+            stored along the way.
         out_dir: Directory in which to save checkpoints and logs. If running in a Lightning Studio Job, look for it in
             /teamspace/jobs/<job-name>/share.
         precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
-        devices: Number of GPU devices (ranks) to be used. We use ranks
-            `range(devices)`.
+        devices: How many devices/GPUs to use
+        resume: Path to a checkpoint directory to resume from in case training
+            was interrupted, or ``True`` to resume from the latest checkpoint in
+            ``out_dir``. An error will be raised if no checkpoint is found. Passing
+            ``'auto'`` will resume from the latest checkpoint but not error if
+            no checkpoint exists.
+            Note: At present, we do not store the optimizer state as part of the
+            checkpoint, so fine-tuning is started from scratch from there.
         data: Data-related arguments. If not provided, the default is
             ``keys_values.data.LongBenchV2``.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
@@ -196,7 +206,7 @@ def setup(
         precision,
         devices,
         1,
-        False,
+        resume,
         data,
         train,
         None,
