@@ -443,7 +443,7 @@ def scaled_dot_product_attention_flexatt(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    scale_factor: float,
+    scale_factor: Optional[float],
     sliding_window_size: Optional[int],
     attention_logit_softcapping: Optional[float],
     input_pos: int,
@@ -460,6 +460,11 @@ def scaled_dot_product_attention_flexatt(
     (`input_pos > 0`). In the latter case, the KV cache buffers `key`, `value`
     must have been updated, meaning that `range(input_pos, input_pos + q_len)`
     must be in each `token_positions[b, h]`.
+
+    Note: `flex_attention` is always called with `scale=None`, the default
+    scale factor. If `scale_factor` is different, we multiply a factor into
+    `query`. This avoids bogus graph re-compilations due to small numerical
+    differences in `scale`.
 
     Args:
         flexatt_args: Arguments for `flex_attention`. Most important are the
@@ -533,6 +538,11 @@ def scaled_dot_product_attention_flexatt(
             ),
             dim=2,
         )
+    # Deal with non-standard `scale_factor`
+    head_size = query.shape[-1]
+    diff = scale_factor * math.sqrt(head_size)
+    if not(0.999 < diff < 1.001):
+        query = query * diff
     if annotation_callback is not None:
         annotation_callback(key, value, sort_index)
 
@@ -540,7 +550,7 @@ def scaled_dot_product_attention_flexatt(
         query=query,
         key=key,
         value=value,
-        scale=scale_factor,
+        scale=None,
         enable_gqa=enable_gqa,
     )
     if q_len_tr > q_len:
