@@ -148,10 +148,13 @@ class FlexAttnManager:
                 score_mod = partial(logit_softcapping, thresh=thresh)
             else:
                 score_mod = None
-            attn_fn = partial(
-                torch.compile(flex_attention, fullgraph=True),
-                score_mod=score_mod,
-                block_mask=block_mask,
+            attn_fn = torch.compile(
+                partial(
+                    flex_attention,
+                    score_mod=score_mod,
+                    block_mask=block_mask,
+                ),
+                fullgraph = True,
             )
             extend_kv = True if self._entries else False
             result = (attn_fn, extend_kv)
