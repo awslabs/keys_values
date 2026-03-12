@@ -511,7 +511,7 @@ def main(
         from litgpt.constants import _BITANDBYTES_AVAILABLE_NOT_EQUAL_0_42_0
     except ModuleNotFoundError:
         # Earlier version of LitGPT
-        from litgpt.utils import BITANDBYTES_AVAILABLE_NOT_EQUAL_0_42_0
+        from litgpt.utils import _BITANDBYTES_AVAILABLE_NOT_EQUAL_0_42_0
 
     checkpoint_dir = extend_checkpoint_dir(checkpoint_dir)
     pprint(locals())
