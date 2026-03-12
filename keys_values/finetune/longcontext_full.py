@@ -1411,9 +1411,6 @@ def fit(
                 fabric,
             )
 
-            if model.verbose is not VerbosityLevels.NONE:
-                print_flex_attn_report(fabric, model)
-
             token_counts["raw_tokens"] += batch["token_counts"]["raw"].sum().item()
             token_counts["raw_tokens_plus_prompt_template"] += (
                 batch["token_counts"]["raw_plus_prompt_template"].sum().item()
