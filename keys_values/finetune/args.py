@@ -14,7 +14,7 @@
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, List, Literal
 
-from litgpt.args import EvalArgs as _EvalArgs
+from litgpt.args import EvalArgs as _EvalArgs, TrainArgs as _TrainArgs
 
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.consts import split_name
@@ -360,6 +360,47 @@ class LoRAARgs:
     mlp: bool = False
     head: bool = False
     kind: Literal["default", "rms_norm", "dora"] = "default"
+
+
+@dataclass
+class TrainArgs(_TrainArgs):
+    """
+    Extends arguments in :class:`litgpt.args.TrainArgs`.
+
+    Storing intermediate checkpoints: Normal checkpoints are stored whenever
+    `state["step_count"] % train.save_interval == 0`. If
+    `intermed_save_interval` is given, we also store checkpoints whenever
+    `state["step_count"] % train.intermed_save_interval == 0`. The value
+    should be smaller than `save_interval` and can be 1. However, we make
+    sure that no more than `intermed_save_num` intermediate checkpoints are
+    stored (by removing the oldest one after a new one has been written).
+
+    Args:
+        intermed_save_interval: See above
+        intermed_save_num: See above
+    """
+
+    intermed_save_interval: Optional[int] = None
+    intermed_save_num: Optional[int] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.intermed_save_interval is not None:
+            if self.intermed_save_interval <= 0:
+                raise ValueError("intermed_save_interval must be positive")
+            if (
+                self.save_interval is not None
+                and self.intermed_save_interval >= self.save_interval
+            ):
+                raise ValueError(
+                    f"intermed_save_interval = {self.intermed_save_interval}, must be smaller than save_interval = {self.save_interval}"
+                )
+            if self.intermed_save_num is None or self.intermed_save_num <= 0:
+                raise ValueError("intermed_save_num must be given and positive")
+        elif self.intermed_save_num is not None:
+            raise ValueError(
+                "intermed_save_num only needed if intermed_save_interval is given"
+            )
 
 
 @dataclass
