@@ -95,3 +95,12 @@ def track(x: torch.Tensor, msg: Optional[str] = None) -> torch.Tensor:
 
 def set_message_postfix(postfix: Optional[str]):
     WEIGHTS_TRACKER.message_postfix = postfix
+
+
+def track_weights(module: torch.nn.Module, msg: Optional[str] = None):
+    if msg is not None:
+        msg = ": " + msg
+    else:
+        msg = ""
+    for name, param in module.named_parameters():
+        track(param.data, msg=name + msg)

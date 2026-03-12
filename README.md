@@ -239,6 +239,15 @@ Basic arguments are:
     distributed data parallel. For `finetune_offload_*`, this value is set
     automatically.
   - `train.save_interval`: Number of optimizer steps between saving checkpoints.
+  - `train.intermed_save_interval`, `train.intermed_save_num`: If these are given,
+    additional intermediate checkpoints are stored every `train.intermed_save_interval`
+    steps. There are at most `train.intermed_save_num` intermediate checkpoints
+    stored, the oldest ones are removed again. Example:
+    `train.save_interval = 10, train.intermed_save_interval = 2,
+    `train.intermed_save_num = 5` means that checkpoints are stored every
+    two steps, but only those stored every ten steps are kept. If training
+    fails starting from step 19 (say), you can recover from step 18 or 16
+    and do not have to go back to step 10.
 * `eval.*`: Parameters controlling evaluations on validation set. Taken from
   `LitGPT` with little modification. Most important ones:
   - `eval.interval`: Number of optimizer steps between evaluations.

@@ -29,7 +29,6 @@ from lightning.fabric.utilities import ThroughputMonitor
 import torch
 from torchmetrics import RunningMean
 
-from litgpt.args import TrainArgs
 from litgpt.data import DataModule
 from litgpt.prompts import save_prompt_style
 from litgpt.tokenizer import Tokenizer
@@ -58,6 +57,7 @@ from keys_values.config import Config as ConfigFull
 from keys_values.data import LongBenchV2, INPUT_IDS_NAME, MyDataLoader
 from keys_values.flex_attention import FlexAttentionArgs, choose_q_lens
 from keys_values.finetune.args import (
+    TrainArgs,
     EvalArgs,
     GradientArgs,
     KVCacheArgs,
@@ -143,7 +143,7 @@ def setup(
     resume: Union[bool, Literal["auto"], Path] = False,
     data: Optional[DataModule] = None,
     train: TrainArgs = TrainArgs(
-        save_interval=1000,
+        save_interval=50,
         log_interval=1,
         global_batch_size=16,
         micro_batch_size=1,
@@ -293,7 +293,7 @@ def setup(
             0 and 1), as comma-separated string. In this case, we compute these
             quantiles for all weights and gradients just before each update,
             writing them to CSV files, see :class:`SizeWeightsGradientsLog` for
-            details.
+            details. Note: This can slow down things quite a bit!
 
     """
     setup_internal(
@@ -1503,18 +1503,17 @@ def fit(
                     del valid_model
                 fabric.barrier()
 
-            if (
-                train.save_interval is not None
-                and not is_accumulating
-                and state["step_count"] % train.save_interval == 0
-            ):
-                interval_dir = out_dir / f"step-{state['step_count']:06d}"
-                save_model_checkpoint(fabric, model, interval_dir)
-                if fabric.global_rank == 0:
-                    copy_config_files(checkpoint_dir, interval_dir)
-                    save_hyperparameters(original_setup, interval_dir)
-                    if hasattr(data, "prompt_style"):
-                        save_prompt_style(data.prompt_style, interval_dir)
+            if not is_accumulating:
+                save_checkpoint_regular(
+                    fabric=fabric,
+                    model=model,
+                    out_dir=out_dir,
+                    checkpoint_dir=checkpoint_dir,
+                    step=state["step_count"],
+                    train=train,
+                    data=data,
+                    original_setup=original_setup,
+                )
 
     except torch._dynamo.exc.FailOnRecompileLimitHit as ex:
         # This error is thrown by FlexAttention if too many graphs have been
@@ -1654,3 +1653,46 @@ def generate_example(
             f"The model's supported context size (post-training) is {gpt_model.config.block_size}.",
             fabric,
         )
+
+
+def do_save(step: int, train: TrainArgs, intermed: bool) -> bool:
+    interval = train.intermed_save_interval if intermed else train.save_interval
+    return interval is not None and step % interval == 0
+
+
+def save_checkpoint_regular(
+    fabric: L.Fabric,
+    model: GPTAndHeadModel,
+    out_dir: Path,
+    checkpoint_dir: Path,
+    step: int,
+    train: TrainArgs,
+    data: DataModule,
+    original_setup: Callable,
+):
+    save_intermed = do_save(step, train, intermed=True)
+    if save_intermed or do_save(step, train, intermed=False):
+        interval_dir = out_dir / f"step-{step:06d}"
+        save_model_checkpoint(fabric, model, interval_dir)
+        if fabric.global_rank == 0:
+            copy_config_files(checkpoint_dir, interval_dir)
+            save_hyperparameters(original_setup, interval_dir)
+            if hasattr(data, "prompt_style"):
+                save_prompt_style(data.prompt_style, interval_dir)
+    if save_intermed:
+        # Check whether previous intermediate checkpoint has to be removed
+        rem_step = step - train.intermed_save_num * train.intermed_save_interval
+        if rem_step > 0 and not do_save(rem_step, train, intermed=False):
+            interval_dir = out_dir / f"step-{rem_step:06d}"
+            if interval_dir.exists():
+                print_message(
+                    f"Removing intermediate checkpoint {interval_dir}",
+                    fabric,
+                )
+                for root, dirs, files in interval_dir.walk(top_down=True):
+                    for name in files:
+                        (root / name).unlink()
+                    for name in dirs:
+                        (root / name).rmdir()
+                if interval_dir.exists():
+                    interval_dir.rmdir()

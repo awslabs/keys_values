@@ -26,7 +26,6 @@ import torch._dynamo.config
 import torch._inductor.config
 from lightning.fabric.plugins import BitsandbytesPrecision
 
-from litgpt.constants import _BITANDBYTES_AVAILABLE_NOT_EQUAL_0_42_0
 from litgpt.generate.base import sample
 from litgpt.prompts import PromptStyle, has_prompt_style, load_prompt_style
 from litgpt.tokenizer import Tokenizer
@@ -508,6 +507,12 @@ def main(
         precision: Indicates the Fabric precision setting to use.
         compile: Whether to compile the model.
     """
+    try:
+        from litgpt.constants import _BITANDBYTES_AVAILABLE_NOT_EQUAL_0_42_0
+    except ModuleNotFoundError:
+        # Earlier version of LitGPT
+        from litgpt.utils import BITANDBYTES_AVAILABLE_NOT_EQUAL_0_42_0
+
     checkpoint_dir = extend_checkpoint_dir(checkpoint_dir)
     pprint(locals())
     if cache_factory_kwargs is None:
