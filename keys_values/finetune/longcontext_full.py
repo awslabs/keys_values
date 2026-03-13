@@ -151,6 +151,8 @@ def setup(
         lr_warmup_fraction=0.15,
         epochs=5,
         max_seq_length=None,
+        intermed_save_interval=None,
+        intermed_save_num=None,
     ),
     eval: EvalArgs = EvalArgs(
         interval=600,

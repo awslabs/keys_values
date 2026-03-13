@@ -15,10 +15,10 @@
 from pathlib import Path
 from typing import Dict, Literal, Optional, Union, Any
 
-from litgpt.args import TrainArgs
 from litgpt.data import DataModule
 
 from keys_values.finetune.args import (
+    TrainArgs,
     EvalArgs,
     GradientArgs,
     KVCacheArgs,
@@ -42,7 +42,7 @@ def setup(
     resume: Union[bool, Literal["auto"], Path] = False,
     data: Optional[DataModule] = None,
     train: TrainArgs = TrainArgs(
-        save_interval=1000,
+        save_interval=50,
         log_interval=1,
         global_batch_size=16,
         micro_batch_size=1,
@@ -50,6 +50,8 @@ def setup(
         lr_warmup_fraction=0.15,
         epochs=5,
         max_seq_length=None,
+        intermed_save_interval=None,
+        intermed_save_num=None,
     ),
     lora: LoRAARgs = LoRAARgs(
         r=8,

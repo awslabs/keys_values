@@ -888,11 +888,12 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     embeddings = embeddings * alpha
                 if self.debug_intermediates is not None:
                     self.debug_intermediates.store_wte(embeddings, start, end)
+
                 # Loop over layers
                 for block_idx, block in enumerate(model_blocks):
                     # Layer input checkpointing
                     self._checkpoint_layer_input(
-                        x=embeddings,
+                        x=embeddings.detach(),
                         layer_idx=block_idx,
                     )
                     if self.gpt_model.start_of_layer_hook is not None:
@@ -935,12 +936,14 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         new_embed_parts.append(y)
                         if not compute_loss:
                             # We need the final layer output for the last chunk
-                            logits_final_chunk = y
+                            logits_final_chunk = y.detach()
                     del embeddings
                     embeddings = torch.cat(new_embed_parts, dim=1)
+                    assert embeddings.shape[1] == end - start, (embeddings.shape, start, end)
+
                 # Layer input checkpointing
                 self._checkpoint_layer_input(
-                    x=embeddings,
+                    x=embeddings.detach(),
                     layer_idx=self.config.n_layer,
                 )
                 if self.gpt_model.start_of_layer_hook is not None:
