@@ -17,10 +17,15 @@ import time
 from pathlib import Path
 from pprint import pprint
 from typing import Dict, Literal, Optional, Union, Any, List, Tuple, Set
+import torch.multiprocessing as mp
 
-import lightning as L
+try:
+    import lightning as L
+    from lightning.fabric.strategies import DDPStrategy
+    HAS_FABRIC = True
+except ImportError:
+    HAS_FABRIC = False
 import torch
-from lightning.fabric.strategies import DDPStrategy
 import yaml
 
 from litgpt.data import DataModule
@@ -201,7 +206,8 @@ def setup(
     )
     if model_type == "lora" and lora_dropout is not None:
         if lora_dropout < 0:
-            raise ValueError(f"lora_dropout {lora_dropout}, must be non-negative")
+            raise ValueError(
+                f"lora_dropout {lora_dropout}, must be non-negative")
         if model_config.config.lora_dropout != lora_dropout:
             print(
                 f"Changing config.lora_dropout from {model_config.config.lora_dropout} to {lora_dropout}"
@@ -218,7 +224,8 @@ def setup(
         raise ValueError(
             f"Currently, this script supports --data LongBenchV2 only, but got {hyp_pars['data']['class_path']}"
         )
-    data = LongBenchV2(**cleanup_longbench_v2_kwargs(hyp_pars["data"]["init_args"]))
+    data = LongBenchV2(
+        **cleanup_longbench_v2_kwargs(hyp_pars["data"]["init_args"]))
     if data.metadata_dir is None:
         data.metadata_dir = str(out_dir / "data")
         print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
@@ -252,7 +259,8 @@ def setup(
                 verbose = VerbosityLevels.SOME.value
     verbose = VerbosityLevels(verbose)
     if attention_forward_temp_size_gb is None:
-        attention_forward_temp_size_gb = hyp_pars.get("attention_forward_temp_size_gb")
+        attention_forward_temp_size_gb = hyp_pars.get(
+            "attention_forward_temp_size_gb")
         if attention_forward_temp_size_gb is None:
             attention_forward_temp_size_gb = kv_cache.attention_forward_temp_size_gb
             if attention_forward_temp_size_gb is None:
@@ -261,40 +269,93 @@ def setup(
     if yarn_rope is None:
         yarn_rope = True
 
-    precision = hyp_pars["precision"] or get_default_supported_precision(training=True)
-    if devices > 1:
-        strategy = DDPStrategy(static_graph=True, broadcast_buffers=False)
+    precision = hyp_pars["precision"] or get_default_supported_precision(
+        training=True)
+
+    fabric = None
+
+    if HAS_FABRIC:
+        if devices > 1:
+            strategy = DDPStrategy(static_graph=True, broadcast_buffers=False)
+        else:
+            strategy = "auto"
+
+        fabric = L.Fabric(
+            devices=devices,
+            num_nodes=1,
+            strategy=strategy,
+            precision=precision,
+        )
+
+        fabric.launch(
+            main,
+            fabric=fabric,
+            seed=seed,
+            data=data,
+            checkpoint_dir=checkpoint_dir,
+            out_dir=out_dir,
+            batch_size=batch_size,
+            kv_cache=kv_cache,
+            sdpa=sdpa,
+            model_type=model_type,
+            model_config=model_config,
+            eval_tasks=eval.tasks,
+            devices=devices,
+            verbose=verbose,
+            attention_forward_temp_size_gb=attention_forward_temp_size_gb,
+            yarn_rope=yarn_rope,
+        )
     else:
-        strategy = "auto"
+        # Fallback without Lightning - multi-device support via PyTorch multiprocessing
+        if devices > 1:
+            print(f"Running with PyTorch multiprocessing on {devices} devices")
 
-    fabric = L.Fabric(
-        devices=devices,
-        num_nodes=1,
-        strategy=strategy,
-        precision=precision,
-    )
+            def _distributed_main(rank):
+                # Set CUDA device for this process
+                torch.cuda.set_device(rank)
+                main(
+                    fabric=None,
+                    seed=seed,
+                    data=data,
+                    checkpoint_dir=checkpoint_dir,
+                    out_dir=out_dir,
+                    batch_size=batch_size,
+                    kv_cache=kv_cache,
+                    sdpa=sdpa,
+                    model_type=model_type,
+                    model_config=model_config,
+                    eval_tasks=eval.tasks,
+                    devices=devices,
+                    verbose=verbose,
+                    attention_forward_temp_size_gb=attention_forward_temp_size_gb,
+                    yarn_rope=yarn_rope,
+                    rank=rank,
+                )
 
-    fabric.launch(
-        main,
-        seed=seed,
-        data=data,
-        checkpoint_dir=checkpoint_dir,
-        out_dir=out_dir,
-        batch_size=batch_size,
-        kv_cache=kv_cache,
-        sdpa=sdpa,
-        model_type=model_type,
-        model_config=model_config,
-        eval_tasks=eval.tasks,
-        devices=devices,
-        verbose=verbose,
-        attention_forward_temp_size_gb=attention_forward_temp_size_gb,
-        yarn_rope=yarn_rope,
-    )
+            mp.spawn(_distributed_main, nprocs=devices)
+        else:
+            # Single device case
+            main(
+                fabric=None,
+                seed=seed,
+                data=data,
+                checkpoint_dir=checkpoint_dir,
+                out_dir=out_dir,
+                batch_size=batch_size,
+                kv_cache=kv_cache,
+                sdpa=sdpa,
+                model_type=model_type,
+                model_config=model_config,
+                eval_tasks=eval.tasks,
+                devices=devices,
+                verbose=verbose,
+                attention_forward_temp_size_gb=attention_forward_temp_size_gb,
+                yarn_rope=yarn_rope,
+            )
 
 
 def main(
-    fabric: L.Fabric,
+    fabric: Optional[Any],
     seed: int,
     data: DataModule,
     checkpoint_dir: Path,
@@ -309,10 +370,15 @@ def main(
     verbose: VerbosityLevels,
     attention_forward_temp_size_gb: float,
     yarn_rope: bool,
+    rank: int = 0,
 ) -> None:
     is_lora = model_type == "lora"
+
     if torch.cuda.is_available():
-        device = torch.device("cuda", fabric.local_rank)
+        if fabric is not None:
+            device = torch.device("cuda", fabric.local_rank)
+        else:
+            device = torch.device("cuda", rank)
     else:
         device = torch.device("cpu")
     tokenizer = Tokenizer(checkpoint_dir)
@@ -335,9 +401,20 @@ def main(
         ignore_index=ignore_index,
     )
 
-    fabric.seed_everything(seed)  # same seed for every process to init model (FSDP)
+    if fabric is not None:
+        fabric.seed_everything(seed)
+    else:
+        # same seed for every process to init model (FSDP)
+        torch.manual_seed(seed)
 
-    with fabric.init_module(empty_init=(fabric.world_size > 1)):
+    from contextlib import nullcontext
+
+    if fabric is not None:
+        context = fabric.init_module(empty_init=(fabric.world_size > 1))
+    else:
+        context = nullcontext()
+
+    with context:
         mha_kwargs = get_mha_and_cache_kwargs(
             attention_forward_temp_size_gb,
             model_config.config,
@@ -346,7 +423,10 @@ def main(
             yarn_rope,
             fabric,
         )
-        dtype = fabric_precision_to_dtype(fabric._precision.precision)
+        if fabric is not None:
+            dtype = fabric_precision_to_dtype(fabric._precision.precision)
+        else:
+            dtype = torch.float32
         torch.set_default_dtype(dtype)
         with torch.device(device):
             if not is_lora:
@@ -409,7 +489,7 @@ def main(
     if devices > 1:
         # Ensure that lock for first batch is not checked at exactly the same
         # time by all devices
-        time.sleep(0.05 * fabric.global_rank)
+        time.sleep(0.05 * rank)
     for batch in test_dataiter:
         if not batch:
             print("Empty batch: Continue")
@@ -418,12 +498,13 @@ def main(
         orig_idxs = batch[ORIG_IDX_NAME]
         eval_metrics_path = tasks_helper.get_lock(batch)
         if eval_metrics_path is None:
-            print(f"Batch {task}, {orig_idxs} already done or in progress: Skipping")
+            print(
+                f"Batch {task}, {orig_idxs} already done or in progress: Skipping")
             continue
         try:
             print_with_rank_and_timestamp(
                 f"Running inference for batch {task}, {orig_idxs}",
-                fabric.global_rank,
+                fabric.global_rank if fabric is not None else rank,
             )
             if test_dataloader.delay_tokenization:
                 # Tokenization only happens here
@@ -431,7 +512,8 @@ def main(
             batch = batch_transform(batch)
             if task != current_task:
                 task_path = out_dir / task
-                print(f"New task {task}: Load model checkpoint from {task_path}")
+                print(
+                    f"New task {task}: Load model checkpoint from {task_path}")
                 load_model_checkpoint(
                     model=model,
                     task_path=task_path,
@@ -457,7 +539,7 @@ def main(
             print_with_rank_and_timestamp(
                 f"Batch {task}, {orig_idxs}: loss = {loss_value:.3f}, "
                 f"eval_time = {eval_time * 1000:.2f} ms",
-                fabric.global_rank,
+                fabric.global_rank if fabric is not None else rank
             )
             flush_io_streams()
             print(f"Storing to {eval_metrics_path}")
@@ -494,7 +576,7 @@ def get_dataloader(
     head_model: str,
     batch_size: int,
     devices: int,
-    fabric: Optional[L.Fabric] = None,
+    fabric: Optional[Any] = None,
 ) -> EvaluationDataLoader:
     """
     Creates data loader for cross product of test dataset with evaluation
@@ -591,7 +673,7 @@ def load_model_checkpoint(
     model: LongContextInferenceModel,
     task_path: Path,
     model_type: str,
-    fabric: L.Fabric,
+    fabric: Optional[Any],
 ):
     if model_type == "full":
         file_path = task_path / LIT_MODEL_FNAME
