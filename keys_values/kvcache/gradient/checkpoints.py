@@ -446,10 +446,12 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
     ) -> int:
         k_and_v = buffers.get_keys_values()
         current_length = buffers.current_length
-        self.k[pos][:, :, :current_length, :] = k_and_v.keys()[:, :, :current_length, :]
-        self.v[pos][:, :, :current_length, :] = k_and_v.values()[
-            :, :, :current_length, :
-        ]
+        self.k[pos][:, :, :current_length, :].copy_(
+            k_and_v.keys()[:, :, :current_length, :], non_blocking=True,
+        )
+        self.v[pos][:, :, :current_length, :].copy_(
+            k_and_v.values()[:, :, :current_length, :], non_blocking=True,
+        )
         self._checkpoint_lengths[pos] = current_length
         return pos
 
@@ -462,8 +464,8 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         value = self.v[pos][:, ...]
         device = out.device
         if device is not None:
-            key = key.to(device)
-            value = value.to(device)
+            key = key.to(device, non_blocking=True)
+            value = value.to(device, non_blocking=True)
         out.prefill(key=key, value=value)
         out.current_length = self._checkpoint_lengths[pos]
 
@@ -489,8 +491,12 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
             raise ValueError(
                 f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self.cache_length}]"
             )
-        self.k[pos][:, :, input_pos : (input_pos + num), :] = key
-        self.v[pos][:, :, input_pos : (input_pos + num), :] = value
+        self.k[pos][:, :, input_pos : (input_pos + num), :].copy_(
+            key, non_blocking=True,
+        )
+        self.v[pos][:, :, input_pos : (input_pos + num), :].copy_(
+            value, non_blocking=True,
+        )
         self._checkpoint_lengths[pos] = max(
             self._checkpoint_lengths[pos],
             input_pos + num,
@@ -515,9 +521,11 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         if device is None:
             device = torch.get_default_device()
         return DefaultKeysAndValues(
-            keys=self.k[pos][:, :, input_pos : (input_pos + num), :].to(device=device),
+            keys=self.k[pos][:, :, input_pos : (input_pos + num), :].to(
+                device=device, non_blocking=True,
+            ),
             values=self.v[pos][:, :, input_pos : (input_pos + num), :].to(
-                device=device
+                device=device, non_blocking=True,
             ),
         )
 

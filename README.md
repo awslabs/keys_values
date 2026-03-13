@@ -429,8 +429,8 @@ we use `torch.gather` to extract information for slots, and `torch.scatter`
 to write information for new tokens into the cache.
 
 For the CLI, a cache is identified by `kv_cache.name`, which can be a string
-`{cname}-{bname}`, where `cname` determines the KV cache policy (i.e., which
-slots are overwritten once the cache is full) and `bname` determines the buffer
+`{cname}-{qname}`, where `cname` determines the KV cache policy (i.e., which
+slots are overwritten once the cache is full) and `qname` determines the buffer
 strategy (i.e., how is the KV information stored). These KV cache policies are
 currently supported:
 
@@ -706,9 +706,9 @@ go into full details, but our technique is a combination of several ideas:
 To be precise, gradients are computed in two phases:
 
 * Forward phase: This is what we also do for inference, with KV cache policies
-  in action. However, we store activation checkpoints at each cell boundary
-  to CPU, and we also log all KV cache eviction decisions into a so-called
-  *replay log*.
+  in action. However, we store activation checkpoints (also called layer input
+  checkpoints) at each cell boundary to CPU, and we also log all KV cache
+  eviction decisions into a so-called *replay log*.
 * Backward phase: In this phase, we use *replay caches*. These are replicas of
   the original KV caches, but instead of running a policy depending on inputs,
   they just replay all decisions made during the forward pass. The backward
@@ -753,7 +753,7 @@ Important arguments for gradient computations are:
 * `--grad.layers_per_cell`: Second phase GPU memory requirements depend
   linearly on this number. It states how many layers are processed in a cell.
   The default is 1. Larger values mean less sequential processing, so faster
-  computation. Note that the CPU memory for layer input checkpoints scales
+  computation. Note that the CPU memory for activation checkpoints scales
   inverse linearly with this number.
 * `--grad.chunks_per_cell_multiplier`: The length of a cell is the sum of
   its chunk's lengths. If `max_cell_length = int(factor * kv_cache.cache_length *
@@ -795,6 +795,16 @@ which can be slower.
 
 Other arguments for fine-tuning are:
 
+* `--grad.layercp_qname`: Selects how activation checkpoints are stored in CPU
+  memory. Same values as `qname` part of `--kv_cache.name`.
+  Defaults to "torch-quantized8". For "default", the checkpoints are not
+  quantized. This is more accurate, but needs more CPU memory and is slower,
+  because more memory has to be transfered to CPU.
+* `--grad.cachecp_qname`: Selects how KV cache checkpoints are stored in CPU
+  memory. Same values as `qname` part of `--kv_cache.name`.
+  Defaults to "torch-quantized8". For "default", the checkpoints are not
+  quantized. This is more accurate, but needs more CPU memory and is slower,
+  because more memory has to be transfered to CPU.
 * `--grad.use_old_cache`: If this is `True`, an older training replay cache is
   used for gradient computations. This used a fused naive SDPA kernel, which
   requires less GPU memory, but is also slower (if `flex_attention` is used).
@@ -804,7 +814,7 @@ Other arguments for fine-tuning are:
   is processed token per token (i.e., with chunk size 1). This is slower, but
   more realistic, mirroring how inference looks like. If the targets part is
   short, it does not make a big time difference.
-* `--grad.layer_checkpoint_chunk_size`: Only relevant if layer input
+* `--grad.layer_checkpoint_chunk_size`: Only relevant if activation
   checkpointing uses quantization. We quantize and de-quantize checkpoints in
   chunks of this length (along sequence axis). Larger values save time, but
   require more GPU memory. The default value is equal to
@@ -823,7 +833,7 @@ The kind of profiling is chosen with `--record_gpu_memory_kind`, with values 0, 
 
 * `${OUT_DIR}/gpu_memory_snapshots/iteration${ITER}/snapshot_initial.pickle`:
   From start of iteration until backward over top-most layer. Includes the
-  forward pass for layer input checkpoints and KV cache logs, as well as the
+  forward pass for activation checkpoints and KV cache logs, as well as the
   backward for the head model.
 * `${OUT_DIR}/gpu_memory_snapshots/iteration${ITER}/snapshot_layer${FST_LAYER_IDX}.pickle`:
   Backward over one row of cells. Here, `FST_LAYER_IDX` the index of the first

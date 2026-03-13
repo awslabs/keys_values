@@ -17,7 +17,7 @@ from typing import Optional, Tuple, Dict, Any, List, Literal
 from litgpt.args import EvalArgs as _EvalArgs, TrainArgs as _TrainArgs
 
 from keys_values.kvcache.factory import KVCacheFactory
-from keys_values.kvcache.consts import split_name
+from keys_values.kvcache.consts import split_name, SUPPORTED_QUANTIZERS
 from keys_values.utils import VerbosityLevels
 
 
@@ -155,6 +155,10 @@ class GradientArgs:
             If `chunks_per_cell_multiplier == 1`, this means that embeddings for
             this cell are as large as KV cache buffers. GPU memory scales
             linearly in this number.
+        layercp_qname: Name of buffer type to be used for layer input
+            checkpointing. See :const:`SUPPORTED_QUANTIZERS`.
+        cachecp_qname: Name of buffer type to be used for KV cache
+            checkpointing. See :const:`SUPPORTED_QUANTIZERS`.
         single_tokens_for_targets: If `True`, the targets part of a sequence is
             processed token per token (i.e., with chunk size 1). This is slower,
             but more realistic, mirroring how inference looks like.
@@ -178,7 +182,9 @@ class GradientArgs:
 
     layers_per_cell: int = 1
     chunks_per_cell_multiplier: float = 1.0
-    single_tokens_for_targets: bool = (False,)
+    layercp_qname: Optional[str] = None
+    cachecp_qname: Optional[str] = None
+    single_tokens_for_targets: bool = False
     use_old_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
     layer_checkpoint_chunk_size: Optional[int] = None
@@ -187,6 +193,10 @@ class GradientArgs:
         _check_positive(self.layers_per_cell, "layers_per_cell")
         assert self.layers_per_cell >= 1
         _check_positive(self.chunks_per_cell_multiplier, "chunks_per_cell_multiplier")
+        if self.layercp_qname is not None and self.layercp_qname not in SUPPORTED_QUANTIZERS:
+            raise ValueError(f"layercp_qname = {self.layercp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}")
+        if self.cachecp_qname is not None and self.cachecp_qname not in SUPPORTED_QUANTIZERS:
+            raise ValueError(f"cachecp_qname = {self.cachecp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}")
         _check_int(self.max_match_trials_pack_arg, "max_match_trials_pack_arg")
         _check_int(self.layer_checkpoint_chunk_size, "layer_checkpoint_chunk_size")
 

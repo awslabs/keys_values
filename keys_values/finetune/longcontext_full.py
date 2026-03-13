@@ -180,6 +180,8 @@ def setup(
     grad: GradientArgs = GradientArgs(
         layers_per_cell=1,
         chunks_per_cell_multiplier=1.0,
+        layercp_qname=None,
+        cachecp_qname=None,
         single_tokens_for_targets=False,
         use_old_cache=False,
         max_match_trials_pack_arg=8,
@@ -1014,7 +1016,7 @@ def wrap_gpt_model(
             add_msg = " (default)"
         else:
             add_msg = ""
-        if kv_cache.qname != "default":
+        if grad.layercp_qname != "default":
             print_message(
                 f"Using layer_checkpoint_chunk_size = {layer_checkpoint_chunk_size}"
                 + add_msg,
@@ -1025,7 +1027,8 @@ def wrap_gpt_model(
             **common_kwargs,
             layers_per_cell=grad.layers_per_cell,
             single_tokens_for_targets=grad.single_tokens_for_targets,
-            qname=kv_cache.qname,
+            layercp_qname=grad.layercp_qname,
+            cachecp_qname=grad.cachecp_qname,
             cache_kwargs=cache_kwargs,
             train_cache_kwargs=train_cache_kwargs,
             backward_tmp_array_limit_gb=backward_tmp_array_limit_gb,

@@ -91,6 +91,8 @@ def setup(
     grad: GradientArgs = GradientArgs(
         layers_per_cell=1,
         chunks_per_cell_multiplier=1.0,
+        layercp_qname=None,
+        cachecp_qname=None,
         single_tokens_for_targets=False,
         use_old_cache=False,
         max_match_trials_pack_arg=8,

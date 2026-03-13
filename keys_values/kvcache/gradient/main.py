@@ -225,7 +225,8 @@ class LongContextGradientModel(LongContextInferenceModel):
         cache_offloader: Optional[KVCacheOffloader] = None,
         set_max_seq_length: bool = True,
         debug_single_cell_per_row: bool = False,
-        qname: Optional[str] = None,
+        layercp_qname: Optional[str] = None,
+        cachecp_qname: Optional[str] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
         train_cache_kwargs: Optional[Dict[str, Any]] = None,
         backward_tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
@@ -279,8 +280,10 @@ class LongContextGradientModel(LongContextInferenceModel):
                 batch. If :meth:`forward` is called with `targets=None`, then
                 `gpt_model.max_seq_length` is not changed in any case.
             debug_single_cell_per_row: Internal option, used for unit testing.
-            qname: Determines how checkpoints are stored. See
-                :const:`SUPPORTED_QUANTIZERS`.
+            layercp_qname: Determines how layer input checkpoints are stored.
+                See :const:`SUPPORTED_QUANTIZERS`.
+            cachecp_qname: Determines how KV cache checkpoints are stored.
+                See :const:`SUPPORTED_QUANTIZERS`.
             cache_kwargs: Additional kwargs for creating the cache buffers for
                 checkpointing, and inference replay caches
             train_cache_kwargs: Arguments for training replay caches in
@@ -298,10 +301,10 @@ class LongContextGradientModel(LongContextInferenceModel):
                 computation.
             offload_device: See above.
             offload_grad_accum: See above.
-            layer_checkpoint_chunk_size: If `qname != "default"`, layer input
-                checkpoints are quantized. Quantization is done in chunks of
-                this length. Determines GPU memory requirements. A value close
-                to the cache length is recommended.
+            layer_checkpoint_chunk_size: If `layercp_qname != "default"`, layer
+                input checkpoints are quantized. Quantization is done in chunks
+                of this length. Determines GPU memory requirements. A value
+                close to the cache length is recommended.
             track_unmatched_annotations: If given, we track for each unmatched
                 pack argument the annotations it was matched against. We
                 print this information for `(layer_idx, chunk_idx)` such that
@@ -328,18 +331,25 @@ class LongContextGradientModel(LongContextInferenceModel):
             debug_intermediates=debug_intermediates,
         )
         self.single_tokens_for_targets = single_tokens_for_targets
-        if qname is None:
-            qname = "torch-quantized8"
-        elif qname not in SUPPORTED_QUANTIZERS:
+        if layercp_qname is None:
+            layercp_qname = "torch-quantized8"
+        elif layercp_qname not in SUPPORTED_QUANTIZERS:
             raise ValueError(
-                f"qname = {qname} is not supported, must be in {SUPPORTED_QUANTIZERS}"
+                f"layercp_qname = {layercp_qname} is not supported, must be in {SUPPORTED_QUANTIZERS}"
+            )
+        if cachecp_qname is None:
+            cachecp_qname = layercp_qname
+        elif cachecp_qname not in SUPPORTED_QUANTIZERS:
+            raise ValueError(
+                f"cachecp_qname = {cachecp_qname} is not supported, must be in {SUPPORTED_QUANTIZERS}"
             )
         if not (1 <= layers_per_cell <= gpt_model.config.n_layer):
             raise ValueError(
                 f"layers_per_cell = {layers_per_cell}, must be in [1, {gpt_model.config.n_layer}]"
             )
         self.layers_per_cell = layers_per_cell
-        self.qname = qname
+        self.layercp_qname = layercp_qname
+        self.cachecp_qname = cachecp_qname
         if cache_kwargs is None:
             cache_kwargs = dict()
         elif "tmp_array_limit_gb" in cache_kwargs:
@@ -396,9 +406,9 @@ class LongContextGradientModel(LongContextInferenceModel):
         else:
             self._offload_grad_accum = None
         self._init_cpu_offloading()
-        if qname != "default" and layer_checkpoint_chunk_size is None:
+        if layercp_qname != "default" and layer_checkpoint_chunk_size is None:
             raise ValueError(
-                "layer_checkpoint_chunk_size must be given if qname != 'default'"
+                "layer_checkpoint_chunk_size must be given if layercp_qname != 'default'"
             )
         self._layer_checkpoint_chunk_size = layer_checkpoint_chunk_size
         self._track_unmatched_annotations = track_unmatched_annotations
@@ -610,7 +620,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         # Layer input checkpoints
         layer_numbers = self._create_layer_numbers()
         dtype = self.gpt_model.get_kv_cache_params(0).dtype
-        if self.qname == "default":
+        if self.layercp_qname == "default":
             # Checkpoints are not quantized
             self.layer_checkpoints = LayerInputDefaultCheckpoints(
                 layer_numbers=layer_numbers,
@@ -633,7 +643,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 layer_numbers=layer_numbers,
                 batch_size=self.batch_size,
                 chunk_size=self._layer_checkpoint_chunk_size,
-                qname=self.qname,
+                qname=self.layercp_qname,
                 cache_kwargs=dict(
                     self.cache_kwargs,
                     tmp_array_limit_gb=self._tmp_array_limit_gb,
@@ -663,7 +673,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         return layer_numbers + [n_layer, n_layer + 1]
 
     def _deallocate_buffers(self):
-        if self.qname != "default":
+        if self.layercp_qname != "default":
             assert isinstance(self.layer_checkpoints, LayerInputQuantizedCheckpoints)
             self.layer_checkpoints.clear()
 
@@ -697,7 +707,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         self.accumulator = GradientAccumulator(
             config=self.config,
             autograd_hooks=self.autograd_hooks,
-            qname=self.qname,
+            qname=self.cachecp_qname,
             cache_kwargs=dict(
                 self.cache_kwargs,
                 tmp_array_limit_gb=self._backward_tmp_array_limit_gb,
