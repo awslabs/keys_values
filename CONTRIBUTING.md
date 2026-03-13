@@ -41,11 +41,15 @@ To send us a pull request, please:
 2. Modify the source; please focus on the specific change you are contributing.
    If you also reformat all the code, it will be hard for us to focus on your
    change.
-3. Ensure that all local tests pass.
-4. Commit to your fork using clear commit messages.
-5. Send us a pull request, answering any default questions in the pull request
+3. We are using `black` and `flake8`, also as part of GitHub actions, and will
+   not merge any PR which does not pass them. Use `./black.sh` and `./flake.sh`
+   on your code to make sure it complies.
+4. Ensure that all local tests pass. Quite a few tests run on GPU devices only.
+   If you have the resources to run them, we would appreciate that.
+5. Commit to your fork using clear commit messages.
+6. Send us a pull request, answering any default questions in the pull request
    interface.
-6. Pay attention to any automated CI failures reported in the pull request, and
+7. Pay attention to any automated CI failures reported in the pull request, and
    stay involved in the conversation.
 
 GitHub provides additional document on [forking a repository](https://help.github.com/articles/fork-a-repo/) and

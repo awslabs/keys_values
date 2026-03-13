@@ -939,7 +939,11 @@ class LongContextInferenceModel(GPTAndHeadModel):
                             logits_final_chunk = y.detach()
                     del embeddings
                     embeddings = torch.cat(new_embed_parts, dim=1)
-                    assert embeddings.shape[1] == end - start, (embeddings.shape, start, end)
+                    assert embeddings.shape[1] == end - start, (
+                        embeddings.shape,
+                        start,
+                        end,
+                    )
 
                 # Layer input checkpointing
                 self._checkpoint_layer_input(
