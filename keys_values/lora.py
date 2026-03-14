@@ -216,11 +216,11 @@ class GPT(BaseModel):
         return model_copy
 
     def check_for_nan(self, do_grads: bool = False) -> None:
-        for block in self.transformer.h:
+        for block in self._get_layer_blocks():
             block.attn.check_for_nan(do_grads)
 
     def reset_lora_parameters(self):
-        for block in self.transformer.h:
+        for block in self._get_layer_blocks():
             block.reset_lora_parameters()
 
 

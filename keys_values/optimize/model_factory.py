@@ -377,9 +377,6 @@ class GPTShardOfBlocks(GPTFull):
         if self._has_layers():
             self.max_seq_length = config.block_size
 
-    def _has_layers(self) -> bool:
-        return self.transformer is not None and hasattr(self.transformer, "h")
-
     @property
     def max_seq_length(self) -> int:
         if self._has_layers():

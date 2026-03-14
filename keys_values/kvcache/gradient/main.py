@@ -717,11 +717,22 @@ class LongContextGradientModel(LongContextInferenceModel):
             self.autograd_hooks = CleanupArraysAutogradHooks(arrays_cleanup)
         else:
             self.autograd_hooks = None
+        # Determine cache length of layers in each shard
+        all_cache_lengths = [
+            cache.cache_length for cache in self.gpt_model.get_kv_caches()
+        ]
+        cache_lengths = [
+            tuple(all_cache_lengths[i] for i in range(start, end))
+            for start, end in self._get_shard_ranges()
+        ]
+        cache_params = self.gpt_model.get_kv_cache_params(0)
         # Accumulator object
         # Key and value buffers should not be annotated for the first chunk if
         # there is only a single chunk in the first cell
         self.accumulator = GradientAccumulator(
             config=self.config,
+            cache_lengths=cache_lengths,
+            cache_params=cache_params,
             autograd_hooks=self.autograd_hooks,
             qname=self.cachecp_qname,
             cache_kwargs=dict(
@@ -778,7 +789,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 lines.append(f"cache_length    = {cache_length}")
             else:
                 cl_str = ", ".join(f"{i}:{j}" for i, j in cache_lengths)
-                lines.append("cache_length    = " + cl_str)
+                lines.append("cache_lengths   = " + cl_str)
             lines.extend(
                 [
                     f"chunk_sizes     = {self.chunk_sizes}",
@@ -958,6 +969,12 @@ class LongContextGradientModel(LongContextInferenceModel):
                 )
                 print("\n".join(lines))
 
+    def _get_shard_ranges(self) -> List[Tuple[int, int]]:
+        # Note that `layer_checkpoints.layer_numbers[-1] == n_layer + 1` is used
+        # for storing head gradients
+        layer_numbers = self.layer_checkpoints.layer_numbers[:-1]
+        return reversed(list(zip(layer_numbers[:-1], layer_numbers[1:])))
+
     def _backward_accumulate_gradients_nocheck(self, count: int):
         """
         Main workhorse. Runs nested activation checkpointing in order to
@@ -1097,11 +1114,8 @@ class LongContextGradientModel(LongContextInferenceModel):
             self._record_gpu_memory_snapshots.stop_recording()
 
         # Loop over rows of cells, from the top down.
-        # Note that `layer_checkpoints.layer_numbers[-1] == n_layer + 1` is used
-        # for storing head gradients
-        layer_numbers = self.layer_checkpoints.layer_numbers[:-1]
         for first_layer_idx, end_layer_idx in wrap_tqdm_if_verbose(
-            reversed(list(zip(layer_numbers[:-1], layer_numbers[1:]))),
+            self._get_shard_ranges(),
             verbose=self.verbose is VerbosityLevels.SOME,
         ):
             if self._use_arrays_cleanup and self.autograd_hooks is not None:

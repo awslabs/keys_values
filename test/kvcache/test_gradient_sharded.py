@@ -268,7 +268,7 @@ def compute_gradients_on_device(
     with torch.no_grad():
         x = gpt_model_on_device.transformer.wte(input_ids)
         layer_inputs = []
-        for block in gpt_model_on_device.transformer.h:
+        for block in gpt_model_on_device._get_layer_blocks():
             layer_inputs.append(x)
             x = block(x, input_ids, gpt_model_on_device.mha)
     head_input = copy_requires_grad(x)
