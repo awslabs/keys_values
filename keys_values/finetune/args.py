@@ -193,10 +193,20 @@ class GradientArgs:
         _check_positive(self.layers_per_cell, "layers_per_cell")
         assert self.layers_per_cell >= 1
         _check_positive(self.chunks_per_cell_multiplier, "chunks_per_cell_multiplier")
-        if self.layercp_qname is not None and self.layercp_qname not in SUPPORTED_QUANTIZERS:
-            raise ValueError(f"layercp_qname = {self.layercp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}")
-        if self.cachecp_qname is not None and self.cachecp_qname not in SUPPORTED_QUANTIZERS:
-            raise ValueError(f"cachecp_qname = {self.cachecp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}")
+        if (
+            self.layercp_qname is not None
+            and self.layercp_qname not in SUPPORTED_QUANTIZERS
+        ):
+            raise ValueError(
+                f"layercp_qname = {self.layercp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}"
+            )
+        if (
+            self.cachecp_qname is not None
+            and self.cachecp_qname not in SUPPORTED_QUANTIZERS
+        ):
+            raise ValueError(
+                f"cachecp_qname = {self.cachecp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}"
+            )
         _check_int(self.max_match_trials_pack_arg, "max_match_trials_pack_arg")
         _check_int(self.layer_checkpoint_chunk_size, "layer_checkpoint_chunk_size")
 

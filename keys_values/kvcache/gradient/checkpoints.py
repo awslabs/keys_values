@@ -447,10 +447,12 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         k_and_v = buffers.get_keys_values()
         current_length = buffers.current_length
         self.k[pos][:, :, :current_length, :].copy_(
-            k_and_v.keys()[:, :, :current_length, :], non_blocking=True,
+            k_and_v.keys()[:, :, :current_length, :],
+            non_blocking=True,
         )
         self.v[pos][:, :, :current_length, :].copy_(
-            k_and_v.values()[:, :, :current_length, :], non_blocking=True,
+            k_and_v.values()[:, :, :current_length, :],
+            non_blocking=True,
         )
         self._checkpoint_lengths[pos] = current_length
         return pos
@@ -492,10 +494,12 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
                 f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self.cache_length}]"
             )
         self.k[pos][:, :, input_pos : (input_pos + num), :].copy_(
-            key, non_blocking=True,
+            key,
+            non_blocking=True,
         )
         self.v[pos][:, :, input_pos : (input_pos + num), :].copy_(
-            value, non_blocking=True,
+            value,
+            non_blocking=True,
         )
         self._checkpoint_lengths[pos] = max(
             self._checkpoint_lengths[pos],
@@ -522,10 +526,12 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
             device = torch.get_default_device()
         return DefaultKeysAndValues(
             keys=self.k[pos][:, :, input_pos : (input_pos + num), :].to(
-                device=device, non_blocking=True,
+                device=device,
+                non_blocking=True,
             ),
             values=self.v[pos][:, :, input_pos : (input_pos + num), :].to(
-                device=device, non_blocking=True,
+                device=device,
+                non_blocking=True,
             ),
         )
 
