@@ -132,16 +132,20 @@ class GPT(nn.Module):
         # Multi-head attention (includes position encoding)
         self.mha.set_seq_length(value)
 
-    def are_kv_caches_assigned(self) -> bool:
-        status = [kv_cache is not None for kv_cache in self.get_kv_caches()]
-        result = any(status)
-        if result and not all(status):
-            raise IndexError("Some layers have KV caches assigned, but not all")
-        return result
+    def _has_layers(self) -> bool:
+        return self.transformer is not None and hasattr(self.transformer, "h")
 
     def _num_layers(self) -> int:
-        has_no_layers = self.transformer is None or not hasattr(self.transformer, "h")
-        return 0 if has_no_layers else len(self.transformer.h)
+        return len(self._get_layer_blocks())
+
+    def _get_layer_blocks(self) -> List["Block"]:
+        """
+        We use this method instead of `self.transformer.h` to ensure that
+        classes such as :class:`CellBlocks` or :class:`GPTShardOfBlocks`
+        surface other methods of this class correctly.
+
+        """
+        return [block for block in self.transformer.h] if self._has_layers() else []
 
     def assign_kv_caches(self, kv_caches: List[Optional[KVCache]]):
         """
@@ -164,7 +168,7 @@ class GPT(nn.Module):
                 self._check_kv_cache(self.config, kv_cache, batch_size, dtype)
         elif num_none != num_layers:
             raise ValueError(f"kv_caches must not contain None or all be None")
-        for kv_cache, block in zip(kv_caches, self.transformer.h):
+        for kv_cache, block in zip(kv_caches, self._get_layer_blocks()):
             if kv_cache is not None:
                 kv_cache.set_seq_length(self.max_seq_length)
             block.attn.kv_cache = kv_cache
@@ -196,7 +200,7 @@ class GPT(nn.Module):
             raise ValueError("Model has KV caches assigned already")
         if max_seq_length is None:
             max_seq_length = self.max_seq_length
-        for block in self.transformer.h:
+        for block in self._get_layer_blocks():
             attn = block.attn
             kv_cache = attn.kv_cache
             if (
@@ -216,7 +220,14 @@ class GPT(nn.Module):
         self._default_kv_cache = True
 
     def get_kv_caches(self) -> List[KVCache]:
-        return [block.attn.kv_cache for block in self.transformer.h]
+        return [block.attn.kv_cache for block in self._get_layer_blocks()]
+
+    def are_kv_caches_assigned(self) -> bool:
+        status = [kv_cache is not None for kv_cache in self.get_kv_caches()]
+        result = any(status)
+        if result and not all(status):
+            raise IndexError("Some layers have KV caches assigned, but not all")
+        return result
 
     def reset(self) -> None:
         """
@@ -357,7 +368,7 @@ class GPT(nn.Module):
         return cls(Config.from_name(name, **kwargs))
 
     def clear_kv_caches(self) -> None:
-        for block in self.transformer.h:
+        for block in self._get_layer_blocks():
             block.attn.kv_cache = None
         self._default_kv_cache = False
 
@@ -374,7 +385,7 @@ class GPT(nn.Module):
         num_layers = self._num_layers()
         if not (0 <= block_idx < num_layers):
             raise IndexError(f"block_idx={block_idx}, must be in [0, {num_layers}])")
-        kv_cache = self.transformer.h[block_idx].attn.kv_cache
+        kv_cache = self.get_kv_caches()[block_idx]
         return None if kv_cache is None else kv_cache.get_params()
 
     def kv_cache_max_forward_length(self) -> Optional[int]:
@@ -444,7 +455,7 @@ class GPT(nn.Module):
         kv_caches = []
         try:
             # Remove KV caches before copy is created
-            for l_ix, block in enumerate(self.transformer.h):
+            for l_ix, block in enumerate(self._get_layer_blocks()):
                 kv_cache = block.attn.kv_cache
                 if (
                     kv_cache is not None

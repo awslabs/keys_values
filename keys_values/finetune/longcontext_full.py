@@ -1023,7 +1023,16 @@ def wrap_gpt_model(
                 + add_msg,
                 fabric,
             )
-        # track_unmatched_annotations = lambda layer_idx, chunk_idx: layer_idx in (0, 35)  # DEBUG
+        if grad.layercp_pin_memory:
+            print_message(
+                "CPU pages for activation (layer input) checkpointing are pinned",
+                fabric,
+            )
+        if grad.cachecp_pin_memory:
+            print_message(
+                "CPU pages for KV cache checkpointing are pinned",
+                fabric,
+            )
         model = LongContextGradientModel(
             **common_kwargs,
             layers_per_cell=grad.layers_per_cell,
@@ -1033,12 +1042,13 @@ def wrap_gpt_model(
             cache_kwargs=cache_kwargs,
             train_cache_kwargs=train_cache_kwargs,
             backward_tmp_array_limit_gb=backward_tmp_array_limit_gb,
+            layercp_pin_memory=grad.layercp_pin_memory,
+            cachecp_pin_memory=grad.cachecp_pin_memory,
             autograd_hooks_kwargs=autograd_hooks_kwargs,
             profile_steps=profile_grad_times,
             offload_device=cpu_offload_device,
             offload_grad_accum=offload_grad_accum,
             layer_checkpoint_chunk_size=layer_checkpoint_chunk_size,
-            track_unmatched_annotations=None,
             debug_profile_forward=profile_parts == "forward",
             debug_profile_backward=profile_parts == "backward",
             debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
@@ -1363,7 +1373,6 @@ def fit(
                 loss = model(**model_kwargs)
                 loss.backward()
 
-            # END DEBUG
             running_loss.update(loss.detach().to(device=optim_device))
             flush_io_streams()
             if size_logs is not None:

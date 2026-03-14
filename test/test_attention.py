@@ -922,8 +922,14 @@ def test_mha_is_passed_on(device):
         write_head_gradients_slice=write_head_gradients_slice,
         targets=targets,
     )
-    model_part = DefaultCellBlocks(gpt_model, 0, n_layer)
-    ir_caches = accumulator._create_inference_replay_caches(model_part)
+    # Note: Must call `accumulator._create_inference_replay_caches` for
+    # single-layer shards only
+    ir_caches = [
+        accumulator._create_inference_replay_caches(
+            DefaultCellBlocks(gpt_model, block_idx, 1)
+        )[0]
+        for block_idx in range(n_layer)
+    ]
     _compare_mhas(
         orig_caches,
         ir_caches,
@@ -931,6 +937,7 @@ def test_mha_is_passed_on(device):
     )
 
     # Training replay caches
+    model_part = DefaultCellBlocks(gpt_model, 0, n_layer)
     cell = CellComputation(
         model_part=model_part,
         autograd_hooks=None,

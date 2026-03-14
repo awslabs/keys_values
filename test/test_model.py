@@ -1683,7 +1683,7 @@ def test_sdpa_choice_kv_cache(config):
 
     reset_meth = [
         (block.attn.kv_cache, block.attn.kv_cache.mha.scaled_dot_product_attention)
-        for block in model.transformer.h
+        for block in model._get_layer_blocks()
     ]
 
     if SUPPORTS_FLASH_ATTENTION:

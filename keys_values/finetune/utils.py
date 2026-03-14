@@ -51,7 +51,7 @@ from keys_values.utils import flush_io_streams
 def debug_print_param_names(model: GPT):
     rows = ["", "Names of model (GPT)", ""]
     rows.extend([name for name, _ in model.named_parameters()])
-    for i, block in enumerate(model.transformer.h):
+    for i, block in enumerate(model._get_layer_blocks()):
         rows.extend(["", f"Names of block {i} (Block)", ""])
         rows.extend([name for name, _ in block.named_parameters()])
     for pname, block in [
