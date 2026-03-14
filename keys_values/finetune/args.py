@@ -178,6 +178,12 @@ class GradientArgs:
             uses quantization. We quantize / dequantize checkpoints in chunks
             of this length (along sequence axis). Larger values require more
             GPU memory.
+        layercp_pin_memory: If `True`, the CPU memory pages for layer input
+            checkpoints are pinned. This can run faster, but also needs more
+            real CPU memory.
+        cachecp_pin_memory: If `True`, the CPU memory pages for KV cache
+            checkpoints are pinned. This can run faster, but also needs more
+            real CPU memory.
     """
 
     layers_per_cell: int = 1
@@ -188,6 +194,8 @@ class GradientArgs:
     use_old_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
     layer_checkpoint_chunk_size: Optional[int] = None
+    layercp_pin_memory: bool = False
+    cachecp_pin_memory: bool = False
 
     def __post_init__(self):
         _check_positive(self.layers_per_cell, "layers_per_cell")

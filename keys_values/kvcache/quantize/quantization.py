@@ -271,6 +271,7 @@ class Quantizer(torch.nn.Module):
         self,
         device: torch.device,
         cache_length: Optional[int] = None,
+        **kwargs,
     ) -> "QuantizerState":
         raise NotImplementedError
 

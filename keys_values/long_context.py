@@ -789,6 +789,15 @@ class LongContextInferenceModel(GPTAndHeadModel):
         """
         pass
 
+    def _do_checkpoint_layer_input(self) -> bool:
+        """
+        Returns:
+            `True` if :meth:`_checkpoint_layer_input` transfers memory
+            from GPU to CPU
+
+        """
+        return False
+
     def _forward_internal(
         self,
         input_ids: torch.Tensor,
@@ -937,6 +946,14 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         if not compute_loss:
                             # We need the final layer output for the last chunk
                             logits_final_chunk = y.detach()
+                    if self._do_checkpoint_layer_input():
+                        # `_checkpoint_layer_input` called above transfers
+                        # `embeddings` to CPU. For this not to lead to
+                        # corruption of the CPU target, we need to synchronize
+                        # here.
+                        # TODO: Is this really a problem? We don't modify
+                        # `embeddings`, but just unlink it.
+                        torch.cuda.synchronize()
                     del embeddings
                     embeddings = torch.cat(new_embed_parts, dim=1)
                     assert embeddings.shape[1] == end - start, (
@@ -1000,6 +1017,14 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     # `logits_final_chunk` has final layer outputs for last
                     # chunk. Map to logits
                     logits_final_chunk = self.gpt_model.lm_head(logits_final_chunk)
+                if self._do_checkpoint_layer_input():
+                    # `_checkpoint_layer_input` called above transfers
+                    # `embeddings` to CPU. For this not to lead to
+                    # corruption of the CPU target, we need to synchronize
+                    # here.
+                    # TODO: Is this really a problem? We don't modify
+                    # `embeddings`, but just unlink it.
+                    torch.cuda.synchronize()
 
         write_back_cache_buffers(self.gpt_model)  # Just to be safe
         if self.cache_offloader is not None:

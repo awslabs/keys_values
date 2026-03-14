@@ -551,8 +551,9 @@ class TorchBasicQuantizer(Quantizer):
         self,
         device: torch.device,
         cache_length: Optional[int] = None,
+        **kwargs,
     ) -> "QuantizerState":
-        return TorchBasicQuantizerState(self, device, cache_length)
+        return TorchBasicQuantizerState(self, device, cache_length, **kwargs)
 
     @staticmethod
     def supported_source_dtypes() -> Tuple[torch.dtype, ...]:
@@ -569,6 +570,7 @@ class TorchBasicQuantizerState(QuantizerState):
         quantizer: TorchBasicQuantizer,
         device: Optional[torch.device] = None,
         cache_length: Optional[int] = None,
+        pin_memory: bool = False,
     ):
         if not isinstance(quantizer, TorchBasicQuantizer):
             raise ValueError(
@@ -585,16 +587,19 @@ class TorchBasicQuantizerState(QuantizerState):
             shape,
             dtype=quantizer._quant_buffer_dtype,
             device=self.device,
+            pin_memory=pin_memory,
         )
         self.quant_scales = torch.zeros(
             shape[:-1],
             dtype=torch.float32,
             device=self.device,
+            pin_memory=pin_memory,
         )
         self.quant_zero_points = torch.zeros(
             shape[:-1],
             dtype=quantizer._quant_buffer_dtype,
             device=self.device,
+            pin_memory=pin_memory,
         )
 
     def copy_(

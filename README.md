@@ -799,12 +799,12 @@ Other arguments for fine-tuning are:
   memory. Same values as `qname` part of `--kv_cache.name`.
   Defaults to "torch-quantized8". For "default", the checkpoints are not
   quantized. This is more accurate, but needs more CPU memory and is slower,
-  because more memory has to be transfered to CPU.
+  because more memory has to be transferred to CPU.
 * `--grad.cachecp_qname`: Selects how KV cache checkpoints are stored in CPU
   memory. Same values as `qname` part of `--kv_cache.name`.
   Defaults to "torch-quantized8". For "default", the checkpoints are not
   quantized. This is more accurate, but needs more CPU memory and is slower,
-  because more memory has to be transfered to CPU.
+  because more memory has to be transferred to CPU.
 * `--grad.use_old_cache`: If this is `True`, an older training replay cache is
   used for gradient computations. This used a fused naive SDPA kernel, which
   requires less GPU memory, but is also slower (if `flex_attention` is used).
@@ -819,6 +819,11 @@ Other arguments for fine-tuning are:
   chunks of this length (along sequence axis). Larger values save time, but
   require more GPU memory. The default value is equal to
   `--kv_cache.cache_length`.
+* `--grad.layercp_pin_memory`: If `True`, the CPU memory pages for activation
+  checkpoints are pinned. This can run faster, but needs more real CPU memory.
+* `--grad.cachecp_pin_memory`: If `True`, the CPU memory pages for KV cache
+  checkpoints are pinned. This can run faster, but needs more real CPU memory.
+
 
 ### Profiling GPU Memory and Runtime
 

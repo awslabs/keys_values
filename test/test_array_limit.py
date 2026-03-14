@@ -122,7 +122,8 @@ def test_tmp_array_limit_object():
     model = LongContextGradientModel(
         **common_kwargs,
         layers_per_cell=grad_args.layers_per_cell,
-        qname=kv_cache_args.qname,
+        layercp_qname=kv_cache_args.qname,
+        cachecp_qname=kv_cache_args.qname,
         cache_kwargs=cache_kwargs,
         train_cache_kwargs=train_cache_kwargs,
         layer_checkpoint_chunk_size=kv_cache_args.cache_length,

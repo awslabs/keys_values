@@ -230,6 +230,8 @@ class LongContextGradientModel(LongContextInferenceModel):
         cache_kwargs: Optional[Dict[str, Any]] = None,
         train_cache_kwargs: Optional[Dict[str, Any]] = None,
         backward_tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        layercp_pin_memory: bool = False,
+        cachecp_pin_memory: bool = False,
         autograd_hooks_kwargs: Optional[Dict[str, Any]] = None,
         debug_dont_use_autograd_hooks: bool = False,
         use_arrays_cleanup: bool = True,
@@ -291,6 +293,12 @@ class LongContextGradientModel(LongContextInferenceModel):
             backward_tmp_array_limit_gb: Same role as `tmp_array_limit_gb`, but
                 for backward computations. Overrides "tmp_array_limit_gb"
                 entries in `cache_kwargs`, `train_cache_kwargs`.
+            layercp_pin_memory: If `True`, the CPU memory pages for layer input
+                checkpoints are pinned. This can run faster, but also needs more
+                real CPU memory.
+            cachecp_pin_memory: If `True`, the CPU memory pages for KV cache
+                checkpoints are pinned. This can run faster, but also needs more
+                real CPU memory.
             debug_dont_use_autograd_hooks: Internal option, used for unit
                 testing. If this is set, autograd saved tensors hooks are not
                 used, and we also do not use memory efficient attention.
@@ -371,6 +379,8 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._autograd_hooks_kwargs = autograd_hooks_kwargs
         # Device memory limit for backward computations:
         self._backward_tmp_array_limit_gb = backward_tmp_array_limit_gb
+        self.layercp_pin_memory = layercp_pin_memory
+        self.cachecp_pin_memory = cachecp_pin_memory
         self._debug_dont_use_autograd_hooks = debug_dont_use_autograd_hooks
         self._use_arrays_cleanup = use_arrays_cleanup
         # Attention logit softcapping is not supported by the special operators
@@ -619,6 +629,10 @@ class LongContextGradientModel(LongContextInferenceModel):
     def _create_layer_checkpointers(self):
         # Layer input checkpoints
         layer_numbers = self._create_layer_numbers()
+        if self.layercp_pin_memory:
+            pin_memory = [True] * len(layer_numbers)
+        else:
+            pin_memory = None
         dtype = self.gpt_model.get_kv_cache_params(0).dtype
         if self.layercp_qname == "default":
             # Checkpoints are not quantized
@@ -628,6 +642,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 max_seq_length=self.gpt_model.max_seq_length,
                 n_embd=self.config.n_embd,
                 dtype=dtype,
+                pin_memory=pin_memory,
             )
         else:
             # Checkpoints are quantized
@@ -648,6 +663,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                     self.cache_kwargs,
                     tmp_array_limit_gb=self._tmp_array_limit_gb,
                 ),
+                pin_memory=pin_memory,
                 **kwargs,
             )
         # Need to track `input_pos` across calls of :meth:`_checkpoint_layer_input`
@@ -717,6 +733,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 self._train_cache_kwargs,
                 tmp_array_limit_gb=self._backward_tmp_array_limit_gb,
             ),
+            pin_memory=self.cachecp_pin_memory,
         )
 
     def _checkpoint_layer_input(
@@ -736,6 +753,9 @@ class LongContextGradientModel(LongContextInferenceModel):
             # forward pass are written left to right.
             if input_pos is not None:
                 self._layer_cp_input_pos[layer_idx] += x.shape[1]
+
+    def _do_checkpoint_layer_input(self) -> bool:
+        return self.training
 
     def _inference_forward_pass(
         self,

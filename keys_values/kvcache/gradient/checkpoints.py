@@ -192,6 +192,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         chunk_numbers: List[int],
         quant_buffers: QuantizedKVCacheBuffers,
         cache_length: Optional[int] = None,
+        pin_memory: Optional[List[bool]] = None,
     ):
         """
         Args:
@@ -206,6 +207,9 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
                 :meth:`get_checkpoint`.
             cache_length: Determine the checkpoint size. May be smaller than
                 `quant_buffers.cache_length`.
+            pin_memory: If given, must have the same length as `chunk_numbers`.
+                Checkpoints for chunks with `True` entries are pinned in CPU
+                memory. Default: No checkpoints are pinned.
 
         """
         if cache_length is None:
@@ -219,13 +223,17 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         self.checkpoints = None
         self._checkpoint_lengths = None
         super().__init__(chunk_numbers)
-        self.set_chunk_numbers(chunk_numbers)
+        self.set_chunk_numbers(chunk_numbers, pin_memory)
 
     @property
     def batch_size(self) -> Optional[int]:
         return self.quant_buffers.batch_size
 
-    def set_chunk_numbers(self, chunk_numbers: List[int]):
+    def set_chunk_numbers(
+        self,
+        chunk_numbers: List[int],
+        pin_memory: Optional[List[bool]] = None,
+    ):
         """
         If `chunk_numbers` is longer than the current list, extra buffers are
         allocated. Buffers are not deallocated if `chunk_numbers` is shorter.
@@ -233,27 +241,45 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         Args:
             chunk_numbers: List of chunk indexes for which checkpoints are to
                 be stored. Must not contain 0
+            pin_memory: See :meth:`__init__`
 
         """
         super().set_chunk_numbers(chunk_numbers)
+        if pin_memory is not None:
+            if len(pin_memory) != len(self.chunk_numbers):
+                raise ValueError(
+                    f"pin_memory = {pin_memory}, chunk_numbers = {chunk_numbers}: Must have same length"
+                )
+        else:
+            pin_memory = [False] * len(self.chunk_numbers)
         if self.checkpoints is None:
             num_to_create = len(self.chunk_numbers)
         else:
             num_to_create = max(len(self.chunk_numbers) - len(self.checkpoints), 0)
         kwargs = dict(device=torch.device("cpu"), cache_length=self.cache_length)
-        new_checkpoints = [
-            (
-                self.quant_buffers.quantizer_k.create_quantizer_state(**kwargs),
-                self.quant_buffers.quantizer_v.create_quantizer_state(**kwargs),
-            )
-            for _ in range(num_to_create)
-        ]
+        if num_to_create > 0:
+            new_checkpoints = [
+                (
+                    self.quant_buffers.quantizer_k.create_quantizer_state(
+                        **kwargs,
+                        pin_memory=pm,
+                    ),
+                    self.quant_buffers.quantizer_v.create_quantizer_state(
+                        **kwargs,
+                        pin_memory=pm,
+                    ),
+                )
+                for pm in pin_memory[(-num_to_create):]
+            ]
+        else:
+            new_checkpoints = []
+        new_lengths = [self.cache_length] * num_to_create
         if self.checkpoints is None:
             self.checkpoints = new_checkpoints
-            self._checkpoint_lengths = [self.cache_length] * num_to_create
+            self._checkpoint_lengths = new_lengths
         else:
             self.checkpoints.extend(new_checkpoints)
-            self._checkpoint_lengths.extend([self.cache_length] * num_to_create)
+            self._checkpoint_lengths.extend(new_lengths)
 
     def _set_checkpoint(
         self,
@@ -393,6 +419,7 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         params: KVCacheBuffersParams,
         cache_length: int,
         batch_size: Optional[int] = None,
+        pin_memory: Optional[List[bool]] = None,
     ):
         """
         Args:
@@ -400,27 +427,39 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
                 be stored. Must not contain 0
             params: KV cache buffer parameters
             cache_length: Cache length
+            pin_memory: If given, must have the same length as `chunk_numbers`.
+                Checkpoints for chunks with `True` entries are pinned in CPU
+                memory. Default: No checkpoints are pinned.
 
         """
         super().__init__(chunk_numbers)
         self._kwargs = dict(dtype=params.dtype, device=torch.device("cpu"))
         if batch_size is None:
             batch_size = params.max_batch_size
-        shape = (batch_size, params.n_query_groups, cache_length, params.head_size)
-        num_slots = len(chunk_numbers)
-        self.k = [torch.zeros(shape, **self._kwargs) for _ in range(num_slots)]
-        self.v = [torch.zeros(shape, **self._kwargs) for _ in range(num_slots)]
-        self._checkpoint_lengths = [cache_length] * num_slots
+        self._shape = (
+            batch_size,
+            params.n_query_groups,
+            cache_length,
+            params.head_size,
+        )
+        self.k = None
+        self.v = None
+        self._checkpoint_lengths = None
+        self.set_chunk_numbers(chunk_numbers, pin_memory)
 
     @property
     def batch_size(self) -> int:
-        return self.k[0].shape[0]
+        return self._shape[0]
 
     @property
     def cache_length(self) -> int:
-        return self.k[0].shape[2]
+        return self._shape[2]
 
-    def set_chunk_numbers(self, chunk_numbers: List[int]):
+    def set_chunk_numbers(
+        self,
+        chunk_numbers: List[int],
+        pin_memory: Optional[List[bool]] = None,
+    ):
         """
         If `chunk_numbers` is longer than the current list, extra buffers are
         allocated. Buffers are not deallocated if `chunk_numbers` is shorter.
@@ -428,16 +467,42 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         Args:
             chunk_numbers: List of chunk indexes for which checkpoints are to
                 be stored. Must not contain 0
+            pin_memory: See :meth:`__init__`
 
         """
         super().set_chunk_numbers(chunk_numbers)
-        shape = self.k[0].shape
-        num_extra = max(len(self.chunk_numbers) - len(self.k), 0)
-        for _ in range(num_extra):
-            self.k.append(torch.zeros(shape, **self._kwargs))
-            self.v.append(torch.zeros(shape, **self._kwargs))
-        if num_extra > 0:
-            self._checkpoint_lengths.extend([self.cache_length] * num_extra)
+        if pin_memory is not None:
+            if len(pin_memory) != len(self.chunk_numbers):
+                raise ValueError(
+                    f"pin_memory = {pin_memory}, chunk_numbers = {chunk_numbers}: Must have same length"
+                )
+        else:
+            pin_memory = [False] * len(chunk_numbers)
+        if self.k is None:
+            num_to_create = len(self.chunk_numbers)
+        else:
+            num_to_create = max(len(self.chunk_numbers) - len(self.k), 0)
+        if num_to_create > 0:
+            new_k = [
+                torch.zeros(self._shape, **self._kwargs, pin_memory=pm)
+                for pm in pin_memory[(-num_to_create):]
+            ]
+            new_v = [
+                torch.zeros(self._shape, **self._kwargs, pin_memory=pm)
+                for pm in pin_memory[(-num_to_create):]
+            ]
+        else:
+            new_k = []
+            new_v = []
+        new_lengths = [self.cache_length] * num_to_create
+        if self.k is None:
+            self.k = new_k
+            self.v = new_v
+            self._checkpoint_lengths = new_lengths
+        else:
+            self.k.extend(new_k)
+            self.v.extend(new_v)
+            self._checkpoint_lengths.extend(new_lengths)
 
     def _set_checkpoint(
         self,
@@ -627,6 +692,7 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
         cache_kwargs: Optional[Dict[str, Any]] = None,
         allocate_buffers: bool = False,
         device: Optional[torch.device] = None,
+        pin_memory: Optional[List[bool]] = None,
     ):
         """
         If `layers_and_buffers` has more than one entry, the layers in different
@@ -651,9 +717,16 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
                 Otherwise, they are allocated at first use
             device: Device for buffer allocations, needed if
                 `allocate_buffers=True`
+            pin_memory: If given, must have the same length as `layer_numbers`.
+                Checkpoints for layers with `True` entries are pinned in CPU
+                memory. Default: No checkpoints are pinned.
 
         """
         super().__init__(layer_numbers)
+        if pin_memory is not None and len(pin_memory) != len(layer_numbers):
+            raise ValueError(
+                f"pin_memory = {pin_memory}, layer_numbers = {layer_numbers}: Must have same length"
+            )
         self.max_seq_length = model.max_seq_length
         # Create quantization buffer to be used
         cache_params = replace(
@@ -687,6 +760,7 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
                 chunk_numbers=layer_numbers,
                 quant_buffers=quant_buffers,
                 cache_length=cache_length,
+                pin_memory=pin_memory,
             )
             for cache_length in cache_lengths
         ]
@@ -797,6 +871,7 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
         max_seq_length: int,
         n_embd: int,
         dtype: Optional[torch.dtype],
+        pin_memory: Optional[List[bool]] = None,
     ):
         """
         Args:
@@ -806,9 +881,16 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
             max_seq_length: Maximum sequence length
             n_embd: Number of embedding dimensions
             dtype: Data type
+            pin_memory: If given, must have the same length as `layer_numbers`.
+                Checkpoints for layers with `True` entries are pinned in CPU
+                memory. Default: No checkpoints are pinned.
 
         """
         super().__init__(layer_numbers)
+        if pin_memory is not None and len(pin_memory) != len(layer_numbers):
+            raise ValueError(
+                f"pin_memory = {pin_memory}, layer_numbers = {layer_numbers}: Must have same length"
+            )
         self._buffer_params = KVCacheBuffersParams(
             max_batch_size=batch_size,
             n_query_groups=1,
@@ -820,6 +902,7 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
             chunk_numbers=layer_numbers,
             params=self._buffer_params,
             cache_length=max_seq_length,
+            pin_memory=pin_memory,
         )
         self.n_embd = n_embd
 

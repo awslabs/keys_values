@@ -186,6 +186,8 @@ def setup(
         use_old_cache=False,
         max_match_trials_pack_arg=8,
         layer_checkpoint_chunk_size=None,
+        layercp_pin_memory=False,
+        cachecp_pin_memory=False,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
@@ -1362,6 +1364,7 @@ def fit(
                 loss = model(**model_kwargs)
                 loss.backward()
 
+            # END DEBUG
             running_loss.update(loss.detach().to(device=optim_device))
             flush_io_streams()
             if size_logs is not None:

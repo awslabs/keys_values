@@ -856,7 +856,8 @@ def test_mha_is_passed_on(device):
             head_model=head_model,
             layers_per_cell=layers_per_cell,
             chunk_size=chunk_size,
-            qname="default",
+            layercp_qname="default",
+            cachecp_qname="default",
         )
     # Input batch
     token_ids = torch.randint(

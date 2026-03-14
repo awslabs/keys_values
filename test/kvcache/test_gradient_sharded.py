@@ -154,7 +154,8 @@ def test_gradient_sharded(
                 head_model=head_model,
                 layers_per_cell=layers_per_cell,
                 chunk_size=chunk_size,
-                qname="default",
+                layercp_qname="default",
+                cachecp_qname="default",
                 debug_gpt_model=debug_gpt_model,
                 debug_intermediates=DebugIntermediates(
                     predicate=debug_intermediates_all,
