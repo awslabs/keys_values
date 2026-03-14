@@ -11,9 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional, Dict, Any, Tuple
-from itertools import accumulate
+import contextlib
 from functools import partial
+from itertools import accumulate
+from typing import List, Optional, Dict, Any, Tuple
 
 import torch
 
@@ -116,6 +117,7 @@ class GradientAccumulator:
         cache_kwargs: Optional[Dict[str, Any]] = None,
         verbose: VerbosityLevels = VerbosityLevels.NONE,
         train_cache_kwargs: Optional[Dict[str, Any]] = None,
+        pin_memory: bool = False,
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
     ):
         if qname is None:
@@ -147,6 +149,7 @@ class GradientAccumulator:
             train_cache_kwargs = train_cache_kwargs.copy()
             self._debug_intermediates = train_cache_kwargs.pop("debug_intermediates")
         self._train_cache_kwargs = train_cache_kwargs
+        self._pin_memory = pin_memory
         self._debug_tensors = debug_tensors
 
     def annotation_usage_logs(self) -> Dict[int, AnnotationUsageLog]:
@@ -276,6 +279,10 @@ class GradientAccumulator:
         # Checkpointing objects, which may include quantizers and dequantization
         # buffers
         chunk_numbers = list(accumulate(self.chunks_per_cell))[:-1]
+        if self._pin_memory:
+            pin_memory = [True] * len(chunk_numbers)
+        else:
+            pin_memory = None
         if self.qname == "default":
             checkpoints = [
                 KVCacheBufferDefaultCheckpoints(
@@ -283,6 +290,7 @@ class GradientAccumulator:
                     params=buffer_params,
                     cache_length=cache_length,
                     batch_size=self._batch_size,
+                    pin_memory=pin_memory,
                 )
                 for cache_length in cache_lengths
             ]
@@ -305,6 +313,7 @@ class GradientAccumulator:
                     chunk_numbers=chunk_numbers,
                     quant_buffers=quant_buffers,
                     cache_length=cache_length,
+                    pin_memory=pin_memory,
                 )
                 for cache_length in cache_lengths
             ]
@@ -486,27 +495,18 @@ class GradientAccumulator:
                     )
                     k_buffers = [copy_requires_grad(x) for x in k_buffers]
                     v_buffers = [copy_requires_grad(x) for x in v_buffers]
+
                 # Forward-backward, using the autograd hooks (if given)
                 scalar_output = None
                 try:
-                    # with torch.autograd.detect_anomaly():  # DEBUG
-                    if self.autograd_hooks is not None:
-                        with torch.autograd.graph.saved_tensors_hooks(
+                    with (
+                        torch.autograd.graph.saved_tensors_hooks(
                             lambda x: self.autograd_hooks.pack_hook(x),
                             lambda x: self.autograd_hooks.unpack_hook(x),
-                        ):
-                            scalar_output = self.forward_computation(
-                                cell=cell,
-                                cell_inputs=cell_inputs,
-                                k_buffers=k_buffers,
-                                v_buffers=v_buffers,
-                                head_gradients_top=head_gradients_top,
-                                head_gradients_k=head_gradients_k,
-                                head_gradients_v=head_gradients_v,
-                                first_chunk_idx=first_chunk_idx,
-                                num_chunks=num_chunks,
-                            )
-                    else:
+                        )
+                        if self.autograd_hooks is not None
+                        else contextlib.nullcontext()
+                    ):
                         scalar_output = self.forward_computation(
                             cell=cell,
                             cell_inputs=cell_inputs,
@@ -531,6 +531,7 @@ class GradientAccumulator:
                         del k_buffers
                     if v_buffers is not None:
                         del v_buffers
+
                 # Store annotation usage logs
                 if self.autograd_hooks is not None:
                     cell_hooks = self._hooks_for_cell_computation()
