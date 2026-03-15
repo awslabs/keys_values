@@ -946,7 +946,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         if not compute_loss:
                             # We need the final layer output for the last chunk
                             logits_final_chunk = y.detach()
-                    if self._do_checkpoint_layer_input():
+                    if self._do_checkpoint_layer_input() and torch.cuda.is_available():
                         # `_checkpoint_layer_input` called above transfers
                         # `embeddings` to CPU. For this not to lead to
                         # corruption of the CPU target, we need to synchronize
@@ -1017,7 +1017,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     # `logits_final_chunk` has final layer outputs for last
                     # chunk. Map to logits
                     logits_final_chunk = self.gpt_model.lm_head(logits_final_chunk)
-                if self._do_checkpoint_layer_input():
+                if self._do_checkpoint_layer_input() and torch.cuda.is_available():
                     # `_checkpoint_layer_input` called above transfers
                     # `embeddings` to CPU. For this not to lead to
                     # corruption of the CPU target, we need to synchronize
