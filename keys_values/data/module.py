@@ -28,7 +28,6 @@ from keys_values.data.evaluation import (
 )
 from keys_values.data.iterators import SimilarSequenceLengthSampler
 
-
 METADATA_SEQ_LENGTHS_KEY = "sequence_lengths"
 
 METADATA_KEYS = {METADATA_SEQ_LENGTHS_KEY}

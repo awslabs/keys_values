@@ -641,7 +641,7 @@ def load_icl(
         all_data = load_dataset("clinc_oos", "plus")
         text_field, label_field = "text", "intent"
 
-    (train_data, test_data) = (
+    train_data, test_data = (
         (all_data["train"], all_data["test"])
         if dataset_key != "clinc150"
         else (all_data["train"], all_data["validation"])

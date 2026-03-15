@@ -29,7 +29,6 @@ from keys_values.sdpa_wrapper import (
 )
 from keys_values.utils import repeat_interleave
 
-
 FlexAttnWithBlockMask = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, float, bool],
     torch.Tensor,

@@ -13,7 +13,6 @@
 # limitations under the License.
 from typing import Optional
 
-
 REDUCTION_FACTORS = [
     3 / 4,
     2 / 4,

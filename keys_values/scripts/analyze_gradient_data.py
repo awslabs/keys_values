@@ -20,7 +20,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 
-
 PREFIXES = ("before", "before_fvec", "after", "after_fvec")
 
 FNAME_MASK = "grad_accumulate_iter{iter}_rank{rank}.pth"

@@ -25,7 +25,6 @@ from torch.nn.attention import SDPAParams, SDPBackend, sdpa_kernel
 
 from keys_values.utils import repeat_interleave, index_to_3d
 
-
 SDPA_KERNELS_BEST_ORDERING = [
     SDPBackend.FLASH_ATTENTION,
     SDPBackend.EFFICIENT_ATTENTION,

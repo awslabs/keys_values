@@ -23,7 +23,6 @@ from typing import List, Dict, Any, Optional, Iterable, Union, Iterator, Tuple
 import torch
 from tqdm import tqdm
 
-
 # Currently, `F.scaled_dot_product_attention` does not properly support the
 # case `enabla_gqa=True` (i.e., keys and values have less heads than
 # queries). In this case, it is best to extend keys and values, which requires

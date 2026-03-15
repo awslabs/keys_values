@@ -39,7 +39,6 @@ from transformers import AutoTokenizer
 import numpy as np
 from tqdm import tqdm
 
-
 DATASETS = {
     "alpaca": "tatsu-lab/alpaca",
     "longbench-v2": "THUDM/LongBench-v2",

@@ -22,7 +22,6 @@ import torch
 from keys_values.tools.debug_utils import size_quantiles_internal
 from keys_values.utils import append_results_to_csv
 
-
 TABLE_FNAMES = {
     "weight": "sizes/size_weights.csv",
     "grad": "sizes/size_gradients.csv",

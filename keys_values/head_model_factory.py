@@ -24,7 +24,6 @@ from keys_values.head_model import (
     SequenceClassification,
 )
 
-
 SUPPORTED_HEAD_MODELS = {
     CrossEntropyOnLogits.NAME: CrossEntropyOnLogits,
     SequenceClassificationOnLogits.NAME: SequenceClassificationOnLogits,

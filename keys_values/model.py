@@ -18,6 +18,7 @@
 Based on the nanoGPT implementation: https://github.com/karpathy/nanoGPT and
 https://github.com/EleutherAI/gpt-neox/tree/main/megatron/model.
 """
+
 import math
 from typing import Any, List, Optional, Union, Callable
 from typing_extensions import Self
@@ -38,7 +39,6 @@ from keys_values.kvcache.base import KVCacheParams, KVCache
 from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.use_eager_kernel import transform_mha_kwargs
 from keys_values.utils import copy_parameters
-
 
 # See `GPT.set_start_of_layer_hook`. A start of layer hook is called just before
 # a layer is computed. The call is `hook(x, block_idx)`, where `x` is the layer
