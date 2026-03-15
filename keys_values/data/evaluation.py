@@ -28,7 +28,6 @@ from keys_values.data.base import (
 from keys_values.data.dataloader import Collator
 from keys_values.data.iterators import BatchSampler
 
-
 EVAL_METRICS_FNAME = "eval/eval_metrics_{}.csv"
 
 REGEX_TASKNAME = re.compile(r"step-[0-9]{6}|final")

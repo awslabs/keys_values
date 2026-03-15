@@ -19,7 +19,6 @@ import torch
 from keys_values.sdpa_wrapper import reorder_buffer_given_sort_index
 from keys_values.utils import shape_to_tuple, expand_index, repeat_interleave
 
-
 # The typical shape for `annotation.delta` in phase (1), matching annotations
 # against pack arguments, is
 # `(batch_size, n_query_groups, MAX_DELTA_TRANS_LENGTH, head_size)`. Making

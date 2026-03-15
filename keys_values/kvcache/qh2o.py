@@ -22,7 +22,6 @@ from keys_values.kvcache.buffers import KVCacheBuffers
 from keys_values.kvcache.h2o import H2OKVCache, VLengthInstantScoreMixin
 from keys_values.kvcache.quant_buffers import QuantizedKVCacheBuffers
 
-
 DEFAULT_COMBINATION_CONSTANT = 0.5
 
 DEFAULT_SCRATCH_BLOCKSIZE = 1024

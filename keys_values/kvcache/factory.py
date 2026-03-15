@@ -46,7 +46,6 @@ from keys_values.kvcache.quant_buffers import (
 )
 from keys_values.model import GPT
 
-
 _SUPPORTED_CACHES = (
     ("dense", DenseKVCache, True),
     ("lastrec", LastRecentlyInsertedKVCache, True),

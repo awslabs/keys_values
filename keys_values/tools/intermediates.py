@@ -20,7 +20,6 @@ import torch
 from keys_values.data import INPUT_IDS_NAME
 from keys_values.tools.debug_utils import for_debug, debug_compare_dicts
 
-
 DebugIntermediatesPredicate = Callable[[str, int, int, int, int, int], bool]
 
 
