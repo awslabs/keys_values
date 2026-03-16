@@ -11,6 +11,7 @@ flashinfer/*
 
 # Build artifacts
 build/
+*.so
 
 # Core dumps
 core.*
