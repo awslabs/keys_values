@@ -11,67 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import dataclass, asdict, replace
-from typing import Dict, Any, Optional, Tuple, List
+from dataclasses import dataclass, asdict
+from typing import Dict, Any, Optional, Tuple
 
 import torch
 
-from keys_values.config import Config
+from litgpt.config import Config
 
 from keys_values.kvcache.attn_weights import AttnWeightsKVCache
 from keys_values.kvcache.buffers import KVCacheBuffers
 from keys_values.kvcache.h2o import H2OKVCache
-
-
-@dataclass(frozen=True)
-class ForwardInput:
-    query: torch.Tensor
-    key: torch.Tensor
-    value: torch.Tensor
-    token_idx: torch.Tensor
-    next_positions: Optional[torch.Tensor]
-    cache_keys: Optional[torch.Tensor]
-    cache_values: Optional[torch.Tensor]
-    cache_token_pos: Optional[torch.Tensor]
-    attn_outputs_shape: Tuple[int, ...]
-    cache_keys_after_shape: Tuple[int, ...]
-    cache_values_after_shape: Tuple[int, ...]
-    input_pos: int
-
-    @staticmethod
-    def from_inputs(
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        token_idx: torch.Tensor,
-        input_pos: int,
-        cache: AttnWeightsKVCache,
-    ):
-        if input_pos > 0:
-            k_and_v = cache.kv_buffers.get_keys_values()
-            kwargs = dict(
-                cache_keys=k_and_v.keys(),
-                cache_values=k_and_v.values(),
-                cache_token_pos=cache.token_pos.clone(),
-            )
-        else:
-            kwargs = dict(
-                cache_keys=None,
-                cache_values=None,
-                cache_token_pos=None,
-            )
-        return ForwardInput(
-            query=query,
-            key=key,
-            value=value,
-            token_idx=token_idx,
-            next_positions=cache._next_positions,
-            attn_outputs_shape=(1,),
-            cache_keys_after_shape=(1,),
-            cache_values_after_shape=(1,),
-            input_pos=input_pos,
-            **kwargs,
-        )
 
 
 @dataclass(frozen=True)
@@ -81,6 +30,7 @@ class ForwardInputOutput:
     key: torch.Tensor
     value: torch.Tensor
     token_idx: torch.Tensor
+    input_pos: int
     next_positions: torch.Tensor
     # Inputs: State of cache before `forward` call
     cache_keys: torch.Tensor
@@ -104,101 +54,35 @@ class ForwardInputOutput:
     def compare_replace(
         self,
         token_idx: torch.Tensor,
+        input_pos: int,
         next_positions: torch.Tensor,
         prefix: str,
     ) -> Tuple[Dict[str, Any], Optional[torch.Tensor]]:
+        if self.input_pos != input_pos:
+            raise ValueError(prefix + f": input_pos = {input_pos}; stored input_pos = {self.input_pos}")
         if not self.token_idx.equal(token_idx):
-            raise ValueError(
-                prefix
-                + f": token_idx = {token_idx}; stored token_idx = {self.token_idx}"
-            )
+            raise ValueError(prefix + f": token_idx = {token_idx}; stored token_idx = {self.token_idx}")
         if next_positions.shape != self.next_positions.shape:
-            raise ValueError(
-                prefix
-                + f": next_positions.shape = {next_positions.shape}; stored next_positions.shape = {self.next_positions.shape}"
-            )
+            raise ValueError(prefix + f": next_positions.shape = {next_positions.shape}; stored next_positions.shape = {self.next_positions.shape}")
         num_diff = (next_positions != self.next_positions).sum().item()
         if num_diff > 0:
             # Differences can arise, because small diffs between score entries
             # can lead to different sort orderings
             rel_diff = 100 * num_diff / next_positions.numel()
-            print(
-                prefix + f": next_positions: num_diff = {num_diff} ({rel_diff:.2f} %)"
-            )
+            print(prefix + f": next_positions: num_diff = {num_diff} ({rel_diff:.2f} %)")
             next_positions = self.next_positions
         else:
             next_positions = None
-        return (
-            dict(
-                query=self.query,
-                key=self.key,
-                value=self.value,
-                token_idx=token_idx,
-            ),
-            next_positions,
-        )
-
-
-class TestLogInputsKVCacheMixin:
-    """
-    Enables logging the inputs to :meth:`forward` calls with subclasses of
-    :class:`AttnWeightsKVCache`.
-
-    """
-
-    def start_logging(
-        self,
-        inputs: List[ForwardInput],
-    ):
-        self._inputs = inputs
-
-    def _get_self(self) -> AttnWeightsKVCache:
-        raise NotImplementedError
-
-    def _get_cache_content(self) -> Dict[str, torch.Tensor]:
-        cache = self._get_self()
-        k_and_v = cache.kv_buffers.get_keys_values()
-        return {
-            "cache_keys": k_and_v.keys(),
-            "cache_values": k_and_v.values(),
-            "cache_token_pos": cache.token_pos.clone(),
-        }
-
-    def call_before_forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        token_idx: torch.Tensor,
-        input_pos: int,
-    ) -> Dict[str, Any]:
-        forward_kwargs = dict(
-            query=query,
-            key=key,
-            value=value,
+        return dict(
+            query=self.query,
+            key=self.key,
+            value=self.value,
             token_idx=token_idx,
-        )
-        if hasattr(self, "_inputs"):
-            self._entry = ForwardInput.from_inputs(
-                **forward_kwargs,
-                cache=self._get_self(),
-                input_pos=input_pos,
-            )
-        return forward_kwargs
-
-    def call_after_forward(self, attn_outputs: torch.Tensor):
-        if hasattr(self, "_inputs"):
-            k_and_v = self._get_self().kv_buffers.get_keys_values()  # just for shape
-            entry = replace(
-                self._entry,
-                attn_outputs_shape=tuple(attn_outputs.shape),
-                cache_keys_after_shape=tuple(k_and_v.keys().shape),
-                cache_values_after_shape=tuple(k_and_v.values().shape),
-            )
-            self._inputs.append(entry)
+            input_pos=input_pos,
+        ), next_positions
 
 
-class TestBeforeAfterKVCacheMixin:
+class TestAttnWeightsKVCacheMixin:
     """
     Enables before/after tests with subclasses of :class:`AttnWeightsKVCache`.
     We can (1) take snapshots of :meth:`forward` calls for the old code, then
@@ -207,7 +91,6 @@ class TestBeforeAfterKVCacheMixin:
     slow drift between old and new, this is not what we want to test here.
 
     """
-
     def start_storing(
         self,
         path_mask: str,
@@ -265,12 +148,14 @@ class TestBeforeAfterKVCacheMixin:
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
+        input_pos: int,
     ) -> Dict[str, Any]:
         forward_kwargs = dict(
             query=query,
             key=key,
             value=value,
             token_idx=token_idx,
+            input_pos=input_pos,
         )
         if self._debug_mode is not None:
             next_positions = self._get_self()._next_positions
@@ -287,6 +172,7 @@ class TestBeforeAfterKVCacheMixin:
                 state = ForwardInputOutput.from_file(debug_path)
                 forward_kwargs, next_positions = state.compare_replace(
                     token_idx=token_idx,
+                    input_pos=input_pos,
                     next_positions=next_positions,
                     prefix=f"Debug step {self._next_ind}",
                 )
@@ -301,13 +187,14 @@ class TestBeforeAfterKVCacheMixin:
             assert self._debug_attn_weights is not None
             # Collect outputs:
             outputs_here = {
-                k + "_after": v for k, v in self._get_cache_content().items()
+                k + "_after": v
+                for k, v in self._get_cache_content().items()
             }
             outputs_here["attn_outputs"] = attn_outputs
             outputs_here["attn_weights"] = self._debug_attn_weights
             if self._debug_mode == "store":
                 self._current_record.update(**outputs_here)
-                print(f"Store record {self._next_ind}")
+                print(f"DEBUG: Store record {self._next_ind}")
                 debug_path = self._path_mask.format(self._next_ind)
                 ForwardInputOutput(**self._current_record).store(debug_path)
             else:
@@ -317,7 +204,7 @@ class TestBeforeAfterKVCacheMixin:
                     dtype=torch.float32
                 ).sum(axis=2)
                 # Compare loaded outputs with `outputs_here`
-                print(f"Compare against record {self._next_ind}")
+                print(f"DEBUG: Compare against record {self._next_ind}")
                 names = (
                     "attn_weights",
                     "cache_token_pos_after",
@@ -340,7 +227,7 @@ class TestBeforeAfterKVCacheMixin:
                 exit(0)
 
 
-class TestH2OKVCache(H2OKVCache, TestBeforeAfterKVCacheMixin):
+class TestH2OKVCache(H2OKVCache, TestAttnWeightsKVCacheMixin):
     """
     For before/after testing, use this instead of :class:`H2OKVCache`.
 
@@ -361,7 +248,6 @@ class TestH2OKVCache(H2OKVCache, TestBeforeAfterKVCacheMixin):
         Otherwise, the program exits after `num_steps` calls.
 
     """
-
     def __init__(
         self,
         config: Config,
@@ -393,14 +279,16 @@ class TestH2OKVCache(H2OKVCache, TestBeforeAfterKVCacheMixin):
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
+        input_pos: int,
     ) -> torch.Tensor:
         _kwargs = dict(
             query=query,
             key=key,
             value=value,
             token_idx=token_idx,
+            input_pos=input_pos,
         )
-        if self.input_pos > 0:
+        if input_pos > 0:
             forward_kwargs = self.call_before_forward(**_kwargs)
             attn_outputs = super().forward(**forward_kwargs)
             self.call_after_forward(attn_outputs)

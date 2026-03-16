@@ -11,46 +11,46 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Tuple
+from typing import List
 from itertools import product
+import random
 import re
 
 import torch
 import pytest
 
-from keys_values.config import Config
+from litgpt.config import Config
 
 from keys_values.kvcache.base import KVCacheParams
-from keys_values.kvcache.factory import KVCacheFactory
-from keys_values.kvcache.consts import split_name
+from keys_values.kvcache.factory import KVCacheFactory, split_name
 from keys_values.kvcache.quantize.bitsandbytes import determine_blocksize
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     tensor_is_simple,
+    random_keys_values,
+    random_tensor,
     cache_name_gpu_only,
     cache_names_and_devices,
     product_with_devices,
-    random_args_cache_forward,
-    range_from_args,
 )
-from keys_values.utils import randint_torch
 
 
-def args_store_retrieve() -> Tuple[str, List[tuple]]:
+def args_store_retrieve() -> List[tuple]:
     names = [
-        (name, dict())
-        for name in KVCacheFactory.supported_names()
+        (name, dict()) for name in KVCacheFactory.supported_names()
         if name.endswith("-default")
     ] + [
         ("h2o-default", dict(grace_period=3)),
         ("h2o-vlen-default", dict(grace_period=3)),
     ]
-    return product_with_devices(names, "name, kwargs")
+    return product_with_devices(names)
 
 
-@pytest.mark.parametrize(*args_store_retrieve())
-def test_store_retrieve(device, name, kwargs):
+@pytest.mark.parametrize(
+    "name, kwargs, device", args_store_retrieve())
+def test_store_retrieve(name, kwargs, device):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
     dtype = torch.bfloat16
@@ -61,32 +61,47 @@ def test_store_retrieve(device, name, kwargs):
         cache_length=32,
         head_size=8,
         n_head=4,
+        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params, **kwargs)
     if name.startswith("dense"):
-        num_insert = randint_torch(cache_length // 2, cache_length)
+        num_insert = random.randint(cache_length // 2, cache_length)
     else:
-        num_insert = randint_torch(cache_length, 3 * cache_length)
-    num_prefill = min(
-        randint_torch(num_insert // 3, int(num_insert * 0.75)),
-        kv_cache.max_prefill_length,
-    )
+        num_insert = random.randint(cache_length, 3 * cache_length)
+    max_prefill_length = kv_cache.max_prefill_length
+    num_prefill = random.randint(num_insert // 3, int(num_insert * 0.75))
+    if max_prefill_length is not None and num_prefill > max_prefill_length:
+        num_prefill = max_prefill_length
 
-    data = random_args_cache_forward(params, num_insert, vocab_size)
-    kv_cache(**range_from_args(data, 0, num_prefill))
+    keys, values = random_keys_values(params, num=num_insert)
+    queries = random_tensor(params, num=num_insert, is_query=True)
+    token_idx = torch.randint(
+        low=0,
+        high=vocab_size,
+        size=(params.max_batch_size, num_insert),
+    )
+    kv_cache(
+        query=queries[:, :, :num_prefill, :],
+        key=keys[:, :, :num_prefill, :],
+        value=values[:, :, :num_prefill, :],
+        token_idx=token_idx[:, :num_prefill],
+        input_pos=0,
+    )
     for pos in range(num_prefill, num_insert):
-        kv_cache(**range_from_args(data, pos, pos + 1))
+        kv_cache(
+            query=queries[:, :, pos:(pos + 1), :],
+            key=keys[:, :, pos:(pos + 1), :],
+            value=values[:, :, pos:(pos + 1), :],
+            token_idx=token_idx[:, pos:(pos + 1)],
+            input_pos=pos,
+        )
 
     current_length = min(cache_length, num_insert)
     assert kv_cache.current_length == current_length
     token_positions = kv_cache.token_positions().to(dtype=torch.int64)
-    assert token_positions.shape == (
-        params.max_batch_size,
-        params.n_query_groups,
-        current_length,
-    )
+    assert token_positions.shape == (params.max_batch_size, params.n_query_groups, current_length)
     if "h2o" not in name:
         assert tensor_is_simple(token_positions)
     # Positions for every (b, h) must be different
@@ -98,19 +113,22 @@ def test_store_retrieve(device, name, kwargs):
     # Test cache content slice by slice
     keys_and_values = kv_cache.get_keys_values()
     for pos in range(current_length):
-        index = token_positions[:, :, pos][:, :, None, None].expand(
-            -1, -1, 1, params.head_size
-        )
+        index = token_positions[:, :, pos][:, :, None, None].expand(-1, -1, 1, params.head_size)
         # `index[i, j, 0, k] = next_position[i, j]`
-        k_expected = data["key"].gather(-2, index).squeeze(-2)
-        v_expected = data["value"].gather(-2, index).squeeze(-2)
-        torch.testing.assert_close(k_expected, keys_and_values.keys()[:, :, pos, :])
-        torch.testing.assert_close(v_expected, keys_and_values.values()[:, :, pos, :])
+        k_expected = keys.gather(-2, index).squeeze(-2)
+        v_expected = values.gather(-2, index).squeeze(-2)
+        torch.testing.assert_close(
+            k_expected, keys_and_values.keys()[:, :, pos, :]
+        )
+        torch.testing.assert_close(
+            v_expected, keys_and_values.values()[:, :, pos, :]
+        )
 
 
 @pytest.mark.parametrize("name, device", cache_names_and_devices())
 def test_prefill(name, device):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
     num_compares = 3
     vocab_size = 128
@@ -122,23 +140,41 @@ def test_prefill(name, device):
         cache_length=32,
         head_size=64,
         n_head=2,
+        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params)
 
-    data = random_args_cache_forward(params, cache_length, vocab_size)
+    keys, values = random_keys_values(params, num=cache_length)
+    queries = random_tensor(params, num=cache_length, is_query=True)
+    token_idx = torch.randint(
+        low=0,
+        high=vocab_size,
+        size=(params.max_batch_size, cache_length),
+    )
     keys_cached = []
     values_cached = []
+    max_prefill_length = kv_cache.max_prefill_length
     for _ in range(num_compares):
-        kv_cache.reset()
-        num_prefill = min(
-            randint_torch(cache_length // 8, cache_length),
-            kv_cache.max_prefill_length,
+        num_prefill = random.randint(cache_length // 8, cache_length)
+        if max_prefill_length is not None and num_prefill > max_prefill_length:
+            num_prefill = max_prefill_length
+        kv_cache(
+            query=queries[:, :, :num_prefill, :],
+            key=keys[:, :, :num_prefill, :],
+            value=values[:, :, :num_prefill, :],
+            token_idx=token_idx[:, :num_prefill],
+            input_pos=0,
         )
-        kv_cache(**range_from_args(data, 0, num_prefill))
         for pos in range(num_prefill, cache_length):
-            kv_cache(**range_from_args(data, pos, pos + 1))
+            kv_cache(
+                query=queries[:, :, pos:(pos + 1), :],
+                key=keys[:, :, pos:(pos + 1), :],
+                value=values[:, :, pos:(pos + 1), :],
+                token_idx=token_idx[:, pos:(pos + 1)],
+                input_pos=pos,
+            )
         keys_and_values = kv_cache.get_keys_values()
         if keys_and_values is not None:
             keys_cached.append(keys_and_values.keys().clone())
@@ -174,8 +210,7 @@ def _filter_func(record: tuple) -> bool:
 def args_size_estimate() -> List[tuple]:
     excludes = {"h2o-vlen", "qh2o-vlen", "h2o-orig"}
     names_devices = [
-        tup
-        for tup in cache_names_and_devices()
+        tup for tup in cache_names_and_devices()
         if split_name(tup[0])[0] not in excludes
     ]
     batch_sizes = [1, 3]  # 2
@@ -193,7 +228,7 @@ def args_size_estimate() -> List[tuple]:
             n_head_groups,
             head_sizes,
             dtypes,
-            boh_lst,
+            boh_lst
         )
         if _filter_func(record)
     ]
@@ -216,6 +251,7 @@ def test_size_estimate(
     blocks_over_heads,
 ):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
     n_layer = 4
@@ -226,6 +262,7 @@ def test_size_estimate(
         cache_length=cache_length,
         head_size=head_size,
         n_head=n_head,
+        device=device,
         dtype=dtype,
     )
     config = Config(
@@ -256,22 +293,33 @@ def test_size_estimate(
         ]
 
         # Need to prefill caches so that `size_estimate` works
-        data = random_args_cache_forward(params, cache_length, vocab_size)
+        keys, values = random_keys_values(params, num=cache_length)
+        queries = random_tensor(params, num=cache_length, is_query=True)
+        token_idx = torch.randint(
+            low=0,
+            high=vocab_size,
+            size=(params.max_batch_size, cache_length),
+        )
         max_prefill_length = kv_caches[0].max_prefill_length
         for kv_cache in kv_caches:
-            kv_cache(**range_from_args(data, 0, max_prefill_length))
+            kv_cache(
+                query=queries[:, :, :max_prefill_length, :],
+                key=keys[:, :, :max_prefill_length, :],
+                value=values[:, :, :max_prefill_length, :],
+                token_idx=token_idx[:, :max_prefill_length],
+                input_pos=0,
+            )
         num_bits_total1, bits_by_part1 = KVCacheFactory.size_estimate(kv_caches)
         num_bits_total2, bits_by_part2 = KVCacheFactory.size_estimate_apriori(
             name=name,
             config=config,
             max_batch_size=batch_size,
             cache_length=cache_length,
+            device=device,
             dtype=dtype,
             cache_kwargs=cache_kwargs,
         )
-        print(
-            f"name={name}, batch_size={batch_size}, cache_length={cache_length}, n_head={n_head}, n_query_groups={n_query_groups}, head_size={head_size}, dtype={dtype}, blocks_over_heads={blocks_over_heads}"
-        )
+        print(f"name={name}, batch_size={batch_size}, cache_length={cache_length}, n_head={n_head}, n_query_groups={n_query_groups}, head_size={head_size}, dtype={dtype}, blocks_over_heads={blocks_over_heads}")
         print(bits_by_part1)
         print(bits_by_part2)
         assert num_bits_total1 == num_bits_total2

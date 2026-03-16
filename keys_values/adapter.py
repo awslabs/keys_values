@@ -20,16 +20,15 @@ https://arxiv.org/abs/2303.16199
 
 Port for LitGPT
 """
-
-from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from typing_extensions import Self
 
 import torch
 import torch.nn as nn
 
+from litgpt.adapter import Config
+
 from keys_values.attention import DefaultKeysAndValues, MultiHeadSelfAttention
-from keys_values.config import Config as BaseConfig
 from keys_values.kvcache.base import KVCache
 from keys_values.model import (
     GPT as BaseModel,
@@ -37,12 +36,6 @@ from keys_values.model import (
     CausalSelfAttention as BaseCausalSelfAttention,
 )
 from keys_values.use_eager_kernel import transform_mha_kwargs
-
-
-@dataclass
-class Config(BaseConfig):
-    adapter_prompt_length: int = 10
-    adapter_start_layer: int = 2
 
 
 class GPT(BaseModel):
@@ -60,15 +53,12 @@ class GPT(BaseModel):
         self.transformer = nn.ModuleDict(
             dict(
                 wte=nn.Embedding(config.padded_vocab_size, config.n_embd),
-                h=nn.ModuleList(
-                    Block(config, block_idx) for block_idx in range(config.n_layer)
-                ),
+                h=nn.ModuleList(Block(config, block_idx) for block_idx in range(config.n_layer)),
                 ln_f=config.norm_class(config.n_embd, eps=config.norm_eps),
             )
         )
         self.mha = MultiHeadSelfAttention(
-            config,
-            **transform_mha_kwargs(mha_kwargs, config),
+            config, **transform_mha_kwargs(mha_kwargs, config),
         )
         self.max_seq_length = self.config.block_size
         self._start_of_layer_hook = None
@@ -84,15 +74,6 @@ class GPT(BaseModel):
         super()._init_weights(module)
         if isinstance(module, CausalSelfAttention):
             module.reset_parameters()
-
-    def _empty_clone(self, device: Optional[torch.device] = None) -> "GPT":
-        if device is None:
-            model_copy = GPT(self.config)
-        else:
-            with torch.device(device):
-                model_copy = GPT(self.config)
-        model_copy.mha = self.mha
-        return model_copy
 
 
 class Block(BaseBlock):
@@ -112,7 +93,6 @@ class CausalSelfAttention(BaseCausalSelfAttention):
     attention over the adaption prompt.
 
     """
-
     def __init__(
         self,
         config: Config,
@@ -140,47 +120,41 @@ class CausalSelfAttention(BaseCausalSelfAttention):
         mha: MultiHeadSelfAttention,
     ) -> torch.Tensor:
         if self._extend_forward:
-            batch_size, num, _ = y.shape
-            y = y.view(batch_size, num, self.config.n_head, self.config.head_size)
-            a_num = self.config.adapter_prompt_length
+            B, T, _ = y.shape
+            y = y.view(B, T, self.config.n_head, self.config.head_size)
+            aT = self.config.adapter_prompt_length
             if self.adapter_kv_cache is not None:
                 # since this uses the wte weights as the prefix and the kv cache is only used during inference, ak and av
                 # are the same every call
                 ak, av = self.adapter_kv_cache
             else:
-                prefix = self.adapter_wte.weight.reshape(1, a_num, self.config.n_embd)
+                prefix = self.adapter_wte.weight.reshape(1, aT, self.config.n_embd)
                 aqkv = self.qkv(prefix)
                 q_per_kv = self.config.n_head // self.config.n_query_groups
-                aqkv = aqkv.view(
-                    1,
-                    a_num,
-                    self.config.n_query_groups,
-                    q_per_kv + 2,
-                    self.config.head_size,
-                )
+                aqkv = aqkv.view(1, aT, self.config.n_query_groups, q_per_kv + 2, self.config.head_size)
                 aqkv = aqkv.permute(0, 2, 3, 1, 4)
                 _, ak, av = aqkv.split((q_per_kv, 1, 1), dim=2)
                 if self.config.n_query_groups != 1:
                     # for MHA this is a no-op
                     ak = ak.repeat_interleave(q_per_kv, dim=2)
                     av = av.repeat_interleave(q_per_kv, dim=2)
-                ak = ak.view(1, -1, a_num, self.config.head_size)  # (1, nh_ak, aT, hs)
-                av = av.view(1, -1, a_num, self.config.head_size)  # (1, nh_av, aT, hs)
+                ak = ak.view(1, -1, aT, self.config.head_size)  # (1, nh_ak, aT, hs)
+                av = av.view(1, -1, aT, self.config.head_size)  # (1, nh_av, aT, hs)
                 self.adapter_kv_cache = (ak, av)
 
-            amask = torch.ones(num, a_num, dtype=torch.bool, device=query.device)
+            amask = torch.ones(T, aT, dtype=torch.bool, device=query.device)
             a_k_and_v = DefaultKeysAndValues(keys=ak, values=av)
             ay, _ = mha.scaled_dot_product_attention(
                 query=query,
                 k_and_v=a_k_and_v,
-                input_pos=0,
+                input_pos=0,  # ensures that PyTorch kernel is used
                 token_positions=None,
                 sdpa_mode=None,
                 sliding_window_size=None,
                 mask=amask,
                 return_attn_weights=False,
             )
-            y = (y + self.gating_factor * ay).view(batch_size, num, -1)
+            y = (y + self.gating_factor * ay).view(B, T, -1)
 
         return y
 
@@ -188,12 +162,8 @@ class CausalSelfAttention(BaseCausalSelfAttention):
         if hasattr(self, "gating_factor"):
             torch.nn.init.zeros_(self.gating_factor)
 
-    def _load_from_state_dict(
-        self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any
-    ) -> None:
+    def _load_from_state_dict(self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any) -> None:
         """For compatibility with older checkpoints."""
-        if (key := prefix + "gating_factor") in state_dict and state_dict[key].size(
-            1
-        ) == self.config.n_head:
+        if (key := prefix + "gating_factor") in state_dict and state_dict[key].size(1) == self.config.n_head:
             state_dict[key] = state_dict[key].permute(0, 2, 1, 3)
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)

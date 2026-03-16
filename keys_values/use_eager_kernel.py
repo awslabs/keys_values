@@ -19,7 +19,7 @@ from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 from scipy.spatial import KDTree
 
-from keys_values.config import Config
+from litgpt.config import Config
 
 from keys_values.attention import UseEagerPredicate
 
@@ -53,7 +53,7 @@ DATA_KV_LEN = [4096, 6144, 8192, 12288, 16384, 24576, 32768]
 
 
 def load_q_len_thresh_data() -> Tuple[np.ndarray, List[List[int]]]:
-    path = Path(__file__).parent / "scripts" / "zero_padded_qlen_thresholds.csv"
+    path = Path(__file__).parent / "scripts" / "qlen_thresholds.csv"
     inputs = []
     q_len_thresh = []
     with path.open("r") as fp:
@@ -92,7 +92,6 @@ class DefaultUseEagerKernel:
     architectures of sizes 0.5B until 14B parameters.
 
     """
-
     def __init__(self):
         inputs, self._q_len_thresh = load_q_len_thresh_data()
         self._nearest_neighbor = KDTree(inputs)
@@ -136,16 +135,11 @@ def transform_mha_kwargs(
     batch_size: int = 1,
     default_factory: Optional[DefaultUseEagerKernel] = None,
 ) -> Dict[str, Any]:
-    if mha_kwargs.get("use_eager_kernel") is not None or mha_kwargs.get(
-        "use_eager_sdpa_always", False
-    ):
+    if mha_kwargs.get("use_eager_kernel") is not None or mha_kwargs.get("use_eager_sdpa_always", False):
         return mha_kwargs
     if default_factory is None:
         default_factory = DefaultUseEagerKernel()
     use_eager_kernel = default_factory(
-        config.n_head,
-        config.n_query_groups,
-        config.head_size,
-        batch_size,
+        config.n_head, config.n_query_groups, config.head_size, batch_size,
     )
     return dict(mha_kwargs, use_eager_kernel=use_eager_kernel)

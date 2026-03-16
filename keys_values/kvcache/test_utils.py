@@ -11,27 +11,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from itertools import product
-import math
-import os
 from typing import Tuple, Optional, List, Dict, Callable
+import math
+from functools import partial
+from itertools import product
 
 import torch
 
-from keys_values.config import Config
+from litgpt.config import Config
 
 from keys_values.attention import (
     KeysAndValues,
     eager_scaled_dot_product_attention,
+    DefaultKeysAndValues,
 )
 from keys_values.attention_utils import build_mask_cache
 from keys_values.kvcache.base import KVCacheParams, KVCache
+from keys_values.kvcache.buffers import DefaultKVCacheBuffers
 from keys_values.kvcache.factory import KVCacheFactory
+from keys_values.kvcache.gradient.accumulate import GradientAccumulator
+from keys_values.kvcache.gradient.checkpoints import KVCacheBufferCheckpoints
+
 
 # Tests run quite slowly for "mps". If this changes, switch this to True
 RUN_TESTS_FOR_MPS = False
-
-ENV_VAR_SKIP_CUDA_TESTS = "KEYSVALS_SKIP_CUDA_TESTS"
 
 
 def create_kv_cache(
@@ -52,6 +55,7 @@ def create_kv_cache(
         max_batch_size=params.max_batch_size,
         cache_length=params.cache_length,
         block_idx=block_idx,
+        device=params.device,
         dtype=params.dtype,
         cache_kwargs=kwargs,
     )
@@ -66,89 +70,23 @@ def tensor_is_simple(x: torch.Tensor) -> bool:
 
 def random_tensor(
     params: KVCacheParams,
-    num: Optional[int] = None,
+    num: int,
     is_query: bool = False,
     batch_size: Optional[int] = None,
-    device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     if batch_size is None:
         batch_size = params.max_batch_size
-    if num is None:
-        num = params.cache_length
     dim1 = params.n_head if is_query else params.n_query_groups
     shape = (batch_size, dim1, num, params.head_size)
-    return torch.randn(*shape, device=device, dtype=params.dtype)
+    return torch.randn(*shape, device=params.device, dtype=params.dtype)
 
 
 def random_keys_values(
-    params: KVCacheParams,
-    num: Optional[int] = None,
-    device: Optional[torch.device] = None,
+    params: KVCacheParams, num: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    keys = random_tensor(params, num, device=device)
-    values = random_tensor(params, num, device=device)
+    keys = random_tensor(params, num)
+    values= random_tensor(params, num)
     return keys, values
-
-
-def random_args_cache_forward(
-    params: KVCacheParams,
-    num: int,
-    vocab_size: int,
-    device: Optional[torch.device] = None,
-) -> Dict[str, torch.Tensor]:
-    query = random_tensor(params, num=num, is_query=True, device=device)
-    kv = random_keys_values(params, num=num, device=device)
-    idx = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(params.max_batch_size, num),
-        device=device,
-    )
-    return {
-        "query": query,
-        "key": kv[0],
-        "value": kv[1],
-        "token_idx": idx,
-    }
-
-
-def range_from_args(
-    data: Dict[str, torch.Tensor],
-    start: int,
-    end: int,
-) -> Dict[str, torch.Tensor]:
-    return {
-        "query": data["query"][:, :, start:end, :],
-        "key": data["key"][:, :, start:end, :],
-        "value": data["value"][:, :, start:end, :],
-        "token_idx": data["token_idx"][:, start:end],
-    }
-
-
-def random_index(
-    params: KVCacheParams,
-    start: int,
-    end: int,
-    num: Optional[int] = None,
-    batch_size: Optional[int] = None,
-    device: Optional[torch.device] = None,
-):
-    if batch_size is None:
-        batch_size = params.max_batch_size
-    if num is None:
-        num = params.cache_length
-    diff = end - start
-    if diff < num:
-        raise ValueError(f"end - start = {diff}, must be >= num = {num}")
-    index_kwargs = dict(dtype=torch.int64, device=device)
-    result = torch.empty(
-        (batch_size, params.n_query_groups, num),
-        **index_kwargs,
-    )
-    for b in range(batch_size):
-        for h in range(params.n_query_groups):
-            result[b, h, :] = (torch.randperm(diff, **index_kwargs) + start)[:num]
-    return result
 
 
 def compute_attn_weights(
@@ -196,7 +134,7 @@ def attention_mask_forward(
     if device is None:
         device = torch.device("cpu")
     mask = torch.cat(
-        (
+(
             torch.zeros(q_len, k_len - q_len, dtype=dtype, device=device),
             torch.ones(q_len, q_len, dtype=dtype, device=device).triu(diagonal=1),
         ),
@@ -212,23 +150,87 @@ def test_bitsandbytes() -> bool:
     return COMPILED_WITH_CUDA
 
 
+class KVCacheBufferTestingCheckpoints(KVCacheBufferCheckpoints):
+    """
+    Checkpointing class used for testing. The checkpoints are not quantized,
+    but the buffers are stored as they are. This is not recommended in
+    practice, but simplifies gradient testing. Also, we do not reserve
+    memory for checkpoints up front, but copy them as they come in.
+
+    """
+    def __init__(
+        self,
+        chunk_numbers: List[int],
+    ):
+        super().__init__(chunk_numbers)
+        self._checkpoints: List[
+            Optional[DefaultKeysAndValues]
+        ] = [None] * len(chunk_numbers)
+
+    def _set_checkpoint(
+        self,
+        pos: int,
+        buffers: DefaultKVCacheBuffers,
+    ) -> int:
+        k_and_v = buffers.get_keys_values()
+        device = torch.device("cpu")
+        self._checkpoints[pos] = DefaultKeysAndValues(
+            keys=k_and_v.keys().to(device=device, copy=True),
+            values=k_and_v.values().to(device=device, copy=True),
+        )
+        return pos
+
+    def _get_checkpoint(
+        self,
+        pos: int,
+        out: DefaultKVCacheBuffers,
+    ):
+        checkpoint = self._checkpoints[pos]
+        if checkpoint is None:
+            raise ValueError(f"checkpoint at pos={pos} is still empty. Use 'set_checkpoint'")
+        out.prefill_from_keys_values(checkpoint)
+
+
 def copy_gradients(
-    model: torch.nn.Module,
-    device: Optional[torch.device] = None,
+    model: torch.nn.Module, device: Optional[torch.device] = None,
 ) -> Dict[str, torch.Tensor]:
     return {
-        name: param.grad.data.to(device=device, copy=True)
+        name: param.grad.to(device=device, copy=True)
         for name, param in model.named_parameters()
         if param.grad is not None
     }
 
 
-def available_backends(do_mps: bool = True) -> List[torch.device]:
+def exchange_kv_cache_checkpoints(accumulator: GradientAccumulator):
+    """
+    Ensures that `accumulator._kv_cache_checkpoints` are of testing type
+    :class:`KVCacheBufferTestingCheckpoints`. These do not quantize checkpoints,
+    which simplifies gradient testing a lot.
+
+    """
+    def wrapped_create_checkpoints_and_buffers(
+        orig_func, model_part,
+    ):
+        cache_buffers, checkpoints = orig_func(model_part)
+        # Need to replace checkpoints
+        chunk_numbers = checkpoints[0].chunk_numbers
+        checkpoints = [
+            KVCacheBufferTestingCheckpoints(chunk_numbers=chunk_numbers)
+            for _ in range(len(checkpoints))
+        ]
+        return cache_buffers, checkpoints
+
+    accumulator._create_checkpoints_and_buffers = partial(
+        wrapped_create_checkpoints_and_buffers,
+        accumulator._create_checkpoints_and_buffers
+    )
+
+
+def available_backends() -> List[torch.device]:
     result = [torch.device("cpu")]
-    if do_mps and RUN_TESTS_FOR_MPS and torch.backends.mps.is_available():
+    if RUN_TESTS_FOR_MPS and torch.backends.mps.is_available():
         result.append(torch.device("mps"))
-    run_cuda_tests = os.environ.get(ENV_VAR_SKIP_CUDA_TESTS) is None
-    if run_cuda_tests and torch.cuda.is_available():
+    if torch.cuda.is_available():
         result.append(torch.device("cuda:0"))
     return result
 
@@ -237,8 +239,12 @@ def cache_name_is_bitsandbytes(name: str) -> bool:
     return name[:-1].endswith("bnb-quantized")
 
 
+def cache_name_is_ao(name: str) -> bool:
+    return name[:-1].endswith("ao-quantized")
+
+
 def cache_name_gpu_only(name: str) -> bool:
-    return cache_name_is_bitsandbytes(name)
+    return cache_name_is_bitsandbytes(name) or cache_name_is_ao(name)
 
 
 def device_for_cache_name(name: str) -> torch.device:
@@ -250,11 +256,12 @@ def device_for_cache_name(name: str) -> torch.device:
 
 
 def filter_cache_names(names: List[str]) -> List[str]:
-    run_cuda_tests = os.environ.get(ENV_VAR_SKIP_CUDA_TESTS) is None
-    if run_cuda_tests and torch.cuda.is_available():
+    if torch.cuda.is_available():
         return names
     else:
-        return [name for name in names if not cache_name_gpu_only(name)]
+        return [
+            name for name in names if not cache_name_gpu_only(name)
+        ]
 
 
 def cache_names_and_devices(
@@ -265,38 +272,48 @@ def cache_names_and_devices(
         filter_name = lambda name: True
     result = []
     for name, device in product(
-        KVCacheFactory.supported_names(),
-        available_backends(),
+        KVCacheFactory.supported_names(), available_backends(),
     ):
         if filter_name(name):
             is_cpu = device.type != "cuda"
-            if (is_cpu and not cache_name_gpu_only(name)) or (
-                not is_cpu and not only_cpu
-            ):
+            if (is_cpu and not cache_name_gpu_only(name)) or (not is_cpu and not only_cpu):
                 result.append((name, device))
     return result
 
 
-def product_with_devices(
-    list_tuples: List[tuple],
-    arg_names: str,
-) -> Tuple[str, List[tuple]]:
-    return "device, " + arg_names, [
-        (a,) + b
-        for a, b in product(
-            available_backends(),
+def product_with_devices(list_tuples: List[tuple]) -> List[tuple]:
+    return [
+        a + (b,) for a, b in product(
             list_tuples,
+            available_backends(),
         )
     ]
 
 
-def debug_print_gradients(model: torch.nn.Module):
-    rows = []
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            if param.grad is not None:
-                row = f"{name}: {param.grad.data.shape}"
-            else:
-                row = f"{name}: None"
-            rows.append(row)
-    print("\n".join(rows))
+def random_args_cache_forward(
+    params: KVCacheParams, num: int, vocab_size: int,
+) -> Dict[str, torch.Tensor]:
+    query = random_tensor(params, num=num, is_query=True)
+    kv = random_keys_values(params, num=num)
+    idx = torch.randint(
+        low=0,
+        high=vocab_size,
+        size=(params.max_batch_size, num),
+    )
+    return {
+        "query": query,
+        "key": kv[0],
+        "value": kv[1],
+        "token_idx": idx,
+    }
+
+
+def range_from_args(
+    data: Dict[str, torch.Tensor], start: int, end: int,
+) -> Dict[str, torch.Tensor]:
+    return {
+        "query": data["query"][:, :, start:end, :],
+        "key": data["key"][:, :, start:end, :],
+        "value": data["value"][:, :, start:end, :],
+        "token_idx": data["token_idx"][:, start:end],
+    }

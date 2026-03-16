@@ -11,18 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import replace
-import math
 from typing import List, Optional, Tuple, Dict, Any
 
 import torch
 
 from keys_values.attention import DefaultKeysAndValues
 from keys_values.kvcache.buffers import KVCacheBuffersParams, DefaultKVCacheBuffers
+from keys_values.kvcache.factory import create_quantized_kv_buffers_for_checkpoints
 from keys_values.kvcache.quant_buffers import (
     QuantizedKVCacheBuffers,
-    create_quantized_kv_buffers,
 )
+from keys_values.kvcache.stack_layers import DefaultCellBlocks
 from keys_values.model import GPT
 
 
@@ -32,7 +31,6 @@ class KVCacheBufferCheckpoints:
     a subset of token chunks.
 
     """
-
     def __init__(
         self,
         chunk_numbers: List[int],
@@ -70,8 +68,7 @@ class KVCacheBufferCheckpoints:
                 value is in `self.chunk_numbers`.
             buffers: KV cache buffers to be checkpointed. Can be on GPU. Note
                 that `buffers.current_length` is stored along with the
-                checkpoint. Also, `buffers.cache_length` can be smaller than
-                the cache length used here.
+                checkpoint.
 
         Returns:
             Slot position of `layer_idx` in `self.layer_numbers` if checkpoint
@@ -79,16 +76,12 @@ class KVCacheBufferCheckpoints:
 
         """
         if not isinstance(buffers, DefaultKVCacheBuffers):
-            raise ValueError(
-                f"type(value) = {type(buffers)}, must be DefaultKVCacheBuffers"
-            )
+            raise ValueError(f"type(value) = {type(buffers)}, must be DefaultKVCacheBuffers")
         pos = self._chunk_pos.get(chunk_idx)
         if pos is None:
             return None
         if self._debug_layer_idx is not None:
-            print(
-                f"set_checkpoint: layer {self._debug_layer_idx}, chunk {chunk_idx} -> pos {pos}"
-            )
+            print(f"set_checkpoint: layer {self._debug_layer_idx}, chunk {chunk_idx} -> pos {pos}")
         return self._set_checkpoint(pos, buffers)
 
     def _set_checkpoint(
@@ -108,8 +101,7 @@ class KVCacheBufferCheckpoints:
             chunk_idx: Index of layer, must be in `self.chunk_numbers`.
             out: KV cache buffers to write checkpoint to. Can be on GPU. Note
                 that `out.current_length` is set to the length stored with
-                :meth:`set_checkpoint`. `out.cache_length` must not be smaller
-                than this length.
+                :meth:`set_checkpoint`.
 
         Returns:
             `out` for convenience.
@@ -186,13 +178,11 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
     :class:`QuantizedKVCacheBuffers`.
 
     """
-
     def __init__(
         self,
         chunk_numbers: List[int],
         quant_buffers: QuantizedKVCacheBuffers,
         cache_length: Optional[int] = None,
-        pin_memory: Optional[List[bool]] = None,
     ):
         """
         Args:
@@ -207,33 +197,24 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
                 :meth:`get_checkpoint`.
             cache_length: Determine the checkpoint size. May be smaller than
                 `quant_buffers.cache_length`.
-            pin_memory: If given, must have the same length as `chunk_numbers`.
-                Checkpoints for chunks with `True` entries are pinned in CPU
-                memory. Default: No checkpoints are pinned.
 
         """
         if cache_length is None:
             cache_length = quant_buffers.cache_length
         elif not (1 <= cache_length <= quant_buffers.cache_length):
-            raise ValueError(
-                f"cache_length={cache_length}, must be in [1, {quant_buffers.cache_length}]"
-            )
+            raise ValueError(f"cache_length={cache_length}, must be in [1, {quant_buffers.cache_length}]")
         self.cache_length = cache_length
         self.quant_buffers = quant_buffers
         self.checkpoints = None
         self._checkpoint_lengths = None
         super().__init__(chunk_numbers)
-        self.set_chunk_numbers(chunk_numbers, pin_memory)
+        self.set_chunk_numbers(chunk_numbers)
 
     @property
     def batch_size(self) -> Optional[int]:
         return self.quant_buffers.batch_size
 
-    def set_chunk_numbers(
-        self,
-        chunk_numbers: List[int],
-        pin_memory: Optional[List[bool]] = None,
-    ):
+    def set_chunk_numbers(self, chunk_numbers: List[int]):
         """
         If `chunk_numbers` is longer than the current list, extra buffers are
         allocated. Buffers are not deallocated if `chunk_numbers` is shorter.
@@ -241,45 +222,27 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         Args:
             chunk_numbers: List of chunk indexes for which checkpoints are to
                 be stored. Must not contain 0
-            pin_memory: See :meth:`__init__`
 
         """
         super().set_chunk_numbers(chunk_numbers)
-        if pin_memory is not None:
-            if len(pin_memory) != len(self.chunk_numbers):
-                raise ValueError(
-                    f"pin_memory = {pin_memory}, chunk_numbers = {chunk_numbers}: Must have same length"
-                )
-        else:
-            pin_memory = [False] * len(self.chunk_numbers)
         if self.checkpoints is None:
             num_to_create = len(self.chunk_numbers)
         else:
             num_to_create = max(len(self.chunk_numbers) - len(self.checkpoints), 0)
         kwargs = dict(device=torch.device("cpu"), cache_length=self.cache_length)
-        if num_to_create > 0:
-            new_checkpoints = [
-                (
-                    self.quant_buffers.quantizer_k.create_quantizer_state(
-                        **kwargs,
-                        pin_memory=pm,
-                    ),
-                    self.quant_buffers.quantizer_v.create_quantizer_state(
-                        **kwargs,
-                        pin_memory=pm,
-                    ),
-                )
-                for pm in pin_memory[(-num_to_create):]
-            ]
-        else:
-            new_checkpoints = []
-        new_lengths = [self.cache_length] * num_to_create
+        new_checkpoints = [
+            (
+                self.quant_buffers.quantizer_k.create_quantizer_state(**kwargs),
+                self.quant_buffers.quantizer_v.create_quantizer_state(**kwargs),
+            )
+            for _ in range(num_to_create)
+        ]
         if self.checkpoints is None:
             self.checkpoints = new_checkpoints
-            self._checkpoint_lengths = new_lengths
+            self._checkpoint_lengths = [self.cache_length] * num_to_create
         else:
             self.checkpoints.extend(new_checkpoints)
-            self._checkpoint_lengths.extend(new_lengths)
+            self._checkpoint_lengths.extend([self.cache_length] * num_to_create)
 
     def _set_checkpoint(
         self,
@@ -290,8 +253,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         keys, values = k_and_v.keys(), k_and_v.values()
         current_length = buffers.current_length
         self.quant_buffers.prefill(
-            keys[:, :, :current_length, :],
-            values[:, :, :current_length, :],
+            keys[:, :, :current_length, :], values[:, :, :current_length, :],
         )
         # Ensure that content is quantized and written into buffers:
         self.quant_buffers.write_back()
@@ -349,29 +311,20 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
             raise ValueError(f"key.shape = {key.shape}, must be {shape}")
         if value.shape != shape:
             raise ValueError(f"value.shape = {value.shape}, must be {shape}")
-        if not (
-            0 <= input_pos
-            and num > 0
-            and input_pos + num <= self.quant_buffers.cache_length
-        ):
-            raise ValueError(
-                f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self.quant_buffers.cache_length}]"
-            )
+        if not (0 <= input_pos and num > 0 and input_pos + num <= self.quant_buffers.cache_length):
+            raise ValueError(f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self.quant_buffers.cache_length}]")
         if input_pos == 0:
             self.quant_buffers.prefill(key, value)
         else:
             self.quant_buffers.set_slots(
-                (input_pos, input_pos + num),
-                key,
-                value,
+                (input_pos, input_pos + num), key, value,
             )
         # Ensure that content is quantized and written into buffers:
         self.quant_buffers.write_back()
         self.checkpoints[pos][0].copy_(start=input_pos, end=input_pos + num)
         self.checkpoints[pos][1].copy_(start=input_pos, end=input_pos + num)
         self._checkpoint_lengths[pos] = max(
-            self._checkpoint_lengths[pos],
-            input_pos + num,
+            self._checkpoint_lengths[pos], input_pos + num,
         )
         return pos
 
@@ -385,14 +338,8 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         pos = self._chunk_pos.get(chunk_idx)
         if pos is None:
             raise IndexError(f"chunk_idx = {chunk_idx} must be in {self.chunk_numbers}")
-        if not (
-            0 <= input_pos
-            and num > 0
-            and input_pos + num <= self._checkpoint_lengths[pos]
-        ):
-            raise ValueError(
-                f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self._checkpoint_lengths[pos]}]"
-            )
+        if not (0 <= input_pos and num > 0 and input_pos + num <= self._checkpoint_lengths[pos]):
+            raise ValueError(f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self._checkpoint_lengths[pos]}]")
         self.checkpoints[pos][0].restore(start=input_pos, end=input_pos + num)
         self.checkpoints[pos][1].restore(start=input_pos, end=input_pos + num)
         # See comments in :meth:`_get_checkpoint`
@@ -412,14 +359,12 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
     recommended mostly for testing, or if CPU memory is not scarce.
 
     """
-
     def __init__(
         self,
         chunk_numbers: List[int],
         params: KVCacheBuffersParams,
         cache_length: int,
         batch_size: Optional[int] = None,
-        pin_memory: Optional[List[bool]] = None,
     ):
         """
         Args:
@@ -427,39 +372,27 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
                 be stored. Must not contain 0
             params: KV cache buffer parameters
             cache_length: Cache length
-            pin_memory: If given, must have the same length as `chunk_numbers`.
-                Checkpoints for chunks with `True` entries are pinned in CPU
-                memory. Default: No checkpoints are pinned.
 
         """
         super().__init__(chunk_numbers)
         self._kwargs = dict(dtype=params.dtype, device=torch.device("cpu"))
-        if batch_size is None:
+        if  batch_size is None:
             batch_size = params.max_batch_size
-        self._shape = (
-            batch_size,
-            params.n_query_groups,
-            cache_length,
-            params.head_size,
-        )
-        self.k = None
-        self.v = None
-        self._checkpoint_lengths = None
-        self.set_chunk_numbers(chunk_numbers, pin_memory)
+        shape = (batch_size, params.n_query_groups, cache_length, params.head_size)
+        num_slots = len(chunk_numbers)
+        self.k = [torch.zeros(shape, **self._kwargs) for _ in range(num_slots)]
+        self.v = [torch.zeros(shape, **self._kwargs) for _ in range(num_slots)]
+        self._checkpoint_lengths = [cache_length] * num_slots
 
     @property
     def batch_size(self) -> int:
-        return self._shape[0]
+        return self.k[0].shape[0]
 
     @property
     def cache_length(self) -> int:
-        return self._shape[2]
+        return self.k[0].shape[2]
 
-    def set_chunk_numbers(
-        self,
-        chunk_numbers: List[int],
-        pin_memory: Optional[List[bool]] = None,
-    ):
+    def set_chunk_numbers(self, chunk_numbers: List[int]):
         """
         If `chunk_numbers` is longer than the current list, extra buffers are
         allocated. Buffers are not deallocated if `chunk_numbers` is shorter.
@@ -467,42 +400,16 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         Args:
             chunk_numbers: List of chunk indexes for which checkpoints are to
                 be stored. Must not contain 0
-            pin_memory: See :meth:`__init__`
 
         """
         super().set_chunk_numbers(chunk_numbers)
-        if pin_memory is not None:
-            if len(pin_memory) != len(self.chunk_numbers):
-                raise ValueError(
-                    f"pin_memory = {pin_memory}, chunk_numbers = {chunk_numbers}: Must have same length"
-                )
-        else:
-            pin_memory = [False] * len(chunk_numbers)
-        if self.k is None:
-            num_to_create = len(self.chunk_numbers)
-        else:
-            num_to_create = max(len(self.chunk_numbers) - len(self.k), 0)
-        if num_to_create > 0:
-            new_k = [
-                torch.zeros(self._shape, **self._kwargs, pin_memory=pm)
-                for pm in pin_memory[(-num_to_create):]
-            ]
-            new_v = [
-                torch.zeros(self._shape, **self._kwargs, pin_memory=pm)
-                for pm in pin_memory[(-num_to_create):]
-            ]
-        else:
-            new_k = []
-            new_v = []
-        new_lengths = [self.cache_length] * num_to_create
-        if self.k is None:
-            self.k = new_k
-            self.v = new_v
-            self._checkpoint_lengths = new_lengths
-        else:
-            self.k.extend(new_k)
-            self.v.extend(new_v)
-            self._checkpoint_lengths.extend(new_lengths)
+        shape = self.k[0].shape
+        num_extra = max(len(self.chunk_numbers) - len(self.k), 0)
+        for _ in range(num_extra):
+            self.k.append(torch.zeros(shape, **self._kwargs))
+            self.v.append(torch.zeros(shape, **self._kwargs))
+        if num_extra > 0:
+            self._checkpoint_lengths.extend([self.cache_length] * num_extra)
 
     def _set_checkpoint(
         self,
@@ -511,14 +418,8 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
     ) -> int:
         k_and_v = buffers.get_keys_values()
         current_length = buffers.current_length
-        self.k[pos][:, :, :current_length, :].copy_(
-            k_and_v.keys()[:, :, :current_length, :],
-            non_blocking=True,
-        )
-        self.v[pos][:, :, :current_length, :].copy_(
-            k_and_v.values()[:, :, :current_length, :],
-            non_blocking=True,
-        )
+        self.k[pos][:, :, :current_length, :] = k_and_v.keys()[:, :, :current_length, :]
+        self.v[pos][:, :, :current_length, :] = k_and_v.values()[:, :, :current_length, :]
         self._checkpoint_lengths[pos] = current_length
         return pos
 
@@ -527,13 +428,10 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         pos: int,
         out: DefaultKVCacheBuffers,
     ):
-        key = self.k[pos][:, ...]
-        value = self.v[pos][:, ...]
-        device = out.device
-        if device is not None:
-            key = key.to(device, non_blocking=True)
-            value = value.to(device, non_blocking=True)
-        out.prefill(key=key, value=value)
+        out.prefill(
+            key=self.k[pos][:, ...],
+            value=self.v[pos][:, ...],
+        )
         out.current_length = self._checkpoint_lengths[pos]
 
     def set_checkpoint_slice(
@@ -555,20 +453,11 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         if value.shape != shape:
             raise ValueError(f"value.shape = {value.shape}, must be {shape}")
         if not (0 <= input_pos and num > 0 and input_pos + num <= self.cache_length):
-            raise ValueError(
-                f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self.cache_length}]"
-            )
-        self.k[pos][:, :, input_pos : (input_pos + num), :].copy_(
-            key,
-            non_blocking=True,
-        )
-        self.v[pos][:, :, input_pos : (input_pos + num), :].copy_(
-            value,
-            non_blocking=True,
-        )
+            raise ValueError(f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self.cache_length}]")
+        self.k[pos][:, :, input_pos:(input_pos + num), :] = key
+        self.v[pos][:, :, input_pos:(input_pos + num), :] = value
         self._checkpoint_lengths[pos] = max(
-            self._checkpoint_lengths[pos],
-            input_pos + num,
+            self._checkpoint_lengths[pos], input_pos + num,
         )
         return pos
 
@@ -584,20 +473,12 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
             raise IndexError(f"chunk_idx = {chunk_idx} must be in {self.chunk_numbers}")
         current_length = self._checkpoint_lengths[pos]
         if not (0 <= input_pos and num > 0 and input_pos + num <= current_length):
-            raise ValueError(
-                f"input_pos = {input_pos}, num = {num}, does not fit into [0, {current_length}]"
-            )
+            raise ValueError(f"input_pos = {input_pos}, num = {num}, does not fit into [0, {current_length}]")
         if device is None:
-            device = torch.get_default_device()
+            device = torch.device("cpu")
         return DefaultKeysAndValues(
-            keys=self.k[pos][:, :, input_pos : (input_pos + num), :].to(
-                device=device,
-                non_blocking=True,
-            ),
-            values=self.v[pos][:, :, input_pos : (input_pos + num), :].to(
-                device=device,
-                non_blocking=True,
-            ),
+            keys=self.k[pos][:, :, input_pos:(input_pos + num), :].to(device=device),
+            values=self.v[pos][:, :, input_pos:(input_pos + num), :].to(device=device),
         )
 
 
@@ -610,15 +491,12 @@ class LayerInputCheckpoints:
     `layer_numbers`.
 
     """
-
     def __init__(self, layer_numbers: List[int]):
         """
         Args:
             layer_numbers: List of layer numbers for which inputs checkpoints
                 are stored. One entry can be equal to `n_layer`, for which the
-                output of the final layer `n_layer - 1` is stored. We also use
-                an entry `n_layer + 1` to store the head gradient during the
-                backward pass.
+                output of the final layer `n_layer - 1` is stored.
 
         """
         assert len(layer_numbers) >= 1
@@ -671,101 +549,98 @@ class LayerInputCheckpoints:
         raise NotImplementedError
 
 
+def create_layers_and_buffers_for_model(
+    model: GPT,
+    layer_numbers: List[int],
+    batch_size: int,
+    qname: str,
+    cache_kwargs: Optional[Dict[str, Any]] = None,
+) -> List[Tuple[List[int], QuantizedKVCacheBuffers]]:
+    # Determine the devices
+    # Note: `n_layer` may be in `layer_numbers`, for which we use the device
+    # of the final layer `n_layer - 1`
+    n_layer = model.config.n_layer
+    lnums_and_device = dict()
+    for l_ix in layer_numbers:
+        params = model.get_kv_cache_params(min(l_ix, n_layer - 1))
+        device = params.device
+        lnums = lnums_and_device.get(device)
+        if lnums is None:
+            lnums_and_device[device] = [l_ix]
+        else:
+            lnums.append(l_ix)
+    # Create quantization buffers, one per device
+    model_part = DefaultCellBlocks(
+        model=model,
+        first_layer_idx=0,
+        num_layers=n_layer,
+    )
+    dequant_kwargs = dict(max_num_ranges=cache_kwargs.get("max_num_ranges"))
+    quant_buffers = create_quantized_kv_buffers_for_checkpoints(
+        model_part=model_part,
+        qname=qname,
+        batch_size=batch_size,
+        layer_activations=True,
+        cache_kwargs=cache_kwargs,
+        dequant_kwargs=dequant_kwargs,
+    )
+    return [
+        (lnums, quant_buffers[device])
+        for device, lnums in lnums_and_device.items()
+    ]
+
+
 class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
     """
     Internally, we use :class:`KVCacheBufferQuantizedCheckpoints` objects,
     splitting two halves to keys and values.
 
-    In fact, we use a list of :class:`KVCacheBufferQuantizedCheckpoints`
-    objects, which share their :class:`QuantizedKVCacheBuffers` object, in
-    order to limit the amount of GPU memory being used.
-
     """
-
     def __init__(
         self,
-        model: GPT,
-        layer_numbers: List[int],
-        batch_size: int,
-        chunk_size: int,
-        qname: str,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-        allocate_buffers: bool = False,
-        device: Optional[torch.device] = None,
-        pin_memory: Optional[List[bool]] = None,
+        layers_and_buffers: List[Tuple[List[int], QuantizedKVCacheBuffers]],
     ):
         """
         If `layers_and_buffers` has more than one entry, the layers in different
-        entries reside on different devices (model-parallel).
-        For each entry, we create a list of
-        :class:`KVCacheBufferQuantizedCheckpoints` objects, all based on the
-        same :class:`QuantizedKVCacheBuffers` from `layers_and_buffers`, so
-        that the sum of `cache_length` is `>= max_seq_length`. This allows to
-        maintain checkpoints of length `max_seq_length`, while limiting the
-        GPU memory being used.
+        entries reside on different devices (model-parallel), and the
+        `quant_buffers` object is on the respective device as well. For
+        convenience, use :func:`create_layers_and_buffers_for_model`.
 
         Args:
-            model: GPT model
-            layer_numbers: List of layer numbers for which inputs checkpoints
-                are stored
-            batch_size: Batch size
-            chunk_size: We quantize sequence batches in chunks of this length
-            qname: Determines quantization buffers
-            cache_kwargs: Additional keyword arguments for
-                :class:`QuantizedKVCacheBuffers`.
-            allocate_buffers: If `True`, we allocate buffer buffers here.
-                Otherwise, they are allocated at first use
-            device: Device for buffer allocations, needed if
-                `allocate_buffers=True`
-            pin_memory: If given, must have the same length as `layer_numbers`.
-                Checkpoints for layers with `True` entries are pinned in CPU
-                memory. Default: No checkpoints are pinned.
+            layers_and_buffers: List of `(layer_numbers, quant_buffers)` tuples.
+                The `layer_numbers` lists are pairwise disjoint. For one entry,
+                all layers and `quant_buffers` are on the same device. The
+                `quant_buffers` object is used internally with an
+                :class:`KVCacheBufferQuantizedCheckpoints` object. It must have
+                `n_query_groups=1`, `cache_length=max_sequence_length`, and
+                `head_size=n_embd // 2`.
 
         """
+        self._layer_to_pos = {
+            l_ix: pos for pos, (l_nums, _) in enumerate(layers_and_buffers) for l_ix in l_nums
+        }
+        layer_numbers = list(self._layer_to_pos.keys())
+        if len(layer_numbers) < sum(len(x[0]) for x in layers_and_buffers):
+            raise ValueError("layer_numbers entries must be pairwise disjoint")
         super().__init__(layer_numbers)
-        if pin_memory is not None and len(pin_memory) != len(layer_numbers):
-            raise ValueError(
-                f"pin_memory = {pin_memory}, layer_numbers = {layer_numbers}: Must have same length"
-            )
-        self.max_seq_length = model.max_seq_length
-        # Create quantization buffer to be used
-        cache_params = replace(
-            model.get_kv_cache_params(0),
-            max_batch_size=batch_size,
-            n_query_groups=1,
-            n_head=1,
-            head_size=model.config.n_embd // 2,
-            cache_length=chunk_size,
-        )
-        if cache_kwargs is not None:
-            dequant_kwargs = dict(max_num_ranges=cache_kwargs.get("max_num_ranges"))
-        else:
-            dequant_kwargs = None
-        quant_buffers = create_quantized_kv_buffers(
-            qname=qname,
-            cache_lengths=[chunk_size],
-            cache_params=cache_params,
-            cache_kwargs=cache_kwargs,
-            dequant_kwargs=dequant_kwargs,
-            allocate_buffers=allocate_buffers,
-            device=device,
-        )[0]
+        if not all(x[1].n_query_groups == 1 for x in layers_and_buffers):
+            raise ValueError(f"quant_buffers.n_query_groups must be 1 for all entries")
+        cache_lengths = set(x[1].cache_length for x in layers_and_buffers)
+        if len(cache_lengths) > 1:
+            raise ValueError(f"quant_buffers.cache_length must be the same for all entries [{cache_lengths}]")
+        head_sizes = set(x[1].head_size for x in layers_and_buffers)
+        if len(head_sizes) > 1:
+            raise ValueError(f"quant_buffers.head_size must be the same for all entries [{head_sizes}]")
+        self.max_sequence_length = next(iter(cache_lengths))
+        self.n_embd = next(iter(head_sizes)) * 2
         # Internally, we use :class:`KVCacheBufferQuantizedCheckpoints` objects
-        num_parts = int(math.ceil(self.max_seq_length / chunk_size))
-        fin_chunk_size = self.max_seq_length - chunk_size * (num_parts - 1)
-        assert 0 < fin_chunk_size <= chunk_size  # Sanity check
-        cache_lengths = [chunk_size] * (num_parts - 1) + [fin_chunk_size]
         self._checkpoints_int = [
             KVCacheBufferQuantizedCheckpoints(
                 chunk_numbers=layer_numbers,
                 quant_buffers=quant_buffers,
-                cache_length=cache_length,
-                pin_memory=pin_memory,
             )
-            for cache_length in cache_lengths
+            for layer_numbers, quant_buffers in layers_and_buffers
         ]
-        self.cache_length = chunk_size
-        self.n_embd = model.config.n_embd
 
     def clear(self):
         """
@@ -773,28 +648,9 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
         attempt to avoid GPU memory leaks.
 
         """
-        self._checkpoints_int[0].quant_buffers.deallocate()
+        for checkpoint in self._checkpoints_int:
+            checkpoint.quant_buffers.deallocate()
         self._checkpoints_int = None
-
-    def _get_ranges(
-        self,
-        input_pos: int,
-        num: int,
-    ) -> List[Tuple[int, int, int]]:
-        if not (0 <= input_pos and num > 0 and input_pos + num <= self.max_seq_length):
-            raise ValueError(
-                f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self.max_seq_length}]"
-            )
-        start_ind = input_pos // self.cache_length
-        start = input_pos % self.cache_length
-        result = []
-        while num > 0:
-            sz = min(num, self.cache_length - start)
-            result.append((start_ind, start, sz))
-            start_ind += 1
-            start = 0
-            num -= sz
-        return result
 
     def set_checkpoint(
         self,
@@ -802,30 +658,28 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
         buffers: torch.Tensor,
         input_pos: int,
     ) -> Optional[int]:
-        if layer_idx not in self.layer_numbers:
+        pos = self._layer_to_pos.get(layer_idx)
+        if pos is None:
             return None
-        cp_int = self._checkpoints_int
+        cp_int = self._checkpoints_int[pos]
         if buffers.ndim != 3:
             raise ValueError(f"buffers.shape = {buffers.shape}, must be 3D")
         num = buffers.shape[1]
-        batch_size = cp_int[0].batch_size
+        batch_size = cp_int.batch_size
         if batch_size is None and input_pos == 0:
             batch_size = buffers.shape[0]
         shape = (batch_size, num, self.n_embd)
         if buffers.shape != shape:
             raise ValueError(f"buffers.shape = {buffers.shape}, must be {shape}")
+        if not (0 <= input_pos and num > 0 and input_pos + num <= self.max_sequence_length):
+            raise ValueError(f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self.max_sequence_length}]")
         ne2 = self.n_embd // 2
-        pos = 0
-        l_pos = None
-        for ind, start, sz in self._get_ranges(input_pos, num):
-            l_pos = cp_int[ind].set_checkpoint_slice(
-                chunk_idx=layer_idx,
-                key=buffers[:, None, pos : (pos + sz), :ne2],
-                value=buffers[:, None, pos : (pos + sz), ne2:],
-                input_pos=start,
-            )
-            pos += sz
-        return l_pos
+        return cp_int.set_checkpoint_slice(
+            chunk_idx=layer_idx,
+            key=buffers[:, None, :, :ne2],
+            value=buffers[:, None, :, ne2:],
+            input_pos=input_pos,
+        )
 
     def get_checkpoint(
         self,
@@ -834,27 +688,22 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
         num: int,
         device: torch.device,
     ) -> torch.Tensor:
-        if layer_idx not in self.layer_numbers:
-            raise ValueError(
-                f"layer_idx = {layer_idx} not in layer numbers [{self.layer_numbers}]"
-            )
-        cp_int = self._checkpoints_int
-        ranges = self._get_ranges(input_pos, num)
-        result_parts = []
-        for ind, start, sz in ranges:
-            k_and_v = cp_int[ind].get_checkpoint_slice(
-                chunk_idx=layer_idx,
-                input_pos=start,
-                num=sz,
-                device=device,
-            )
-            result_parts.append(
-                torch.cat(
-                    (k_and_v.keys().squeeze(1), k_and_v.values().squeeze(1)),
-                    dim=-1,
-                )
-            )
-        return torch.cat(result_parts, dim=1)
+        pos = self._layer_to_pos.get(layer_idx)
+        if pos is None:
+            raise ValueError(f"layer_idx = {layer_idx} not in layer numbers [{self.layer_numbers}]")
+        cp_int = self._checkpoints_int[pos]
+        if not (0 <= input_pos and num > 0 and input_pos + num <= self.max_sequence_length):
+            raise ValueError(f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self.max_sequence_length}]")
+        k_and_v = cp_int.get_checkpoint_slice(
+            chunk_idx=layer_idx,
+            input_pos=input_pos,
+            num=num,
+            device=device,
+        )
+        return torch.cat(
+            (k_and_v.keys().squeeze(1), k_and_v.values().squeeze(1)),
+            dim=-1,
+        )
 
 
 class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
@@ -863,34 +712,25 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
     splitting two halves to keys and values.
 
     """
-
     def __init__(
         self,
         layer_numbers: List[int],
         batch_size: int,
-        max_seq_length: int,
+        max_sequence_length: int,
         n_embd: int,
         dtype: Optional[torch.dtype],
-        pin_memory: Optional[List[bool]] = None,
     ):
         """
         Args:
             layer_numbers: List of layer numbers for which inputs checkpoints
                 are stored
             batch_size: Batch size
-            max_seq_length: Maximum sequence length
+            max_sequence_length: Maximum sequence length
             n_embd: Number of embedding dimensions
             dtype: Data type
-            pin_memory: If given, must have the same length as `layer_numbers`.
-                Checkpoints for layers with `True` entries are pinned in CPU
-                memory. Default: No checkpoints are pinned.
 
         """
         super().__init__(layer_numbers)
-        if pin_memory is not None and len(pin_memory) != len(layer_numbers):
-            raise ValueError(
-                f"pin_memory = {pin_memory}, layer_numbers = {layer_numbers}: Must have same length"
-            )
         self._buffer_params = KVCacheBuffersParams(
             max_batch_size=batch_size,
             n_query_groups=1,
@@ -901,8 +741,7 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
         self._checkpoints_int = KVCacheBufferDefaultCheckpoints(
             chunk_numbers=layer_numbers,
             params=self._buffer_params,
-            cache_length=max_seq_length,
-            pin_memory=pin_memory,
+            cache_length=max_sequence_length,
         )
         self.n_embd = n_embd
 
@@ -926,9 +765,7 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
             raise ValueError(f"buffers.shape = {buffers.shape}, must be {shape}")
         max_seq_length = self._checkpoints_int.cache_length
         if not (0 <= input_pos and num > 0 and input_pos + num <= max_seq_length):
-            raise ValueError(
-                f"input_pos = {input_pos}, num = {num}, does not fit into [0, {max_seq_length}]"
-            )
+            raise ValueError(f"input_pos = {input_pos}, num = {num}, does not fit into [0, {max_seq_length}]")
         ne2 = self.n_embd // 2
         device = torch.device("cpu")
         return self._checkpoints_int.set_checkpoint_slice(
@@ -947,14 +784,10 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
     ) -> torch.Tensor:
         max_seq_length = self._checkpoints_int.cache_length
         if not (0 <= input_pos and num > 0 and input_pos + num <= max_seq_length):
-            raise ValueError(
-                f"input_pos = {input_pos}, num = {num}, does not fit into [0, {max_seq_length}]"
-            )
+            raise ValueError(f"input_pos = {input_pos}, num = {num}, does not fit into [0, {max_seq_length}]")
         pos = self._checkpoints_int.pos_for_chunk_idx(layer_idx)
         if pos is None:
-            raise ValueError(
-                f"layer_idx = {layer_idx} is not in layer numbers [{self.layer_numbers}]"
-            )
+            raise ValueError(f"layer_idx = {layer_idx} is not in layer numbers [{self.layer_numbers}]")
         k_and_v = self._checkpoints_int.get_checkpoint_slice(
             chunk_idx=layer_idx,
             input_pos=input_pos,

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional, Tuple, Union, Callable
+from typing import List, Optional, Tuple, Union
 import math
 
 import torch
@@ -23,14 +23,14 @@ from torch.backends.cuda import (
 from torch.nn import functional as F
 from torch.nn.attention import SDPAParams, SDPBackend, sdpa_kernel
 
-from keys_values.utils import repeat_interleave, index_to_3d
 
-SDPA_KERNELS_BEST_ORDERING = [
-    SDPBackend.FLASH_ATTENTION,
-    SDPBackend.EFFICIENT_ATTENTION,
-    SDPBackend.CUDNN_ATTENTION,
-    SDPBackend.MATH,
-]
+# Currently, `F.scaled_dot_product_attention` does not properly support the
+# case `enabla_gqa=True` (i.e., keys and values have less heads than
+# queries). In this case, it is best to extend keys and values, which requires
+# extra memory, but allows for efficient kernels to be used.
+# Once PyTorch supports `enabla_gqa=True` properly at least with some fused
+# kernels (such as flash attention), this flag can be switched to `False`.
+FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA = True
 
 
 def filter_sdpa_kernels(
@@ -47,20 +47,11 @@ def filter_sdpa_kernels(
     params = SDPAParams(query, key, value, attn_mask, dropout_p, is_causal, enable_gqa)
     new_kernels = []
     for kernel in sdpa_kernels:
-        if not torch.cuda.is_available() and kernel != SDPBackend.MATH:
+        if kernel == SDPBackend.FLASH_ATTENTION and not can_use_flash_attention(params):
             continue
-        elif kernel == SDPBackend.FLASH_ATTENTION and not can_use_flash_attention(
-            params
-        ):
+        elif kernel == SDPBackend.EFFICIENT_ATTENTION and not can_use_efficient_attention(params):
             continue
-        elif (
-            kernel == SDPBackend.EFFICIENT_ATTENTION
-            and not can_use_efficient_attention(params)
-        ):
-            continue
-        elif kernel == SDPBackend.CUDNN_ATTENTION and not can_use_cudnn_attention(
-            params
-        ):
+        elif kernel == SDPBackend.CUDNN_ATTENTION and not can_use_cudnn_attention(params):
             continue
         new_kernels.append(kernel)
     return new_kernels
@@ -218,21 +209,11 @@ def mask_slice_bool(
     q_per_kv = n_head // n_query_groups
     assert n_head == n_query_groups * q_per_kv and q_per_kv >= 1
     if q_per_kv > 1:
-        token_positions = (
-            token_positions.unsqueeze(2)
-            .expand(
-                -1,
-                -1,
-                q_per_kv,
-                -1,
-            )
-            .reshape(batch_size, n_head, -1)
-        )
+        token_positions = token_positions.unsqueeze(2).expand(
+            -1, -1, q_per_kv, -1,
+        ).reshape(batch_size, n_head, -1)
     token_positions = token_positions.unsqueeze(2).expand(
-        -1,
-        -1,
-        num,
-        -1,
+        -1, -1, num, -1,
     )
     kwargs = dict(device=token_positions.device, dtype=token_positions.dtype)
     bool_mask = (
@@ -301,8 +282,8 @@ def build_mask_slice(
     return mask
 
 
-# Maximum number of `float32` entries for `tmp_array` for GB
-ENTRIES_PER_GB = 2**28
+# Maximum umber of `float32` entries for `tmp_array` for GB
+ENTRIES_PER_GB = 2 ** 28
 
 # Maximum size of `tmp_array` in GB
 DEFAULT_TMP_ARRAY_LIMIT_GB = 3
@@ -350,9 +331,7 @@ def create_temp_array(
     else:
         tmp_len = tmp_array_max_num_entries // factor
         if tmp_len < 1:
-            raise ValueError(
-                f"batch_size={batch_size}, n_head={n_head}, kv_len={kv_len} too large. Their product must be <= {tmp_array_max_num_entries}"
-            )
+            raise ValueError(f"batch_size={batch_size}, n_head={n_head}, kv_len={kv_len} too large. Their product must be <= {tmp_array_max_num_entries}")
         num_splits = int(math.ceil(q_len / tmp_len))
     shape = (batch_size, n_head, tmp_len, kv_len)
     kwargs = dict(device=device, dtype=torch.float32)
@@ -416,18 +395,13 @@ def sdpa_attention_weights(
     _, n_query_groups, kv_len, _ = key.shape
     # Compute attention weights f(S)
     attention_compute_scores(
-        query=query,
-        key=key,
-        out=tmp_array,
-        scale_factor=scale_factor,
+        query=query, key=key, out=tmp_array, scale_factor=scale_factor,
     )
     # Attention masking
     if token_positions is None:
-        _token_positions = index_to_3d(
-            torch.arange(kv_len, device=query.device, dtype=torch.int64),
-            batch_size,
-            n_query_groups,
-        )
+        _token_positions = torch.arange(
+            kv_len, device=query.device, dtype=torch.int64,
+        ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
     else:
         _token_positions = token_positions
     bool_mask = mask_slice_bool(
@@ -437,7 +411,7 @@ def sdpa_attention_weights(
         n_head=n_head,
         sliding_window_size=sliding_window_size,
     )
-    assert bool_mask.shape == tmp_array.shape, (bool_mask.shape, tmp_array.shape)
+    assert bool_mask.shape == tmp_array.shape
     tmp_array[bool_mask] = minus_infinity(dtype=tmp_array.dtype)  # S
     # This creates an extra copy, but is much faster than `softmax_in_place`
     return tmp_array.softmax(dim=-1)  # f(S)
@@ -453,21 +427,17 @@ def sample_token_positions(
 ) -> torch.Tensor:
     index_kwargs = dict(dtype=torch.int64, device=device)
     token_positions = torch.zeros(
-        (batch_size, n_query_groups, kv_len),
-        **index_kwargs,
+        (batch_size, n_query_groups, kv_len), **index_kwargs,
     )
     for bs in range(batch_size):
         for nq in range(n_query_groups):
             token_positions[bs, nq, :] = torch.randperm(
-                input_pos,
-                **index_kwargs,
+                input_pos, **index_kwargs,
             )[:kv_len]
             # Ensure that `input_pos:(input_pos + q_len)` is present
             index = torch.randperm(kv_len, **index_kwargs)[:q_len]
             token_positions[bs, nq, index] = torch.arange(
-                input_pos,
-                input_pos + q_len,
-                **index_kwargs,
+                input_pos, input_pos + q_len, **index_kwargs,
             )
     return token_positions
 
@@ -480,7 +450,6 @@ def pytorch_scaled_dot_product_attention(
     sdpa_kernels: Union[SDPBackend, List[SDPBackend]],
     do_filter_kernels: bool = False,
     mask: Optional[torch.Tensor] = None,
-    annotation_callback: Optional[Callable[[torch.Tensor, torch.Tensor], None]] = None,
 ) -> Tuple[torch.Tensor, Optional[List[SDPBackend]]]:
     """
     If you call this repeatedly and want to filter `sdpa_kernels`, use
@@ -497,28 +466,25 @@ def pytorch_scaled_dot_product_attention(
         sdpa_kernels: Kernels to be considered, in this order
         do_filter_kernels: See above
         mask: Mask tensor, optional
-        annotation_callback: If given, we call
-            `annotation_callback(key, value)` just before calling SDPA
 
     Returns:
-        `(attn_outputs, filtered_sdpa_kernels)`, where `attn_outputs` is
-        the SDPA output, and `filtered_sdpa_kernels` is the filtered list of
-        SDPA kernels if `do_filter_kernels=True`, and `None` otherwise.
+          `(y, filtered_sdpa_kernels)`, where `y` is the SDPA output, and
+          `filtered_sdpa_kernels` is the filtered list of SDPA kernels
+          if `do_filter_kernels=True`, and `None` otherwise.
 
     """
     is_causal = mask is None
     n_head = query.shape[1]
     n_query_groups = key.shape[1]
     enable_gqa = n_query_groups < n_head
-    if enable_gqa:
+    if enable_gqa and FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA:
         # Some efficient kernels have not implemented
         # `enabla_gqa=True`. It is better to extend keys, values in
         # this case.
-        key = repeat_interleave(key, n_head)
-        value = repeat_interleave(value, n_head)
-        enable_gqa = key.shape[1] == n_query_groups
-    if annotation_callback is not None:
-        annotation_callback(key, value)
+        q_per_kv = n_head // n_query_groups
+        key = key.repeat_interleave(q_per_kv, dim=1)
+        value = value.repeat_interleave(q_per_kv, dim=1)
+        enable_gqa = False
     kwargs = dict(
         query=query,
         key=key,
@@ -536,7 +502,7 @@ def pytorch_scaled_dot_product_attention(
             sdpa_kernels = filter_sdpa_kernels(sdpa_kernels=sdpa_kernels, **kwargs)
     if sdpa_kernels:
         with sdpa_kernel(sdpa_kernels):
-            attn_outputs = F.scaled_dot_product_attention(**kwargs)
+            y = F.scaled_dot_product_attention(**kwargs)
     else:
-        attn_outputs = F.scaled_dot_product_attention(**kwargs)
-    return attn_outputs, sdpa_kernels if do_filter_kernels else None
+        y = F.scaled_dot_product_attention(**kwargs)
+    return y, sdpa_kernels if do_filter_kernels else None

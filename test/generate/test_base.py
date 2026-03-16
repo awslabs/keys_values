@@ -25,12 +25,12 @@ import pytest
 import torch
 import yaml
 
-from keys_values.long_context import LongContextInferenceModel
-from keys_values.config import Config
+from litgpt.config import Config
 
 import keys_values.generate.base as generate
 from keys_values.model import GPT
 from keys_values.generate.base import batched_sample
+
 
 skip_in_ci_on_macos = pytest.mark.skipif(
     sys.platform == "darwin" and os.getenv("GITHUB_ACTIONS") == "true",
@@ -53,15 +53,11 @@ def test_generate():
         n_head=4,
         n_embd=8,
     )
-    gpt_model = GPT(config)
+    model = GPT(config)
     max_new_tokens = 20
-    gpt_model.max_seq_length = T + max_new_tokens
-    gpt_model.set_kv_caches(batch_size=1)
-    model = LongContextInferenceModel(
-        gpt_model=gpt_model,
-        head_model=None,
-        chunk_size=16,
-    )
+    model.max_seq_length = T + max_new_tokens
+    model.set_kv_caches(batch_size=1)
+
     multinomial_results = []
 
     def multinomial(*args, **kwargs):
@@ -83,9 +79,7 @@ def test_generate():
 
     assert out.size(0) == T + max_new_tokens, (out.size(0), T + max_new_tokens)
     multinomial_results = torch.hstack(multinomial_results)
-    print(
-        f"input_idx {input_idx.shape}, multinomial_results: {multinomial_results.shape}"
-    )
+    print(f"input_idx {input_idx.shape}, multinomial_results: {multinomial_results.shape}")
     expected = torch.cat((input_idx, multinomial_results.squeeze(0)))
     assert out.shape == expected.shape, (out.shape, expected.shape)
     torch.testing.assert_close(out, expected)
@@ -139,12 +133,12 @@ def test_main(fake_checkpoint_dir, monkeypatch, tensor_like):
 
     assert len(tokenizer_mock.return_value.decode.mock_calls) == num_samples
     assert torch.allclose(
-        tokenizer_mock.return_value.decode.call_args[0][0].to(torch.device("cpu")),
-        generate_mock.return_value,
+        tokenizer_mock.return_value.decode.call_args[0][0].to(torch.device("cpu")), generate_mock.return_value
     )
     expected_call = call(
         model=ANY,
         prompt=tensor_like,
+        prompt_chunksize=16,
         max_returned_tokens=len_return_value,
         **sample_kwargs,
         eos_id=tokenizer_mock.return_value.eos_id,
@@ -199,14 +193,9 @@ def test_generate_different_results_with_different_top_p():
         n_embd=8,
         rotary_percentage=1,
     )
-    gpt_model = GPT(config)
-    gpt_model.max_seq_length = 50
-    gpt_model.set_kv_caches(batch_size=1)
-    model = LongContextInferenceModel(
-        gpt_model=gpt_model,
-        head_model=None,
-        chunk_size=16,
-    )
+    model = GPT(config)
+    model.max_seq_length = 50
+    model.set_kv_caches(batch_size=1)
 
     torch.manual_seed(123)
     input_idx = torch.randint(10, size=(1,))

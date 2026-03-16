@@ -15,17 +15,12 @@ from typing import Optional, Dict, Tuple, List
 
 import torch
 
-from keys_values.config import Config
+from litgpt.config import Config
 
 from keys_values.kvcache.attn_weights import (
-    AttnWeightsKVCache,
-    AttnWeightsReplayLog,
+    AttnWeightsKVCache, AttnWeightsReplayLog,
 )
-from keys_values.kvcache.base import (
-    DefaultKVCacheReplayLog,
-    KVCacheReplayLog,
-    DefaultKVCache,
-)
+from keys_values.kvcache.base import DefaultKVCacheReplayLog, KVCacheReplayLog
 from keys_values.kvcache.basics import (
     DenseKVCache,
     LastRecentlyInsertedKVCache,
@@ -53,13 +48,12 @@ class InferenceReplayCacheMixin:
     done in training mode.
 
     """
-
     def __init__(self):
         self.replay_log = None
         self.token_chunk_pos = 0
 
     @property
-    def input_pos(self) -> int:
+    def next_token_pos(self) -> Optional[int]:
         raise NotImplementedError
 
     @property
@@ -67,11 +61,11 @@ class InferenceReplayCacheMixin:
         raise NotImplementedError
 
     @property
-    def cache_length(self) -> int:
+    def cache_length(self) -> Optional[int]:
         raise NotImplementedError
 
     @property
-    def device(self) -> Optional[torch.device]:
+    def device(self) -> torch.device:
         raise NotImplementedError
 
     @property
@@ -82,21 +76,21 @@ class InferenceReplayCacheMixin:
     def n_query_groups(self) -> int:
         raise NotImplementedError
 
-    def next_positions(self, num: int) -> torch.Tensor:
+    def next_positions(self, num: int) -> Optional[torch.Tensor]:
         kwargs = {"dtype": torch.int64, "device": self.device}
-        if self.current_length < self.cache_length:
+        if self.next_token_pos is None:
+            return None
+        elif self.current_length < self.cache_length:
             assert num <= self.cache_length - self.current_length
-            return (
-                torch.arange(
-                    self.current_length,
-                    min(self.cache_length, self.current_length + num),
-                    **kwargs,
-                )
-                .view(1, 1, -1)
-                .expand(self.batch_size, self.n_query_groups, -1)
-            )
+            return torch.arange(
+                self.current_length,
+                min(self.cache_length, self.current_length + num),
+                **kwargs,
+            ).view(1, 1, -1).expand(self.batch_size, self.n_query_groups, -1)
         else:
-            return self.replay_log.extract_index(self.input_pos, num, **kwargs)
+            return self.replay_log.extract_index(
+                self.next_token_pos, num, **kwargs,
+            )
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
         if self.replay_log is None:
@@ -105,31 +99,13 @@ class InferenceReplayCacheMixin:
             device=self.device,
         )
         if not token_idx.equal(other):
-            raise ValueError(
-                f"token_idx:\n{token_idx} -- {token_idx.shape}\nreplay_log.token_chunks[{self.token_chunk_pos}]:\n{other} -- {other.shape}\nShould be the same!"
-            )
+            raise ValueError(f"token_idx:\n{token_idx} -- {token_idx.shape}\nreplay_log.token_chunks[{self.token_chunk_pos}]:\n{other} -- {other.shape}\nShould be the same!")
         self.token_chunk_pos += 1
 
 
-def check_replay_log(
-    cache: DefaultKVCache,
-    replay_log: DefaultKVCacheReplayLog,
+class InferenceAttnWeightsReplayCache(
+    AttnWeightsKVCache, InferenceReplayCacheMixin
 ):
-    for name in (
-        "cache_length",
-        "max_prefill_length",
-        "grace_period",
-    ):
-        try:
-            val_c = getattr(cache, name)
-            val_r = getattr(replay_log, name)
-            if val_c != val_r:
-                raise ValueError(f"{name}: {val_c} (cache) != {val_r} (replay_log)")
-        except AttributeError:
-            pass
-
-
-class InferenceAttnWeightsReplayCache(AttnWeightsKVCache, InferenceReplayCacheMixin):
     def __init__(
         self,
         config: Config,
@@ -147,29 +123,26 @@ class InferenceAttnWeightsReplayCache(AttnWeightsKVCache, InferenceReplayCacheMi
             **base_kwargs,
         )
         InferenceReplayCacheMixin.__init__(self)
-        if (
-            replay_log is None
-            or len(replay_log) == 0
-            or not isinstance(replay_log, AttnWeightsReplayLog)
-        ):
-            raise ValueError("replay_log is empty or has wrong type")
-        check_replay_log(self, replay_log)
+        if replay_log is None or len(replay_log) == 0:
+            raise ValueError("replay_log must not be empty")
+        if self.device != replay_log.device:
+            raise ValueError(f"self.device = {self.device}, replay_log.device = {self.replay_log.device}: must be the same")
         self.replay_log = replay_log
 
     @property
-    def input_pos(self) -> int:
-        return super().input_pos
+    def next_token_pos(self) -> Optional[int]:
+        return super().next_token_pos
 
     @property
     def current_length(self) -> int:
         return super().current_length
 
     @property
-    def cache_length(self) -> int:
+    def cache_length(self) -> Optional[int]:
         return super().cache_length
 
     @property
-    def device(self) -> Optional[torch.device]:
+    def device(self) -> torch.device:
         return super().device
 
     @property
@@ -180,7 +153,7 @@ class InferenceAttnWeightsReplayCache(AttnWeightsKVCache, InferenceReplayCacheMi
     def n_query_groups(self) -> int:
         return super().n_query_groups
 
-    def next_positions(self, num: int) -> torch.Tensor:
+    def next_positions(self, num: int) -> Optional[torch.Tensor]:
         return InferenceReplayCacheMixin.next_positions(self, num)
 
     def _update(self, *args, **kwargs):
@@ -214,7 +187,9 @@ class InferenceAttnWeightsReplayCache(AttnWeightsKVCache, InferenceReplayCacheMi
         InferenceReplayCacheMixin._validate_token_idx(self, token_idx)
 
 
-class InferenceDenseReplayCache(DenseKVCache, InferenceReplayCacheMixin):
+class InferenceDenseReplayCache(
+    DenseKVCache, InferenceReplayCacheMixin
+):
     def __init__(
         self,
         config: Config,
@@ -231,29 +206,26 @@ class InferenceDenseReplayCache(DenseKVCache, InferenceReplayCacheMixin):
             **base_kwargs,
         )
         InferenceReplayCacheMixin.__init__(self)
-        if (
-            replay_log is None
-            or len(replay_log) == 0
-            or not isinstance(replay_log, DefaultKVCacheReplayLog)
-        ):
-            raise ValueError("replay_log is empty or has wrong type")
-        check_replay_log(self, replay_log)
+        if len(replay_log) == 0:
+            raise ValueError("replay_log must not be empty")
+        if self.device != self.replay_log.device:
+            raise ValueError(f"self.device = {self.device}, replay_log.device = {self.replay_log.device}: must be the same")
         self.replay_log = replay_log
 
     @property
-    def input_pos(self) -> int:
-        return super().input_pos
+    def next_token_pos(self) -> Optional[int]:
+        return super().next_token_pos
 
     @property
     def current_length(self) -> int:
         return super().current_length
 
     @property
-    def cache_length(self) -> int:
+    def cache_length(self) -> Optional[int]:
         return super().cache_length
 
     @property
-    def device(self) -> Optional[torch.device]:
+    def device(self) -> torch.device:
         return super().device
 
     @property
@@ -264,7 +236,7 @@ class InferenceDenseReplayCache(DenseKVCache, InferenceReplayCacheMixin):
     def n_query_groups(self) -> int:
         return super().n_query_groups
 
-    def next_positions(self, num: int) -> torch.Tensor:
+    def next_positions(self, num: int) -> Optional[torch.Tensor]:
         return InferenceReplayCacheMixin.next_positions(self, num)
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
@@ -287,33 +259,29 @@ class InferenceLastRecentlyInsertedReplayCache(
             config=config,
             buffers=buffers,
             block_idx=block_idx,
-            init_grace_tokens=replay_log.init_grace_tokens,
             **base_kwargs,
         )
         InferenceReplayCacheMixin.__init__(self)
-        if (
-            replay_log is None
-            or len(replay_log) == 0
-            or not isinstance(replay_log, LastRecentlyInsertedKVCacheReplayLog)
-        ):
-            raise ValueError("replay_log is empty or has wrong type")
-        check_replay_log(self, replay_log)
+        if len(replay_log) == 0:
+            raise ValueError("replay_log must not be empty")
+        if self.device != replay_log.device:
+            raise ValueError(f"self.device = {self.device}, replay_log.device = {self.replay_log.device}: must be the same")
         self.replay_log = replay_log
 
     @property
-    def input_pos(self) -> int:
-        return super().input_pos
+    def next_token_pos(self) -> Optional[int]:
+        return super().next_token_pos
 
     @property
     def current_length(self) -> int:
         return super().current_length
 
     @property
-    def cache_length(self) -> int:
+    def cache_length(self) -> Optional[int]:
         return super().cache_length
 
     @property
-    def device(self) -> Optional[torch.device]:
+    def device(self) -> torch.device:
         return super().device
 
     @property
@@ -324,14 +292,13 @@ class InferenceLastRecentlyInsertedReplayCache(
     def n_query_groups(self) -> int:
         return super().n_query_groups
 
-    def next_positions(self, num: int) -> torch.Tensor:
+    def next_positions(self, num: int) -> Optional[torch.Tensor]:
         return InferenceReplayCacheMixin.next_positions(self, num)
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
         InferenceReplayCacheMixin._validate_token_idx(self, token_idx)
 
 
-# HIER: `mha` should be the same object, right?
 def inference_replay_cache_factory(
     kv_cache: KVCacheWithBuffers,
     config: Config,
@@ -339,7 +306,7 @@ def inference_replay_cache_factory(
     block_idx: int,
     replay_log: KVCacheReplayLog,
     **base_kwargs,
-) -> KVCacheWithBuffers:
+) -> Optional[KVCacheWithBuffers]:
     kwargs = dict(
         base_kwargs,
         config=config,
@@ -354,20 +321,16 @@ def inference_replay_cache_factory(
     elif isinstance(kv_cache, AttnWeightsKVCache):
         return InferenceAttnWeightsReplayCache(**kwargs)
     else:
-        raise TypeError(
-            f"type(kv_cache) = {type(kv_cache)}, does not have corresponding "
-            "inference replay cache type"
-        )
+        return None
 
 
-def get_replay_logs(gpt_model: GPT) -> List[KVCacheReplayLog]:
-    kv_caches = gpt_model.get_kv_caches()
-    if any(c is None or not isinstance(c, KVCacheWithBuffers) for c in kv_caches):
-        raise IndexError(
-            "All blocks of GPT model must have KV caches of type KVCacheWithBuffers assigned"
-        )
+def get_replay_logs(model: GPT) -> List[KVCacheReplayLog]:
+    kv_caches = [block.attn.kv_cache for block in model.transformer.h]
+    if any(
+        c is None or not isinstance(c, KVCacheWithBuffers)
+        for c in kv_caches
+    ):
+        raise IndexError("All blocks of GPT model must have KV caches of type KVCacheWithBuffers assigned")
     if not all(c.do_replay_logging for c in kv_caches):
-        raise IndexError(
-            "All KV caches of GPT model must have replay logging activated"
-        )
+        raise IndexError("All KV caches of GPT model must have replay logging activated")
     return [c.get_replay_log() for c in kv_caches]

@@ -12,19 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import replace
+import random
 from pathlib import Path
 import time
 from typing import List, Tuple
 
 import torch
 
-from keys_values.config import Config
+from litgpt.config import Config
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.test_utils import random_args_cache_forward
-from keys_values.utils import append_results_to_csv, randint_torch
+from keys_values.utils import append_results_to_csv
 
 
 def main(
@@ -43,6 +44,7 @@ def main(
 
     """
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
     on_gpu = torch.cuda.is_available()
 
@@ -53,24 +55,17 @@ def main(
         head_size=config.head_size,
         n_head=config.n_head,
         dtype=dtype,
+        device=device,
     )
     cache_kwargs = {
         "tmp_array_limit_gb": TemporaryArrayLimit(
-            init_val=4,
-            name="attention_forward_temp_size_gb",
+            init_val=4, name="attention_forward_temp_size_gb",
         )
     }
     names = ["lastrec-default", "lastrec-alt-default"]
     print(f"Comparing caches: {names}")
     result_fixed = dict()
-    for key in (
-        "n_head",
-        "n_query_groups",
-        "head_size",
-        "max_batch_size",
-        "dtype",
-        "device",
-    ):
+    for key in ("n_head", "n_query_groups", "head_size", "max_batch_size", "dtype", "device"):
         val = getattr(params, key)
         print(f"{key} = {getattr(params, key)}")
         result_fixed[key] = str(val) if key in {"dtype", "device"} else val
@@ -94,7 +89,7 @@ def main(
         ]
         rows = []
         for repeat in [None] * warmup_repeats + list(range(num_repeats)):
-            next_pos = randint_torch(0, cache_length - 1)
+            next_pos = random.randint(0, cache_length - 1)
             if repeat is not None:
                 result = dict(
                     result_fixed,
@@ -106,40 +101,35 @@ def main(
             prefill = None
             insert1 = None
             insert2 = None
-            for cache in caches:
-                cache.reset()
             with torch.no_grad():
                 for name, cache in zip(names, caches):
                     # Prefill (prepare)
+                    input_pos = 0
                     num = cache_length
                     if prefill is None:
                         prefill = random_args_cache_forward(
-                            params,
-                            num,
-                            config.padded_vocab_size,
+                            params, num, config.padded_vocab_size,
                         )
-                    cache(**prefill)
+                    cache(**prefill, input_pos=input_pos)
+                    input_pos += num
                     # Insert (prepare)
                     num = next_pos
                     if insert1 is None:
                         insert1 = random_args_cache_forward(
-                            params,
-                            num,
-                            config.padded_vocab_size,
+                            params, num, config.padded_vocab_size,
                         )
-                    cache(**insert1)
+                    cache(**insert1, input_pos=input_pos)
+                    input_pos += num
                     # Insert (measure)
                     num = chunk_size
                     if insert2 is None:
                         insert2 = random_args_cache_forward(
-                            params,
-                            num,
-                            config.padded_vocab_size,
+                            params, num, config.padded_vocab_size,
                         )
                     if on_gpu:
                         torch.cuda.current_stream().synchronize()
                     forward_time = time.perf_counter()
-                    y = cache(**insert2)
+                    y = cache(**insert2, input_pos=input_pos)
                     if on_gpu:
                         torch.cuda.current_stream().synchronize()
                     time_in_ms = (time.perf_counter() - forward_time) * 1000
@@ -158,15 +148,13 @@ def main(
 if __name__ == "__main__":
     batch_size = 3
     dtype = torch.bfloat16
-    device = (
-        torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
-    )
+    device = torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
     num_repeats = 10
     result_path = Path("./profile_lastrec.csv")
-    cache_length = 2**15
+    cache_length = 2 ** 15
     setups = [
         (cache_length, chunk_size)
-        for chunk_size in [2**8, 2**9, 2**10, 2**11] + list(range(2048, 2**14, 2048))
+        for chunk_size in [2 ** 8, 2 ** 9, 2 ** 10, 2 ** 11] + list(range(2048, 2 ** 14, 2048))
     ]
     model_names = ["Qwen3-4B"]
     for model_name in model_names:

@@ -11,18 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Tuple, Dict, List, Any
+from typing import Optional, Tuple, Dict, List
 
 import torch
 from torch.linalg import vector_norm
 
-from keys_values.config import Config
+from litgpt.config import Config
 
 from keys_values.kvcache.attn_weights import AttnWeightsKVCache
-from keys_values.kvcache.base import KVCacheParams, KVCache
+from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.kvcache.buffers import KVCacheBuffers
-from keys_values.utils import bits_for_torch_dtype, bitsize_of
+from keys_values.kvcache.utils import bitsize_of, bits_for_torch_dtype
 
 
 class H2OKVCache(AttnWeightsKVCache):
@@ -47,10 +47,8 @@ class H2OKVCache(AttnWeightsKVCache):
       attention weights, see :meth:`_instantaneous_score`.
 
     The original H2O method as published is provided in
-    :class:`H2OOriginalKVCache` (for comparison only; not recommended).
-
+    :class:`H2OOriginalKVCache`.
     """
-
     def __init__(
         self,
         config: Config,
@@ -59,17 +57,9 @@ class H2OKVCache(AttnWeightsKVCache):
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
         detach_attn_weights: bool = False,
-        keep_initial_fraction: Optional[float] = None,
-        max_chunk_size: Optional[int] = None,
         normalize_scores: bool = False,
         **base_kwargs,
     ):
-        """
-        Additional args:
-            normalize_scores: If `True`, scores are normalized (see header
-                comment.
-
-        """
         super().__init__(
             config=config,
             buffers=buffers,
@@ -77,16 +67,13 @@ class H2OKVCache(AttnWeightsKVCache):
             grace_period=grace_period,
             replay_log_blocksize=replay_log_blocksize,
             detach_attn_weights=detach_attn_weights,
-            keep_initial_fraction=keep_initial_fraction,
-            max_chunk_size=max_chunk_size,
             **base_kwargs,
         )
         self.normalize_scores = normalize_scores
         shape = (buffers.max_batch_size, self.n_query_groups, buffers.cache_length)
-        device = self._default_device_for_new_params()
         self.register_buffer(
             "scores",
-            torch.zeros(shape, device=device, dtype=torch.float32),
+            torch.zeros(shape, device=buffers.device, dtype=torch.float32),
             persistent=False,
         )
 
@@ -100,9 +87,6 @@ class H2OKVCache(AttnWeightsKVCache):
         dtype: Optional[torch.dtype] = None,
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
-        detach_attn_weights: bool = False,
-        keep_initial_fraction: Optional[float] = None,
-        max_chunk_size: Optional[int] = None,
         normalize_scores: bool = False,
         **base_kwargs,
     ) -> "H2OKVCache":
@@ -121,16 +105,9 @@ class H2OKVCache(AttnWeightsKVCache):
             block_idx,
             grace_period,
             replay_log_blocksize,
-            detach_attn_weights,
-            keep_initial_fraction,
-            max_chunk_size,
             normalize_scores,
             **base_kwargs,
         )
-
-    @classmethod
-    def _parameter_names(cls) -> List[str]:
-        return super()._parameter_names() + cls._score_buffer_names()
 
     def _score_buffers(self) -> List[Tuple[torch.Tensor, str]]:
         return [(self.scores, "scores")]
@@ -139,60 +116,35 @@ class H2OKVCache(AttnWeightsKVCache):
     def _score_buffer_names(cls) -> List[str]:
         return ["scores"]
 
-    def fix_dtype_of_score_buffers(self):
-        if self.scores.dtype != torch.float32:
-            self.scores = self.scores.to(torch.float32)
-
     def _compute_scores(
         self,
         attn_weights: torch.Tensor,
         query_length: int,
     ) -> Optional[torch.Tensor]:
-        """
-        Computes scores from attention weights. H2O scores are cumulative
-        attention weights (possibly normalized). This can be modified in
-        subclasses, via :meth:`_instantaneous_score` and
-        :meth:`_modify_scores`.
-
-        Args:
-            attn_weights: Attention weights, summed over query axis, shape
-                `(batch_size, n_query_groups, current_length)`, dtype
-                `float32`.
-            query_length: Number of queries (i.e., `query.shape[2]`) in last
-                recent :meth:`forward` call.
-
-        Returns:
-            Current score values over slots except for grace period, shape
-            `(batch_size, n_query_groups, cache_length - grace_period)`.
-            Only if cache is full (i.e., `current_length == cache_length`),
-            otherwise `None` is returned.
-
-        """
+        # Map weights to instantaneous scores, accumulate them. Sum over
+        # dimension 2 (`num` tokens)
         if attn_weights.dtype != torch.float32:
-            raise ValueError(
-                f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}"
-            )
+            raise ValueError(f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}")
         self.scores[
-            : self.batch_size, :, : self.current_length
+            :self.batch_size, :, :self.current_length
         ] += self._instantaneous_score(attn_weights, query_length)
         scores = None
         if self.current_length == self.cache_length:
             # Exclude the grace region, so that these tokens are not evicted
             limit = self.cache_length - self.grace_period
-            scores = self.scores[: self.batch_size, :, :limit]
+            scores = self.scores[:self.batch_size, :, :limit]
             if self.normalize_scores:
                 # Normalize cumulative scores
-                token_pos = self.token_pos[: self.batch_size, :, :limit]
+                token_pos = self.token_pos[:self.batch_size, :, :limit]
                 assert token_pos.shape == scores.shape  # Sanity check
                 other = torch.full(
                     (1, 1, 1),
                     self.prefill_length - 1,
                     dtype=self.token_pos.dtype,
-                    device=self.device,
+                    device=self.device
                 ).expand(*token_pos.shape)
                 token_pos = token_pos.maximum(other)
-                # Note: `input_pos` has been increased already
-                denom = (self.input_pos - token_pos).to(torch.float32)
+                denom = (self.next_token_pos - token_pos).to(torch.float32)
                 scores = scores / denom
             # Subclasses may modify the scores:
             scores = self._modify_scores(scores)
@@ -224,17 +176,17 @@ class H2OKVCache(AttnWeightsKVCache):
 
         Args:
             scores: Score values, shape
-                `(batch_size, n_query_groups, cache_length - grace_period)`
+            `(batch_size, n_query_groups, cache_length - grace_period)`
 
         Returns:
             Modified values, same shape
 
         """
-        return scores  # Default: no modification
+        return scores
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         sz_total, dct_sz = super().size_estimate()
-        sz_sc = 0
+        sz_sc = 0.0
         for scores, name in self._score_buffers():
             sz = int(bitsize_of(scores))
             dct_sz[name] = sz
@@ -242,9 +194,7 @@ class H2OKVCache(AttnWeightsKVCache):
         return sz_total + sz_sc, dict(dct_sz, scores=sz_sc)
 
     @classmethod
-    def size_estimate_apriori(
-        cls, params: KVCacheParams, **kwargs
-    ) -> Tuple[int, Dict[str, int]]:
+    def size_estimate_apriori(cls, params: KVCacheParams, **kwargs) -> Tuple[int, Dict[str, int]]:
         sz_total, dct_sz = super().size_estimate_apriori(params, **kwargs)
         numel = params.max_batch_size * params.n_query_groups * params.cache_length
         sz = int(numel * bits_for_torch_dtype(torch.float32))
@@ -254,14 +204,6 @@ class H2OKVCache(AttnWeightsKVCache):
             sz_sc += sz
         return sz_total + sz_sc, dict(dct_sz, scores=sz_sc)
 
-    def clone(self) -> KVCache:
-        return H2OKVCache(**self._base_kwargs_for_clone())
-
-    def _base_kwargs_for_clone(self) -> Dict[str, Any]:
-        base_kwargs = super()._base_kwargs_for_clone()
-        base_kwargs["normalize_scores"] = self.normalize_scores
-        return base_kwargs
-
 
 class VLengthInstantScoreMixin:
     """
@@ -269,7 +211,6 @@ class VLengthInstantScoreMixin:
     modified to take the length of V vectors into account.
 
     """
-
     def get_v_norm(self) -> torch.Tensor:
         """
         Returns:
@@ -307,8 +248,7 @@ class VLengthInstantScoreMixin:
         NOTE: If we obtained the attention weights NOT summed over the query
         axis, we could first normalize to sum to 1 over the cache length
         dimension, then sum over the query axis, which may be a better score.
-        But we do not obtain the full attention weights (would be a huge
-        tensor).
+        But we do not obtain the full attention weights.
 
         """
         scores = self.get_v_norm() * attn_weights
@@ -321,7 +261,7 @@ class VLengthInstantScoreMixin:
     ) -> Dict[str, torch.Tensor]:
         return {
             self.get_name_v_norm(): vector_norm(
-                value[: self.batch_size],
+                value[:self.batch_size],
                 dim=-1,
                 dtype=torch.float32,
             )
@@ -334,7 +274,7 @@ class VLengthInstantScoreMixin:
     ):
         v_norm_buffer = self.get_v_norm()
         vector_norm(
-            value[: self.batch_size],
+            value[:self.batch_size],
             dim=-1,
             dtype=torch.float32,
             out=v_norm_buffer,
@@ -342,25 +282,6 @@ class VLengthInstantScoreMixin:
 
 
 class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
-    """
-    Variant of H2O. Instead of cumulative attention weights, we use
-    cumulative expected v vector sizes, where the expectation is over the
-    attention weights. The instantaneous score is:
-
-    ..math::
-        S(j) = n_Q * m_j |v_j| / Z,  Z = \sum_j m_j |v_j|,
-         m_j = \sum_i m_{i,j}
-
-    Namely, `m_j` is `attn_weights` summed over the query axis, `|v_j|` the
-    norm of the v vector, n_Q the length of the query axis (`query_length`
-    passed to :meth:`_instantaneous_score`).
-
-    Different to H2O, this score takes the length of v vectors into account as
-    well, which in the end determine the attention outputs alongside the
-    attention weights.
-
-    """
-
     def __init__(
         self,
         config: Config,
@@ -369,8 +290,6 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
         detach_attn_weights: bool = False,
-        keep_initial_fraction: Optional[float] = None,
-        max_chunk_size: Optional[int] = None,
         normalize_scores: bool = False,
         **base_kwargs,
     ):
@@ -381,16 +300,13 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
             grace_period,
             replay_log_blocksize,
             detach_attn_weights,
-            keep_initial_fraction,
-            max_chunk_size,
             normalize_scores,
             **base_kwargs,
         )
         shape = (buffers.max_batch_size, self.n_query_groups, buffers.cache_length)
-        device = self._default_device_for_new_params()
         self.register_buffer(
             self.get_name_v_norm(),
-            torch.zeros(shape, device=device, dtype=torch.float32),
+            torch.zeros(shape, device=buffers.device, dtype=torch.float32),
             persistent=False,
         )
 
@@ -404,9 +320,6 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         dtype: Optional[torch.dtype] = None,
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
-        detach_attn_weights: bool = False,
-        keep_initial_fraction: Optional[float] = None,
-        max_chunk_size: Optional[int] = None,
         normalize_scores: bool = False,
         **base_kwargs,
     ) -> "VLengthH2OKVCache":
@@ -425,9 +338,6 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
             block_idx,
             grace_period,
             replay_log_blocksize,
-            detach_attn_weights,
-            keep_initial_fraction,
-            max_chunk_size,
             normalize_scores,
             **base_kwargs,
         )
@@ -443,24 +353,13 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
     def _score_buffer_names(cls) -> List[str]:
         return super()._score_buffer_names() + [cls.get_name_v_norm()]
 
-    def fix_dtype_of_score_buffers(self):
-        super().fix_dtype_of_score_buffers()
-        if self.v_norm.dtype != torch.float32:
-            self.v_norm = self.v_norm.to(torch.float32)
-
-    @classmethod
-    def _parameter_names(cls) -> List[str]:
-        return super()._parameter_names() + [cls.get_name_v_norm()]
-
     def _instantaneous_score(
         self,
         attn_weights: torch.Tensor,
         query_length: int,
     ) -> torch.Tensor:
         return VLengthInstantScoreMixin._instantaneous_score(
-            self,
-            attn_weights,
-            query_length,
+            self, attn_weights, query_length,
         )
 
     def _initial_scores_in_forward(
@@ -479,22 +378,10 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         VLengthInstantScoreMixin._initial_scores_in_prefill(self, key, value)
 
     def get_v_norm(self) -> torch.Tensor:
-        return self.v_norm[: self.batch_size, :, : self.current_length]
+        return self.v_norm[:self.batch_size, :, :self.current_length]
 
     def get_kv_buffers(self) -> KVCacheBuffers:
         return self.kv_buffers
-
-    def clone(self) -> KVCache:
-        return VLengthH2OKVCache(**self._base_kwargs_for_clone())
-
-
-REMOVE_ARG_NAMES = (
-    "grace_period",
-    "replay_log_blocksize",
-    "detach_attn_weights",
-    "keep_initial_fraction",
-    "max_chunk_size",
-)
 
 
 class H2OOriginalKVCache(AttnWeightsKVCache):
@@ -517,7 +404,6 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
     the score buffer `scores` has a batch dimension, even if it is not used.
 
     """
-
     def __init__(
         self,
         config: Config,
@@ -525,20 +411,14 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
         block_idx: int,
         **base_kwargs,
     ):
-        for name in REMOVE_ARG_NAMES:
-            if name in base_kwargs:
-                raise ValueError(
-                    f"Parameter {name} not supported for this class. Use 'H2OKVCache' instead."
-                )
         super().__init__(config, buffers, block_idx, **base_kwargs)
         # Note: `scores` has a batch dimension, even though it is not used.
         # This is because all score buffers in :class:`AttnWeightsKVCache` have
         # the same shape, which has a batch dimension.
         shape = (self.max_batch_size, self.n_query_groups, buffers.cache_length)
-        device = self._default_device_for_new_params()
         self.register_buffer(
             "scores",
-            torch.zeros(shape, device=device, dtype=torch.float32),
+            torch.zeros(shape, device=buffers.device, dtype=torch.float32),
             persistent=False,
         )
 
@@ -580,14 +460,12 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
         query_length: int,
     ) -> Optional[torch.Tensor]:
         if attn_weights.dtype != torch.float32:
-            raise ValueError(
-                f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}"
-            )
-        # Sum over the batch dimension
+            raise ValueError(f"attn_weights.dtype={attn_weights.dtype}, must be {torch.float32}")
+        # Sum over the batch dimension 0
         aggregated_weights = attn_weights.sum(0, keepdim=True)
-        self.scores[: self.batch_size, :, : self.current_length] += aggregated_weights
+        self.scores[:self.batch_size, :, :self.current_length] += aggregated_weights
         if self.current_length == self.cache_length:
-            return self.scores[: self.batch_size]
+            return self.scores[:self.batch_size]
         else:
             return None
 
@@ -597,9 +475,7 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
         return sz_total + sz_sc, dict(dct_sz, scores=sz_sc)
 
     @classmethod
-    def size_estimate_apriori(
-        cls, params: KVCacheParams, **kwargs
-    ) -> Tuple[int, Dict[str, int]]:
+    def size_estimate_apriori(cls, params: KVCacheParams, **kwargs) -> Tuple[int, Dict[str, int]]:
         numel = params.n_query_groups * params.cache_length
         sz_sc = numel * bits_for_torch_dtype(torch.float32)
         sz_total, dct_sz = super().size_estimate_apriori(params, **kwargs)
@@ -611,17 +487,3 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
     @classmethod
     def _score_buffer_names(cls) -> List[str]:
         return ["scores"]
-
-    @classmethod
-    def _parameter_names(cls) -> List[str]:
-        return super()._parameter_names() + ["scores"]
-
-    def clone(self) -> KVCache:
-        return H2OOriginalKVCache(**self._base_kwargs_for_clone())
-
-    def _base_kwargs_for_clone(self) -> Dict[str, Any]:
-        return {
-            k: v
-            for k, v in super()._base_kwargs_for_clone().items()
-            if k not in REMOVE_ARG_NAMES
-        }

@@ -20,35 +20,24 @@ https://arxiv.org/abs/2304.15010
 
 Port for LitGPT
 """
-
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
 from typing_extensions import Self
 
-import litgpt
-from litgpt.adapter_v2 import AdapterV2Linear
+from litgpt.adapter_v2 import AdapterV2Linear, Config
 from litgpt.scripts.convert_hf_checkpoint import qkv_reassemble
 from litgpt.utils import map_old_state_dict_weights
 
 from keys_values.adapter import (
     GPT as BaseModel,
-    Config as BaseConfig,
     CausalSelfAttention as BaseCausalSelfAttention,
 )
 from keys_values.attention import MultiHeadSelfAttention
 from keys_values.kvcache.base import KVCache
 from keys_values.model import Block as BaseBlock
 from keys_values.use_eager_kernel import transform_mha_kwargs
-
-
-@dataclass
-class Config(BaseConfig):
-    @property
-    def mlp_class(self) -> Type:
-        return getattr(litgpt.adapter_v2, self.mlp_class_name)
 
 
 class GPT(BaseModel):
@@ -66,15 +55,12 @@ class GPT(BaseModel):
         self.transformer = nn.ModuleDict(
             dict(
                 wte=nn.Embedding(config.padded_vocab_size, config.n_embd),
-                h=nn.ModuleList(
-                    Block(config, block_idx) for block_idx in range(config.n_layer)
-                ),
+                h=nn.ModuleList(Block(config, block_idx) for block_idx in range(config.n_layer)),
                 ln_f=config.norm_class(config.n_embd, eps=config.norm_eps),
             )
         )
         self.mha = MultiHeadSelfAttention(
-            config,
-            **transform_mha_kwargs(mha_kwargs, config),
+            config, **transform_mha_kwargs(mha_kwargs, config),
         )
         self.max_seq_length = self.config.block_size
         self._start_of_layer_hook = None
@@ -91,25 +77,11 @@ class GPT(BaseModel):
         if isinstance(module, AdapterV2Linear):
             module.reset_parameters()
 
-    def _load_from_state_dict(
-        self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any
-    ) -> None:
+    def _load_from_state_dict(self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any) -> None:
         """For compatibility with base checkpoints."""
-        mapping = {
-            "lm_head.weight": "lm_head.linear.weight",
-            "lm_head.bias": "lm_head.linear.bias",
-        }
+        mapping = {"lm_head.weight": "lm_head.linear.weight", "lm_head.bias": "lm_head.linear.bias"}
         state_dict = map_old_state_dict_weights(state_dict, mapping, prefix)
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
-
-    def _empty_clone(self, device: Optional[torch.device] = None) -> "GPT":
-        if device is None:
-            model_copy = GPT(self.config)
-        else:
-            with torch.device(device):
-                model_copy = GPT(self.config)
-        model_copy.mha = self.mha
-        return model_copy
 
 
 class Block(BaseBlock):
@@ -126,7 +98,6 @@ class Block(BaseBlock):
 
 class CausalSelfAttention(BaseCausalSelfAttention):
     """A modification of `keys_values.adapter.CausalSelfAttention` that uses the Adapter V2 Linear class"""
-
     def __init__(
         self,
         config: Config,
@@ -136,25 +107,16 @@ class CausalSelfAttention(BaseCausalSelfAttention):
         super().__init__(config, block_idx, kv_cache)
         # key, query, value projections for all heads, but in a batch
         shape = (config.n_head + 2 * config.n_query_groups) * config.head_size
-        self.qkv = AdapterV2Linear(
-            in_features=config.n_embd,
-            out_features=shape,
-            bias=config.bias or config.attn_bias,
-        )
+        self.qkv = AdapterV2Linear(in_features=config.n_embd, out_features=shape, bias=config.bias or config.attn_bias)
         # output projection
-        self.proj = AdapterV2Linear(
-            config.head_size * config.n_head,
-            config.n_embd,
-            bias=config.bias,
-        )
+        self.proj = AdapterV2Linear(config.head_size * config.n_head, config.n_embd, bias=config.bias)
 
-    def _load_from_state_dict(
-        self,
-        state_dict: Dict,
-        prefix: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
+    @property
+    def device(self) -> Optional[torch.device]:
+        w = self.qkv.linear.weight
+        return None if w is None else w.device
+
+    def _load_from_state_dict(self, state_dict: Dict, prefix: str, *args: Any, **kwargs: Any) -> None:
         """For compatibility with base and/or legacy checkpoints."""
         mapping = {
             "qkv.weight": "qkv.linear.weight",
@@ -164,17 +126,13 @@ class CausalSelfAttention(BaseCausalSelfAttention):
         }
         state_dict = map_old_state_dict_weights(state_dict, mapping, prefix)
         # For compatibility with older checkpoints
-        if (key := prefix + "gating_factor") in state_dict and state_dict[key].size(
-            1
-        ) == self.config.n_head:
+        if (key := prefix + "gating_factor") in state_dict and state_dict[key].size(1) == self.config.n_head:
             state_dict[key] = state_dict[key].permute(0, 2, 1, 3)
 
         for attr in ("weight", "bias"):
             legacy_key = f"{prefix}attn.linear.{attr}"
             current_key = f"{prefix}qkv.linear.{attr}"
             if legacy_key in state_dict:
-                state_dict[current_key] = qkv_reassemble(
-                    state_dict.pop(legacy_key), self.config
-                )
+                state_dict[current_key] = qkv_reassemble(state_dict.pop(legacy_key), self.config)
 
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)

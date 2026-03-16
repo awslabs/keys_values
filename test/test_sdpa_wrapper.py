@@ -13,17 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
+import random
 
 import pytest
 import torch
+from torch.nn.attention import SDPBackend
 
-from keys_values.config import Config
+from litgpt.config import Config
 
 from keys_values.attention import (
     DefaultKeysAndValues,
     scaled_dot_product_attention_in_blocks,
 )
-from keys_values.attention_utils import SDPA_KERNELS_BEST_ORDERING
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.test_utils import (
@@ -32,11 +33,11 @@ from keys_values.kvcache.test_utils import (
     range_from_args,
 )
 from keys_values.sdpa_wrapper import scaled_dot_product_attention as wrapper_sdpa
-from keys_values.utils import randint_torch
 
 
 @pytest.mark.parametrize(
-    *product_with_devices(
+    ("n_head", "n_query_groups", "device"),
+    product_with_devices(
         [
             (2, 1),
             (4, 1),
@@ -45,12 +46,12 @@ from keys_values.utils import randint_torch
             (24, 8),
             (9, 3),
         ],
-        "n_head, n_query_groups",
     ),
 )
 @torch.inference_mode()
-def test_sdpa_wrapper(device, n_head, n_query_groups):
+def test_sdpa_wrapper(n_head, n_query_groups, device):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
 
     num_repeats = 32
@@ -64,44 +65,43 @@ def test_sdpa_wrapper(device, n_head, n_query_groups):
         assert_kwargs = dict(atol=0.0005, rtol=0.05)
     else:
         assert_kwargs = dict(atol=0.0015, rtol=0.05)
-    sdpa_kernels = SDPA_KERNELS_BEST_ORDERING.copy()
+    sdpa_kernels = [
+        SDPBackend.FLASH_ATTENTION,
+        SDPBackend.EFFICIENT_ATTENTION,
+        SDPBackend.CUDNN_ATTENTION,
+        SDPBackend.MATH,
+    ]
 
     print(f"n_head={n_head}, n_query_groups={n_query_groups}, device={device}")
     for repeat in range(num_repeats):
-        head_size = 2 ** randint_torch(3, 6)
-        batch_size = randint_torch(1, 5)
-        kv_len = randint_torch(64, 256)
-        input_pos = randint_torch(kv_len, 2 * kv_len)
+        head_size = 2 ** random.randint(3, 6)
+        batch_size = random.randint(1, 5)
+        kv_len = random.randint(64, 256)
+        input_pos = random.randint(kv_len, 2 * kv_len)
         # Sample data: For `token_positions`, we iterate between two
         # cases: Overlap / no overlap between the two parts which are
         # exchanged
         token_positions = torch.zeros(
-            (batch_size, n_query_groups, kv_len),
-            **index_kwargs,
+            (batch_size, n_query_groups, kv_len), **index_kwargs,
         )
         if repeat % 2 == 0:
             # No overlap case
-            q_len = randint_torch(1, kv_len // 2)
+            q_len = random.randint(1, kv_len // 2)
             left_sz = kv_len - q_len
             s1 = input_pos + q_len - left_sz
             l1 = left_sz
             l2 = s1
             for b in range(batch_size):
                 for h in range(n_query_groups):
-                    token_positions[b, h, :left_sz] = (
-                        torch.randperm(
-                            l1,
-                            **index_kwargs,
-                        )
-                        + s1
-                    )
+                    token_positions[b, h, :left_sz] = torch.randperm(
+                        l1, **index_kwargs,
+                    ) + s1
                     token_positions[b, h, left_sz:] = torch.randperm(
-                        l2,
-                        **index_kwargs,
+                        l2, **index_kwargs,
                     )[:q_len]
         else:
             # Overlap case
-            q_len = randint_torch(kv_len // 10, kv_len // 2)
+            q_len = random.randint(kv_len // 10, kv_len // 2)
             s1 = input_pos + q_len - kv_len
             done = False
             for _ in range(50):
@@ -117,9 +117,7 @@ def test_sdpa_wrapper(device, n_head, n_query_groups):
             if not done:
                 print("Did not manage to reach overlap threshold")
         print(f"repeat {repeat}:")
-        print(
-            f"head_size={head_size}, batch_size={batch_size}, kv_len={kv_len}, input_pos={input_pos}, q_len={q_len}"
-        )
+        print(f"head_size={head_size}, batch_size={batch_size}, kv_len={kv_len}, input_pos={input_pos}, q_len={q_len}")
         shape = (batch_size, n_head, q_len, head_size)
         query = torch.randn(shape, **gen_kwargs)
         shape = (batch_size, n_query_groups, kv_len, head_size)
@@ -151,18 +149,19 @@ def test_sdpa_wrapper(device, n_head, n_query_groups):
 
 
 @pytest.mark.parametrize(
-    *product_with_devices(
+    "dtype, tol_kwargs, device",
+    product_with_devices(
         [
             (torch.float32, dict()),
             (torch.bfloat16, dict(atol=0.0005, rtol=0.03)),
             (torch.float16, dict(atol=0.0005, rtol=0.03)),
         ],
-        "dtype, tol_kwargs",
     ),
 )
 @torch.inference_mode()
-def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
+def test_wrapper_with_lastrec_cache(dtype, tol_kwargs, device):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
 
     torch.set_default_dtype(dtype)  # Set default dtype
@@ -188,6 +187,7 @@ def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
         config=config,
         max_batch_size=batch_size,
         cache_length=cache_length,
+        device=device,
         dtype=dtype,
     )
     kwargs = dict(
@@ -204,15 +204,13 @@ def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
     cache_old = KVCacheFactory.create_single(
         **kwargs,
         cache_kwargs=dict(
-            use_eager_kernel=lambda kv_len, q_len: True,
+            use_eager_kernel = lambda kv_len, q_len: True,
         ),
     )
     cache_new = KVCacheFactory.create_single(**kwargs)
     assert cache_old.mha._use_eager_kernel is not None
     data = random_args_cache_forward(
-        params,
-        num=seq_length,
-        vocab_size=vocab_size,
+        params, num=seq_length, vocab_size=vocab_size,
     )
 
     outputs = []
@@ -220,7 +218,12 @@ def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
         input_pos = 0
         parts = []
         for num in tokens_per_chunk:
-            parts.append(cache(**range_from_args(data, input_pos, input_pos + num)))
+            parts.append(
+                cache(
+                    **range_from_args(data, input_pos, input_pos + num),
+                    input_pos=input_pos,
+                )
+            )
             input_pos += num
         outputs.append(torch.cat(parts, dim=1))
 

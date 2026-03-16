@@ -16,31 +16,19 @@ from dataclasses import dataclass
 
 import torch
 
-from keys_values.config import Config
+from litgpt.config import Config
 
 from keys_values.attention import KeysAndValues, DefaultKeysAndValues
 from keys_values.kvcache.base import KVCacheParams
-from keys_values.utils import (
+from keys_values.kvcache.utils import (
     expand_index,
-    index_to_3d,
-    bits_for_torch_dtype,
     bitsize_of,
+    bits_for_torch_dtype,
 )
 
 
 @dataclass(frozen=True)
 class KVCacheBuffersParams:
-    """
-    Note that `device` need not be set. As long as a buffer remains not
-    allocated, its device can be unspecified. It is then determined upon
-    allocation, based on input arguments to the first KV cache call.
-
-    `dtype` need not be set either. In this case, the buffer dtype is
-    determined from input arguments to the first KV cache call. This dtype
-    cannot be changed later.
-
-    """
-
     max_batch_size: int
     n_query_groups: int
     head_size: int
@@ -51,26 +39,25 @@ class KVCacheBuffersParams:
     def from_config(
         config: Config,
         max_batch_size: Optional[int] = None,
-        head_size: Optional[int] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ) -> "KVCacheBuffersParams":
         return KVCacheBuffersParams(
             max_batch_size=max_batch_size,
-            n_query_groups=config.n_query_groups,
-            head_size=config.head_size if head_size is None else head_size,
+            n_query_groups = config.n_query_groups,
+            head_size = config.head_size,
             device=device,
             dtype=dtype,
         )
 
     @staticmethod
-    def from_params(cache_params: KVCacheParams) -> "KVCacheBuffersParams":
+    def from_params(params: KVCacheParams) -> "KVCacheBuffersParams":
         return KVCacheBuffersParams(
-            max_batch_size=cache_params.max_batch_size,
-            n_query_groups=cache_params.n_query_groups,
-            head_size=cache_params.head_size,
-            device=None,
-            dtype=cache_params.dtype,
+            max_batch_size=params.max_batch_size,
+            n_query_groups=params.n_query_groups,
+            head_size=params.head_size,
+            device=params.device,
+            dtype=params.dtype,
         )
 
 
@@ -84,22 +71,18 @@ def positions_wrap_around(
     end: int,
     batch_size: int,
     n_query_groups: int,
-    device: torch.device,
+    device: Optional[torch.device],
     return_tensor: bool = False,
 ) -> PositionsType:
     """
     Returns positions which form a range of length `num`, starting from
-    `current`, and lying in `[min(current, start), end)`. If
-    `current + num >= end`, the range wraps around and consists of two
-    parts. The wrap-around starts at `start`.
-
-    Example: `start = 2, current = 3, end = 8, num = 7` results in
-    `[3, 4, 5, 6, 7, 2, 3]`.
+    `current`, and lying in `[start, end)`. If `current + num > end`, the range
+    wraps around and consists of two parts.
 
     Args:
-        num: Length of positions, must be `<= end - start`
+        num: Length of positions
         current: First entry of positions
-        start: Wrap around starts here
+        start: Start of domain range
         end: End of domain range (not inclusive)
         batch_size: Dimension size for expanding `positions`
         n_query_groups: Dimension size for expanding `positions`
@@ -114,19 +97,19 @@ def positions_wrap_around(
         from shape `(1, 1, num)`.
 
     """
-    assert start <= current < end, f"current = {current}, must be in [{start}, {end})"
-    assert num <= end - start, f"num = {num}, must be <= {end - start}"
+    assert start <= current < end
+    assert num <= end - start
     num1 = min(num, end - current)
     diff = num - num1
     if diff == 0 and not return_tensor:
         return current, current + num
-    if device is None:
-        raise ValueError("device must be given")
     kwargs = dict(device=device, dtype=torch.int64)
     positions = torch.arange(current, current + num1, **kwargs)
     if diff > 0:
-        positions = torch.cat((positions, torch.arange(start, start + diff, **kwargs)))
-    return index_to_3d(positions, batch_size, n_query_groups)
+        positions = torch.cat(
+            (positions, torch.arange(start, start + diff, **kwargs))
+        )
+    return positions.view(1, 1, -1).expand(batch_size, n_query_groups, -1)
 
 
 class KVCacheBuffers(torch.nn.Module):
@@ -137,12 +120,18 @@ class KVCacheBuffers(torch.nn.Module):
     `(batch_size, n_query_groups, cache_length, head_size)`. Instead of
     allocating them in the :class:`KVCache` class, we abstract them here. The
     reason is that some KV caches maintain compressed (e.g., quantized)
-    versions of these buffers, see :class:`QuantizedKVCacheBuffers`.
+    versions of these buffers.
+
+    The general structure for quantized buffers allocates memory for the
+    quantized buffers as members here, and several objects (for different model
+    layers) share a single object with normal arrays, which is used to mediate
+    between the user and quantized storage.
 
     Deallocating and allocating buffers:
 
-    By default, allocation is delayed until first usage. In this case, the
-    device for the buffers is determined from the input arguments.
+    If `allocate_buffers == True`, buffers are allocated when the object is
+    created, using `params.device`. If this is `False`, allocation is delayed
+    until first usage (this is the default).
     Buffers can be deallocated by calling :meth:`deallocate`, to save GPU
     memory when they are not needed. In general, buffers are allocated when
     not present with the next recent call of :meth:`prefill`. There are some
@@ -151,11 +140,11 @@ class KVCacheBuffers(torch.nn.Module):
     * If inference with KV caches is iterated with other operations requiring
         a lot of device memory, the available device memory can be shared.
     * Delayed buffer allocation works better with parallel training
-        frameworks, which may move models to a device after creation. A
-        buffer object can change its device if buffers are deallocated.
+        frameworks, which may move models to a device after creation. On
+        the other hand, using `allocate_buffers=False` risks OOM errors to
+        be delayed until the model is first used.
 
     """
-
     def __init__(
         self,
         params: KVCacheBuffersParams,
@@ -169,15 +158,14 @@ class KVCacheBuffers(torch.nn.Module):
         self.dtype = params.dtype
         self.batch_size = None
         # Number of slots which are occupied. Grows until `cache_length`, then
-        # stays there. Initialized by :meth:`prefill` or :meth:`reset`.
+        # stays there. Initialized by :meth:`prefill`.
         self.current_length = None
 
     @property
-    def device(self) -> Optional[torch.device]:
+    def device(self) -> torch.device:
         """
         Returns:
-            Device the KV cache buffers are kept on. If buffers are not
-            allocated, this can be `None`.
+            Device the KV cache buffers are kept on
 
         """
         raise NotImplementedError()
@@ -289,16 +277,12 @@ class KVCacheBuffers(torch.nn.Module):
         self.batch_size, self.current_length = self._check_prefill(key, value)
         self._prefill(key, value)
 
-    def _check_prefill(
-        self, key: torch.Tensor, value: Optional[torch.Tensor]
-    ) -> Tuple[int, int]:
+    def _check_prefill(self, key: torch.Tensor, value: Optional[torch.Tensor]) -> Tuple[int, int]:
         if key.dim() != 4:
             raise ValueError("key must have 4 dimensions")
         batch_size, _, init_length, _ = key.shape
         if not (1 <= batch_size <= self.max_batch_size):
-            raise ValueError(
-                f"key.shape[0] = {batch_size} must be in [1, {self.max_batch_size}]"
-            )
+            raise ValueError(f"key.shape[0] = {batch_size} must be in [1, {self.max_batch_size}]")
         shape = (batch_size, self.n_query_groups, init_length, self.head_size)
         if key.shape != shape or (value is not None and value.shape != shape):
             msg = f"Shapes of key, value must be {shape}, but key.shape = {key.shape}"
@@ -312,8 +296,7 @@ class KVCacheBuffers(torch.nn.Module):
         For caches which support late buffer allocation and deallocation, this
         method needs to do the allocation based on `batch_size` (not
         `max_batch_size`), and also reallocate existing buffers if they do not
-        fit `batch_size`. Note that `current_length` is already increased
-        before.
+        fit `batch_size`.
 
         """
         raise NotImplementedError()
@@ -327,15 +310,6 @@ class KVCacheBuffers(torch.nn.Module):
         """
         pass
 
-    def reset(self):
-        """
-        Called by :meth:`KVCacheWithBuffers.reset`, resets current length to
-        0. Note that :meth:`prefill` can be called even if :meth:`reset` has
-        not been called before.
-
-        """
-        self.current_length = 0
-
     def deallocate(self):
         """
         Deallocates the buffers. They are automatically reallocated with the
@@ -343,10 +317,6 @@ class KVCacheBuffers(torch.nn.Module):
         scarce and is needed by other operations in between inference calls.
 
         """
-        self._deallocate()
-        self.reset()
-
-    def _deallocate(self):
         raise NotImplementedError()
 
     @property
@@ -371,9 +341,7 @@ class KVCacheBuffers(torch.nn.Module):
         raise NotImplementedError()
 
     @staticmethod
-    def size_estimate_apriori(
-        params: KVCacheBuffersParams, **kwargs
-    ) -> Tuple[int, Dict[str, int]]:
+    def size_estimate_apriori(params: KVCacheBuffersParams, **kwargs) ->Tuple[int, Dict[str, int]]:
         """
         Same semantics as :meth:`size_estimate`, but can be called without a
         cache being created. Results may not be exactly the same, but should
@@ -404,66 +372,48 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
     such (no compression or clever storage).
 
     """
-
     def __init__(
         self,
         params: KVCacheBuffersParams,
         cache_length: int,
         allocate_buffers: bool = False,
-        debug_device_warning: bool = False,
     ):
         super().__init__(params, cache_length)
         self.k = None
         self.v = None
+        self._device = params.device
         if allocate_buffers:
-            self._allocate_buffers(params.device)
-        self._debug_device_warning = debug_device_warning
+            self._allocate_buffers()
 
     @property
-    def device(self) -> Optional[torch.device]:
-        return None if self.k is None else self.k.device
+    def device(self) -> torch.device:
+        if self.k is not None:
+            self._device = self.k.device
+        return self._device
 
-    def _allocate_buffers(
-        self,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
-    ):
-        """
-        Args:
-            device: If given, the buffer must be on this device. It is
-                reallocated if not.
-            dtype: If `self.dtype is None`, it is set to this value. Otherwise,
-                this value is ignored.
-
-        """
+    def _allocate_buffers(self, device: Optional[torch.device] = None):
         if device is None:
-            if self.buffers_are_allocated:
-                device = self.device
-            else:
-                device = torch.get_default_device()
-        if self.dtype is None:
-            self.dtype = dtype
+            device = self.device
         batch_size = self.batch_size
         if not self.buffers_are_allocated:
             if batch_size is None:
                 batch_size = self.max_batch_size
         elif batch_size is not None:
-            if self.k.shape[0] >= batch_size and device == self.device:
+            if self.k.shape[0] >= batch_size:
                 # Buffer exists and is large enough: No need to reallocate
                 batch_size = None
-            elif self.k.shape[0] < batch_size:
-                print(
-                    f"Batch size increased from {self.k.shape[0]} to {batch_size}: Re-allocating buffers"
-                )
+            else:
+                print(f"Batch size increased from {self.k.shape[0]} to {batch_size}: Re-allocating buffers")
         if batch_size is not None:
             shape = (batch_size, self.n_query_groups, self.cache_length, self.head_size)
             self.k = torch.zeros(shape, device=device, dtype=self.dtype)
             self.v = torch.zeros(shape, device=device, dtype=self.dtype)
 
-    def _deallocate(self):
+    def deallocate(self):
         if self.k is not None:
             del self.k
             self.k = None
+        if self.v is not None:
             del self.v
             self.v = None
 
@@ -472,9 +422,7 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         return self.k is not None
 
     def _assert_buffers_allocated_and_initialized(self):
-        assert (
-            self.buffers_are_allocated
-        ), "Buffers are not allocated. Call 'prefill' first"
+        assert self.buffers_are_allocated, "Buffers are not allocated. Call 'prefill' first"
 
     def get_slots(
         self,
@@ -484,12 +432,12 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         positions = self._check_positions(positions)
         if isinstance(positions, torch.Tensor):
             index = expand_index(positions, self.head_size)
-            res_k = self.k[: self.batch_size, ...].gather(-2, index)
-            res_v = self.v[: self.batch_size, ...].gather(-2, index)
+            res_k = self.k[:self.batch_size, ...].gather(-2, index)
+            res_v = self.v[:self.batch_size, ...].gather(-2, index)
         else:
             start, end = positions
-            res_k = self.k[: self.batch_size, :, start:end, :]
-            res_v = self.v[: self.batch_size, :, start:end, :]
+            res_k = self.k[:self.batch_size, :, start:end, :]
+            res_v = self.v[:self.batch_size, :, start:end, :]
         return res_k, res_v
 
     def set_slots(
@@ -499,21 +447,17 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         value: torch.Tensor,
     ):
         self._assert_buffers_allocated_and_initialized()
-        if self._debug_device_warning and key.device != self.device:
-            print(
-                f"WARNING DefaultKVCacheBuffers.set_slots: {key.device} -> {self.device}"
-            )
         key = key.to(device=self.device, dtype=self.dtype)
         value = value.to(device=self.device, dtype=self.dtype)
         positions = self._check_positions(positions)
         if isinstance(positions, torch.Tensor):
             index = expand_index(positions, self.head_size)
-            self.k[: self.batch_size, ...].scatter_(-2, index, key)
-            self.v[: self.batch_size, ...].scatter_(-2, index, value)
+            self.k[:self.batch_size, ...].scatter_(-2, index, key)
+            self.v[:self.batch_size, ...].scatter_(-2, index, value)
         else:
             start, end = positions
-            self.k[: self.batch_size, :, start:end, :] = key
-            self.v[: self.batch_size, :, start:end, :] = value
+            self.k[:self.batch_size, :, start:end, :] = key
+            self.v[:self.batch_size, :, start:end, :] = value
 
     def _forward(
         self,
@@ -525,27 +469,21 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         return self.get_keys_values()
 
     def get_keys_values(self) -> Optional[KeysAndValues]:
-        if (
-            not self.buffers_are_allocated
-            or self.batch_size is None
-            or self.current_length is None
-        ):
+        if not self.buffers_are_allocated or self.batch_size is None or self.current_length is None:
             return None
         else:
             return DefaultKeysAndValues(
-                self.k[: self.batch_size, :, : self.current_length, :],
-                self.v[: self.batch_size, :, : self.current_length, :],
+                self.k[:self.batch_size, :, :self.current_length, :],
+                self.v[:self.batch_size, :, :self.current_length, :],
             )
 
     def _prefill(self, key: torch.Tensor, value: torch.Tensor):
-        if self.buffers_are_allocated and key.device != self.device:
-            raise ValueError(f"key.device = {key.device}, must be {self.device}")
         # Note: `self.batch_size` already set here
-        self._allocate_buffers(device=key.device, dtype=key.dtype)
+        self._allocate_buffers(device=key.device)
         # Initialize cache buffers
         init_length = key.shape[2]
-        self.k[: self.batch_size, :, :init_length, :] = key.to(dtype=self.dtype)
-        self.v[: self.batch_size, :, :init_length, :] = value.to(dtype=self.dtype)
+        self.k[:self.batch_size, :, :init_length, :] = key.to(device=self.device, dtype=self.dtype)
+        self.v[:self.batch_size, :, :init_length, :] = value.to(device=self.device, dtype=self.dtype)
 
     def prefill_from_keys_values(self, k_and_v: KeysAndValues):
         """
@@ -557,18 +495,17 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
 
         """
         keys = k_and_v.keys()
-        if self.buffers_are_allocated and keys.device != self.device:
-            raise ValueError(
-                f"k_and_v.keys.device = {keys.device}, must be {self.device}"
-            )
         self.batch_size, init_length = self._check_prefill(keys, None)
         init_length = min(init_length, self.cache_length)
-        self._allocate_buffers(device=keys.device, dtype=keys.dtype)
+        self._allocate_buffers(device=keys.device)
         self.current_length = init_length
-        keys = keys[:, :, :init_length, :].to(dtype=self.dtype)
-        self.k[: self.batch_size, :, :init_length, :] = keys
-        values = k_and_v.values()[:, :, :init_length, :].to(dtype=self.dtype)
-        self.v[: self.batch_size, :, :init_length, :] = values
+        self.k[:self.batch_size, :, :init_length, :] = keys.to(
+            device=self.device, dtype=self.dtype,
+        )[:, :, :init_length, :]
+        values = k_and_v.values().to(
+            device=self.device, dtype=self.dtype,
+        )[:, :, :init_length, :]
+        self.v[:self.batch_size, :, :init_length, :] = values
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         if not self.buffers_are_allocated:
@@ -577,9 +514,7 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         return sz_buffs, dict(buffers=sz_buffs)
 
     @staticmethod
-    def size_estimate_apriori(
-        params: KVCacheBuffersParams, **kwargs
-    ) -> Tuple[int, Dict[str, int]]:
+    def size_estimate_apriori(params: KVCacheBuffersParams, **kwargs) -> Tuple[int, Dict[str, int]]:
         cache_length = kwargs.get("cache_length")
         if cache_length is None:
             raise IndexError("Argument 'cache_length' is missing")
@@ -588,12 +523,7 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         dtype = params.dtype
         if dtype is None:
             raise ValueError("params.dtype must be provided")
-        numel = (
-            params.max_batch_size
-            * params.n_query_groups
-            * cache_length
-            * params.head_size
-        )
+        numel = params.max_batch_size * params.n_query_groups * cache_length * params.head_size
         sz_buffs = 2 * numel * bits_for_torch_dtype(dtype)
         return sz_buffs, dict(buffers=sz_buffs)
 
@@ -606,10 +536,10 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
                 raise ValueError(f"positions = {positions} is out of bounds")
         else:
             assert (
-                positions.ndim == 3
-                and positions.shape[0] in (1, self.batch_size)
-                and positions.shape[1] in (1, self.n_query_groups)
-                and positions.shape[2] <= self.cache_length
+                positions.ndim == 3 and
+                positions.shape[0] in (1, self.batch_size) and
+                positions.shape[1] in (1, self.n_query_groups) and
+                positions.shape[2] <= self.cache_length
             ), f"positions.shape = {positions.shape} not compatible with batch_size = {self.batch_size}, n_query_groups = {self.n_query_groups}"
             if positions.dtype != torch.int64:
                 positions = positions.to(dtype=torch.int64)

@@ -11,34 +11,66 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import dataclass, replace
+import random
 from itertools import accumulate
-from typing import Optional, Any, Mapping, List, Set, Tuple
+from typing import Optional, Dict, Any, Mapping, List, Set, Tuple
+from dataclasses import dataclass, replace
 
 import torch
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import MultiHeadSelfAttention
-from keys_values.tools.intermediates import DebugIntermediates
 from keys_values.head_model import HeadModel
-from keys_values.kvcache.base import DefaultKVCache
-from keys_values.kvcache.factory import deallocate_kv_cache_buffers_of_model
-from keys_values.kvcache.offloading import KVCacheOffloader
-from keys_values.gpu_memory import RecordGPUMemory
+from keys_values.kvcache.base import KVCache, DefaultKVCache
+from keys_values.kvcache.basics import DenseKVCache
+from keys_values.kvcache.factory import (
+    KVCacheFactory,
+    split_name,
+    deallocate_kv_cache_buffers_of_model,
+)
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
-from keys_values.model import GPT
-from keys_values.utils import (
-    randint_torch,
-    VerbosityLevels,
+from keys_values.kvcache.utils import (
     wrap_tqdm_if_verbose,
+    VerbosityLevels,
     bytes_for_torch_dtype,
 )
+from keys_values.model import GPT, block_iterator
 
-HEAD_OR_INITIAL_TENSORS_MAX_BYTES = 2**31
+
+HEAD_OR_INITIAL_TENSORS_MAX_BYTES = 2 ** 31
 
 CLOSEBY_THRESHOLD = 4
 
-NUM_RANDOM_CHUNK_SIZE_VALUES = 5
+
+@dataclass(frozen=True)
+class KVCacheArgs:
+    name: str  # TODO: Different per layer
+    cache_length: int  # TODO: Different per layer
+    layers_per_cell: int = 1
+    chunk_size: int = 16
+    cache_kwargs: Optional[Dict[str, Any]] = None
+    randomize_chunk_sizes: bool = False
+    single_tokens_for_targets: bool = False,
+    verbose: str = VerbosityLevels.SOME.value
+    allocate_buffers: bool = False
+    attention_forward_temp_size_gb: Optional[float] = None
+    attention_backward_temp_size_gb: Optional[float] = None
+
+    def __post_init__(self):
+        supported_names = KVCacheFactory.supported_names()
+        assert self.name in supported_names, f"name = {self.name} not supported, must be in {supported_names}"
+        assert self.verbose in VerbosityLevels, f"verbose = {self.verbose} not supported, must be in {VerbosityLevels}"
+        assert self.cache_length >= 1
+        assert self.attention_forward_temp_size_gb is None or self.attention_forward_temp_size_gb > 0
+        assert self.attention_backward_temp_size_gb is None or self.attention_backward_temp_size_gb > 0
+
+    @property
+    def verbosity_level(self) -> VerbosityLevels:
+        return VerbosityLevels(self.verbose)
+
+    @property
+    def qname(self) -> str:
+        return split_name(self.name)[1]
 
 
 def create_chunk_sizes(
@@ -56,18 +88,14 @@ def create_chunk_sizes(
     - For every cache, its cache length must be the union of initial chunks,
       so that no cache length falls in the middle of a chunk
 
-    If `randomize_chunk_sizes == True`, chunk sizes after the first are
-    randomized. Randomization is done as follows:
-
-    - Sample 5 different values from `U([L, R])`, where
-      `L = chunk_size - chunk_size // 2`, `R =  chunk_size + chunk_size // 2`
-    - Each chunk size is drawn randomly from these 5
-
-    This is done to limit the number of different chunk sizes, which has
-    advantages for `flex_attention` SDPA.
-
     """
-    mpl = min(c.max_prefill_length for c in gpt_model.get_kv_caches())
+    def get_mpl(cache: KVCache) -> int:
+        mlp = cache.max_prefill_length
+        return cache.cache_length if mlp is None else mlp
+
+    mpl = min(
+        get_mpl(block.attn.kv_cache) for block in block_iterator(gpt_model)
+    )
     if seq_length <= mpl:
         # Does not need anything special, but should still work. Maybe one
         # of the batches is short
@@ -75,9 +103,9 @@ def create_chunk_sizes(
     else:
         points_to_cover = list(
             set(
-                cache.cache_length
-                for cache in gpt_model.get_kv_caches()
-                if cache.cache_length <= seq_length
+                block.attn.kv_cache.cache_length
+                for block in block_iterator(gpt_model)
+                if block.attn.kv_cache.cache_length < seq_length
             )
         )
         chunk_sizes = [mpl]  # First chunk (prefill)
@@ -85,18 +113,9 @@ def create_chunk_sizes(
         step = chunk_size // 2
         min_val = max(chunk_size - step, 1)
         max_val = min(chunk_size + step, points_to_cover[0])
-        if randomize_chunk_sizes:
-            random_sizes = torch.randint(
-                min_val,
-                max_val + 1,
-                (NUM_RANDOM_CHUNK_SIZE_VALUES,),
-            )
-        else:
-            random_sizes = None
         while num_done < seq_length:
             if randomize_chunk_sizes:
-                ind = randint_torch(0, NUM_RANDOM_CHUNK_SIZE_VALUES - 1)
-                c_size = random_sizes[ind].item()
+                c_size = random.randint(min_val, max_val)
             else:
                 c_size = chunk_size
             c_size = min(c_size, seq_length - num_done)
@@ -108,10 +127,7 @@ def create_chunk_sizes(
             num_done += c_size
     assert sum(chunk_sizes) == seq_length  # Sanity check
     _assert_chunk_sizes(
-        chunk_sizes,
-        gpt_model,
-        chunk_size,
-        randomize_chunk_sizes,
+        chunk_sizes, gpt_model, chunk_size, randomize_chunk_sizes,
     )
     return chunk_sizes
 
@@ -122,7 +138,9 @@ def _assert_chunk_sizes(
     chunk_size: int,
     randomize_chunk_sizes: bool,
 ):
-    cache_lengths = [cache.cache_length for cache in gpt_model.get_kv_caches()]
+    cache_lengths = [
+        block.attn.kv_cache.cache_length for block in block_iterator(gpt_model)
+    ]
     min_cat_length = chunk_sizes[0]
     shape_lengths: Set[int] = set()
     for cache_length in set(cache_lengths):
@@ -196,9 +214,10 @@ def write_back_cache_buffers(gpt_model: GPT):
     needed anymore at the end of such a loop.
 
     """
-    for cache in gpt_model.get_kv_caches():
-        if cache is not None:
-            cache.kv_buffers.write_back()
+    for block in block_iterator(gpt_model):
+        kv_cache = block.attn.kv_cache
+        if kv_cache is not None:
+            kv_cache.kv_buffers.write_back()
 
 
 @dataclass(frozen=True)
@@ -207,7 +226,6 @@ class ChunksForCell:
     Structure of grouping of chunks into a cell. :func:`get_chunks_for_cells`
     computes this from `chunks_per_cell` and `chunk_sizes`, over all cells.
     """
-
     input_range: Tuple[int, int]
     first_chunk_idx: int
     chunk_ranges: List[Tuple[int, int]]
@@ -216,7 +234,9 @@ class ChunksForCell:
         assert self.chunk_ranges[0][0] == 0
         assert all(a < b for a, b in self.chunk_ranges)
         assert all(
-            a[1] == b[0] for a, b in zip(self.chunk_ranges[:-1], self.chunk_ranges[1:])
+            a[1] == b[0] for a, b in zip(
+                self.chunk_ranges[:-1], self.chunk_ranges[1:]
+            )
         )
         assert self.chunk_ranges[-1][1] == self.input_range[1] - self.input_range[0]
 
@@ -247,7 +267,7 @@ def get_chunks_for_cells(
         ChunksForCell(
             input_range=input_range,
             first_chunk_idx=first,
-            chunk_ranges=get_chunk_ranges(chunk_sizes[first : (first + num)]),
+            chunk_ranges=get_chunk_ranges(chunk_sizes[first:(first + num)]),
         )
         for input_range, first, num in zip(
             input_ranges,
@@ -323,14 +343,12 @@ def compute_loss_with_limited_logits_tensor(
     config = gpt_model.config
     batch_size, chunk_size, _ = model_outputs_for_chunk.shape
     weights_dtype = gpt_model.transformer.wte.weight.dtype
-    bytes_per_token = (
-        batch_size * config.padded_vocab_size * bytes_for_torch_dtype(weights_dtype)
-    )
+    bytes_per_token = batch_size * config.padded_vocab_size * bytes_for_torch_dtype(weights_dtype)
     max_chunk_size = max(HEAD_OR_INITIAL_TENSORS_MAX_BYTES // bytes_per_token, 1)
     loss_all = 0
     for off in range(0, chunk_size, max_chunk_size):
         len = min(off + max_chunk_size, chunk_size) - off
-        x = gpt_model.lm_head(model_outputs_for_chunk[:, off : (off + len), :])
+        x = gpt_model.lm_head(model_outputs_for_chunk[:, off:(off + len), :])
         loss_part = compute_loss_for_chunk(
             head_model=head_model,
             model_outputs_for_chunk=x,
@@ -380,7 +398,7 @@ class GPTAndHeadModel(torch.nn.Module):
     def __init__(
         self,
         gpt_model: GPT,
-        head_model: Optional[HeadModel],
+        head_model: HeadModel,
     ):
         super().__init__()
         self.gpt_model = gpt_model
@@ -389,7 +407,7 @@ class GPTAndHeadModel(torch.nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        targets: Optional[torch.Tensor],
+        targets: torch.Tensor,
         scale_factor: float = 1.0,
         **kwargs,
     ) -> torch.Tensor:
@@ -402,29 +420,23 @@ class GPTAndHeadModel(torch.nn.Module):
         assign: bool = False,
     ):
         self.gpt_model.load_state_dict(
-            state_dict["gpt_model"],
-            strict=strict,
-            assign=assign,
+            state_dict["gpt_model"], strict=strict, assign=assign,
         )
         self.head_model.load_state_dict(
-            state_dict["head_model"],
-            strict=strict,
-            assign=assign,
+            state_dict["head_model"], strict=strict, assign=assign,
         )
 
 
 class LongContextInferenceModel(GPTAndHeadModel):
     """
-    Wraps a `GPT` and `HeadModel` model (latter optional), provides inference
-    computation for long contexts. For the moment, this means that a sequence
-    batch is processed, so that an evaluation score can be computed (if
-    `head_model` is presented), or new tokens can be generated (no
-    `head_model`).
+    Wraps a `GPT` model, provides inference computation for long contexts.
+    For the moment, this means that a sequence batch is processed, so that
+    an evaluation score can be computed.
+
+    TODO: Fuse this with token generation.
 
     The GPT model `model` must have KV caches assigned to every layer. The
-    caches can have different `cache_length`, but must be of the same type.
-    If there is no `head_model`, then constructing these KV caches by
-    processing a given batch of prompts is the main purpose of this class.
+    caches can be of different type, but must have a fixed `cache_length`.
 
     All memory required here is allocated anew for every :meth:`forward` call,
     depending on the sequence length.
@@ -476,21 +488,16 @@ class LongContextInferenceModel(GPTAndHeadModel):
     :class:`LongContextGradientModel`.
 
     """
-
     def __init__(
         self,
         gpt_model: GPT,
-        head_model: Optional[HeadModel],
+        head_model: HeadModel,
         chunk_size: int = 16,
         randomize_chunk_sizes: bool = False,
-        chunks_per_cell_multiplier: float = 1.0,
+        single_tokens_for_targets: bool = False,
         verbose: VerbosityLevels = VerbosityLevels.SOME,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
-        cache_offloader: Optional[KVCacheOffloader] = None,
-        set_max_seq_length: bool = True,
         debug_single_cell_per_row: bool = False,
-        debug_intermediates: Optional[DebugIntermediates] = None,
-        debug_no_deallocate_buffers: bool = False,
     ):
         """
         If `tmp_array_limit_gb` is given, it maintains a limit on
@@ -503,39 +510,21 @@ class LongContextInferenceModel(GPTAndHeadModel):
             gpt_model: GPT model to train on sequence data. All layers must have
                 KV caches assigned, and these must not be dense. For now, all
                 caches must have the same `cache_length`.
-            head_model: Head model and loss function. Optional. If not given,
-                :meth:`forward` does not return a loss value.
+            head_model: Head model and loss function
             chunk_size: Data batches are processed in chunks of this size
                 (except the first one). See above.
             randomize_chunk_sizes: If `True`, chunk sizes are randomized (with
                 mean `chunk_size`). This may have advantages for model
                 training. Defaults to `False`.
-            chunks_per_cell_multiplier: Each cell contains a number of chunks.
-                The length of a cell is the sum of lengths of its cells. We
-                assign chunks to cells so that cell lengths are close to
-                `int(cache_length * chunks_per_cell_multiplier)`, but not
-                larger. The larger this multiplier, the fewer cells per row,
-                which speeds up computation, but also memory requirements of
-                gradient computation per cell scales linearly in this value.
+            single_tokens_for_targets: If `True`, the targets part of a
+                sequence is processed token per token (i.e., with chunk size
+                1). This is slower, but more realistic, mirroring how inference
+                looks like.
             verbose: Verbosity level, defaults to ``VerbosityLevels.SOME``.
                 For ``VerbosityLevels.ALL``, we print deep diagnostic
                 information
             tmp_array_limit_gb: See above.
-            cache_offloader: If CPU offloading of KV cache buffers is used,
-                this must be supplied. It maintains the quantization states on
-                the CPU.
-            set_max_seq_length: If `True`, we set `gpt_model.max_seq_length` to
-                the length of `input_ids` with each call of :meth:`forward`
-                for which `targets is not None`. The value is passed through
-                to position encoding. If `False`, this is not done, and
-                position encoding is not adjusted to the length of each input
-                batch. If :meth:`forward` is called with `targets=None`, then
-                `gpt_model.max_seq_length` is not changed in any case.
             debug_single_cell_per_row: Internal option, used for unit testing.
-            debug_intermediates: For debugging/testing. Intermediates of
-                forward computation are stored.
-            debug_no_deallocate_buffers: For debugging/testing. KV cache
-                buffers are not deallocated at the end of :meth:`forward`.
 
         """
         super().__init__(gpt_model, head_model)
@@ -543,120 +532,79 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self.config = gpt_model.config
         self.chunk_size = chunk_size
         self.randomize_chunk_sizes = randomize_chunk_sizes
-        if chunks_per_cell_multiplier < 0.1:
-            raise ValueError(
-                f"chunks_per_cell_multiplier = {chunks_per_cell_multiplier}, must be >=0.1"
-            )
-        self.chunks_per_cell_multiplier = chunks_per_cell_multiplier
-        # Becomes an option in subclass for gradient computation:
-        self.single_tokens_for_targets = False
+        self.single_tokens_for_targets = single_tokens_for_targets
         self.verbose = verbose
         self._debug_single_cell_per_row = debug_single_cell_per_row
         cache_params = self.gpt_model.get_kv_cache_params(0)
         self._max_batch_size = cache_params.max_batch_size
         # Set max_prefill_length as minimum over all caches
-        self._max_prefill_length = min(
-            c.max_prefill_length for c in gpt_model.get_kv_caches()
-        )
+        caches = [block.attn.kv_cache for block in block_iterator(gpt_model)]
+        min_cache_length = min(c.cache_length for c in caches)
+        mpl_values = [min_cache_length] + [
+            c.max_prefill_length
+            for c in caches
+            if c.max_prefill_length is not None
+        ]
+        self._max_prefill_length = min(mpl_values)
         self.chunk_sizes = None
         self.chunks_per_cell = None
         self.batch_size = None
         self._tmp_array_limit_gb = tmp_array_limit_gb
-        self.cache_offloader = cache_offloader
-        self._set_max_seq_length = set_max_seq_length
-        self._record_gpu_memory_snapshots = None
-        self._record_gpu_memory_kind = None
-        self.debug_intermediates = debug_intermediates
-        self._debug_no_deallocate_buffers = debug_no_deallocate_buffers
 
-    @staticmethod
     def _check_args(
-        gpt_model: GPT,
+        self,
+        model: GPT,
         chunk_size: int,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit],
     ):
         if chunk_size < 1:
             raise ValueError(f"chunk_size = {chunk_size}, must be >= 1")
         if tmp_array_limit_gb is not None:
-            mha = gpt_model.mha
+            mha = model.mha
             if mha.tmp_array_limit_gb is None:
                 mha.set_tmp_array_limit_gb(tmp_array_limit_gb)
             elif not (mha.tmp_array_limit_gb is tmp_array_limit_gb):
-                raise ValueError(
-                    "tmp_array_limit_gb and gpt_model.mha.tmp_array_limit_gb must be the same object"
-                )
+                raise ValueError("tmp_array_limit_gb and gpt_model.mha.tmp_array_limit_gb must be the same object")
 
-        for block_idx, kv_cache in enumerate(gpt_model.get_kv_caches()):
+        for block_idx, block in enumerate(block_iterator(model)):
+            kv_cache = block.attn.kv_cache
             prefix = f"Block {block_idx} of model: "
             if kv_cache is None:
-                raise ValueError(
-                    prefix + "No KV cache assigned. Use 'model.assign_kv_caches'"
-                )
+                raise ValueError(prefix + "No KV cache assigned. Use 'model.assign_kv_caches'")
+            if isinstance(kv_cache, DenseKVCache):
+                raise ValueError(prefix + "Needs non-dense KV cache. Use 'model.assign_kv_caches'")
             if tmp_array_limit_gb is not None and isinstance(kv_cache, DefaultKVCache):
                 mha = kv_cache.mha
                 if mha.tmp_array_limit_gb is None:
                     mha.set_tmp_array_limit_gb(tmp_array_limit_gb)
                 elif not (mha.tmp_array_limit_gb is tmp_array_limit_gb):
-                    raise ValueError(
-                        prefix
-                        + "tmp_array_limit_gb and block.attn.kv_cache.mha.tmp_array_limit_gb must be the same object"
-                    )
+                    raise ValueError(prefix + "tmp_array_limit_gb and block.attn.kv_cache.mha.tmp_array_limit_gb must be the same object")
 
     def forward(
         self,
         input_ids: torch.Tensor,
-        targets: Optional[torch.Tensor],
+        targets: torch.Tensor,
         scale_factor: float = 1.0,
         **kwargs,
     ) -> torch.Tensor:
         """
         Different to `GPT.forward`, this is processing a batch of full
-        sequences. Depending on whether `targets` are provided or not,
-        this method does different things:
-
-        * `targets` given: Process `input_ids`, compute loss function given
-            by `head_model` (must be given). The loss value is returned.
-            The KV caches are reset, their buffers are deallocated.
-        * `targets` not given: Process `input_ids`. Return logits for the
-            final chunk being processed. The KV caches are not reset, as the
-            model is to be used for token generations.
+        sequences. It also evaluates the head model and computes the loss
+        function.
 
         Args:
             input_ids: Batch of full input token sequences
-            targets: Targets, these are right-aligned with `input_ids`. Only
-                if `head_model` is given. If `head_model` is given and
-                `targets=None`, we return logits as well
+            targets: Targets, these are right-aligned with `input_ids`
             scale_factor: Loss is multiplied by this factor. Defaults to 1.
 
         Returns:
-            Loss values, shape `(batch_size,)`. If `targets` are not given,
-            we return the logits for the final chunk, shape
-            `(batch_size, chunk_size, config.padded_vocab_size)`.
+            Loss values, shape `(batch_size,)`
 
         """
-        if self.head_model is None and targets is not None:
-            print("targets given, but head_model is not: targets are ignored")
-            targets = None
-        if not isinstance(self.gpt_model.mha, MultiHeadSelfAttention):
-            raise ValueError(
-                f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention"
-            )
-        device = self.gpt_model.transformer.wte.weight.device
-        input_ids = input_ids.to(device)
-        if targets is not None:
-            targets = targets.to(device)
         self._init_members_from_tokens(input_ids, targets)
-        # Reset all KV caches
-        self.gpt_model.reset()
+        if not isinstance(self.gpt_model.mha, MultiHeadSelfAttention):
+            raise ValueError(f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention")
         return self._forward_only(input_ids, targets, scale_factor)
-
-    def set_record_gpu_memory(
-        self,
-        record_gpu_memory_snapshots: Optional[RecordGPUMemory],
-        record_gpu_memory_kind: int,
-    ):
-        self._record_gpu_memory_snapshots = record_gpu_memory_snapshots
-        self._record_gpu_memory_kind = record_gpu_memory_kind
 
     def clear(self):
         """
@@ -666,13 +614,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self.chunk_sizes = None
         self.chunks_per_cell = None
         self.batch_size = None
-        self._record_gpu_memory_snapshots = None
-        self._record_gpu_memory_kind = None
 
     def _init_members_from_tokens(
-        self,
-        input_ids: torch.Tensor,
-        targets: Optional[torch.Tensor],
+        self, input_ids: torch.Tensor, targets: torch.Tensor,
     ):
         """
         Initialize members required for processing the current batch.
@@ -683,9 +627,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
             raise ValueError(f"input_ids.shape = {input_ids.shape}, must be 2D")
         batch_size, seq_length = input_ids.shape
         if not (1 <= batch_size <= self._max_batch_size):
-            raise ValueError(
-                f"input_ids.batch_size = {batch_size}, must be in [1, {self._max_batch_size}]"
-            )
+            raise ValueError(f"input_ids.batch_size = {batch_size}, must be in [1, {self._max_batch_size}]")
         self.batch_size = batch_size
         if seq_length > self.config.block_size:
             print(
@@ -695,31 +637,18 @@ class LongContextInferenceModel(GPTAndHeadModel):
             self.config = replace(self.config, block_size=seq_length)
             self.gpt_model.config = self.config
 
-        if targets is not None:
-            if targets.ndim != 2:
-                raise ValueError(f"targets.shape = {targets.shape}: Must be 2D")
-            num_output_tokens = targets.shape[-1]
-            if self.batch_size != targets.shape[0] or not (
-                1 <= num_output_tokens <= seq_length
-            ):
-                raise ValueError(
-                    f"targets.shape = {targets.shape}: Not compatible with batch_size = {self.batch_size} or num_input_tokens = {seq_length}"
-                )
-            if self._set_max_seq_length:
-                # Adjust maximum sequence length, which may affect the position
-                # encoding
-                self.gpt_model.max_seq_length = seq_length
-        else:
-            num_output_tokens = 0
+        if targets.ndim != 2:
+            raise ValueError(f"targets.shape = {targets.shape}: Must be 2D")
+        num_output_tokens = targets.shape[-1]
+        if self.batch_size != targets.shape[0] or not (1 <= num_output_tokens <= seq_length):
+            raise ValueError(f"targets.shape = {targets.shape}: Not compatible with batch_size = {self.batch_size} or num_input_tokens = {seq_length}")
+        self.gpt_model.max_seq_length = seq_length
         # Select chunk sizes and chunks per cell
-        self._select_chunks_and_cells(num_output_tokens, seq_length)
+        self._select_chunks_and_cells(num_output_tokens)
 
-    def _select_chunks_and_cells(
-        self,
-        num_output_tokens: int,
-        seq_length: int,
-    ):
+    def _select_chunks_and_cells(self, num_output_tokens: int):
         # Select chunk sizes
+        seq_length = self.gpt_model.max_seq_length
         if self.single_tokens_for_targets:
             seq_length -= num_output_tokens
         chunk_sizes = create_chunk_sizes(
@@ -728,41 +657,29 @@ class LongContextInferenceModel(GPTAndHeadModel):
             chunk_size=self.chunk_size,
             randomize_chunk_sizes=self.randomize_chunk_sizes,
         )
-        assert all(
-            x > 0 for x in chunk_sizes
-        ), f"chunk_sizes = {chunk_sizes}, must all be positive"
+        assert all(x > 0 for x in chunk_sizes), f"chunk_sizes = {chunk_sizes}, must all be positive"
         if self.single_tokens_for_targets:
             chunk_sizes += [1] * num_output_tokens
         self.chunk_sizes = chunk_sizes
-        # Select chunks per cell. If `chunks_per_cell_multiplier == 1`, the
-        # maximum chunk length is chosen so that the size of embeddings of
-        # this length are equal to the maximum cache buffer size,
+        # Select chunks per cell. This is done in a way so that the length of
+        # each cell (i.e., sum of chunk lengths) is close to `cache_length`,
+        # but not larger.
         if self._debug_single_cell_per_row:
             # This is used for unit testing only: Force single cell per row.
             # Do not use!
             chunks_per_cell = [len(chunk_sizes)]
         else:
-            factor = (
-                2
-                * self.config.n_query_groups
-                * self.config.head_size
-                / self.config.n_embd
-            )
             max_cache_length = max(
-                cache.cache_length for cache in self.gpt_model.get_kv_caches()
-            )
-            max_cell_length = int(
-                factor * max_cache_length * self.chunks_per_cell_multiplier
+                block.attn.kv_cache.cache_length
+                for block in block_iterator(self.gpt_model)
             )
             chunks_per_cell = []
             cell_length = 0
             num_chunks = 0
             for chunk_size in chunk_sizes:
                 new_length = cell_length + chunk_size
-                # If a single chunk is longer than `max_cell_length` (for
-                # example, the first one -- prefill), we need to make an
-                # exception to have a cell longer than `max_cell_length`:
-                if new_length > max_cell_length and num_chunks > 0:
+                if new_length > max_cache_length:
+                    assert num_chunks > 0  # Sanity check
                     chunks_per_cell.append(num_chunks)
                     cell_length = chunk_size
                     num_chunks = 1
@@ -777,31 +694,24 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self,
         x: torch.Tensor,
         layer_idx: int,
+        input_pos: int,
     ):
         """
-        Implemented in subclasses which need layer input checkpointing.
+        Implemented in subclasses which need layer input checkpointing
 
         Args:
-            x: Inputs to layer `layer_idx`. If inputs are processed in chunks,
-                the corresponding `input_pos` for layer must be tracked.
+            x: Inputs to layer `layer_idx`, starting from `input_pos`.
+                The length is that of the current cell
             layer_idx: See above
+            input_pos: See above
 
         """
         pass
 
-    def _do_checkpoint_layer_input(self) -> bool:
-        """
-        Returns:
-            `True` if :meth:`_checkpoint_layer_input` transfers memory
-            from GPU to CPU
-
-        """
-        return False
-
     def _forward_internal(
         self,
         input_ids: torch.Tensor,
-        targets: Optional[torch.Tensor],
+        targets: torch.Tensor,
         scale_factor: float,
     ) -> torch.Tensor:
         """
@@ -813,36 +723,26 @@ class LongContextInferenceModel(GPTAndHeadModel):
         """
         if self._tmp_array_limit_gb is None:
             return self._forward_internal_no_check(
-                input_ids,
-                targets,
-                scale_factor,
+                input_ids, targets, scale_factor,
             )
         else:
             result = None
-            retry_count = 0
             while result is None:
                 try:
                     result = self._forward_internal_no_check(
-                        input_ids,
-                        targets,
-                        scale_factor,
+                        input_ids, targets, scale_factor,
                     )
                 except RuntimeError as ex:
                     oom_exception_action(ex, self._tmp_array_limit_gb)
                     result = None
                     deallocate_kv_cache_buffers_of_model(self.gpt_model)
                     torch.cuda.empty_cache()
-                    retry_count += 1
-                    if self._record_gpu_memory_kind in (1, 3) and retry_count == 2:
-                        self._record_gpu_memory_snapshots.store_current_snapshot()
-                        self._record_gpu_memory_snapshots.stop_recording()
-
             return result
 
     def _forward_internal_no_check(
         self,
         input_ids: torch.Tensor,
-        targets: Optional[torch.Tensor],
+        targets: torch.Tensor,
         scale_factor: float,
     ) -> torch.Tensor:
         """
@@ -852,27 +752,18 @@ class LongContextInferenceModel(GPTAndHeadModel):
         innermost loop over chunks.
 
         """
-        compute_loss = targets is not None
-        assert not compute_loss or self.head_model is not None
         loss_full = 0
         num_input_tokens = input_ids.shape[-1]
-        if compute_loss:
-            weight_per_chunk = chunk_weights_for_loss(
-                head_model=self.head_model,
-                targets=targets,
-                chunk_sizes=self.chunk_sizes,
-                num_input_tokens=num_input_tokens,
-            )
-        else:
-            weight_per_chunk = None
-        logits_final_chunk = None  # Only if no loss is computed
+        weight_per_chunk = chunk_weights_for_loss(
+            head_model=self.head_model,
+            targets=targets,
+            chunk_sizes=self.chunk_sizes,
+            num_input_tokens=num_input_tokens,
+        )
         # Need grouping of chunks into cells, for outermost loop
         chunks_for_cells = get_chunks_for_cells(
-            self.chunks_per_cell,
-            self.chunk_sizes,
+            self.chunks_per_cell, self.chunk_sizes,
         )
-        if self.debug_intermediates is not None:
-            self.debug_intermediates.clear()  # Reset
 
         # Need each layer separately
         model_blocks = [
@@ -884,7 +775,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
             for idx in range(self.config.n_layer)
         ]
         wte = self.gpt_model.transformer.wte
-        alpha = self.config.n_embd**0.5
+        alpha = self.config.n_embd ** 0.5
+        wte_device = wte.weight.device
         with torch.no_grad():
             # Outermost loop over cells (group of chunks)
             for chunks_for_cell in wrap_tqdm_if_verbose(
@@ -892,163 +784,89 @@ class LongContextInferenceModel(GPTAndHeadModel):
             ):
                 start, end = chunks_for_cell.input_range
                 # Input embeddings
-                embeddings = wte(input_ids[:, start:end])
+                embeddings = wte(input_ids[:, start:end].to(device=wte_device))
                 if self.config.scale_embeddings:
                     embeddings = embeddings * alpha
-                if self.debug_intermediates is not None:
-                    self.debug_intermediates.store_wte(embeddings, start, end)
-
                 # Loop over layers
                 for block_idx, block in enumerate(model_blocks):
+                    input_pos = start
                     # Layer input checkpointing
                     self._checkpoint_layer_input(
-                        x=embeddings.detach(),
+                        x=embeddings,
                         layer_idx=block_idx,
+                        input_pos=input_pos,
                     )
-                    if self.gpt_model.start_of_layer_hook is not None:
-                        self.gpt_model.start_of_layer_hook(
-                            embeddings.detach(),
-                            block_idx,
-                        )
                     new_embed_parts = []
                     # Innermost loop over chunks per cell
                     for rel_start, rel_end in chunks_for_cell.chunk_ranges:
-                        if self.debug_intermediates is not None:
-
-                            def callback(
-                                value: torch.Tensor,
-                                postfix: Optional[str] = None,
-                            ):
-                                self.debug_intermediates.store_block(
-                                    value,
-                                    block_idx,
-                                    start,
-                                    end,
-                                    rel_start,
-                                    rel_end,
-                                    postfix,
-                                )
-
-                        else:
-                            callback = None
                         ch_size = rel_end - rel_start
                         x = embeddings[:, rel_start:rel_end, :]
                         abs_start = start + rel_start
-                        idx = input_ids[:, abs_start : (abs_start + ch_size)]
-                        y = block.forward(
-                            x=x,
-                            idx=idx,
-                            debug_intermediates=callback,
+                        idx = input_ids[:, abs_start:(abs_start + ch_size)]
+                        new_embed_parts.append(
+                            block.forward(
+                                x=x,
+                                idx=idx,
+                                input_pos=input_pos,
+                            )
                         )
-                        if self.debug_intermediates is not None:
-                            callback(value=y)
-                        new_embed_parts.append(y)
-                        if not compute_loss:
-                            # We need the final layer output for the last chunk
-                            logits_final_chunk = y.detach()
-                    if self._do_checkpoint_layer_input() and torch.cuda.is_available():
-                        # `_checkpoint_layer_input` called above transfers
-                        # `embeddings` to CPU. For this not to lead to
-                        # corruption of the CPU target, we need to synchronize
-                        # here.
-                        # TODO: Is this really a problem? We don't modify
-                        # `embeddings`, but just unlink it.
-                        torch.cuda.synchronize()
-                    del embeddings
+                        input_pos += ch_size
+                    assert input_pos == end  # Sanity check
                     embeddings = torch.cat(new_embed_parts, dim=1)
-                    assert embeddings.shape[1] == end - start, (
-                        embeddings.shape,
-                        start,
-                        end,
-                    )
-
                 # Layer input checkpointing
                 self._checkpoint_layer_input(
-                    x=embeddings.detach(),
+                    x=embeddings,
                     layer_idx=self.config.n_layer,
+                    input_pos=start,
                 )
-                if self.gpt_model.start_of_layer_hook is not None:
-                    self.gpt_model.start_of_layer_hook(
-                        embeddings.detach(),
-                        self.config.n_layer,
-                    )
-
-                if compute_loss:
-                    # Head model
-                    a = chunks_for_cell.first_chunk_idx
-                    b = a + chunks_for_cell.num_chunks
-                    input_pos = start
-                    for (rel_start, rel_end), weight in zip(
-                        chunks_for_cell.chunk_ranges,
-                        weight_per_chunk[a:b],
-                    ):
-                        ch_size = rel_end - rel_start
-                        output_chunk = embeddings[:, rel_start:rel_end, :]
-                        if self.head_model.needs_logits():
-                            loss_part = compute_loss_with_limited_logits_tensor(
-                                gpt_model=self.gpt_model,
-                                head_model=self.head_model,
-                                model_outputs_for_chunk=output_chunk,
-                                targets=targets,
-                                num_input_tokens=num_input_tokens,
-                                input_pos=input_pos,
-                                scale_factor=weight * scale_factor,
-                            )
-                        else:
-                            loss_part = compute_loss_for_chunk(
-                                head_model=self.head_model,
-                                model_outputs_for_chunk=output_chunk,
-                                targets=targets,
-                                num_input_tokens=num_input_tokens,
-                                input_pos=input_pos,
-                                scale_factor=weight * scale_factor,
-                            )
-                        loss_full = loss_part + loss_full
-                        input_pos += ch_size
-                        if self.debug_intermediates is not None:
-                            self.debug_intermediates.store_loss(
-                                loss_part,
-                                start,
-                                end,
-                                rel_start,
-                                rel_end,
-                            )
-                else:
-                    # `logits_final_chunk` has final layer outputs for last
-                    # chunk. Map to logits
-                    logits_final_chunk = self.gpt_model.lm_head(logits_final_chunk)
-                if self._do_checkpoint_layer_input() and torch.cuda.is_available():
-                    # `_checkpoint_layer_input` called above transfers
-                    # `embeddings` to CPU. For this not to lead to
-                    # corruption of the CPU target, we need to synchronize
-                    # here.
-                    # TODO: Is this really a problem? We don't modify
-                    # `embeddings`, but just unlink it.
-                    torch.cuda.synchronize()
+                # Head model
+                a = chunks_for_cell.first_chunk_idx
+                b = a + chunks_for_cell.num_chunks
+                input_pos = start
+                for (rel_start, rel_end), weight in zip(
+                    chunks_for_cell.chunk_ranges,
+                    weight_per_chunk[a:b],
+                ):
+                    output_chunk = embeddings[:, rel_start:rel_end, :]
+                    if self.head_model.needs_logits():
+                        loss_part = compute_loss_with_limited_logits_tensor(
+                            gpt_model=self.gpt_model,
+                            head_model=self.head_model,
+                            model_outputs_for_chunk=output_chunk,
+                            targets=targets,
+                            num_input_tokens=num_input_tokens,
+                            input_pos=input_pos,
+                            scale_factor=weight * scale_factor,
+                        )
+                    else:
+                        loss_part = compute_loss_for_chunk(
+                            head_model=self.head_model,
+                            model_outputs_for_chunk=output_chunk,
+                            targets=targets,
+                            num_input_tokens=num_input_tokens,
+                            input_pos=input_pos,
+                            scale_factor=weight * scale_factor,
+                        )
+                    loss_full = loss_part + loss_full
+                    input_pos += (rel_end - rel_start)
 
         write_back_cache_buffers(self.gpt_model)  # Just to be safe
-        if self.cache_offloader is not None:
-            self.cache_offloader.flush()
-        if not (targets is None or self._debug_no_deallocate_buffers):
-            if self.verbose is not VerbosityLevels.NONE:
-                print("\nDeallocate KV cache buffers")
-            deallocate_kv_cache_buffers_of_model(self.gpt_model)
-        return loss_full if compute_loss else logits_final_chunk
+        if self.verbose is not VerbosityLevels.NONE:
+            print("\nDeallocate KV cache buffers")
+        deallocate_kv_cache_buffers_of_model(self.gpt_model)
+        return loss_full
 
     def _forward_only(
         self,
         input_ids: torch.Tensor,
-        targets: Optional[torch.Tensor],
+        targets: torch.Tensor,
         scale_factor: float,
     ) -> torch.Tensor:
         # Ensure that all KV caches do not record replay logs
-        for cache in self.gpt_model.get_kv_caches():
-            cache.switch_replay_logging(False)
+        for block in block_iterator(self.gpt_model):
+            block.attn.kv_cache.switch_replay_logging(False)
         if self.verbose is not VerbosityLevels.NONE:
-            print(
-                f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode)"
-            )
+            print(f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode)")
         loss_full = self._forward_internal(input_ids, targets, scale_factor)
-        if not (targets is None or self._debug_no_deallocate_buffers):
-            self.clear()
+        self.clear()
         return loss_full

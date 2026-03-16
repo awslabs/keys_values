@@ -16,6 +16,7 @@ import torch
 
 from keys_values.finetune.batch_transform import SFTBatchTransform
 
+
 PAD_ID = 0
 
 IGNORE_INDEX = -100
@@ -27,51 +28,31 @@ def args_sft_batch_transform():
             dict(
                 input_ids=torch.tensor(
                     [
-                        [1, 2, 3, 4, 5, 6, 7, 8, 9],
+                        [ 1, 2, 3, 4, 5, 6, 7, 8, 9],
                         [10, 11, 12, 13, 14, 15, 16, 17, PAD_ID],
                     ]
                 ),
-                labels=torch.tensor(
+                labels = torch.tensor(
                     [
-                        [
-                            IGNORE_INDEX,
-                            IGNORE_INDEX,
-                            IGNORE_INDEX,
-                            IGNORE_INDEX,
-                            IGNORE_INDEX,
-                            IGNORE_INDEX,
-                            IGNORE_INDEX,
-                            8,
-                            9,
-                        ],
-                        [
-                            IGNORE_INDEX,
-                            IGNORE_INDEX,
-                            IGNORE_INDEX,
-                            IGNORE_INDEX,
-                            14,
-                            15,
-                            16,
-                            17,
-                            IGNORE_INDEX,
-                        ],
+                        [IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX, 8, 9],
+                        [IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX, 14, 15, 16, 17, IGNORE_INDEX],
                     ]
-                ),
+                )
             ),
             dict(
                 input_ids=torch.tensor(
                     [
-                        [1, 2, 3, 4, 5, 6, 7, 8, 9, PAD_ID],
+                        [ 1, 2, 3, 4, 5, 6, 7, 8, 9, PAD_ID],
                         [PAD_ID, PAD_ID, PAD_ID, 10, 11, 12, 13, 14, 15, 16],
                     ]
                 ),
-                targets=torch.tensor(
+                targets = torch.tensor(
                     [
                         [8, 9, IGNORE_INDEX, IGNORE_INDEX],
                         [14, 15, 16, 17],
                     ]
                 ),
-            ),
+            )
         ),
         (
             dict(
@@ -80,7 +61,7 @@ def args_sft_batch_transform():
                         ([1] * 10) + ([PAD_ID] * 6),
                         ([2] * 6) + ([PAD_ID] * 10),
                         ([3] * 14) + ([PAD_ID] * 2),
-                        [4] + ([PAD_ID] * 15),
+                        [4]  + ([PAD_ID] * 15),
                         [5] * 16,
                         ([6] * 8) + ([PAD_ID] * 8),
                         ([7] * 5) + ([PAD_ID] * 11),
@@ -98,7 +79,7 @@ def args_sft_batch_transform():
                         ([IGNORE_INDEX] * 4) + [15] + ([IGNORE_INDEX] * 11),
                         ([IGNORE_INDEX] * 6) + ([16] * 7) + ([IGNORE_INDEX] * 3),
                     ]
-                ),
+                )
             ),
             dict(
                 input_ids=torch.tensor(
@@ -125,7 +106,7 @@ def args_sft_batch_transform():
                         ([16] * 7) + ([IGNORE_INDEX] * 3),
                     ]
                 ),
-            ),
+            )
         ),
     ]
 

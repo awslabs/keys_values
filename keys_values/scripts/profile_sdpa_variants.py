@@ -12,15 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
+import random
 import time
 from typing import List
 
 import torch
+from torch.nn.attention import SDPBackend
 import numpy as np
 
-from keys_values.config import Config
+from litgpt.config import Config
 
-from keys_values.attention_utils import SDPA_KERNELS_BEST_ORDERING
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.test_utils import random_args_cache_forward
 from keys_values.sdpa_wrapper import scaled_dot_product_attention
@@ -38,12 +39,18 @@ def main(
     warmup_repeats: int = 2,
 ):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
     on_gpu = torch.cuda.is_available()
     device = torch.device("cuda", 0) if on_gpu else torch.device("cpu")
 
     index_kwargs = dict(dtype=torch.int64, device=device)
-    sdpa_kernels = SDPA_KERNELS_BEST_ORDERING.copy()
+    sdpa_kernels = [
+        SDPBackend.FLASH_ATTENTION,
+        SDPBackend.EFFICIENT_ATTENTION,
+        SDPBackend.CUDNN_ATTENTION,
+        SDPBackend.MATH,
+    ]
     params = KVCacheParams(
         max_batch_size=batch_size,
         n_query_groups=config.n_query_groups,
@@ -51,22 +58,19 @@ def main(
         head_size=config.head_size,
         n_head=config.n_head,
         dtype=dtype,
+        device=device,
     )
     input_pos = 2 * cache_length
     scale_factor = 1.0 / math.sqrt(config.head_size)
 
-    print(
-        f"config = {config}\ncache_length = {cache_length}\nbatch_size = {batch_size}\ndtype = {dtype}"
-    )
+    print(f"config = {config}\ncache_length = {cache_length}\nbatch_size = {batch_size}\ndtype = {dtype}")
     for chunk_size in chunk_sizes:
         print(f"\nchunk_size = {chunk_size}")
         results = np.zeros((3, num_repeats), dtype=np.float64)
         for repeat in [None] * warmup_repeats + list(range(num_repeats)):
             # Sample input data
             data = random_args_cache_forward(
-                params,
-                cache_length,
-                config.padded_vocab_size,
+                params, cache_length, config.padded_vocab_size,
             )
             data["query"] = data["query"][:, :, :chunk_size, :]
             token_positions = torch.randint(
@@ -79,9 +83,7 @@ def main(
                 for h in range(config.n_query_groups):
                     randpos = torch.randperm(cache_length, **index_kwargs)[:chunk_size]
                     token_positions[b, h, randpos] = torch.arange(
-                        input_pos,
-                        input_pos + chunk_size,
-                        **index_kwargs,
+                        input_pos, input_pos + chunk_size, **index_kwargs,
                     )
             sdpa_kwargs = dict(
                 query=data["query"],
