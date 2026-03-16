@@ -11,11 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple, Iterable, Dict, Any, List, Union
+from typing import Optional, Tuple, Iterable, Dict, Any
 
 import torch
 
-from keys_values.config import Config
+from litgpt.config import Config
+from litgpt.model import batched_index_select
 
 from keys_values.kvcache.base import KVCache
 from keys_values.model import Block, GPT
@@ -27,9 +28,12 @@ class CellBlocks:
     :class:`CellComputation`.
 
     """
-
     def __init__(self, config: Config):
         self.config = config
+
+    @property
+    def _full_rope_params(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
 
     @property
     def max_seq_length(self) -> int:
@@ -39,26 +43,36 @@ class CellBlocks:
         self,
         x: torch.Tensor,
         idx: torch.Tensor,
-        **forward_kwargs,
+        input_pos: int,
     ) -> torch.Tensor:
         batch_size, chunk_len, n_embd = x.shape
         if n_embd != self.config.n_embd:
-            raise ValueError(
-                f"x.shape[2] = {n_embd} != {self.config.n_embd} = config.n_embd"
-            )
+            raise ValueError(f"x.shape[2] = {n_embd} != {self.config.n_embd} = config.n_embd")
         if idx.shape != (batch_size, chunk_len):
-            raise ValueError(
-                f"idx.shape = {idx.shape}, must be {(batch_size, chunk_len)}"
-            )
+            raise ValueError(f"idx.shape = {idx.shape}, must be {(batch_size, chunk_len)}")
         if chunk_len > self.max_seq_length:
-            raise ValueError(
-                f"Cannot forward chunk of length {chunk_len}, max seq length is only {self.max_seq_length}"
+            raise ValueError(f"Cannot forward chunk of length {chunk_len}, max seq length is only {self.max_seq_length}")
+        for block_idx, block in self.blocks():
+            self._check_kv_cache(
+                block.attn.kv_cache, input_pos, block_idx, batch_size, chunk_len,
             )
-        for block_idx, cache in self.get_kv_caches():
-            self._check_kv_cache(cache, block_idx, batch_size, chunk_len)
+        # `cos`, `sin` have shape `(1, T, config.rope_n_elem)`, or shape
+        # `(1, T, config.rope_n_elem, 2)`
+        rope_params = self._rope_params_for_chunk(input_pos, chunk_len)
         # Loop over blocks
         for block_idx, block, block_kwargs in self.blocks_with_kwargs():
-            x = block(x, token_idx=idx, **block_kwargs, **forward_kwargs)
+            device = block.attn.device
+            _cos, _sin = self._rope_params_for_block(
+                rope_params, block_idx, device,
+            )
+            x = block(
+                x.to(device=device),
+                cos=_cos,
+                sin=_sin,
+                token_idx=idx.to(device=device),
+                input_pos=input_pos,
+                **block_kwargs,
+            )
 
         return x
 
@@ -75,7 +89,7 @@ class CellBlocks:
         Returns:
             Sequence of `(block_idx, block, block_kwargs)` of model blocks,
             in increasing order. We call
-            `x = block(x, token_idx, **block_kwargs)`.
+            `x = block(x, cos, sin, token_idx, input_pos, **block_kwargs)`.
 
         """
         raise NotImplementedError
@@ -83,49 +97,67 @@ class CellBlocks:
     def blocks(self) -> Iterable[Tuple[int, Block]]:
         return [(a, b) for a, b, _ in self.blocks_with_kwargs()]
 
-    def get_kv_caches(self) -> List[Tuple[int, KVCache]]:
-        return [
-            (block_idx, block.attn.kv_cache)
-            for block_idx, block, _ in self.blocks_with_kwargs()
-        ]
-
-    @staticmethod
     def _check_kv_cache(
+        self,
         kv_cache: KVCache,
+        input_pos: int,
         block_idx: int,
         batch_size: int,
         chunk_len: int,
     ):
-        if kv_cache is not None:
-            if kv_cache.input_pos == 0:
-                if kv_cache.max_batch_size < batch_size:
-                    raise ValueError(
-                        f"Batch size {batch_size} is too large for KV cache layer {block_idx} (batch size {kv_cache.max_batch_size}). Use 'assign_kv_caches' or `set_kv_caches'"
-                    )
-            else:
-                if kv_cache.max_forward_length() < chunk_len:
-                    raise ValueError(
-                        f"KV cache for layer {block_idx}: chunk_len = {chunk_len}, must be <= max_forward_length() = {kv_cache.max_forward_length()} (input_pos = {kv_cache.input_pos})"
-                    )
-
-    def assign_kv_caches(
-        self,
-        kv_caches: Union[List[KVCache], List[Tuple[int, KVCache]]],
-    ):
-        if len(kv_caches) != self.num_layers:
-            raise ValueError(
-                f"kv_caches must have one entry per layer, so {self.num_layers} entries"
-            )
-        if isinstance(kv_caches[0], KVCache):
-            for cache, (_, block) in zip(kv_caches, self.blocks()):
-                block.attn.kv_cache = cache
+        if kv_cache is None:
+            raise ValueError(f"Block {block_idx} has no KV cache")
+        if input_pos == 0:
+            if kv_cache.max_batch_size < batch_size:
+                raise ValueError(
+                    f"Batch size {batch_size} is too large for KV cache layer {block_idx} (batch size {kv_cache.max_batch_size}). Use 'assign_kv_caches' or `set_kv_caches'"
+                )
         else:
-            for (_, cache), (_, block) in zip(kv_caches, self.blocks()):
-                block.attn.kv_cache = cache
+            if kv_cache.next_token_pos is None:
+                raise ValueError("Inference calls need to start with pre-fill, i.e. 'input_pos=0'")
+            if kv_cache.next_token_pos != input_pos:
+                raise ValueError(
+                    f"KV cache for layer {block_idx}: input_pos = {input_pos} != {kv_cache.next_token_pos} = kv_cache.next_token_pos"
+                )
+            if kv_cache.max_tokens_forward < chunk_len:
+                raise ValueError(
+                    f"KV cache for layer {block_idx}: chunk_len = {chunk_len}, must be <= max_tokens_forward = {kv_cache.max_tokens_forward}"
+                )
 
-    def clear_kv_caches(self):
-        for _, block in self.blocks():
-            block.attn.kv_cache = None
+    def _rope_params_for_chunk(
+        self,
+        input_pos: int,
+        chunk_len: int,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        if self.config.rope_n_elem > 0:
+            full_cos, full_sin = self._full_rope_params
+            input_pos_array = torch.arange(
+                input_pos,
+                input_pos + chunk_len,
+                device=full_cos.device,
+                dtype=torch.int64,
+            )
+            cos = batched_index_select(full_cos, 0, input_pos_array).unsqueeze(0)
+            sin = batched_index_select(full_sin, 0, input_pos_array).unsqueeze(0)
+        else:
+            cos = sin = None
+        return cos, sin
+
+    def _rope_params_for_block(
+        self,
+        rope_params_for_chunk: Tuple[Optional[torch.Tensor], Optional[torch.Tensor]],
+        block_idx: int,
+        device: torch.device,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        _cos, _sin = rope_params_for_chunk
+        if _cos is not None and self.config.rope_indices is not None:
+            # Select global (0) or local (1) variant
+            _cos = _cos[..., self.config.rope_indices[block_idx]]
+            _sin = _sin[..., self.config.rope_indices[block_idx]]
+        if _cos is not None:
+            _cos = _cos.to(device=device)
+            _sin = _sin.to(device=device)
+        return _cos, _sin
 
 
 class DefaultCellBlocks(CellBlocks):
@@ -139,6 +171,10 @@ class DefaultCellBlocks(CellBlocks):
         self._model = model
         self._first_layer_idx = first_layer_idx
         self._num_layers = num_layers
+
+    @property
+    def _full_rope_params(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self._model.cos, self._model.sin
 
     @property
     def max_seq_length(self) -> int:

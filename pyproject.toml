@@ -1,30 +1,31 @@
+[build-system]
+requires = [
+    "setuptools>=61.0",
+    "wheel",
+    "torch>=2.0.0",
+]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "keys-vals"
-dynamic = ["version"]
-description = "Efficient Inference, Fine-tuning and Key-Value Caching on top of LitGPT"
+name = "keys_values"
+version = "0.1.dev1"
+description = "Efficient Inference, Fine-tuning and Key-value Caching on top of LitGPT"
 authors = [
     { name = "Matthias Seeger", email = "mseeger@gmail.com" },
 ]
 readme = "README.md"
 license = { file = "LICENSE" }
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3.8",
-]
 requires-python = ">=3.8"
-
-urls.homepage = "https://github.com/awslabs/keys_values"
-scripts.keys_values = "keys_values.__main__:main"
-
 dependencies = [
+    "torchao",
     "filelock",
-    "black>=26.3.1",
-    "flake8",
 ]
+
+[project.urls]
+homepage = "https://github.com/awslabs/keys_values"
+
+[project.scripts]
+keys_values = "keys_values.__main__:main"
 
 [tool.setuptools.packages.find]
 include = [
@@ -33,5 +34,8 @@ include = [
 ]
 exclude = []
 
-[tool.setuptools.dynamic]
-version = {attr = "keys_values.read_version"}
+[tool.setuptools.package-data]
+keys_values = [
+    "LICENSE",
+    "README.md",
+]

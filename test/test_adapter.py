@@ -24,11 +24,7 @@ from transformers.models.gemma2 import Gemma2Config, Gemma2ForCausalLM
 from transformers.models.gemma3 import Gemma3ForCausalLM, Gemma3TextConfig
 
 from litgpt.adapter import adapter_filter, Config
-from litgpt.scripts.convert_hf_checkpoint import (
-    copy_weights_gemma_2,
-    copy_weights_gemma_3,
-    copy_weights_hf_llama,
-)
+from litgpt.scripts.convert_hf_checkpoint import copy_weights_gemma_2, copy_weights_gemma_3, copy_weights_hf_llama
 from litgpt.scripts.convert_lit_checkpoint import qkv_reassemble as make_qkv_interleaved
 from litgpt.utils import _RunIf
 
@@ -68,14 +64,7 @@ def test_adapter_filter(tmp_path):
 
 
 def test_adapter_gpt_init_weights():
-    config = Config(
-        n_layer=1,
-        n_head=6,
-        n_embd=12,
-        block_size=1,
-        vocab_size=1,
-        adapter_start_layer=0,
-    )
+    config = Config(n_layer=1, n_head=6, n_embd=12, block_size=1, vocab_size=1, adapter_start_layer=0)
     model = GPT(config)
     param = model.transformer.h[0].attn.gating_factor
 
@@ -90,9 +79,7 @@ def test_adapter_gpt_init_weights():
 @torch.inference_mode()
 def test_adapter_compile():
     model = GPT.from_name("pythia-14m", n_layer=3)
-    x = torch.randint(
-        model.config.vocab_size, size=(2, model.config.block_size), dtype=torch.int64
-    )
+    x = torch.randint(model.config.vocab_size, size=(2, model.config.block_size), dtype=torch.int64)
 
     explanation = torch._dynamo.explain(model)(x)
     assert isinstance(explanation, debugging.ExplainOutput)
@@ -101,7 +88,7 @@ def test_adapter_compile():
 
     model = GPT(model.config)
     model.set_kv_caches(2)
-    explanation = torch._dynamo.explain(model)(x)
+    explanation = torch._dynamo.explain(model)(x, input_pos=0)
     assert isinstance(explanation, debugging.ExplainOutput)
     assert explanation.graph_count == 1
     assert explanation.graph_break_count == 0
@@ -113,9 +100,7 @@ def test_against_hf_gemma(model_name):
     device = torch.device("cpu")
     dtype = torch.float32
     T = 5
-    ours_config = Config.from_name(
-        model_name, n_layer=2, n_head=16, n_embd=32, intermediate_size=86
-    )
+    ours_config = Config.from_name(model_name, n_layer=2, n_head=16, n_embd=32, intermediate_size=86)
     theirs_config = GemmaConfig(
         vocab_size=ours_config.padded_vocab_size,
         hidden_size=ours_config.n_embd,
@@ -214,9 +199,7 @@ def test_against_original_gemma_2(model_name, device, dtype):
     ours_model.load_state_dict(state_dict)
 
     # test end to end
-    x = torch.randint(
-        low=0, high=ours_config.padded_vocab_size, size=(T,), device=device
-    ).unsqueeze(0)
+    x = torch.randint(low=0, high=ours_config.padded_vocab_size, size=(T,), device=device).unsqueeze(0)
     assert x.size(1) == T
     ours_y = ours_model(x)
     theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
@@ -224,9 +207,7 @@ def test_against_original_gemma_2(model_name, device, dtype):
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize(
-    "model_name", ("gemma-3-1b-it", "gemma-3-4b-it", "gemma-3-12b-it", "gemma-3-27b-it")
-)
+@pytest.mark.parametrize("model_name", ("gemma-3-1b-it", "gemma-3-4b-it", "gemma-3-12b-it", "gemma-3-27b-it"))
 @pytest.mark.parametrize(
     ("device", "dtype"),
     [
@@ -289,9 +270,7 @@ def test_against_original_gemma_3(model_name, device, dtype):
     ours_model.load_state_dict(state_dict)
 
     # test end to end
-    x = torch.randint(
-        low=0, high=ours_config.padded_vocab_size, size=(T,), device=device
-    ).unsqueeze(0)
+    x = torch.randint(low=0, high=ours_config.padded_vocab_size, size=(T,), device=device).unsqueeze(0)
     assert x.size(1) == T
     ours_y = ours_model(x)
     theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
@@ -313,9 +292,7 @@ def test_load_legacy_state_dict():
     # make weights to be as-like in a legacy checkpoint, with `attn.attn.weight` instead of `attn.qkv.weight`
     # and make them interleaved
     state_dict = deepcopy(attention_1.state_dict())
-    state_dict["attn.weight"] = make_qkv_interleaved(
-        state_dict.pop("qkv.weight"), config
-    )
+    state_dict["attn.weight"] = make_qkv_interleaved(state_dict.pop("qkv.weight"), config)
     state_dict["attn.bias"] = make_qkv_interleaved(state_dict.pop("qkv.bias"), config)
 
     attention_2 = CausalSelfAttention(config=config, block_idx=0)

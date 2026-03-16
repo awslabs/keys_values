@@ -12,16 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import replace
 from itertools import product
 import math
-from typing import Optional, Tuple, List
+import random
+from typing import Optional, Tuple
 
 import pytest
 import torch
 from torch.nn import functional as F
 
-from keys_values.config import Config
+from litgpt.config import Config
 from litgpt.model import (
     apply_rope,
     build_rope_cache,
@@ -41,25 +41,18 @@ from keys_values.attention_utils import (
     sample_token_positions,
     ENTRIES_PER_GB,
 )
-from keys_values.head_model import CrossEntropyOnLogits
-from keys_values.head_model_factory import HeadModelFactory
-from keys_values.kvcache.base import KVCache, KVCacheParams, DefaultKVCache
-from keys_values.kvcache.gradient.cell import CellComputation
-from keys_values.kvcache.gradient.main import LongContextGradientModel
-from keys_values.kvcache.stack_layers import DefaultCellBlocks
+from keys_values.kvcache.base import KVCache
 from keys_values.kvcache.test_utils import (
     product_with_devices,
     available_backends,
-    create_kv_cache,
 )
 from keys_values.model import GPT, CausalSelfAttention
-from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
-from keys_values.pos_encoding import LinearPositionEncoding
-from keys_values.utils import repeat_interleave, randint_torch
+from keys_values.use_eager_kernel import transform_mha_kwargs
 
 
 @pytest.mark.parametrize(
-    *product_with_devices(
+    ("n_head", "n_query_groups", "device"),
+    product_with_devices(
         [
             (2, 1),
             (4, 1),
@@ -68,12 +61,12 @@ from keys_values.utils import repeat_interleave, randint_torch
             (24, 8),
             (9, 3),
         ],
-        "n_head, n_query_groups",
     ),
 )
 @torch.inference_mode()
-def test_scaled_dot_product_attention(device, n_head, n_query_groups):
+def test_scaled_dot_product_attention(n_head, n_query_groups, device):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
     num_repeats = 32
     dtype = torch.bfloat16
@@ -82,9 +75,9 @@ def test_scaled_dot_product_attention(device, n_head, n_query_groups):
     sliding_window_size = None
 
     for repeat in range(num_repeats):
-        head_size = 2 ** randint_torch(3, 6)
-        batch_size = randint_torch(1, 5)
-        len_key = randint_torch(16, 128)
+        head_size = 2 ** random.randint(3, 6)
+        batch_size = random.randint(1, 5)
+        len_key = random.randint(16, 128)
         mask = None
         if repeat % 2 == 0:
             len_query = len_key
@@ -96,17 +89,13 @@ def test_scaled_dot_product_attention(device, n_head, n_query_groups):
             input_pos = 0
             token_positions = None
         elif repeat % 4 == 1:
-            len_query = randint_torch(1, len_key // 2)
-            token_positions = (
-                torch.arange(
-                    0,
-                    len_key,
-                    dtype=torch.int64,
-                    device=device,
-                )
-                .view(1, 1, -1)
-                .expand(batch_size, n_query_groups, -1)
-            )
+            len_query = random.randint(1, len_key // 2)
+            token_positions = torch.arange(
+                0,
+                len_key,
+                dtype=torch.int64,
+                device=device,
+            ).view(1, 1, -1).expand(batch_size, n_query_groups, -1)
             input_pos = len_key // 2
             mask = build_mask_slice(
                 input_pos=len_key - len_query,
@@ -138,8 +127,9 @@ def test_scaled_dot_product_attention(device, n_head, n_query_groups):
             sliding_window_size=sliding_window_size,
             mask=mask,
         )
-        key_bc = repeat_interleave(key, n_head)
-        value_bc = repeat_interleave(value, n_head)
+        q_per_kv = n_head // n_query_groups
+        key_bc = key.repeat_interleave(q_per_kv, dim=1)
+        value_bc = value.repeat_interleave(q_per_kv, dim=1)
         k_and_v_bc = DefaultKeysAndValues(key_bc, value_bc)
         result_cmp, attn_weights_cmp = eager_scaled_dot_product_attention(
             query,
@@ -153,18 +143,18 @@ def test_scaled_dot_product_attention(device, n_head, n_query_groups):
             mask=mask,
         )
         attn_weights_cmp = attn_weights_cmp.view(
-            batch_size,
-            n_query_groups,
-            -1,
-            len_key,
+            batch_size, n_query_groups, -1, len_key,
         ).mean(dim=2)
-        msg = f"bs={batch_size}, hs={head_size}, nh_q={n_head}, nh_k={n_query_groups}, len_q={len_query}, len_k={len_key}"
+        msg = (
+            f"bs={batch_size}, hs={head_size}, nh_q={n_head}, nh_k={n_query_groups}, len_q={len_query}, len_k={len_key}"
+        )
         torch.testing.assert_close(result, result_cmp, **assert_kwargs), msg
         torch.testing.assert_close(attn_weights, attn_weights_cmp, **assert_kwargs), msg
 
 
 @pytest.mark.parametrize(
-    *product_with_devices(
+    ("sliding_window_size", "batch_size", "n_query_groups", "device"),
+    product_with_devices(
         [
             (None, 1, 1),
             (None, 4, 16),
@@ -172,28 +162,29 @@ def test_scaled_dot_product_attention(device, n_head, n_query_groups):
             (4, 2, 32),
             (128, 1, 1),
             (128, 4, 16),
-        ],
-        "sliding_window_size, batch_size, n_query_groups",
+        ]
     ),
 )
 @torch.inference_mode()
 def test_build_mask_slice(
-    device: torch.device,
     sliding_window_size: Optional[int],
     batch_size: int,
     n_query_groups: int,
+    device: torch.device,
 ):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
     num_repeats = 30
     dtype = torch.bfloat16
+    device = torch.device("cpu")
 
     for _ in range(num_repeats):
-        seq_len = randint_torch(16, 256)
+        seq_len = random.randint(16, 256)
         full_mask = build_mask_cache(seq_len, sliding_window_size, device, dtype)
-        input_pos = randint_torch(1, seq_len - 1)
-        num = randint_torch(1, min(16, seq_len - input_pos))
-        cache_length = randint_torch(8, seq_len - 4)
+        input_pos = random.randint(1, seq_len - 1)
+        num = random.randint(1, min(16, seq_len - input_pos))
+        cache_length = random.randint(8, seq_len - 4)
         token_positions = torch.zeros(
             (batch_size, n_query_groups, cache_length),
             dtype=torch.int64,
@@ -222,19 +213,20 @@ def test_build_mask_slice(
 
 
 @pytest.mark.parametrize(
-    "device, dtype",
+    "dtype, device",
     product(
-        available_backends(),
         [torch.float32, torch.float16, torch.bfloat16],
+        available_backends(),
     ),
 )
-def test_mask_sliding_window(device, dtype):
+def test_mask_sliding_window(dtype, device):
     """
     Compares `mask` used in MHA in training mode in old code (using
     `mask_cache`) and new code, using a setup from
     :func:`test_against_original_gemma_2` above.
 
     """
+    device = torch.device("cpu")
     T = 20
     model_name = "gemma-2-27b"
     config = Config.from_name(
@@ -253,9 +245,7 @@ def test_mask_sliding_window(device, dtype):
     old_mask = torch.ones(T, T, dtype=dtype, device=device).triu(diagonal=1)
     old_mask.masked_fill_(old_mask.bool(), neg_infty)
     old_mask = old_mask.view(1, 1, *old_mask.shape)
-    sliding_window_bias = torch.ones_like(old_mask).tril(
-        diagonal=-config.sliding_window_size
-    )
+    sliding_window_bias = torch.ones_like(old_mask).tril(diagonal=-config.sliding_window_size)
     sliding_window_bias.masked_fill_(sliding_window_bias.bool(), neg_infty)
     old_mask += sliding_window_bias
     # Determine mask as in new code
@@ -275,24 +265,16 @@ class CausalSelfAttention_OLD(torch.nn.Module):
         # key, query and value projections for all heads, but in a batch
         self.qkv = torch.nn.Linear(
             config.n_embd,
-            (config.n_head + 2 * config.n_query_groups)
-            * config.head_size,  # support for grouped/multi queries
+            (config.n_head + 2 * config.n_query_groups) * config.head_size,  # support for grouped/multi queries
             bias=config.bias or config.attn_bias,
         )
         # output projection
-        self.proj = torch.nn.Linear(
-            config.head_size * config.n_head, config.n_embd, bias=config.bias
-        )
+        self.proj = torch.nn.Linear(config.head_size * config.n_head, config.n_embd, bias=config.bias)
         # disabled by default
         self.kv_cache: Optional[KVCache] = None
         self.apply_sliding_window_attention = False
-        if (
-            config.sliding_window_size is not None
-            and config.sliding_window_indices is not None
-        ):
-            self.apply_sliding_window_attention = config.sliding_window_indices[
-                block_idx
-            ]
+        if config.sliding_window_size is not None and config.sliding_window_indices is not None:
+            self.apply_sliding_window_attention = config.sliding_window_indices[block_idx]
 
         if config.norm_qk:
             self.norm_q = config.norm_class(config.head_size, eps=config.norm_eps)
@@ -323,9 +305,7 @@ class CausalSelfAttention_OLD(torch.nn.Module):
         n_head = self.config.n_head
         n_query_groups = self.config.n_query_groups
         rope_n_elem = self.config.rope_n_elem
-        B, T, C = (
-            x.size()
-        )  # batch size, sequence length, embedding dimensionality (n_embd)
+        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
         # Perform a single multiplication operation using a combined QKV matrix to calculate `query`, `key`, and `value`
         # instead of individually multiplying the input `x` with the respective weight matrices.
@@ -398,9 +378,7 @@ class CausalSelfAttention_OLD(torch.nn.Module):
                 mask = torch.ones(T, T, dtype=q.dtype, device=q.device).triu(diagonal=1)
                 mask.masked_fill_(mask.bool(), minus_infty)
                 mask = mask.view(1, 1, *mask.shape)
-            sliding_window_bias = torch.ones_like(mask).tril(
-                diagonal=-self.config.sliding_window_size
-            )
+            sliding_window_bias = torch.ones_like(mask).tril(diagonal=-self.config.sliding_window_size)
             sliding_window_bias.masked_fill_(sliding_window_bias.bool(), minus_infty)
             mask += sliding_window_bias
 
@@ -418,15 +396,9 @@ class CausalSelfAttention_OLD(torch.nn.Module):
     # Note: All internal computations are done in `float32`. This is also done
     # in `F.scaled_dot_product_attention`.
     def scaled_dot_product_attention(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        scale = 1.0 / math.sqrt(
-            self.config.attention_scores_scalar or self.config.head_size
-        )
+        scale = 1.0 / math.sqrt(self.config.attention_scores_scalar or self.config.head_size)
 
         # with softcapping we cannot use SDPA
         if self.config.attention_logit_softcapping is not None:
@@ -448,13 +420,7 @@ class CausalSelfAttention_OLD(torch.nn.Module):
             y = (scores @ v.to(dtype)).to(q.dtype)
         else:
             y = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=mask,
-                dropout_p=0.0,
-                scale=scale,
-                is_causal=mask is None,
+                q, k, v, attn_mask=mask, dropout_p=0.0, scale=scale, is_causal=mask is None
             )
         return y.transpose(1, 2)
 
@@ -467,37 +433,22 @@ def rope_cache_OLD(
         extra_config = None
 
     else:
-        adjusted_params_required = [
-            "factor",
-            "low_freq_factor",
-            "high_freq_factor",
-            "original_max_seq_len",
-        ]
-        params_present = [
-            param in config.rope_adjustments for param in adjusted_params_required
-        ]
+        adjusted_params_required = ["factor", "low_freq_factor", "high_freq_factor", "original_max_seq_len"]
+        params_present = [param in config.rope_adjustments for param in adjusted_params_required]
         num_params_present = sum(params_present)
 
         if num_params_present == 0:
             extra_config = None  # uses standard RoPE
         elif num_params_present == 4:
             # These parameters should always be used together so that we don't interfere with standard rope
-            extra_config = {
-                name: config.rope_adjustments[name] for name in adjusted_params_required
-            }
+            extra_config = {name: config.rope_adjustments[name] for name in adjusted_params_required}
         elif "factor" in config.rope_adjustments:
             # linear RoPE
             adjusted_params_required = ["factor"]
-            extra_config = {
-                name: config.rope_adjustments[name] for name in adjusted_params_required
-            }
+            extra_config = {name: config.rope_adjustments[name] for name in adjusted_params_required}
         else:
             # Some but not all parameters are specified; raise an error
-            missing_params = [
-                param
-                for param, present in zip(adjusted_params_required, params_present)
-                if not present
-            ]
+            missing_params = [param for param, present in zip(adjusted_params_required, params_present) if not present]
             raise ValueError(
                 f"The following adjusted RoPE parameters are missing in rope_adjustments: {', '.join(missing_params)}. "
                 "All adjusted RoPE parameters must be specified together."
@@ -515,14 +466,14 @@ def rope_cache_OLD(
 
 
 @pytest.mark.parametrize(
-    "device, model_name, dtype",
+    "model_name, dtype, device",
     product(
-        available_backends(),
         ["gemma-2-27b", "gemma-3-27b-it"],
         [torch.float32, torch.float16, torch.bfloat16],
+        available_backends(),
     ),
 )
-def test_multi_head_attention_for_gemma(device, model_name, dtype):
+def test_multi_head_attention_for_gemma(model_name, dtype, device):
     """
     Compares multi-head attention in old and current code, using a
     setup from :func:`test_against_original_gemma_2` above.
@@ -544,43 +495,36 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
         rotary_percentage=1.0,
         rope_indices=[0, 1] if is_gemma_3 else None,
     )
-    tol_kwargs = dict()
-    if dtype != torch.float32:
-        if model_name == "gemma-2-27b":
-            tol_kwargs = dict(atol=0.0005, rtol=0.005)
-        else:
-            tol_kwargs = dict(atol=0.001, rtol=0.005)
+    kwargs = dict(dtype=dtype, device=device)
 
     # Obtain RoPE parameters and compare
-    with torch.device(device):
-        model_new = GPT(config).to(dtype=dtype)
+    model_new = GPT(config).to(**kwargs)
     model_new.max_seq_length = T
-    mha = model_new.mha
-    pos_encoding = mha.pos_encoding
-    assert isinstance(pos_encoding, LinearPositionEncoding)
-    cos_new = pos_encoding._cos.unsqueeze(0)
-    sin_new = pos_encoding._sin.unsqueeze(0)
+    cos_new = model_new.cos.unsqueeze(0)
+    sin_new = model_new.sin.unsqueeze(0)
     cos_old, sin_old = rope_cache_OLD(config)
-    cos_old = cos_old.unsqueeze(0).to(device=device)
-    sin_old = sin_old.unsqueeze(0).to(device=device)
+    cos_old = cos_old.unsqueeze(0).to(**kwargs)
+    sin_old = sin_old.unsqueeze(0).to(**kwargs)
     torch.testing.assert_close(cos_new, cos_old)
     torch.testing.assert_close(sin_new, sin_old)
 
+    mha = MultiHeadSelfAttention(
+        config, **transform_mha_kwargs(dict(), config)
+    )
     shape = (batch_size, T, config.n_embd)
     for rep in range(num_repeats):
         block_idx = rep % 2
-        with torch.device(device):
-            attn_new = CausalSelfAttention(
-                config,
-                block_idx=block_idx,
-            ).to(dtype=dtype)
-            attn_old = CausalSelfAttention_OLD(
-                config,
-                block_idx=block_idx,
-            ).to(dtype=dtype)
+        attn_new = CausalSelfAttention(
+            config,
+            block_idx=block_idx,
+        ).to(**kwargs)
+        attn_old = CausalSelfAttention_OLD(
+            config,
+            block_idx=block_idx,
+        ).to(**kwargs)
         # Ensure they have the same weights
         attn_old.load_state_dict(attn_new.state_dict())
-        inputs = torch.randn(shape, dtype=dtype, device=device)
+        inputs = torch.randn(shape, **kwargs)
         token_idx = torch.randint(
             0,
             config.padded_vocab_size,
@@ -588,8 +532,16 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
             dtype=torch.int64,
             device=device,
         )
+        if is_gemma_3:
+            _cos = cos_new[..., config.rope_indices[block_idx]]
+            _sin = sin_new[..., config.rope_indices[block_idx]]
+        else:
+            _cos = cos_new
+            _sin = sin_new
         outputs_new = attn_new(
             x=inputs,
+            cos=_cos,
+            sin=_sin,
             token_idx=token_idx,
             mha=mha,
         )
@@ -605,7 +557,7 @@ def test_multi_head_attention_for_gemma(device, model_name, dtype):
             sin=_sin,
             mask=None,
         )
-        torch.testing.assert_close(outputs_new, outputs_old, **tol_kwargs)
+        torch.testing.assert_close(outputs_new, outputs_old)
 
 
 def _get_token_positions(
@@ -627,18 +579,19 @@ def _get_token_positions(
 
 
 @pytest.mark.parametrize(
-    *product_with_devices(
+    "seq_len, sliding_window_size, device",
+    product_with_devices(
         [
             (128, None),
             (21, None),
             (128, 16),
             (21, 12),
         ],
-        "seq_len, sliding_window_size",
     ),
 )
-def test_build_mask(device, seq_len, sliding_window_size):
+def test_build_mask(seq_len, sliding_window_size, device):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
     num_repeats = 4
     batch_size = 2
@@ -658,7 +611,7 @@ def test_build_mask(device, seq_len, sliding_window_size):
     token_positions = _get_token_positions(0, seq_len, **tp_kwargs)
     for _ in range(num_repeats):
         mask_parts = []
-        num_prefill = randint_torch(1, seq_len - 1)
+        num_prefill = random.randint(1, seq_len - 1)
         mask_parts.append(
             build_mask_slice(
                 input_pos=0,
@@ -685,7 +638,8 @@ def test_build_mask(device, seq_len, sliding_window_size):
 
 
 @pytest.mark.parametrize(
-    *product_with_devices(
+    ("n_head", "n_query_groups", "q_len", "kv_len", "dtype", "sliding_window_size", "device"),
+    product_with_devices(
         [
             (4, 2, 128, 512, torch.float16, None),
             (4, 4, 8, 256, torch.bfloat16, None),
@@ -697,13 +651,11 @@ def test_build_mask(device, seq_len, sliding_window_size):
             (24, 8, 2, 512, torch.bfloat16, 64),
             (9, 3, 128, 512, torch.float16, 96),
         ],
-        "n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size",
     ),
 )
-def test_attention_in_blocks(
-    device, n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size
-):
+def test_attention_in_blocks(n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size, device):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
     num_repeats = 32
     seq_len = 2 * kv_len
@@ -721,13 +673,11 @@ def test_attention_in_blocks(
         rotary_percentage=1.0,
     )
 
-    print(
-        f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}, device={device}"
-    )
+    print(f"n_head={n_head}, n_query_groups={n_query_groups}, q_len={q_len}, kv_len={kv_len}, is_causal={is_causal}, dtype={dtype}, device={device}")
     kwargs = dict(dtype=dtype, device=device)
     for repeat in range(num_repeats):
-        head_size = 2 ** randint_torch(3, 6)
-        batch_size = randint_torch(1, 5)
+        head_size = 2 ** random.randint(3, 6)
+        batch_size = random.randint(1, 5)
         if q_len % 2 != 0 and batch_size % 2 != 0:
             batch_size += 1
         print(f"repeat={repeat}, head_size={head_size}, batch_size={batch_size}")
@@ -769,7 +719,7 @@ def test_attention_in_blocks(
                 tmp_array_limit_gb=TemporaryArrayLimit(
                     init_val=2 * numel_tmp / ENTRIES_PER_GB,
                     name="bogus",
-                ),
+                )
             ),
         }
         for kind in ("no", "yes"):
@@ -787,160 +737,139 @@ def test_attention_in_blocks(
         for name, result in results.items():
             print(f"Compare gradients for {name}")
             torch.testing.assert_close(
-                result[0],
-                result[1],
-                atol=0.0005,
-                rtol=0.05,
+                result[0], result[1], atol=0.0005, rtol=0.05,
             )
 
 
-def _compare_mhas(
-    caches1: List[DefaultKVCache], caches2: List[DefaultKVCache], prefix: str
-):
-    for block_idx, (cache1, cache2) in enumerate(zip(caches1, caches2)):
-        mha1 = cache1.mha
-        mha2 = cache2.mha
-        assert mha1 is mha2, prefix + f"block_idx={block_idx}"
-
-
-@pytest.mark.parametrize("device", available_backends())
-def test_mha_is_passed_on(device):
-    dtype = torch.float32
-    torch.set_default_dtype(dtype)  # Set default dtype
-
-    cache_name = "lastrec-default"
-    batch_size = 2
-    n_layer = 8
-    n_head = 8
-    n_query_groups = 2
-    head_size = 64
-    vocab_size = 512
-    head_model_name = CrossEntropyOnLogits.NAME
-    cache_lengths = [128, 256] * (n_layer // 2)
-    layers_per_cell = 1
-    chunk_size = 8
-    seq_length = cache_lengths[1] + 4 * 8
-
-    # Create model and KV caches
-    config = Config(
-        n_layer=n_layer,
-        n_head=n_head,
+@pytest.mark.parametrize(
+    ("n_head", "n_query_groups", "q_len", "kv_len", "dtype", "sliding_window_size", "device"),
+    product_with_devices(
+        [
+            (4, 2, 16, 32, torch.float16, None),
+            (8, 4, 8, 64, torch.float16, None),
+            (8, 2, 1, 64, torch.float16, None),  # Decode phase
+            (16, 4, 16, 128, torch.bfloat16, None),
+            (8, 4, 8, 32, torch.float16, 16),  # Sliding window
+            (12, 4, 4, 64, torch.bfloat16, 32),  # Sliding window + GQA
+        ],
+    ),
+)
+@torch.inference_mode()
+def test_flashinfer_vs_eager_sdpa(n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size, device):
+    """
+    Test FlashInfer SDPA kernels against eager implementation.
+    
+    FlashInfer is used when:
+    - return_attn_weights=True
+    - FlashInfer wrapper is available
+    - No attention_logit_softcapping (so we use Llama config, not Gemma-2)
+    """
+    from keys_values.flashinfer_wrapper import FlashInferSDPA
+    
+    # Skip if FlashInfer is not available
+    wrapper = FlashInferSDPA()
+    if not wrapper.available:
+        pytest.skip("FlashInfer kernels not available")
+    
+    # Skip if not on CUDA
+    if device == "cpu":
+        pytest.skip("FlashInfer requires CUDA")
+    
+    seed = 31415927
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    
+    # Use Llama config (no attention_logit_softcapping)
+    config = Config.from_name(
+        "Llama-3.2-1B",
+        block_size=max(kv_len * 2, 256),
+        sliding_window_size=sliding_window_size,
+        n_layer=1,
         n_query_groups=n_query_groups,
-        n_embd=n_head * head_size,
-        block_size=512,
-        vocab_size=vocab_size,
-        rotary_percentage=1,
+        n_head=n_head,
+        n_embd=n_head * 64,
+        intermediate_size=n_head * 64 * 3,
     )
-    params = KVCacheParams.from_config(
-        config=config,
-        max_batch_size=batch_size,
-        cache_length=cache_lengths[0],
-        dtype=dtype,
-    )
-    with torch.device(device):
-        gpt_model = GPT(config)
-        gpt_model.assign_kv_caches(
-            [
-                create_kv_cache(
-                    name=cache_name,
-                    params=replace(params, cache_length=cache_length),
-                    block_idx=block_idx,
-                )
-                for block_idx, cache_length in enumerate(cache_lengths)
-            ]
+    
+    # Tolerance based on dtype
+    if dtype == torch.bfloat16:
+        rtol, atol = 1e-2, 1e-2
+    else:  # float16
+        rtol, atol = 1e-3, 1e-2
+    
+    kwargs = dict(dtype=dtype, device=device)
+    num_repeats = 8
+    
+    for repeat in range(num_repeats):
+        head_size = 64  # Fixed for consistency
+        batch_size = random.randint(1, 4)
+        
+        is_causal = q_len == kv_len
+        input_pos = 0 if is_causal else kv_len - q_len
+        
+        # Create token positions for non-causal case
+        if is_causal:
+            token_positions = None
+        else:
+            token_positions = (
+                torch.arange(kv_len, dtype=torch.int64, device=device)
+                .view(1, 1, -1)
+                .expand(batch_size, n_query_groups, -1)
+            )
+        
+        # Create test tensors
+        query = torch.randn(batch_size, n_head, q_len, head_size, **kwargs)
+        key = torch.randn(batch_size, n_query_groups, kv_len, head_size, **kwargs)
+        value = torch.randn(batch_size, n_query_groups, kv_len, head_size, **kwargs)
+        k_and_v = DefaultKeysAndValues(key, value)
+        
+        # MHA with FlashInfer enabled (use_eager_sdpa_always=False)
+        mha_flashinfer = MultiHeadSelfAttention(
+            config,
+            use_eager_sdpa_always=False,  # Allow FlashInfer
         )
-        orig_caches = gpt_model.get_kv_caches()
-        head_model = HeadModelFactory.create(name=head_model_name, config=config)
-        lc_model = LongContextGradientModel(
-            gpt_model=gpt_model,
-            head_model=head_model,
-            layers_per_cell=layers_per_cell,
-            chunk_size=chunk_size,
-            layercp_qname="default",
-            cachecp_qname="default",
+        
+        # MHA with eager only
+        mha_eager = MultiHeadSelfAttention(
+            config,
+            use_eager_sdpa_always=True,  # Force eager
         )
-    # Input batch
-    token_ids = torch.randint(
-        low=0,
-        high=config.vocab_size,
-        size=(batch_size, seq_length),
-        device=device,
-    )
-    num_output_tokens = randint_torch(4, int(seq_length * 0.75))
-    input_ids = token_ids[:, :-1]
-    targets = token_ids[:, (-num_output_tokens):]
-
-    # After cloning
-    gpt_model_clone = gpt_model.clone()
-    _compare_mhas(
-        orig_caches,
-        gpt_model_clone.get_kv_caches(),
-        prefix="GPT.clone: ",
-    )
-    gpt_model_clone = clone_model_shard_via_flat_vectors(
-        model=gpt_model,
-        device=device,
-        shard_type=None,
-    )
-    _compare_mhas(
-        orig_caches,
-        gpt_model_clone.get_kv_caches(),
-        prefix="GPT.clone: ",
-    )
-
-    # Inference replay caches
-    # Forward pass creates replay logs
-    lc_model.train()
-    loss = lc_model(input_ids, targets)
-    print(f"loss = {loss.item()}")
-    lc_model._create_members_for_backward()
-
-    def get_inputs_slice(
-        start: int,
-        end: int,
-    ) -> torch.Tensor:
-        return lc_model.layer_checkpoints.get_checkpoint(
-            layer_idx=n_layer,
-            input_pos=start,
-            num=end - start,
-            device=device,
+        
+        # Get outputs with attention weights
+        output_flashinfer, weights_flashinfer = mha_flashinfer(
+            query=query,
+            k_and_v=k_and_v,
+            block_idx=0,
+            input_pos=input_pos,
+            return_attn_weights=True,
+            token_positions=token_positions,
         )
-
-    def write_head_gradients_slice(
-        input_pos: int,
-        value: torch.Tensor,
-    ) -> Optional[int]:
-        return None
-
-    accumulator = lc_model.accumulator
-    accumulator.run_head_model(
-        gpt_model=lc_model.gpt_model,
-        head_model=lc_model.head_model,
-        replay_logs=lc_model._replay_logs,
-        chunks_per_cell=lc_model.chunks_per_cell,
-        get_inputs_slice=get_inputs_slice,
-        write_head_gradients_slice=write_head_gradients_slice,
-        targets=targets,
-    )
-    model_part = DefaultCellBlocks(gpt_model, 0, n_layer)
-    ir_caches = accumulator._create_inference_replay_caches(model_part)
-    _compare_mhas(
-        orig_caches,
-        ir_caches,
-        prefix="Inference replay caches: ",
-    )
-
-    # Training replay caches
-    cell = CellComputation(
-        model_part=model_part,
-        autograd_hooks=None,
-        replay_logs=accumulator.replay_logs,
-        batch_size=batch_size,
-        **accumulator._train_cache_kwargs,
-    )
-    tr_caches = cell._create_train_replay_caches(0, n_layer)
-    _compare_mhas(
-        orig_caches,
-        tr_caches,
-        prefix="Training replay caches: ",
-    )
+        
+        output_eager, weights_eager = mha_eager(
+            query=query,
+            k_and_v=k_and_v,
+            block_idx=0,
+            input_pos=input_pos,
+            return_attn_weights=True,
+            token_positions=token_positions,
+        )
+        
+        # Compare outputs
+        msg = (
+            f"repeat={repeat}, bs={batch_size}, nh={n_head}, nqg={n_query_groups}, "
+            f"q_len={q_len}, kv_len={kv_len}, dtype={dtype}, sw={sliding_window_size}"
+        )
+        
+        torch.testing.assert_close(
+            output_flashinfer, output_eager,
+            rtol=rtol, atol=atol,
+            msg=f"Output mismatch: {msg}",
+        )
+        
+        # Compare attention weights
+        if weights_flashinfer is not None and weights_eager is not None:
+            torch.testing.assert_close(
+                weights_flashinfer, weights_eager,
+                rtol=rtol, atol=atol,
+                msg=f"Weights mismatch: {msg}",
+            )

@@ -16,35 +16,30 @@ from typing import List, Dict, Any, Optional, Union, Tuple
 
 import torch
 
-from keys_values.config import Config
+from litgpt.config import Config
+
 from keys_values.kvcache.base import KVCache, KVCacheParams
 from keys_values.kvcache.basics import (
-    KVCacheWithBuffers,
     DenseKVCache,
     LastRecentlyInsertedKVCache,
+    KVCacheWithBuffers,
 )
-from keys_values.kvcache.buffers import (
-    KVCacheBuffersParams,
-    DefaultKVCacheBuffers,
-)
-from keys_values.kvcache.consts import split_name, SUPPORTED_QUANTIZERS
-from keys_values.kvcache.h2o import (
-    H2OKVCache,
-    VLengthH2OKVCache,
-    H2OOriginalKVCache,
-)
-from keys_values.kvcache.offloading import KVCacheOffloader
-from keys_values.kvcache.qh2o import (
-    QuantizedH2OKVCache,
-    QuantizedVLengthH2OKVCache,
-)
+from keys_values.kvcache.buffers import KVCacheBuffersParams, DefaultKVCacheBuffers
+from keys_values.kvcache.h2o import H2OKVCache, VLengthH2OKVCache, H2OOriginalKVCache
+from keys_values.kvcache.qh2o import QuantizedH2OKVCache, QuantizedVLengthH2OKVCache
 from keys_values.kvcache.quant_buffers import (
     QuantizedKVCacheBuffers,
     DequantizedKVCacheBuffers,
-    create_quantized_kv_buffers,
-    get_quant_kwargs,
 )
-from keys_values.model import GPT
+from keys_values.kvcache.quantize import (
+    Quantizer,
+    TorchAOQuantizer,
+    TorchBasicQuantizer,
+    BitsAndBytesQuantizer,
+)
+from keys_values.kvcache.stack_layers import CellBlocks
+from keys_values.model import GPT, block_iterator
+
 
 _SUPPORTED_CACHES = (
     ("dense", DenseKVCache, True),
@@ -56,12 +51,28 @@ _SUPPORTED_CACHES = (
     ("h2o-orig", H2OOriginalKVCache, True),
 )
 
+SUPPORTED_QUANTIZERS = {
+    "default": None,
+    "torch-quantized8": TorchBasicQuantizer,
+    "ao-quantized4": TorchAOQuantizer,
+    "ao-quantized8": TorchAOQuantizer,
+    "bnb-quantized4": BitsAndBytesQuantizer,
+    "bnb-quantized8": BitsAndBytesQuantizer,
+}
+
 SUPPORTED_CACHES = {
     f"{name}-{quant}": typ
     for quant in SUPPORTED_QUANTIZERS.keys()
     for name, typ, do_def in _SUPPORTED_CACHES
     if do_def or quant != "default"
 }
+
+
+def split_name(name: str) -> Tuple[str, str]:
+    for qname in SUPPORTED_QUANTIZERS.keys():
+        if name.endswith(qname):
+            return name[:-(len(qname) + 1)], qname
+    raise ValueError(f"Name {name} is not supported")
 
 
 class KVCacheFactory:
@@ -73,8 +84,9 @@ class KVCacheFactory:
     determines the type of buffers:
 
     - "default": Normal storage, no quantization
-    - "torch-quantized4": Default PyTorch 4-bit quantization
     - "torch-quantized8": Default PyTorch 8-bit quantization
+    - "ao-quantized4": Torch AO 4-bit quantization
+    - "ao-quantized8": Torch AO 8-bit quantization
     - "bnb-quantized4": Bitsandbytes 4-bit quantization (does not work for
       every hardware)
     - "bnb-quantized8": Bitsandbytes 8-bit quantization (does not work for
@@ -96,7 +108,6 @@ class KVCacheFactory:
       publication. Not recommended, only for comparisons
 
     """
-
     @staticmethod
     def create_single(
         name: str,
@@ -104,8 +115,8 @@ class KVCacheFactory:
         max_batch_size: int,
         cache_length: int,
         block_idx: int,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
+        device: torch.device,
+        dtype: torch.dtype,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> KVCache:
         """
@@ -116,10 +127,8 @@ class KVCacheFactory:
             max_batch_size: Maximum batch size for caches
             cache_length: Number of slots in caches
             block_idx: Index of block (or layer) in model
-            device: Device for cache objects. If not given, this is determined
-                with first usage
-            dtype: Data type for cache buffers (de-quantized). Must be given
-                for quantized buffers
+            device: Device for cache objects
+            dtype: Data type for cache buffers (de-quantized)
             cache_kwargs: Additional keyword arguments for cache creation
 
         Returns:
@@ -132,6 +141,7 @@ class KVCacheFactory:
             cache_length=cache_length,
             head_size=config.head_size,
             n_head=config.n_head,
+            device=device,
             dtype=dtype,
         )
         if cache_kwargs is None:
@@ -156,12 +166,6 @@ class KVCacheFactory:
                 result = cache_type.from_config(**from_config_kwargs)
             else:
                 cache_params = KVCacheBuffersParams.from_params(params)
-                if dtype is None:
-                    raise ValueError(
-                        f"dtype must be given for quantized cache buffers ({qname})"
-                    )
-                if device is not None:
-                    cache_params = replace(cache_params, device=device)
                 allocate_buffers = cache_kwargs.get("allocate_buffers")
                 if allocate_buffers is not None:
                     cache_kwargs.pop("allocate_buffers")
@@ -172,13 +176,10 @@ class KVCacheFactory:
                     cache_length=cache_length,
                     max_num_ranges=max_num_ranges,
                 )
-                quant_kwargs, quantizer_type, cache_kwargs = get_quant_kwargs(
-                    params,
-                    qname,
-                    cache_kwargs,
+                quant_kwargs, quantizer_type, cache_kwargs = KVCacheFactory.get_quant_kwargs(
+                    params, qname, cache_kwargs,
                 )
                 quant_kwargs["allocate_buffers"] = allocate_buffers
-                quant_kwargs["device"] = device
                 result = cache_type(
                     config=config,
                     buffers=QuantizedKVCacheBuffers(
@@ -202,11 +203,10 @@ class KVCacheFactory:
         gpt_model: GPT,
         name: str,
         max_batch_size: int,
+        dtype: torch.dtype,
         cache_length: Union[int, List[int]],
         start: int = 0,
         end: Optional[int] = None,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> List[KVCache]:
         """
@@ -219,14 +219,11 @@ class KVCacheFactory:
             name: Determines cache and buffers type, must be in
                 :const:`SUPPORTED_CACHES`
             max_batch_size: Maximum batch size for caches
+            dtype: Data type for cache buffers (de-quantized)
             cache_length: Number of slots in caches. Can be different for
                 different caches
             start: Caches are created for layers in `range(start, end)`
             end: Caches are created for layers in `range(start, end)`
-            device: Device for cache objects. If not given, this is determined
-                with first usage
-            dtype: Data type for cache buffers (de-quantized). If not given,
-                this is determined with first usage
             cache_kwargs: Additional keyword arguments for cache creation
 
         Returns:
@@ -237,9 +234,7 @@ class KVCacheFactory:
         if end is None:
             end = config.n_layer
         if not (0 <= start < end <= config.n_layer):
-            raise ValueError(
-                f"start={start}, end={end}, must be 0 <= start < end <= {config.n_layer}"
-            )
+            raise ValueError(f"start={start}, end={end}, must be 0 <= start < end <= {config.n_layer}")
         num_layers = end - start
         if cache_kwargs is None:
             cache_kwargs = dict()
@@ -248,13 +243,9 @@ class KVCacheFactory:
         elif len(cache_length) == 1:
             cache_length = [cache_length[0]] * num_layers
         elif len(cache_length) != num_layers:
-            raise ValueError(
-                f"len(cache_length) = {len(cache_length)}, must be 1 or {num_layers}"
-            )
+            raise ValueError(f"len(cache_length) = {len(cache_length)}, must be 1 or {num_layers}")
         if not all(x > 0 for x in cache_length):
-            raise ValueError(
-                f"cache_length = {cache_length}, must contain only positive integers"
-            )
+            raise ValueError(f"cache_length = {cache_length}, must contain only positive integers")
 
         cache_type = SUPPORTED_CACHES.get(name)
         if cache_type is not None:
@@ -267,7 +258,6 @@ class KVCacheFactory:
                     config=config,
                     max_batch_size=max_batch_size,
                     dtype=dtype,
-                    device=device,
                     **cache_kwargs,
                 )
                 kv_caches = [
@@ -275,14 +265,17 @@ class KVCacheFactory:
                         **from_config_kwargs,
                         cache_length=c_len,
                         block_idx=i + start,
+                        device=block.attn.device,
                     )
-                    for i, c_len in enumerate(cache_length)
+                    for i, (block, c_len) in enumerate(
+                        zip(
+                            block_iterator(gpt_model, start, end),
+                            cache_length,
+                        )
+                    )
                 ]
             else:
-                if dtype is None:
-                    raise ValueError(
-                        f"dtype must be given for quantized cache buffers ({qname})"
-                    )
+                device = next(block_iterator(gpt_model, 0, 1)).attn.device
                 cache_params = KVCacheParams(
                     max_batch_size=max_batch_size,
                     n_query_groups=config.n_query_groups,
@@ -290,6 +283,7 @@ class KVCacheFactory:
                     head_size=config.head_size,
                     n_head=config.n_head,
                     dtype=dtype,
+                    device=device,
                 )
                 allocate_buffers = cache_kwargs.get("allocate_buffers")
                 if allocate_buffers is not None:
@@ -298,14 +292,15 @@ class KVCacheFactory:
                     allocate_buffers = False
                 dequant_kwargs = dict(max_num_ranges=max_num_ranges)
                 quant_buffers = create_quantized_kv_buffers(
+                    gpt_model=gpt_model,
                     qname=qname,
+                    start=start,
+                    end=end,
                     cache_lengths=cache_length,
                     cache_params=cache_params,
                     cache_kwargs=cache_kwargs,
                     dequant_kwargs=dequant_kwargs,
                     allocate_buffers=allocate_buffers,
-                    device=device,
-                    first_block_idx=start,
                 )
                 kv_caches = [
                     cache_type(
@@ -314,7 +309,12 @@ class KVCacheFactory:
                         block_idx=i + start,
                         **cache_kwargs,
                     )
-                    for i, buffers in enumerate(quant_buffers)
+                    for i, (block, buffers) in enumerate(
+                        zip(
+                            block_iterator(gpt_model, start, end),
+                            quant_buffers,
+                        )
+                    )
                 ]
             return kv_caches
         else:
@@ -324,88 +324,11 @@ class KVCacheFactory:
                 raise ValueError(f"name = {name} not supported")
 
     @staticmethod
-    def create_cpu_offloading(
-        gpt_model: GPT,
-        name: str,
-        max_batch_size: int,
-        cache_length: int,
-        dtype: torch.dtype,
-        device: Optional[torch.device] = None,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[List[KVCache], KVCacheOffloader]:
-        """
-        Same as :meth:`create`, but with CPU offloading of KV cache buffers.
-        This is currently available only if:
-
-        - All caches have the same length
-        - Ranges over caches of all layers
-        - KV cache buffers are quantized
-
-        Args:
-            gpt_model: GPT model for which KV caches are to be created
-            name: Determines cache and buffers type, must be in
-                :const:`SUPPORTED_CACHES`. Buffers must be quantized.
-            max_batch_size: Maximum batch size for caches
-            cache_length: Number of slots in caches. Must be the same for
-                all caches
-            dtype: Data type for cache buffers (de-quantized)
-            device: Device for cache objects. If not given, this is determined
-                with first usage
-            cache_kwargs: Additional keyword arguments for cache creation
-
-        Returns:
-            KV cache objects, offloading manager
-
-        """
-        config = gpt_model.config
-        cname, qname = split_name(name)
-        if qname == "default":
-            raise ValueError(
-                f"name = {name}: Offloading does not support default buffers, must be quantized"
-            )
-        cache_type = SUPPORTED_CACHES.get(name)
-        if cache_type is not None:
-            max_num_ranges = cache_kwargs.get("max_num_ranges")
-            if max_num_ranges is not None:
-                cache_kwargs.pop("max_num_ranges")
-            allocate_buffers = cache_kwargs.get("allocate_buffers")
-            if allocate_buffers is not None:
-                cache_kwargs.pop("allocate_buffers")
-            else:
-                allocate_buffers = False
-            dequant_kwargs = dict(max_num_ranges=max_num_ranges)
-            offloader = KVCacheOffloader(
-                config=config,
-                cache_length=cache_length,
-                max_batch_size=max_batch_size,
-                qname=qname,
-                dtype=dtype,
-                device=device,
-                cache_kwargs=cache_kwargs,
-                dequant_kwargs=dequant_kwargs,
-                allocate_buffers=allocate_buffers,
-            )
-            kv_caches = [
-                cache_type(
-                    config=config,
-                    buffers=buffers,
-                    block_idx=i,
-                    **cache_kwargs,
-                )
-                for i, buffers in enumerate(offloader.cache_buffers)
-            ]
-            return kv_caches, offloader
-        else:
-            raise ValueError(f"name = {name} not supported")
-
-    @staticmethod
     def supported_names() -> List[str]:
         return list(SUPPORTED_CACHES.keys())
 
     @staticmethod
-    def size_estimate(
-        model_or_caches: Union[GPT, List[KVCache]],
-    ) -> Tuple[int, Dict[str, int]]:
+    def size_estimate(model_or_caches: Union[GPT, List[KVCache]]) -> Tuple[int, Dict[str, int]]:
         """
         Args:
             model_or_caches: GPT model or list of KV caches (one per layer).
@@ -437,17 +360,17 @@ class KVCacheFactory:
         config: Config,
         max_batch_size: int,
         cache_length: int,
+        device: torch.device,
         dtype: torch.dtype,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[int, Dict[str, int]]:
-        if dtype is None:
-            raise ValueError("dtype must be specified")
         params = KVCacheParams(
             max_batch_size=max_batch_size,
             n_query_groups=config.n_query_groups,
             cache_length=cache_length,
             head_size=config.head_size,
             n_head=config.n_head,
+            device=device,
             dtype=dtype,
         )
         n_layers = config.n_layer
@@ -465,10 +388,8 @@ class KVCacheFactory:
             else:
                 kwargs["buffer_type"] = QuantizedKVCacheBuffers
                 quantized_buffer = True
-                quant_kwargs, quantizer_type, cache_kwargs = get_quant_kwargs(
-                    params,
-                    qname,
-                    cache_kwargs,
+                quant_kwargs, quantizer_type, cache_kwargs = KVCacheFactory.get_quant_kwargs(
+                    params, qname, cache_kwargs,
                 )
                 kwargs["quantizer_type"] = quantizer_type
                 # Extra arguments going to the cache buffer
@@ -476,14 +397,20 @@ class KVCacheFactory:
             total_sz, dct_sz = cache_type.size_estimate_apriori(params, **kwargs)
             num_bits_total = total_sz * n_layers
             # Note: Only one entry for all layers, they are all the same
-            bits_by_part = {"layer_" + k: v * n_layers for k, v in dct_sz.items()}
+            bits_by_part = {
+                "layer_" + k: v * n_layers for k, v in dct_sz.items()
+            }
             if quantized_buffer:
                 total_sz, dct_sz = DequantizedKVCacheBuffers.size_estimate_apriori(
                     params=KVCacheBuffersParams.from_params(params),
                     cache_length=cache_length,
                 )
                 num_bits_total += total_sz
-                bits_by_part.update({"dequant_" + k: v for k, v in dct_sz.items()})
+                bits_by_part.update(
+                    {
+                        "dequant_" + k: v for k, v in dct_sz.items()
+                    }
+                )
             return num_bits_total, bits_by_part
         else:
             raise ValueError(f"name = {name} not supported")
@@ -491,93 +418,218 @@ class KVCacheFactory:
     @staticmethod
     def _get_caches(model_or_caches: Union[GPT, List[KVCache]]) -> List[KVCache]:
         if isinstance(model_or_caches, GPT):
-            caches = model_or_caches.get_kv_caches()
+            caches = [block.attn.kv_cache for block in model_or_caches.transformer.h]
             if any(cache is None for cache in caches):
-                raise IndexError(
-                    "Some layers of model do not have a cache. Run 'assign_kv_cache' or 'set_kv_cache' first."
-                )
+                raise IndexError("Some layers of model do not have a cache. Run 'assign_kv_cache' or 'set_kv_cache' first.")
         else:
             caches = model_or_caches
         return caches
 
+    @staticmethod
+    def get_quant_kwargs(
+        params: KVCacheParams,
+        qname: str,
+        cache_kwargs: Optional[Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], type[Quantizer], Dict[str, Any]]:
+        quantizer_type = SUPPORTED_QUANTIZERS[qname]
+        if quantizer_type is None:
+            raise NotImplementedError(f"Quantizer type {qname} currently not supported")
+        if cache_kwargs is None:
+            cache_kwargs = dict()
+        else:
+            cache_kwargs = cache_kwargs.copy()
+        try:
+            blocks_over_heads = cache_kwargs.pop("blocks_over_heads")
+        except KeyError:
+            blocks_over_heads = False
+        if blocks_over_heads is False and params.head_size < quantizer_type.minimum_blocksize():
+            print(f"blocksize = {params.head_size} too small. Switching to blocks_over_heads = True.")
+            blocks_over_heads = True
+        shape = (
+            params.max_batch_size,
+            params.n_query_groups,
+            params.cache_length,
+            params.head_size,
+        )
+        quant_kwargs = {
+            "shape": shape,
+            "source_dtype": params.dtype,
+            "device": params.device,
+            "blocks_over_heads": blocks_over_heads,
+            "tmp_array_limit_gb": cache_kwargs.get("tmp_array_limit_gb"),
+        }
+        if qname.endswith("torch-quantized8"):
+            quant_kwargs["target_dtype"] = torch.int8
+        else:
+            quant_kwargs["num_bits"] = int(qname[-1])
+        return quant_kwargs, quantizer_type, cache_kwargs
 
-def deallocate_kv_cache_buffers(caches: List[KVCache]):
+
+def create_quantized_kv_buffers(
+    gpt_model: GPT,
+    qname: str,
+    start: int,
+    end: int,
+    cache_lengths: List[int],
+    cache_params: KVCacheParams,
+    cache_kwargs: Optional[Dict[str, Any]] = None,
+    dequant_kwargs: Optional[Dict[str, Any]] = None,
+    allocate_buffers: bool = False,
+) -> List[QuantizedKVCacheBuffers]:
     """
-    Deallocates buffers of KV caches in `caches`. Use this to free up GPU memory
-    once the caches are not needed for the moment (buffers are reallocated on
-    first usage), but also in preparation of cloning the caches on a different
-    device (this works only if buffers are deallocated).
+    Creates a list of :class:`QuantizedKVCacheBuffers` for the layer range
+    `range(start, end)`. All buffers on the same device share their
+    :class:`DequantizedKVCacheBuffers`.
 
     """
+    if not (0 <= start < end <= gpt_model.config.n_layer):
+        raise ValueError(f"start={start}, end={end}: Must have 0 <= start < end <= config.n_layer={gpt_model.config.n_layer}")
+    assert len(cache_lengths) == end - start
+    buffer_params = KVCacheBuffersParams.from_params(cache_params)
+    # Create dequantization buffer(s)
+    length_for_device = dict()
+    for block, cache_length in zip(
+        block_iterator(gpt_model, start, end), cache_lengths,
+    ):
+        device = block.attn.device
+        length_for_device[device] = max(
+            cache_length, length_for_device.get(device, 0),
+        )
+    if dequant_kwargs is None:
+        dequant_kwargs = dict()
+    dequant_buffers = {
+        device: DequantizedKVCacheBuffers(
+            params=replace(buffer_params, device=device),
+            cache_length=cache_length,
+            **dequant_kwargs,
+        )
+        for device, cache_length in length_for_device.items()
+    }
+    quant_buffers = []
+    for block, cache_length, block_idx in zip(
+        block_iterator(gpt_model, start, end),
+        cache_lengths,
+        range(start, end),
+    ):
+        device = block.attn.device
+        _cache_params = replace(
+            cache_params,
+            device=device,
+            cache_length=cache_length,
+        )
+        quant_kwargs, quantizer_type, cache_kwargs = KVCacheFactory.get_quant_kwargs(
+            _cache_params, qname, cache_kwargs,
+        )
+        quant_kwargs["allocate_buffers"] = allocate_buffers
+        quant_buffers.append(
+            QuantizedKVCacheBuffers(
+                quantizer_k=quantizer_type(**quant_kwargs),
+                quantizer_v=quantizer_type(**quant_kwargs),
+                dequant_buffers=dequant_buffers[device],
+                debug_label=f"block{block_idx}",
+            )
+        )
+    return quant_buffers
+
+
+def deallocate_kv_cache_buffers(caches: List[KVCacheWithBuffers]):
     for cache in caches:
-        if cache is not None and isinstance(cache, KVCacheWithBuffers):
-            buffers = cache.kv_buffers
-            buffers.deallocate()
-            # Deallocate associated :class:`DequantizedKVCacheBuffers` buffers
-            # as well. They may be shared by several entries in `caches`, but
-            # calling :meth:`deallocate` multiple times is fine.
-            if isinstance(buffers, QuantizedKVCacheBuffers):
-                buffers.dequant_buffers.deallocate()
+        buffers = cache.kv_buffers
+        buffers.deallocate()
 
 
-def deallocate_kv_cache_buffers_of_model(gpt_model: GPT):
+def deallocate_kv_cache_buffers_of_model(model: GPT):
+    kv_caches = [block.attn.kv_cache for block in block_iterator(model)]
+    deallocate_kv_cache_buffers(kv_caches)
+
+
+def _get_length_for_device(model_part: CellBlocks) -> Dict[torch.device, int]:
+    length_for_device = dict()
+    for _, block in model_part.blocks():
+        device = block.attn.device
+        cache_length = block.attn.kv_cache.cache_length
+        length_for_device[device] = max(
+            cache_length, length_for_device.get(device, 0),
+        )
+    return length_for_device
+
+
+def create_quantized_kv_buffers_for_checkpoints(
+    model_part: CellBlocks,
+    qname: str,
+    batch_size: int,
+    layer_activations: bool = False,
+    cache_kwargs: Optional[Dict[str, Any]] = None,
+    dequant_kwargs: Optional[Dict[str, Any]] = None,
+) -> Dict[torch.device, QuantizedKVCacheBuffers]:
     """
-    Deallocates buffers of KV caches associated with `model`. Use this to free
-    up GPU memory once the caches are not needed for the moment (buffers are
-    reallocated on first usage), but also in preparation of cloning the caches
-    on a different device (this works only if buffers are deallocated).
+    Creates a dictionary from device to :class:`QuantizedKVCacheBuffers` for
+    the layer range given by `model_part`. This is used to create checkpointing
+    objects per layer.
+
+    One use case is for KV cache checkpoints for inference replay, see also
+    :class:`KVCacheBufferQuantizedCheckpoints`. Another use case is for layer
+    activation checkpoints, see also :class:`LayerInputQuantizedCheckpoints`.
+    For the latter, use `layer_activations=True`.
 
     """
-    deallocate_kv_cache_buffers(gpt_model.get_kv_caches())
+    _, first_block = next(iter(model_part.blocks()))
+    cache_params = first_block.attn.kv_cache.get_params()
+    if layer_activations:
+        # Layer activations have a different shape than KV caches. And their
+        # `cache_length` dimension is constant.
+        cache_params = replace(
+            cache_params,
+            max_batch_size=batch_size,
+            n_query_groups=1,
+            head_size=model_part.config.n_embd // 2,
+            n_head=1,
+        )
+        layer_act_cache_length = model_part.max_seq_length
+    else:
+        layer_act_cache_length = None
+    buffer_params = KVCacheBuffersParams.from_params(cache_params)
+    length_for_device = _get_length_for_device(model_part)
+    if dequant_kwargs is None:
+        dequant_kwargs = dict()
+
+    quant_buffers = dict()
+    for device, cache_length in length_for_device.items():
+        _cache_length = layer_act_cache_length if layer_activations else cache_length
+        dequant_buffers = DequantizedKVCacheBuffers(
+            params=replace(buffer_params, device=device),
+            cache_length=_cache_length,
+            **dequant_kwargs,
+        )
+        _cache_params = replace(
+            cache_params,
+            device=device,
+            cache_length=_cache_length,
+        )
+        quant_kwargs, quantizer_type, cache_kwargs = KVCacheFactory.get_quant_kwargs(
+            _cache_params, qname, cache_kwargs,
+        )
+        quant_buffers[device] = QuantizedKVCacheBuffers(
+            quantizer_k=quantizer_type(**quant_kwargs),
+            quantizer_v=quantizer_type(**quant_kwargs),
+            dequant_buffers=dequant_buffers,
+        )
+    return quant_buffers
 
 
 REMOVE_KEYS = {
-    "dense": (
-        "combination_constant",
-        "detach_attn_weights",
-        "grace_period",
-        "init_grace_tokens",
-        "keep_initial_fraction",
-        "max_chunk_size",
-        "normalize_scores",
-        "replay_log_blocksize",
-        "scratch_blocksize",
-    ),
-    "lastrec": (
-        "detach_attn_weights",
-        "grace_period",
-        "keep_initial_fraction",
-        "max_chunk_size",
-        "normalize_scores" "combination_constant",
-        "replay_log_blocksize",
-        "scratch_blocksize",
-    ),
-    "h2o": (
-        "combination_constant",
-        "init_grace_tokens",
-        "scratch_blocksize",
-    ),
-    "h2o-vlen": (
-        "combination_constant",
-        "init_grace_tokens",
-        "scratch_blocksize",
-    ),
-    "qh2o": ("init_grace_tokens",),
-    "qh2o-vlen": ("init_grace_tokens",),
-    "h2o-orig": (
-        "init_grace_tokens",
-        "normalize_scores",
-        "combination_constant",
-        "scratch_blocksize",
-    ),
+    "dense": ("replay_log_blocksize", "grace_period", "normalize_scores", "combination_constant", "scratch_blocksize"),
+    "lastrec": ("replay_log_blocksize", "grace_period", "normalize_scores" "combination_constant", "scratch_blocksize"),
+    "h2o": ("combination_constant", "scratch_blocksize"),
+    "h2o-vlen": ("combination_constant", "scratch_blocksize"),
+    "qh2o": (),
+    "qh2o-vlen": (),
+    "h2o-orig": ("replay_log_blocksize", "grace_period", "normalize_scores", "combination_constant", "scratch_blocksize"),
 }
 
 
 def cleanup_cache_kwargs(
-    cname: str,
-    cache_kwargs: Optional[Dict[str, Any]],
+    cname: str, cache_kwargs: Dict[str, Any]
 ) -> Dict[str, Any]:
-    if cache_kwargs is None:
-        return dict()
     rem_keys = REMOVE_KEYS[cname]
     return {k: v for k, v in cache_kwargs.items() if k not in rem_keys}

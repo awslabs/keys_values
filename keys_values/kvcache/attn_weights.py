@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import torch
 
-from keys_values.config import Config
+from litgpt.config import Config
 
 from keys_values.attention import KeysAndValues
 from keys_values.kvcache.base import (
@@ -32,7 +32,7 @@ from keys_values.kvcache.buffers import (
     positions_wrap_around,
     PositionsType,
 )
-from keys_values.utils import index_to_3d, bits_for_torch_dtype, bitsize_of
+from keys_values.kvcache.utils import bitsize_of, bits_for_torch_dtype
 
 
 class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
@@ -46,41 +46,30 @@ class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
     for token positions >= `cache_length`.
 
     """
-
     def __init__(
         self,
         token_chunks: List[torch.Tensor],
         slot_positions: List[torch.Tensor],
         cache_length: int,
-        max_prefill_length: int,
+        max_prefill_length: Optional[int],
         blocksize: int,
         grace_period: int = 0,
+        dtype: Optional[torch.dtype] = None,
     ):
         super().__init__(
             token_chunks,
             cache_length=cache_length,
             max_prefill_length=max_prefill_length,
             grace_period=grace_period,
+            dtype=dtype,
         )
         if slot_positions:
-            if not self.token_chunks:
-                raise ValueError(
-                    "Cannot have empty token_chunks, non-empty slot_positions"
-                )
-            self._slot_positions = None
-            device = self.device
-            if any(b.device != device for b in slot_positions):
-                raise ValueError(
-                    f"All token_chunks and slot_position entries must be on same device {device}"
-                )
-            shape = slot_positions[0].shape[:-1]
-            if not all(b.shape[:-1] == shape for b in slot_positions):
-                raise ValueError("Blocks in slot_positions have incompatible shapes")
-            batch_size = shape[0]
-            if any(c.shape[0] != batch_size for c in self.token_chunks):
-                raise ValueError(
-                    f"slot_positions has batch size {batch_size}, but some token_chunks entries differ"
-                )
+            shapes = set(block.shape[:-1] for block in slot_positions)
+            assert len(shapes) == 1, f"Blocks in slot_positions have incompatible shapes: {shapes}"
+            batch_size = next(iter(shapes))[0]
+            batch_sizes = set(chunk.shape[0] for chunk in self.token_chunks)
+            assert len(batch_sizes) == 1 and next(iter(
+                batch_sizes)) == batch_size, f"slot_positions has batch size {batch_size}, but token_chunks has {batch_sizes}"
         self._slot_positions = slot_positions
         self.blocksize = blocksize
 
@@ -88,21 +77,14 @@ class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
     def slot_positions(self) -> List[torch.Tensor]:
         return self._slot_positions
 
-    @property
-    def device(self) -> Optional[torch.device]:
-        if self.slot_positions:
-            return self.slot_positions[0].device
-        else:
-            return super().device
-
     def finalize(
         self,
-        input_pos: int,
+        next_token_pos: int,
     ) -> "AttnWeightsReplayLog":
-        if input_pos <= self.cache_length:
+        if next_token_pos <= self.cache_length:
             slot_positions = []
         else:
-            end = (input_pos - self.cache_length) % self.blocksize
+            end = (next_token_pos - self.cache_length) % self.blocksize
             if end == 0:
                 slot_positions = self._slot_positions
             else:
@@ -115,68 +97,66 @@ class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
             max_prefill_length=self.max_prefill_length,
             blocksize=self.blocksize,
             grace_period=self.grace_period,
+            dtype=self.dtype,
         )
 
+    def _replay_kwargs(self) -> Dict[str, Any]:
+        device = self.device if self.token_chunks else torch.device("cpu")
+        return {
+            "dtype": torch.uint32,
+            "device": device,
+        }
+
     def append_position_index(
-        self,
-        index: torch.Tensor,
-        input_pos: int,
+        self, index: torch.Tensor, next_token_pos: int,
     ):
-        if self.device is not None and index.device != self.device:
-            raise ValueError(f"index.device = {index.device}, must be{self.device}")
-        kwargs = dict(dtype=torch.uint32)
         shape = index.shape[:2] + (self.blocksize,)
-        bstart = (input_pos - self.cache_length) % self.blocksize
+        bstart = (next_token_pos - self.cache_length) % self.blocksize
         if bstart == 0:
-            self._append_new_pos_log_block(shape, index.device)
+            self._append_new_pos_log_block(shape)
         block = self._slot_positions[-1]
         num = index.shape[2]
         bend = min(bstart + num, self.blocksize)
         istart = 0
         iend = bend - bstart
-        block[:, :, bstart:bend] = index[:, :, istart:iend].to(**kwargs)
+        block[:, :, bstart:bend] = index[:, :, istart:iend].to(**self._replay_kwargs())
         while iend < num:
             istart = iend
-            block = self._append_new_pos_log_block(shape, index.device)
+            block = self._append_new_pos_log_block(shape)
             bend = min(num - istart, self.blocksize)
             iend = istart + bend
-            block[:, :, :bend] = index[:, :, istart:iend].to(**kwargs)
+            block[:, :, :bend] = index[:, :, istart:iend].to(**self._replay_kwargs())
 
     def _append_new_pos_log_block(
-        self,
-        shape: Tuple[int, ...],
-        device: torch.device,
+        self, shape: Tuple[int, ...],
     ):
-        new_block = torch.zeros(shape, device=device, dtype=torch.uint32)
+        new_block = torch.zeros(shape, **self._replay_kwargs())
         self._slot_positions.append(new_block)
         return new_block
 
-    def _position_and_offset(self, input_pos: int) -> Tuple[int, int]:
-        if input_pos < self.cache_length:
-            raise ValueError(
-                f"token_pos = {input_pos} must be >= {self.cache_length} = cache_length"
-            )
-        assert input_pos >= self.cache_length
+    def _position_and_offset(self, token_pos: int) -> Tuple[int, int]:
+        if token_pos < self.cache_length:
+            raise ValueError(f"token_pos = {token_pos} must be >= {self.cache_length} = cache_length")
+        assert token_pos >= self.cache_length
         offset = None
         pos = self.cache_length
-        relpos = None
         for relpos, block in enumerate(self._slot_positions):
             block_len = block.shape[-1]
-            if input_pos < pos + block_len:
-                offset = input_pos - pos
+            if token_pos < pos + block_len:
+                offset = token_pos - pos
                 break
             pos += block_len
         if offset is None:
-            raise ValueError(f"token_pos = {input_pos} is too large")
+            raise ValueError(f"token_pos = {token_pos} is too large")
         return relpos, offset
 
     def extract_index(
         self,
-        input_pos: int,
+        token_pos: int,
         num: int,
         **kwargs,
     ) -> torch.Tensor:
-        relpos, bstart = self._position_and_offset(input_pos)
+        relpos, bstart = self._position_and_offset(token_pos)
         parts = []
         block = self._slot_positions[relpos]
         blocksize = block.shape[-1]
@@ -202,7 +182,7 @@ class UpdateTokenPositionsGracePeriod:
 
 def update_token_positions(
     token_positions: torch.Tensor,
-    input_pos: int,
+    next_token_pos: int,
     num: int,
     batch_size: int,
     index: Optional[torch.Tensor],
@@ -213,33 +193,31 @@ def update_token_positions(
     `token_positions` of shape `(batch_size, n_query_groups, cache_length)`
     contains token positions for each slot. If `batch_size < batch_size`,
     only the leading rows are used. It is updated here with new token positions
-    `input_pos` to `input_pos + num - 1`.
+    `next_token_pos` to `next_token_pos + num - 1`.
 
-    If `input_pos < cache_length`, must have `input_pos + num <=
+    If `next_token_pos < cache_length`, must have `next_token_pos + num <=
     cache_length`. In this case, slot positions are just token positions.
     Otherwise, `index` must be given, with semantics as in
-    :class:`AttnWeightsKVCache`. Afterwards, `input_pos` should be
+    :class:`AttnWeightsKVCache`. Afterwards, `next_token_pos` should be
     increased by `num`.
 
     """
     assert token_positions.ndim == 3
     bs, n_query_groups, cache_length = token_positions.shape
     assert 1 <= batch_size <= bs
-    assert num >= 1 and input_pos >= 0
+    assert num >= 1 and next_token_pos >= 0
     assert cache_length >= 1
-    cache_full = input_pos >= cache_length
-    assert cache_full or input_pos + num <= cache_length
+    cache_full = next_token_pos >= cache_length
+    assert cache_full or next_token_pos + num <= cache_length
     assert grace_period >= 0
     device = token_positions.device
     arange_kwargs = dict(dtype=token_positions.dtype, device=device)
     result = None
     if not cache_full:
-        start = input_pos
-        end = input_pos + num
+        start = next_token_pos
+        end = next_token_pos + num
         token_positions[:batch_size, :, start:end] = torch.arange(
-            start,
-            end,
-            **arange_kwargs,
+            start, end, **arange_kwargs,
         ).view(1, 1, -1)
     else:
         assert index is not None
@@ -265,53 +243,46 @@ def update_token_positions(
             )
             # Update token_pos
             new_pos = torch.arange(
-                input_pos + num1,
-                input_pos + num,
-                **arange_kwargs,
+                next_token_pos + num1, next_token_pos + num, **arange_kwargs,
             ).view(1, 1, -1)
             pos_flat = positions[0, 0, :]
             token_positions[:batch_size, :, pos_flat] = new_pos
-            start_token_pos = input_pos - grace_period
+            start_token_pos = next_token_pos - grace_period
             result = UpdateTokenPositionsGracePeriod(
                 positions=positions,
                 num1=num1,
                 prefix=prefix,
             )
         else:
-            start_token_pos = input_pos
+            start_token_pos = next_token_pos
 
-        new_token_pos = index_to_3d(
-            torch.arange(start_token_pos, start_token_pos + num, **arange_kwargs),
-            batch_size,
-            n_query_groups,
+        new_token_pos = torch.arange(
+            start_token_pos, start_token_pos + num, **arange_kwargs,
+        ).view(1, 1, -1).expand(
+            batch_size, n_query_groups, -1
         )
         token_positions[:batch_size, ...].scatter_(
-            -1,
-            index,
-            new_token_pos,
+            -1, index, new_token_pos,
         )
         return result
 
 
 DEFAULT_REPLAY_LOG_BLOCKSIZE = 1024
 
-DEFAULT_KEEP_INITIAL_FRACTION = 0.05
-
 
 class AttnWeightsKVCache(KVCacheWithBuffers):
     """
-    Base class for key-value caches which need attention weights (summeed over
-    the query axis) to be passed (via :meth:`_update`) in every round. In
-    general, these weights are used to compute scores, based on which eviction
-    decisions are taken, once the cache is full. Score computations happen in
-    :meth:`_compute_scores`, which subclasses need to implement.
+    Base class for key-value caches which need attention weights to be passed
+    (via :meth:`update`) in every round. In general, these weights are used to
+    compute scores, based on which eviction decisions are taken. All of this
+    happens in :meth:`_compute_scores`, which subclasses need to implement.
 
     Grace period:
 
     If `grace_period > 0` (must be `< cache_length`), tokens are kept in the
-    cache for at least this many rounds before being considered for eviction,
-    independent of their score values. This prevents the most recent tokens
-    to be evicted based on noisy score values (scores are often cumulative).
+    cache for at least this many rounds before being considered for eviction.
+    This prevents the most recent tokens to be evicted based on noisy score
+    values.
 
     Technically, the final `grace_period` slots are reserved for these grace
     tokens. This part is organized as a ring buffer, the next slot to be
@@ -335,45 +306,17 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
     Replay log:
 
     Replay logging is required for gradient computation (fine-tuning), but not
-    for inference. It is (de)activated by :meth:`switch_replay_logging`. If
-    active, we maintain the slot positions for all tokens at positions
-    `>= cache_length`, as well as all `token_idx` values passed to
-    :meth:`forward`. These positions depend on batch and head index. They are
-    stored on the same device as the cache buffers, as list of `uint32`
-    tensors of shape `(batch_size, n_query_groups, replay_log_blocksize)`.
+    for inference. It needs to be activated by
+    :code:`switch_replay_logging(True)`, and can be deactivated by passing
+    `False`. If active, We maintain the slot positions for all tokens at
+    positions `>= cache_length`, as well as all `token_idx` values passed to
+    :meth:`prefill` and :meth:`forward`. These positions depend on batch and head
+    index. They are stored on the same device as the cache buffers, as list of
+    `uint32` tensors of shape `(batch_size, n_query_groups, replay_log_blocksize)`.
     These slot positions allow for re-playing all insert decisions later on,
     which is required for gradient computations.
 
-    First :meth:`forward` call when cache is full:
-
-    In general, the initial (prefill) call fills up the cache, while not
-    returning attention weights. This means that for the second call, we cannot
-    use a score-based decision for which slots to overwrite. Instead, for the
-    first :meth:`forward` after the cache is filled up, we use a heuristic
-    rule. Namely, we evict slots starting at position
-    `int(cache_length * keep_initial_fraction)`. This rule is used once only,
-    afterwards we use H2O scores. If `keep_initial_fraction > 0`, the KV
-    information for the initial tokens is not evicted in this step. For
-    `keep_fraction == 0`, this one-time rule corresponds to what a
-    :class:`LastRecentlyInsertedKVCache` would do.
-
-    Limiting the chunk size:
-
-    The length of tensors passed to :meth:`forward` (along the sequence axis)
-    is called chunk size. The first call (after :meth:`reset`) is prefilling
-    with chunks up to `max_prefill_length`. If `max_chunk_size` is used, chunks
-    other than prefill must not be longer than this. The limitation is used in
-    order to process score values by `torch.topk` instead of `torch.argsort` in
-    :meth:`_update`, which can be significantly faster.
-
-    Debugging/testing with `debug_next_positions`:
-
-    If this is set, it must be a list. Then, `index` used in
-    :meth:`_forward_internal` are appended there. In this case, we sort the
-    index in :meth:`_update` if `max_chunk_size` is given.
-
     """
-
     def __init__(
         self,
         config: Config,
@@ -382,105 +325,82 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         grace_period: int = 0,
         replay_log_blocksize: Optional[int] = None,
         detach_attn_weights: bool = False,
-        keep_initial_fraction: Optional[float] = None,
-        max_chunk_size: Optional[int] = None,
         **base_kwargs,
     ):
         """
         Use :meth:`from_config` in order to use default KV cache buffers, which
         are allocated here.
 
-        Additional args:
+        Args:
+            config: Model config
+            buffers: KV cache buffers to be used
+            block_idx: Index of block (or layer)
             grace_period: Grace period, see header comment. Defaults to 0
                 (no grace period)
             replay_log_blocksize: See header comment.
             detach_attn_weights: If `True`, `attn_weights` are not detached before
                 passing it into score computations. This can create a very
                 complex computation graph. Defaults to `False`.
-            keep_initial_fraction: See above. Defaults to
-                :const:`DEFAULT_KEEP_INITIAL_FRACTION`.
-            max_chunk_size: If given, any :meth:`forward` call with
-                `input_pos > 0`, argument lengths must be `<= max_chunk_size`.
-                This is used to speed up :meth:`_update`.
 
         """
         super().__init__(config, buffers, block_idx=block_idx, **base_kwargs)
         if not (0 <= grace_period < buffers.cache_length):
-            raise ValueError(
-                f"Must have 0 <= grace_period < {buffers.cache_length}, but grace_period = {grace_period}"
-            )
+            raise ValueError(f"Must have 0 <= grace_period < {buffers.cache_length}, but grace_period = {grace_period}")
         if replay_log_blocksize is None:
             replay_log_blocksize = DEFAULT_REPLAY_LOG_BLOCKSIZE
         elif replay_log_blocksize <= 0:
-            raise ValueError(
-                f"replay_log_blocksize must be positive, but got {replay_log_blocksize}"
-            )
-        if keep_initial_fraction is None:
-            keep_initial_fraction = DEFAULT_KEEP_INITIAL_FRACTION
-        elif not (0 <= keep_initial_fraction < 1):
-            raise ValueError(
-                f"keep_initial_fraction = {keep_initial_fraction}, must be in [0, 1)"
-            )
-        self._keep_initial_fraction = keep_initial_fraction
+            raise ValueError(f"replay_log_blocksize must be positive, but got {replay_log_blocksize}")
         self.grace_period = grace_period
         self.replay_log_blocksize = replay_log_blocksize
         self._detach_attn_weights = detach_attn_weights
-        cache_length = buffers.cache_length
-        if max_chunk_size is not None:
-            if not (0 < max_chunk_size <= cache_length):
-                raise ValueError(
-                    f"max_chunk_size = {max_chunk_size}, must be in (0, {cache_length}]"
-                )
-            if max_chunk_size > cache_length // 2:
-                print(
-                    f"max_chunk_size = {max_chunk_size} too large to provide savings. Switching it off."
-                )
-                max_chunk_size = None
-        self.max_chunk_size = max_chunk_size
-        shape = (buffers.max_batch_size, self.n_query_groups, cache_length)
-        device = self._default_device_for_new_params()
+        shape = (buffers.max_batch_size, self.n_query_groups, buffers.cache_length)
         self.register_buffer(
             "token_pos",
-            torch.zeros(shape, device=device, dtype=torch.int),
+            torch.zeros(shape, device=buffers.device, dtype=torch.int),
             persistent=False,
         )
         # Slot positions where :meth:`forward` writes new key, value tensors.
         # Integer array of shape `(batch_size, n_query_groups, num)`, where
         # `num <= cache_length`. Initialized by :meth:`prefill`.
         self._next_positions = None
+        # Next token position :meth:`forward` is called for
+        self._next_token_pos = None
         self.next_grace_pos = None
         self.prefill_length = None
-        # Signals :meth:`forward` to use the initial rule instead of
-        # `_next_positions`. This happens for the first call after the cache
-        # has been filled.
-        self._use_initial_rule = None
         # For replay log
         self._replay_log = None
-        # For debugging/testing
-        self.debug_next_positions = None
-
-    @classmethod
-    def _parameter_names(cls) -> List[str]:
-        return super()._parameter_names() + ["token_pos"]
 
     def next_positions(self, num: int) -> Optional[torch.Tensor]:
         """
         Returns:
             Batched positions where key and value tensors in next :meth:`forward`
             call are written to, shape `(batch_size, n_query_groups, num)`,
-            where `num <= max_forward_length()`, the remaining ones are not used.
+            where `num <= max_tokens_forward`, the remaining ones are not used.
         """
-        return (
-            None if self._next_positions is None else self._next_positions[:, :, :num]
-        )
+        return None if self._next_positions is None else self._next_positions[:, :, :num]
 
-    def max_forward_length(self) -> int:
+    @property
+    def next_token_pos(self) -> Optional[int]:
+        return self._next_token_pos
+
+    @property
+    def max_prefill_length(self) -> Optional[int]:
+        """
+        Note that :meth:`prefill` must not fill the cache, as we need to
+        compute scores in order to make a good eviction decision, and this can
+        be done only after the first :meth:`forward` call.
+
+        Returns:
+            Maximum length for arguments to :meth:prefill`.
+        """
+        return self.cache_length - 1
+
+    @property
+    def max_tokens_forward(self) -> int:
         diff = self.cache_length - self.current_length
         result = self.cache_length - self.grace_period
         if diff > 0:
             result = min(result, diff)
-        if self.max_chunk_size is not None:
-            result = min(result, self.max_chunk_size)
         return result
 
     def _forward_internal(
@@ -489,41 +409,18 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
+        if self.next_positions(num=1) is None:
+            raise IndexError("Cache needs to be initialized with 'prefill' before being used")
         num = key.shape[2]
-        if self._use_initial_rule is None or (
-            not self._use_initial_rule and self.next_positions(num=1) is None
-        ):
-            raise IndexError(
-                "Cache needs to be initialized with 'prefill' before being used"
-            )
         diff = self.cache_length - self.current_length
-        if not 1 <= num <= self.max_forward_length():
+        if not 1 <= num <= self.max_tokens_forward:
             if 0 < diff < num:
                 # Cache is almost full, with `diff < num` slots free. There is no
                 # good solution for this. We don't know which `num - diff` slots to
                 # evict, because we did not compute scores so far.
-                raise ValueError(
-                    f"key.shape[2] = {num}, must be <= {diff} as long as the cache is not full"
-                )
+                raise ValueError(f"key.shape[2] = {num}, must be <= {diff} as long as the cache is not full")
             else:
-                raise ValueError(
-                    f"key.shape[2] = {num}, must be in [1, {self.max_forward_length()}]"
-                )
-        if self._use_initial_rule:
-            # Set `_next_positions` according to the initial rule
-            num_keep = min(
-                int(self._keep_initial_fraction * self.cache_length),
-                self.cache_length - num,
-            )
-            self._next_positions = index_to_3d(
-                torch.arange(
-                    num_keep, num_keep + num, dtype=torch.int64, device=self.device
-                ),
-                self.batch_size,
-                self.n_query_groups,
-            )
-            # Only use once:
-            self._use_initial_rule = False
+                raise ValueError(f"key.shape[2] = {num}, must be in [1, {self.max_tokens_forward}]")
         # We need to know how score buffers are initialized for new content. By
         # default, they are filled with 0. But other initial values for scores
         # can be passed via `_initial_scores_in_forward`.
@@ -531,12 +428,10 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         # Positions (from last recent `update`) where new content is to be
         # written to:
         index = self.next_positions(num)
-        if self.debug_next_positions is not None:
-            self.debug_next_positions.append(index.detach().clone().cpu())
         # Update `token_pos`
         update_result = update_token_positions(
             token_positions=self.token_pos,
-            input_pos=self.input_pos,
+            next_token_pos=self._next_token_pos,
             num=num,
             batch_size=self.batch_size,
             index=index,
@@ -577,9 +472,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             )
             if num1 == 0:
                 # Increment in round-robin fashion (only if num <= grace_period)
-                self.next_grace_pos = (
-                    self.next_grace_pos - prefix + num
-                ) % self.grace_period + prefix
+                self.next_grace_pos = (self.next_grace_pos - prefix + num) % self.grace_period + prefix
         else:
             # No grace period, or buffer net yet full
             k_and_v = self.kv_buffers.forward(
@@ -598,15 +491,13 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
 
         if self._replay_log is not None:
             if not isinstance(self._replay_log, AttnWeightsReplayLog):
-                raise IndexError(
-                    "Cannot switch on replay logging in the middle of inference run. Call 'prefill'."
-                )
+                raise IndexError("Cannot switch on replay logging in the middle of inference run. Call 'prefill'.")
             self._append_token_idx(token_idx)
-            if self.input_pos >= self.cache_length:
+            if self._next_token_pos >= self.cache_length:
                 self._replay_log.append_position_index(
-                    index=index,
-                    input_pos=self.input_pos,
+                    index=index, next_token_pos=self.next_token_pos,
                 )
+        self._next_token_pos += num
         self._next_positions = None  # Set by next :meth:`update` call
         return k_and_v
 
@@ -628,9 +519,9 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             for scores, name in self._score_buffers():
                 # Copy score values from grace region
                 if pos_do_wrap_around:
-                    scores_src = scores[: self.batch_size, :, pos_flat]
+                    scores_src = scores[:self.batch_size, :, pos_flat]
                 else:
-                    scores_src = scores[: self.batch_size, :, start:end]
+                    scores_src = scores[:self.batch_size, :, start:end]
                 init_vals = init_score_values.get(name)
                 if num1 > 0:
                     if init_vals is not None:
@@ -640,21 +531,21 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                             (1, 1, 1), dtype=scores.dtype, device=scores.device
                         ).expand(self.batch_size, self.n_query_groups, num1)
                     scores_src = torch.cat((scores_src, part2), dim=-1)
-                scores[: self.batch_size, ...].scatter_(-1, index, scores_src)
+                scores[:self.batch_size, ...].scatter_(-1, index, scores_src)
                 if pos_do_wrap_around:
                     if init_vals is None:
-                        scores[: self.batch_size, :, pos_flat].fill_(0.0)
+                        scores[:self.batch_size, :, pos_flat].fill_(0.0)
                     else:
-                        scores[: self.batch_size, :, pos_flat] = init_vals[:, :, num1:]
+                        scores[:self.batch_size, :, pos_flat] = init_vals[:, :, num1:]
                 else:
                     if init_vals is None:
-                        scores[: self.batch_size, :, start:end].fill_(0.0)
+                        scores[:self.batch_size, :, start:end].fill_(0.0)
                     else:
-                        scores[: self.batch_size, :, start:end] = init_vals[:, :, num1:]
+                        scores[:self.batch_size, :, start:end] = init_vals[:, :, num1:]
         else:
             for scores, name in self._score_buffers():
                 init_vals = init_score_values.get(name, 0.0)
-                scores[: self.batch_size, ...].scatter_(-1, index, init_vals)
+                scores[:self.batch_size, ...].scatter_(-1, index, init_vals)
 
     def _append_token_idx(self, token_idx: torch.Tensor):
         if self._replay_log is None:
@@ -665,6 +556,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                 max_prefill_length=self.max_prefill_length,
                 blocksize=self.replay_log_blocksize,
                 grace_period=self.grace_period,
+                dtype=self.dtype,
             )
         self._replay_log.append_token_chunk(token_idx)
 
@@ -681,7 +573,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
 
         Args:
             key: New keys, `(batch_size, n_query_groups, num, head_size)`,
-                where `1 <= num <= max_forward_length()`
+                where `1 <= num <= max_tokens_forward`
             value: New values, `(batch_size, n_query_groups, num, head_size)`
 
         Returns:
@@ -712,6 +604,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             query_length: Size of query axis
 
         """
+
         if len(args) >= 1:
             attn_weights = args[0]
         else:
@@ -729,14 +622,10 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         if not isinstance(query_length, int) or query_length <= 0:
             raise TypeError("query_length argument needs to be positive int")
         if attn_weights.device != self.device:
-            raise ValueError(
-                f"attn_weights.device = {attn_weights.device}, self.device = {self.device}. Must be the same"
-            )
+            raise ValueError(f"attn_weights.device = {attn_weights.device}, self.device = {self.device}. Must be the same")
         shape = (self.batch_size, self.n_query_groups, self.current_length)
         if attn_weights.shape != shape:
-            raise ValueError(
-                f"Shape of attn_weights must be {shape}, but attn_weights.shape = {attn_weights.shape}"
-            )
+            raise ValueError(f"Shape of attn_weights must be {shape}, but attn_weights.shape = {attn_weights.shape}")
         # Block gradients
         if self._detach_attn_weights:
             attn_weights = attn_weights.detach()
@@ -746,17 +635,8 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         scores = self._compute_scores(attn_weights, query_length)
         if self.current_length < self.cache_length:
             self._set_next_positions_to_free_slots()
-        elif self.max_chunk_size is None:
-            self._next_positions = scores.argsort(dim=-1)
         else:
-            # If `debug_next_positions`, we use `sorted=True` to be able
-            # to compare against not using `max_chunk_size`
-            self._next_positions = scores.topk(
-                k=self.max_chunk_size,
-                dim=-1,
-                largest=False,
-                sorted=self.debug_next_positions is not None,
-            )[1]
+            self._next_positions = scores.argsort(dim=-1)
 
     def _compute_scores(
         self,
@@ -770,23 +650,17 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         excludes the grace region at the end of the buffer, since these tokens
         must not be evicted.
 
-        Note that score values are updated even if the cache is not full.
-        They are just not returned in this case.
-
         Args:
             attn_weights: Attention weights for the multi-head attention
                 computation done just after the last recent :meth:`forward`
                 call, summed over the query axis. Shape must be
-                `(batch_size, n_query_groups, current_length)`, where
-                `current_length <= cache_length` is the current cache length.
-                Also, `dtype=float32`.
+                `(batch_size, n_query_groups, T)`, where `T <= cache_length` is
+                the current cache length. Also, `dtype=float32`.
             query_length: Size of query axis
 
         Returns:
             scores, shape `(batch_size, n_query_groups, cache_length - grace_period)`,
-            only if cache is full. Note that the grace slots at the end of the
-            cache are excluded.
-
+            only if cache is full.
         """
         raise NotImplementedError()
 
@@ -825,15 +699,16 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         # Update `token_pos`
         update_token_positions(
             token_positions=self.token_pos,
-            input_pos=0,
+            next_token_pos=0,
             num=init_length,
             batch_size=self.batch_size,
             index=None,
             grace_period=self.grace_period,
         )
-        self._use_initial_rule = self.current_length == self.cache_length
-        if not self._use_initial_rule:
-            self._set_next_positions_to_free_slots()
+        self._next_token_pos = init_length
+        # The cache is not completely full, so that :meth:`forward` can be
+        # called without having to call :meth:`update` before
+        self._set_next_positions_to_free_slots()
         if self.grace_period > 0:
             # First slot to move out once the cache is full
             self.next_grace_pos = self.cache_length - self.grace_period
@@ -871,7 +746,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
     def token_positions(self) -> torch.Tensor:
         if self.current_length is None:
             raise IndexError("Cache is not initialized, call 'prefill' first")
-        return self.token_pos[: self.batch_size, :, : self.current_length]
+        return self.token_pos[:self.batch_size, :, :self.current_length]
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         """
@@ -885,9 +760,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         return sz_buffs + sz_tp, dct_sz
 
     @classmethod
-    def size_estimate_apriori(
-        cls, params: KVCacheParams, **kwargs
-    ) -> Tuple[int, Dict[str, int]]:
+    def size_estimate_apriori(cls, params: KVCacheParams, **kwargs) -> Tuple[int, Dict[str, int]]:
         """
         `cache_length` is required in `kwargs`. If `buffer_type` is given in
         `kwargs`, the size for this type is used, otherwise for the default
@@ -897,19 +770,12 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         buff_params = KVCacheBuffersParams.from_params(params)
         buffer_type = kwargs.get("buffer_type", DefaultKVCacheBuffers)
         sz_buffs, dct_sz = buffer_type.size_estimate_apriori(
-            buff_params,
-            cache_length=params.cache_length,
-            **kwargs,
+            buff_params, cache_length=params.cache_length, **kwargs,
         )
         dtype = params.dtype
         if dtype is None:
             raise ValueError("params.dtype must be provided")
-        sz_tp = (
-            params.max_batch_size
-            * params.n_query_groups
-            * params.cache_length
-            * bits_for_torch_dtype(torch.int)
-        )
+        sz_tp = params.max_batch_size * params.n_query_groups * params.cache_length * bits_for_torch_dtype(torch.int)
         return sz_buffs + sz_tp, dict(dct_sz, token_pos=sz_tp)
 
     def switch_replay_logging(self, status: bool):
@@ -928,7 +794,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         Returns list of slot position tensors.
         If we applied `torch.cat(..., dim=-1)` to this, we would get a tensor `res`
         of shape `(batch_size, n_query_groups, T)`, where
-        `T = input_pos - cache_length`, so the content for any token
+        `T = next_token_pos - cache_length`, so the content for any token
         position `t + cache_length` was written to slots `res[:, :, t]`.
 
         Returns:
@@ -939,7 +805,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         if self._replay_log is None:
             return None
         else:
-            return self._replay_log.finalize(self.input_pos)
+            return self._replay_log.finalize(self.next_token_pos)
 
     def _score_buffers(self) -> List[Tuple[torch.Tensor, str]]:
         """
@@ -962,44 +828,15 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         """
         raise NotImplementedError()
 
-    def fix_dtype_of_score_buffers(self):
-        """
-        Iterates over registered score buffers. If any does not have
-        `dtype == float32`, it is replaced by one with that `dtype`.
-
-        This special method is needed because `Lightning Fabric` has the
-        annoying property of changing `dtype` of registered buffers if
-        a model is wrapped with `fabric.setup`.
-
-        """
-        raise NotImplementedError()
-
     def _set_next_positions_to_free_slots(self):
         """
         If `current_length < cache_length`, this method sets `_next_positions`
         to cover the remaining free slots.
         """
         if self.current_length < self.cache_length:
-            self._next_positions = index_to_3d(
-                torch.arange(
-                    self.current_length,
-                    self.cache_length,
-                    dtype=torch.int64,
-                    device=self.device,
-                ),
-                self.batch_size,
-                self.n_query_groups,
-            )
-
-    def _base_kwargs_for_clone(self) -> Dict[str, Any]:
-        base_kwargs = super()._base_kwargs_for_clone()
-        base_kwargs.update(
-            dict(
-                grace_period=self.grace_period,
-                replay_log_blocksize=self.replay_log_blocksize,
-                detach_attn_weights=self._detach_attn_weights,
-                keep_initial_fraction=self._keep_initial_fraction,
-                max_chunk_size=self.max_chunk_size,
-            )
-        )
-        return base_kwargs
+            self._next_positions = torch.arange(
+                self.current_length,
+                self.cache_length,
+                dtype=torch.int64,
+                device=self.device
+            ).view(1, 1, -1).expand(self.batch_size, self.n_query_groups, -1)

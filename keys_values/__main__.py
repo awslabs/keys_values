@@ -24,13 +24,7 @@ from litgpt.__main__ import PARSER_DATA as PARSER_DATA_LITGPT
 from keys_values.finetune.longcontext_eval import setup as eval_long_fn
 from keys_values.finetune.longcontext_full import setup as finetune_long_full_fn
 from keys_values.finetune.longcontext_lora import setup as finetune_long_lora_fn
-from keys_values.finetune.longcon_offload_full import setup as finetune_offload_full_fn
-from keys_values.finetune.longcon_offload_lora import setup as finetune_offload_lora_fn
 from keys_values.parser_config import parser_commands
-
-ENV_VAR_LOG_DIR = "KEYSVALS_LOG_DIR"
-
-ENV_VAR_LOG_DIR_LEGACY = "VALKEYRIE_LOG_DIR"
 
 
 PARSER_DATA = {
@@ -38,8 +32,6 @@ PARSER_DATA = {
     "finetune_long_full": finetune_long_full_fn,
     "finetune_long_lora": finetune_long_lora_fn,
     "eval_long": eval_long_fn,
-    "finetune_offload_full": finetune_offload_full_fn,
-    "finetune_offload_lora": finetune_offload_lora_fn,
 }
 
 
@@ -54,7 +46,6 @@ def _check_commands():
 
 class TeeOutput:
     """Utility class to duplicate output to both file and stream (stdout/stderr)"""
-
     def __init__(self, file_obj, stream):
         self.file = file_obj
         self.stream = stream
@@ -85,11 +76,7 @@ def _setup_rank_logs(base_directory: str | None = None):
     """
     # Get rank information from environment
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    base_directory = os.environ.get(ENV_VAR_LOG_DIR)
-    if base_directory is None:
-        base_directory = os.environ.get(ENV_VAR_LOG_DIR_LEGACY)
-    if base_directory is None:
-        base_directory = "./logs"
+    base_directory = base_directory or os.environ.get("VALKEYRIE_LOG_DIR") or "./logs"
     os.makedirs(base_directory, exist_ok=True)
 
     # Configure log file paths
@@ -129,10 +116,7 @@ def main() -> None:
     warning_message = r"The epoch parameter in `scheduler.step\(\)` was not necessary and is being deprecated.*"
 
     warnings.filterwarnings(
-        action="ignore",
-        message=warning_message,
-        category=UserWarning,
-        module=r".*torch\.optim\.lr_scheduler.*",
+        action="ignore", message=warning_message, category=UserWarning, module=r".*torch\.optim\.lr_scheduler.*"
     )
 
     torch.set_float32_matmul_precision("high")

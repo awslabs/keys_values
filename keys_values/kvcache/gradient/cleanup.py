@@ -16,8 +16,7 @@ from typing import Any, Set, Optional, Union, Dict, Tuple, Iterable
 
 import torch
 
-from keys_values.kvcache.utils import storage_id
-from keys_values.utils import bytes_for_torch_dtype
+from keys_values.kvcache.utils import bytes_for_torch_dtype, storage_id
 
 
 @dataclass(frozen=True)
@@ -41,8 +40,11 @@ class ArraysForCleanup:
     The original "solution" proposed in the GitHub issue does not work for
     me, it affects too many tensors, not just those stored in the graph.
 
-    """
+    TODO: At the moment, using this with the autograd hooks and
+    :func:`protect_named_params_buffers_of_model` passing in the model
+    still leads to memory leakage. Needs more investigation.
 
+    """
     def __init__(
         self,
         protected_ids: Optional[Union[Set[int], Dict[int, str]]] = None,
@@ -62,6 +64,7 @@ class ArraysForCleanup:
     def add(self, x: Any):
         if isinstance(x, torch.Tensor):
             id_x = storage_id(x)
+            #if id_x not in self._arrays:  # DEBUG
             if id_x not in self._arrays and id_x not in self._protected_ids:
                 self._arrays[id_x] = x
                 self._num += 1
@@ -77,15 +80,23 @@ class ArraysForCleanup:
         if verbose:
             stats = self.stats()
         for array in self._arrays.values():
+            # DEBUG:
+            #id_x = storage_id(array)
+            #is_protected = id_x in self._protected_ids
+            #text = f"{id_x}: {getrefcount(array)}"
+            #if is_protected:
+            #    if isinstance(self._protected_ids, set):
+            #        text += " (protected)"
+            #    else:
+            #        text += f" (protected: {self._protected_ids[id_x]})"
+            #print(text)
             array.grad = None
             array.storage().resize_(0)
         self._arrays = dict()
         self._num = 0
         if verbose:
             if stats.num > 0:
-                print(
-                    f"Deallocated {stats.num} arrays [total: {stats.total_mem:.3f} GB]."
-                )
+                print(f"Deallocated {stats.num} arrays [total: {stats.total_mem:.3f} GB].")
             else:
                 print("Autograd graph has been properly deallocated.")
 
@@ -93,7 +104,7 @@ class ArraysForCleanup:
         assert self._num == len(self._arrays), (self._num, len(self._arrays))
         total_mem = sum(
             x.numel() * bytes_for_torch_dtype(x.dtype) for x in self._arrays.values()
-        ) / (2**30)
+        ) / (2 ** 30)
         return ArraysForCleanupStats(
             num=self._num,
             max_num=self._max_size,
@@ -102,8 +113,7 @@ class ArraysForCleanup:
 
 
 def _params_and_buffers(
-    model: torch.nn.Module,
-    map_names: bool,
+    model: torch.nn.Module, map_names: bool,
 ) -> Union[Iterable[torch.Tensor], Iterable[Tuple[str, torch.Tensor]]]:
     if not map_names:
         for param in model.parameters():
@@ -122,8 +132,7 @@ def _params_and_buffers(
 
 
 def protect_named_params_buffers_of_model(
-    model: torch.nn.Module,
-    map_names: bool = False,
+    model: torch.nn.Module, map_names: bool = False,
 ) -> Union[Set[int], Dict[int, str]]:
     """
     Args:
@@ -137,8 +146,11 @@ def protect_named_params_buffers_of_model(
 
     """
     if not map_names:
-        return {storage_id(x) for x in _params_and_buffers(model, map_names)}
+        return {
+            storage_id(x) for x in _params_and_buffers(model, map_names)
+        }
     else:
         return {
-            storage_id(x): name for name, x in _params_and_buffers(model, map_names)
+            storage_id(x): name
+            for name, x in _params_and_buffers(model, map_names)
         }

@@ -11,25 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import random
+from typing import Optional, Dict, Any
 from functools import partial
-from itertools import product
-from typing import Dict, Any
 
 import torch
 import pytest
 
-from keys_values.config import Config
+from litgpt.config import Config
 
 from keys_values.kvcache.attn_weights import AttnWeightsKVCache
 from keys_values.kvcache.base import KVCacheParams
-from keys_values.kvcache.consts import split_name
+from keys_values.kvcache.factory import KVCacheFactory, split_name
 from keys_values.kvcache.gradient.inference_replay import (
     inference_replay_cache_factory,
     get_replay_logs,
     InferenceAttnWeightsReplayCache,
-)
-from keys_values.kvcache.gradient.train_attn_weights_replay_old import (
-    TrainingAttnWeightsReplayCacheOld,
 )
 from keys_values.kvcache.gradient.train_attn_weights_replay import (
     TrainingAttnWeightsReplayCache,
@@ -53,7 +50,6 @@ class ForTestInferenceAttnWeightsReplayCache(InferenceAttnWeightsReplayCache):
     the attention weights are not needed.
 
     """
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -70,9 +66,7 @@ def _cache_kwargs(name: str) -> Dict[str, Any]:
 
 def args_inference_replay():
     names_devices = cache_names_and_devices(
-        filter_name=lambda name: not (
-            name.startswith("dense") or name.startswith("h2o-orig")
-        )
+        filter_name=lambda name: not (name.startswith("dense") or name.startswith("h2o-orig"))
     )
     result = [(name, device, _cache_kwargs(name)) for name, device in names_devices]
     result += [
@@ -84,11 +78,11 @@ def args_inference_replay():
 
 
 @pytest.mark.parametrize(
-    "cache_name, device, cache_kwargs",
-    args_inference_replay(),
+    "cache_name, device, cache_kwargs", args_inference_replay(),
 )
 def test_inference_replay(cache_name, device, cache_kwargs):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
     dtype = torch.bfloat16
     torch.set_default_dtype(dtype)  # Set default dtype
@@ -99,17 +93,22 @@ def test_inference_replay(cache_name, device, cache_kwargs):
     cache_length = 512
     head_size = 64
     vocab_size = 48
-    tokens_per_chunk = [cache_length, 8, 4, 8, 2, 8, 2, 8, 8]
+    tokens_per_chunk = [cache_length - 1, 1, 8, 4, 8, 2, 8, 2, 8, 8]
     seq_length = sum(tokens_per_chunk)
 
     layer_outputs = dict()
 
-    def start_of_layer_hook(x: torch.Tensor, l_ix: int, tag: str):
+    def start_of_layer_hook(
+        x: torch.Tensor, l_ix: int, input_pos: Optional[int], tag: str,
+    ):
         if l_ix == 1:
+            assert input_pos is not None
             current = layer_outputs.get(tag)
             if current is None:
+                assert input_pos == 0
                 layer_outputs[tag] = x
             else:
+                assert input_pos == current.shape[1]
                 layer_outputs[tag] = torch.cat([current, x], dim=1)
 
     config = Config(
@@ -125,10 +124,10 @@ def test_inference_replay(cache_name, device, cache_kwargs):
         config=config,
         max_batch_size=batch_size,
         cache_length=cache_length,
+        device=device,
         dtype=dtype,
     )
-    with torch.device(device):
-        model = GPT(config)
+    model = GPT(config).to(device=device)
     kv_cache = create_kv_cache(
         name=cache_name,
         params=params,
@@ -167,8 +166,7 @@ def test_inference_replay(cache_name, device, cache_kwargs):
                 ir_cache = ForTestInferenceAttnWeightsReplayCache(**kwargs)
             else:
                 ir_cache = inference_replay_cache_factory(
-                    kv_cache=kv_cache,
-                    **kwargs,
+                    kv_cache=kv_cache, **kwargs,
                 )
             model.transformer.h[0].attn.kv_cache = ir_cache
             print("* Replay inference pass")
@@ -177,7 +175,12 @@ def test_inference_replay(cache_name, device, cache_kwargs):
             input_pos = 0
             y_parts = []
             for num in tokens_per_chunk:
-                y_parts.append(model(token_idxs[:, input_pos : (input_pos + num)]))
+                y_parts.append(
+                    model(
+                        token_idxs[:, input_pos:(input_pos + num)],
+                        input_pos=input_pos,
+                    )
+                )
                 input_pos += num
             y = torch.cat(y_parts, dim=1)
 
@@ -199,19 +202,24 @@ def test_inference_replay(cache_name, device, cache_kwargs):
 
 
 def args_training_replay():
-    tol_kwargs = dict(atol=0.004, rtol=0.1)
+    def tol_kwargs(name):
+        if name.startswith("lastrec"):
+            return dict(atol=0.005, rtol=0.1)
+        else:
+            return dict()
+
     names_devices = cache_names_and_devices(
         filter_name=lambda name: (
-            split_name(name)[1] == "default"
-            and split_name(name)[0] not in ("dense", "h2o-orig")
+            split_name(name)[1] == "default" and
+            split_name(name)[0] not in ("dense", "h2o-orig")
         ),
     )
     result1 = [
-        (name, device, _cache_kwargs(name), tol_kwargs)
+        (name, device, _cache_kwargs(name), tol_kwargs(name))
         for name, device in names_devices
     ]
     result2 = [
-        (name, device, dict(_cache_kwargs(name), grace_period=10), tol_kwargs)
+        (name, device, dict(_cache_kwargs(name), grace_period=10), dict())
         for name, device in names_devices
         if split_name(name)[0] in ("h2o", "h2o-vlen")
     ]
@@ -219,17 +227,11 @@ def args_training_replay():
 
 
 @pytest.mark.parametrize(
-    "cache_name, device, cache_kwargs, tol_kwargs, use_old_cache",
-    [
-        a + (b,)
-        for a, b in product(
-            args_training_replay(),
-            [False, True],
-        )
-    ],
+    "cache_name, device, cache_kwargs, tol_kwargs", args_training_replay(),
 )
-def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_old_cache):
+def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
 
     dtype = torch.bfloat16
@@ -240,25 +242,22 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_old_c
     cache_length = 512
     head_size = 64
     vocab_size = 48
-    tokens_per_chunk = [cache_length, 8, 4, 8, 2, 8, 2, 8, 8]
+    tokens_per_chunk = [cache_length - 1, 1, 8, 4, 8, 2, 8, 2, 8, 8]
     seq_length = sum(tokens_per_chunk)
-    if not use_old_cache:
-        replay_class = TrainingAttnWeightsReplayCache
-        # Eager SDPA never used
-        cache_kwargs = {
-            **cache_kwargs,
-            "use_eager_kernel": lambda kv_len, q_len: False,
-        }
-    else:
-        replay_class = TrainingAttnWeightsReplayCacheOld
+
     layer_outputs = dict()
 
-    def start_of_layer_hook(x: torch.Tensor, l_ix: int, tag: str):
+    def start_of_layer_hook(
+        x: torch.Tensor, l_ix: int, input_pos: Optional[int], tag: str,
+    ):
         if l_ix == 1:
+            assert input_pos is not None
             current = layer_outputs.get(tag)
             if current is None:
+                assert input_pos == 0
                 layer_outputs[tag] = x
             else:
+                assert input_pos == current.shape[1]
                 layer_outputs[tag] = torch.cat([current, x], dim=1)
 
     config = Config(
@@ -274,10 +273,10 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_old_c
         config=config,
         max_batch_size=batch_size,
         cache_length=cache_length,
+        device=device,
         dtype=dtype,
     )
-    with torch.device(device):
-        model = GPT(config)
+    model = GPT(config).to(device=device)
     kv_cache = create_kv_cache(
         name=cache_name,
         params=params,
@@ -305,14 +304,15 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_old_c
             # Create training replay cache. We use the buffer of `kv_cache`
             # here.
             replay_log = get_replay_logs(model)[0]
-            tr_cache = replay_class(
+            tr_cache = TrainingAttnWeightsReplayCache(
                 config=config,
                 batch_size=batch_size,
                 cache_length=cache_length,
                 replay_log=replay_log,
-                start_input_pos=0,
+                start_token_pos=0,
                 layer_idx=0,
                 num_chunks=len(tokens_per_chunk),
+                device=device,
                 node_annotations=None,
             )
             model.transformer.h[0].attn.kv_cache = tr_cache
@@ -322,7 +322,12 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_old_c
             input_pos = 0
             y_parts = []
             for num in tokens_per_chunk:
-                y_parts.append(model(token_idxs[:, input_pos : (input_pos + num)]))
+                y_parts.append(
+                    model(
+                        token_idxs[:, input_pos:(input_pos + num)],
+                        input_pos=input_pos,
+                    )
+                )
                 input_pos += num
             y = torch.cat(y_parts, dim=1)
 

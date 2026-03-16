@@ -13,7 +13,7 @@
 # limitations under the License.
 from typing import Tuple, Optional
 
-from keys_values.config import Config
+from litgpt.config import Config
 from litgpt.data import DataModule
 
 from keys_values.data import LongBenchV2
@@ -23,6 +23,7 @@ from keys_values.head_model import (
     SequenceClassificationOnLogits,
     SequenceClassification,
 )
+
 
 SUPPORTED_HEAD_MODELS = {
     CrossEntropyOnLogits.NAME: CrossEntropyOnLogits,
@@ -52,9 +53,7 @@ class HeadModelFactory:
         """
         model_cls = SUPPORTED_HEAD_MODELS.get(name)
         if model_cls is None:
-            raise ValueError(
-                f"name = {name} not supported, must be in {HeadModelFactory.supported_names()}"
-            )
+            raise ValueError(f"name = {name} not supported, must be in {HeadModelFactory.supported_names()}")
         head_kwargs = dict()
         if data is not None and isinstance(data, LongBenchV2):
             head_kwargs = data.head_model_kwargs(name)

@@ -11,15 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import random
 from functools import partial
 from itertools import product
-from typing import List, Optional
+from typing import List
 
 import torch
 from torch.linalg import vector_norm
 import pytest
 
-from keys_values.config import Config
+from litgpt.config import Config
 from litgpt.utils import _RunIf
 
 from keys_values.kvcache.base import KVCacheParams
@@ -38,125 +39,86 @@ from keys_values.kvcache.test_utils import (
     random_keys_values,
     cache_names_and_devices,
     random_args_cache_forward,
-    random_index,
 )
 from keys_values.model import GPT
-from keys_values.utils import randint_torch
 
 
-def args_for_one_cache(
-    cname: str,
-    dtypes: Optional[List[torch.dtype]] = None,
-) -> List[tuple]:
-    if dtypes is None:
-        dtypes = [torch.float32, torch.float16, torch.bfloat16]
+def args_for_one_cache(cname: str) -> List[tuple]:
     return [
-        (a, b) + c
-        for a, b, c in product(
-            dtypes,
+        (a, b) + c for a, b, c in product(
+            [torch.float32, torch.float16, torch.bfloat16],
             [False, True],
             cache_names_and_devices(
-                filter_name=lambda name: name.startswith(cname)
-                and not name.endswith("default"),
+                filter_name=lambda name: name.startswith(cname) and not name.endswith("default"),
             ),
         )
     ]
 
 
-# TODO:
-# We currently skip blocks_over_heads = True, name = 'dense-bnb-quantized*'.
-# Need to understand what is going on there
 @pytest.mark.parametrize(
     "dtype, blocks_over_heads, name, device",
     args_for_one_cache("dense"),
 )
 def test_quantization_error(dtype, blocks_over_heads, name, device):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
-    if not ("bnb" in name and blocks_over_heads):
-        print(
-            f"dtype={dtype}, blocks_over_heads={blocks_over_heads}, name={name}, device={device}"
+    print(f"dtype={dtype}, blocks_over_heads={blocks_over_heads}, name={name}, device={device}")
+
+    head_sizes = (16, 32, 64)
+    params = [
+        KVCacheParams(
+            max_batch_size=3,
+            n_query_groups=4,
+            cache_length=32,
+            head_size=head_size,
+            n_head=4,
+            device=device,
+            dtype=dtype,
         )
+        for head_size in head_sizes
+    ]
+    cache_length = params[0].cache_length
 
-        if "bnb" in name and not blocks_over_heads:
-            # Minimum blocksize for bitsandbytes is 64
-            head_sizes = (64, 128, 256)
-        else:
-            head_sizes = (16, 32, 64)
-        max_i = len(head_sizes) - 1
-        batch_size = 3
-        n_query_groups = 4
-        params = [
-            KVCacheParams(
-                max_batch_size=batch_size * 2 ** (max_i - i),
-                n_query_groups=4,
-                cache_length=32,
-                head_size=head_size,
-                n_head=4,
-                dtype=dtype,
-            )
-            for i, head_size in enumerate(head_sizes)
-        ]
-        cache_length = params[0].cache_length
-
-        kv_caches = [
-            create_kv_cache(name, p, blocks_over_heads=blocks_over_heads)
-            for p in params
-        ]
-        keys = random_tensor(params[-1], num=cache_length)
-        assert keys.shape == (batch_size, n_query_groups, cache_length, head_sizes[-1])
-        # Errors with larger blocksize
-        q_errors = []
-        for i, kv_cache in enumerate(kv_caches[:-1]):
-            # Split blocks into parts
-            n_parts = 2 ** (max_i - i)
-            head_size = head_sizes[i]
-            assert n_parts * head_size == head_sizes[-1]
-            assert n_parts * batch_size == params[i].max_batch_size
-            _keys = (
-                keys.view(*keys.shape[:-1], n_parts, head_size)
-                .permute(
-                    3,
-                    0,
-                    1,
-                    2,
-                    4,
-                )
-                .reshape(n_parts * batch_size, n_query_groups, -1, head_size)
-            )
-            # Errors with smaller blocksize (should be smaller)
-            # Only error for keys, ignore for values
-            errors = kv_cache.kv_buffers.quantization_error(_keys, _keys)[0].view(
-                n_parts,
-                batch_size,
-                n_query_groups,
-                -1,
-            )
-            assert errors.shape[-1] == cache_length
-            errors = vector_norm(errors, dim=0)
-            q_errors.append(errors)
-        q_errors.append(kv_caches[-1].kv_buffers.quantization_error(keys, keys)[0])
-        assert q_errors[0].shape == q_errors[1].shape
-        assert q_errors[0].shape == q_errors[2].shape
-        # Weak test: The smaller the blocksize, the smaller the error should be,
-        # but this holds only "on average", since `round` is used in quantization,
-        # which is strongly nonlinear
-        total_sz = q_errors[0].numel()
-        for i in range(2):
-            index_lt = torch.lt(q_errors[i + 1], q_errors[i])
-            num_lt = int(index_lt.sum().item())
-            if num_lt > 0:
-                hs_gt = params[i + 1].head_size
-                hs_lt = params[i].head_size
-                index_lt = index_lt.nonzero()
-                print(f"{num_lt} violations of total {total_sz}")
-                for row in index_lt:
-                    print(
-                        f"{row.tolist()}: err{hs_gt} = {q_errors[i + 1][*row]:.7f} < {q_errors[i][*row]:.7f} = err{hs_lt}"
-                    )
-            # Only a fraction of the comparisons should violate the relation
-            # which holds "on average"
-            assert num_lt < total_sz / 4
+    kv_caches = [
+        create_kv_cache(name, p, blocks_over_heads=blocks_over_heads)
+        for p in params
+    ]
+    keys = random_tensor(params[-1], num=cache_length)
+    # Errors with larger blocksize
+    assert keys.shape[-1] == 64
+    q_errors = []
+    for i, kv_cache in enumerate(kv_caches[:-1]):
+        # Split blocks into parts
+        n_parts = 2 ** (2 - i)
+        _keys = keys.view(*keys.shape[:-1], n_parts, -1)
+        # Errors with smaller blocksize (should be smaller)
+        assert _keys.shape[-1] == params[i].head_size
+        errors = kv_cache.kv_buffers.quantization_error(_keys, _keys)[0]
+        errors = vector_norm(errors, dim=-1)
+        q_errors.append(errors)
+    q_errors.append(
+        kv_caches[-1].kv_buffers.quantization_error(keys, keys)[0]
+    )
+    assert q_errors[0].shape == q_errors[1].shape
+    assert q_errors[0].shape == q_errors[2].shape
+    # Weak test: The smaller the blocksize, the smaller the error should be,
+    # but this holds only "on average", since `round` is used in quantization,
+    # which is strongly nonlinear
+    total_sz = q_errors[0].numel()
+    for i in range(2):
+        index_lt = torch.lt(q_errors[i + 1], q_errors[i])
+        num_lt = int(index_lt.sum().item())
+        if num_lt > 0:
+            hs_gt = params[i + 1].head_size
+            hs_lt = params[i].head_size
+            index_lt = index_lt.nonzero()
+            print(f"{num_lt} violations of total {total_sz}")
+            for row in index_lt:
+                print(f"{row.tolist()}: err{hs_gt} = {q_errors[i + 1][*row]:.7f} < {q_errors[i][*row]:.7f} = err{hs_lt}")
+        # Only a fraction of the comparisons should violate the relation
+        # which holds "on average"
+        assert num_lt < total_sz / 4
 
 
 @pytest.mark.parametrize(
@@ -165,10 +127,9 @@ def test_quantization_error(dtype, blocks_over_heads, name, device):
 )
 def test_concatenation(dtype, blocks_over_heads, name, device):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
-    print(
-        f"name={name}, dtype={dtype}, blocks_over_heads={blocks_over_heads}, device={device}"
-    )
+    print(f"name={name}, dtype={dtype}, blocks_over_heads={blocks_over_heads}, device={device}")
 
     vocab_size = 128
     params = KVCacheParams(
@@ -177,17 +138,23 @@ def test_concatenation(dtype, blocks_over_heads, name, device):
         cache_length=32,
         head_size=64,
         n_head=4,
+        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params, blocks_over_heads=blocks_over_heads)
     data = random_args_cache_forward(
-        params,
-        num=cache_length,
-        vocab_size=vocab_size,
+        params, num=cache_length, vocab_size=vocab_size,
     )
     kv_cache._prefill(data["key"], data["value"], data["token_idx"])
-    positions = random_index(params, 0, cache_length, num=7)
+    positions = torch.zeros(
+        (params.max_batch_size, params.n_query_groups, 7),
+        dtype=torch.int64,
+        device=device,
+    )
+    for b in range(params.max_batch_size):
+        for g in range(params.n_query_groups):
+            positions[b, g, :] = torch.randperm(cache_length)[:7]
     keys_1, values_1 = kv_cache.kv_buffers.get_slots(positions)
     kv_cache.kv_buffers.set_slots(positions, keys_1, values_1)
     keys_2, values_2 = kv_cache.kv_buffers.get_slots(positions)
@@ -202,6 +169,7 @@ def test_concatenation(dtype, blocks_over_heads, name, device):
 )
 def test_quantizer_states(dtype, blocks_over_heads, name, device):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
 
     vocab_size = 128
@@ -211,30 +179,29 @@ def test_quantizer_states(dtype, blocks_over_heads, name, device):
         cache_length=32,
         head_size=64,
         n_head=4,
+        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params, blocks_over_heads=blocks_over_heads)
     data = random_args_cache_forward(
-        params,
-        num=cache_length,
-        vocab_size=vocab_size,
+        params, num=cache_length, vocab_size=vocab_size,
     )
     kv_cache._prefill(data["key"], data["value"], data["token_idx"])
     kv_buffers = kv_cache.kv_buffers
     quantizer_k = kv_buffers.quantizer_k
     quantizer_v = kv_buffers.quantizer_v
     checkpoint = (
-        quantizer_k.create_quantizer_state(device=device),
-        quantizer_v.create_quantizer_state(device=device),
+        quantizer_k.create_quantizer_state(device=params.device),
+        quantizer_v.create_quantizer_state(device=params.device),
     )
     for _ in range(50):
         k_and_v = kv_buffers.get_keys_values()
         before_k = k_and_v.keys().clone()
         before_v = k_and_v.values().clone()
         # Copy certain range into checkpoint
-        start = randint_torch(0, 3 * cache_length // 4)
-        end = randint_torch(start + 1, cache_length)
+        start = random.randint(0, 3 * cache_length // 4)
+        end = random.randint(start + 1, cache_length)
         checkpoint[0].copy_()
         checkpoint[1].copy_()
         # Overwrite this range with new values
@@ -252,8 +219,7 @@ def test_quantizer_states(dtype, blocks_over_heads, name, device):
         torch.testing.assert_close(before_v, after_v)
 
 
-_MAX_TEMP_SIZE_IN_BYTES = 2**16
-
+_MAX_TEMP_SIZE_IN_BYTES = 2 ** 16
 
 class _TorchBasicQuantizer(TorchBasicQuantizer):
     def __init__(self, *args, **kwargs):
@@ -271,6 +237,7 @@ def test_explore_bitsandbytes():
     from bitsandbytes.functional import quantize_4bit, quantize_blockwise
 
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
 
     device = torch.device("cuda:0")
@@ -280,7 +247,7 @@ def test_explore_bitsandbytes():
     code_4 = None
     code_8 = None
     for rep in range(num_repeats):
-        blocksize = ALLOWED_BLOCK_SIZE[randint_torch(0, len(ALLOWED_BLOCK_SIZE) - 1)]
+        blocksize = ALLOWED_BLOCK_SIZE[random.randint(0, len(ALLOWED_BLOCK_SIZE) - 1)]
         if rep % 2 == 0:
             quant_func = partial(quantize_4bit, blocksize=blocksize)
             num_bits = 4
@@ -288,13 +255,14 @@ def test_explore_bitsandbytes():
             quant_func = partial(quantize_blockwise, blocksize=blocksize)
             num_bits = 8
         dtype = ALLOWED_SOURCE_DTYPES[rep % num_dtypes]
-        n_query_groups = randint_torch(1, 4)
+        n_query_groups = random.randint(1, 4)
         params = KVCacheParams(
-            max_batch_size=randint_torch(1, 4),
+            max_batch_size=random.randint(1, 4),
             n_query_groups=n_query_groups,
-            cache_length=randint_torch(16, 64),
+            cache_length=random.randint(16, 64),
             head_size=blocksize,
             n_head=n_query_groups,
+            device=device,
             dtype=dtype,
         )
         num_channels = params.max_batch_size * n_query_groups * params.cache_length
@@ -343,8 +311,8 @@ def test_explore_bitsandbytes():
             assert state.shape is None
             assert state.quant_type is None
         # Test memory layout for `q_x`
-        start = randint_torch(0, params.cache_length // 2)
-        end = randint_torch(start + 1, params.cache_length)
+        start = random.randint(0, params.cache_length // 2)
+        end = random.randint(start + 1, params.cache_length)
         # Note: Without `contiguous`, this fails! Apparently, `quant_func`
         # needs contiguous memory, fails otherwise
         xpart = x[:, :, start:end, :].contiguous()
@@ -393,24 +361,18 @@ def args_bitsandbytes_with_blocks_over_heads() -> List[tuple]:
     args_bitsandbytes_with_blocks_over_heads(),
 )
 def test_bitsandbytes_with_blocks_over_heads(
-    qname,
-    batch_size,
-    n_query_groups,
-    head_size,
-    shape,
-    is_valid,
+    qname, batch_size, n_query_groups, head_size, shape, is_valid,
 ):
     name = "lastrec-" + qname
     device = torch.device("cuda:0")
-    print(
-        f"qname={qname}, batch_size={batch_size}, n_query_groups={n_query_groups}, head_size={head_size}, shape={shape}, is_valid={is_valid}"
-    )
+    print(f"qname={qname}, batch_size={batch_size}, n_query_groups={n_query_groups}, head_size={head_size}, shape={shape}, is_valid={is_valid}")
     params = KVCacheParams(
         max_batch_size=batch_size,
         n_query_groups=n_query_groups,
         cache_length=32,
         head_size=head_size,
         n_head=n_query_groups * 2,
+        device=device,
         dtype=torch.float32,
     )
     if is_valid:
@@ -431,8 +393,7 @@ def write_back_all(caches: List[KVCacheWithBuffers]):
 
 
 def compare_buffers(
-    caches1: List[KVCacheWithBuffers],
-    caches2: List[KVCacheWithBuffers],
+    caches1: List[KVCacheWithBuffers], caches2: List[KVCacheWithBuffers],
 ):
     assert len(caches1) == len(caches2)
     for block_idx, (cache1, cache2) in enumerate(zip(caches1, caches2)):
@@ -442,59 +403,19 @@ def compare_buffers(
         assert isinstance(buffer2, QuantizedKVCacheBuffers)
         if isinstance(buffer1.quantizer_k, TorchBasicQuantizer):
             compare_these = [
-                (
-                    buffer1.quantizer_k.quant_scales,
-                    buffer2.quantizer_k.quant_scales,
-                    "k_quant_scales",
-                ),
-                (
-                    buffer1.quantizer_k.quant_zero_points,
-                    buffer2.quantizer_k.quant_zero_points,
-                    "k_quant_zero_points",
-                ),
-                (
-                    buffer1.quantizer_v.quant_scales,
-                    buffer2.quantizer_v.quant_scales,
-                    "v_quant_scales",
-                ),
-                (
-                    buffer1.quantizer_v.quant_zero_points,
-                    buffer2.quantizer_v.quant_zero_points,
-                    "v_quant_zero_points",
-                ),
-                (
-                    buffer1.quantizer_k.quant_buffer,
-                    buffer2.quantizer_k.quant_buffer,
-                    "k_quant_buffer",
-                ),
-                (
-                    buffer1.quantizer_v.quant_buffer,
-                    buffer2.quantizer_v.quant_buffer,
-                    "v_quant_buffer",
-                ),
+                (buffer1.quantizer_k.quant_scales, buffer2.quantizer_k.quant_scales, "k_quant_scales"),
+                (buffer1.quantizer_k.quant_zero_points, buffer2.quantizer_k.quant_zero_points, "k_quant_zero_points"),
+                (buffer1.quantizer_v.quant_scales, buffer2.quantizer_v.quant_scales, "v_quant_scales"),
+                (buffer1.quantizer_v.quant_zero_points, buffer2.quantizer_v.quant_zero_points, "v_quant_zero_points"),
+                (buffer1.quantizer_k.quant_buffer, buffer2.quantizer_k.quant_buffer, "k_quant_buffer"),
+                (buffer1.quantizer_v.quant_buffer, buffer2.quantizer_v.quant_buffer, "v_quant_buffer"),
             ]
         else:
             compare_these = [
-                (
-                    buffer1.quantizer_k.quant_absmax,
-                    buffer2.quantizer_k.quant_absmax,
-                    "k_quant_absmax",
-                ),
-                (
-                    buffer1.quantizer_v.quant_absmax,
-                    buffer2.quantizer_v.quant_absmax,
-                    "v_quant_absmax",
-                ),
-                (
-                    buffer1.quantizer_k.quant_buffer,
-                    buffer2.quantizer_k.quant_buffer,
-                    "k_quant_buffer",
-                ),
-                (
-                    buffer1.quantizer_v.quant_buffer,
-                    buffer2.quantizer_v.quant_buffer,
-                    "v_quant_buffer",
-                ),
+                (buffer1.quantizer_k.quant_absmax, buffer2.quantizer_k.quant_absmax, "k_quant_absmax"),
+                (buffer1.quantizer_v.quant_absmax, buffer2.quantizer_v.quant_absmax, "v_quant_absmax"),
+                (buffer1.quantizer_k.quant_buffer, buffer2.quantizer_k.quant_buffer, "k_quant_buffer"),
+                (buffer1.quantizer_v.quant_buffer, buffer2.quantizer_v.quant_buffer, "v_quant_buffer"),
             ]
         for x1, x2, name in compare_these:
             print(f"Comparing {block_idx}: {name}")
@@ -502,8 +423,7 @@ def compare_buffers(
 
 
 def check_same_events(
-    cache1: KVCacheWithBuffers,
-    caches2: List[KVCacheWithBuffers],
+    cache1: KVCacheWithBuffers, caches2: List[KVCacheWithBuffers],
 ):
     events_all = [str(x) for x in cache1.kv_buffers.dequant_buffers.debug_events]
     _events_all = set(events_all)
@@ -531,11 +451,11 @@ def args_quantized_buffers_write_back() -> List[tuple]:
 
 
 @pytest.mark.parametrize(
-    "dtype, name, device",
-    args_quantized_buffers_write_back(),
+    "dtype, name, device", args_quantized_buffers_write_back(),
 )
 def test_quantized_buffers_write_back(dtype, name, device):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
     batch_size = 4
     cache_length = 64
@@ -555,15 +475,14 @@ def test_quantized_buffers_write_back(dtype, name, device):
         cache_length=cache_length,
         head_size=config.head_size,
         n_head=config.n_head,
+        device=device,
         dtype=dtype,
     )
-    with torch.device(device):
-        gpt_model = GPT(config)
-    gpt_model.apply(gpt_model._init_weights)  # Initialize
+    model = GPT(config).to(device=device)
     # Create caches
     # Share the same dequantization buffers
     caches_common = KVCacheFactory.create(
-        gpt_model=gpt_model,
+        gpt_model=model,
         name=name,
         max_batch_size=batch_size,
         dtype=dtype,
@@ -587,27 +506,27 @@ def test_quantized_buffers_write_back(dtype, name, device):
     # Prefill
     print(f"name={name}, dtype={dtype}, device={device}")
     print(f"Prefill: {cache_length}")
+    input_pos = 0
     num_prefill = caches_common[0].max_prefill_length
     if num_prefill is None:
         num_prefill = cache_length
     for c_comm, c_sep in zip(caches_common, caches_separate):
         c_sep.kv_buffers.dequant_buffers.start_debug_event_protocol()
         data = random_args_cache_forward(
-            params,
-            num=num_prefill,
-            vocab_size=config.vocab_size,
+            params, num=num_prefill, vocab_size=config.vocab_size,
         )
-        c_comm(**data)
-        c_sep(**data)
+        c_comm(**data, input_pos=input_pos)
+        c_sep(**data, input_pos=input_pos)
     write_back_all(caches_common)
     write_back_all(caches_separate)
     check_same_events(caches_common[0], caches_separate)
     compare_buffers(caches_common, caches_separate)
+    input_pos += num_prefill
     # Several updates
     for n_upd in range(5):
         q_len = min(
-            randint_torch(1, cache_length // 2),
-            caches_common[0].max_forward_length(),
+            random.randint(1, cache_length // 2),
+            caches_common[0].max_tokens_forward,
         )
         print(f"Update {n_upd}: {q_len}")
         for c_comm, c_sep in zip(caches_common, caches_separate):
@@ -615,142 +534,12 @@ def test_quantized_buffers_write_back(dtype, name, device):
             # reading from quantized, which gives differences
             c_sep.kv_buffers.drop_association()
             data = random_args_cache_forward(
-                params,
-                num=q_len,
-                vocab_size=config.vocab_size,
+                params, num=q_len, vocab_size=config.vocab_size,
             )
-            c_comm(**data)
-            c_sep(**data)
+            c_comm(**data, input_pos=input_pos)
+            c_sep(**data, input_pos=input_pos)
         write_back_all(caches_common)
         write_back_all(caches_separate)
         check_same_events(caches_common[0], caches_separate)
         compare_buffers(caches_common, caches_separate)
-
-
-# TODO:
-# We currently skip 'bnb-quantized*', because the test is meant to only work
-# for linear min-max quantization. Need to find a variant for "bnb"
-@pytest.mark.parametrize(
-    "dtype, blocks_over_heads, name, device",
-    args_for_one_cache("dense", dtypes=[torch.float32, torch.float16]),
-)
-def test_no_error(dtype, blocks_over_heads, name, device):
-    seed = 31415927
-    torch.random.manual_seed(seed)
-    if not ("bnb" in name):
-        print(
-            f"dtype={dtype}, blocks_over_heads={blocks_over_heads}, name={name}, device={device}"
-        )
-        head_size = 64
-        batch_size = 3
-        n_query_groups = 4
-        cache_length = 32
-        params = KVCacheParams(
-            max_batch_size=batch_size,
-            n_query_groups=n_query_groups,
-            cache_length=cache_length,
-            head_size=head_size,
-            n_head=4,
-            dtype=dtype,
-        )
-        is_4bit = name[-1] == "4"
-        assert is_4bit or name[-1] == "8"
-        kinds = ("as_is", "shift", "scale", "shift_scale")
-        if dtype == torch.float32:
-            tol_shift_scale = dict(rtol=1e-5, atol=0.025)
-        else:
-            tol_shift_scale = dict(rtol=0.005, atol=0.1)
-        tol_kwargss = (dict(),) * 3 + (tol_shift_scale,)
-
-        kv_cache = create_kv_cache(
-            name,
-            params,
-            blocks_over_heads=blocks_over_heads,
-        )
-        kv_buffers = kv_cache.kv_buffers
-        # Sample internal data: Must contain smallest and largest along final
-        # dim
-        low = 0
-        high = 16 if is_4bit else 256
-        shape = (batch_size, n_query_groups, cache_length, head_size)
-        int_data = {
-            name: torch.randint(low=low, high=high, size=shape, device=device)
-            for name in ("key", "value")
-        }
-        kwargs = dict(dtype=int_data["key"].dtype, device=device)
-        vals = [low, high - 1]
-        srcs = [
-            torch.tensor([val], **kwargs)
-            .view(1, 1, 1, 1)
-            .expand(
-                *shape[:-1],
-                1,
-            )
-            for val in vals
-        ]
-        for arr in int_data.values():
-            indexes = [
-                torch.randint(0, head_size, size=shape[:-1], device=device)
-                for _ in vals
-            ]
-            equal_ind = indexes[0] == indexes[1]
-            if equal_ind.any().item():
-                current = indexes[1][equal_ind]
-                indexes[1][equal_ind] = torch.remainder(current + 1, head_size)
-            assert not (indexes[0] == indexes[1]).any().item()
-            for index, src in zip(indexes, srcs):
-                arr.scatter_(dim=-1, index=index.unsqueeze(-1), src=src)
-
-        print(int_data["key"][0, 0, 0, :])
-        if blocks_over_heads:
-            orig_shape = (batch_size, cache_length)
-            view_shape = (batch_size, 1, cache_length, 1)
-        else:
-            orig_shape = (batch_size, n_query_groups, cache_length)
-            view_shape = orig_shape + (1,)
-        for kind, tol_kwargs in zip(kinds, tol_kwargss):
-            print(f"\nkind = {kind}")
-            if "shift" in kind:
-                shifts = {
-                    k: torch.randint(
-                        -1024,
-                        1024,
-                        orig_shape,
-                        device=device,
-                    ).view(*view_shape)
-                    for k in int_data.keys()
-                }
-            if "scale" in kind:
-                scales = {
-                    k: torch.randn(
-                        *orig_shape,
-                        dtype=torch.float32,
-                        device=device,
-                    )
-                    .exp()
-                    .view(*view_shape)
-                    for k in int_data.keys()
-                }
-            if kind == "as_is":
-                data = {k: v.to(dtype=dtype) for k, v in int_data.items()}
-            elif kind == "shift":
-                data = {k: (v + shifts[k]).to(dtype=dtype) for k, v in int_data.items()}
-            elif kind == "scale":
-                data = {k: (v * scales[k]).to(dtype=dtype) for k, v in int_data.items()}
-            else:
-                data = {
-                    k: ((v + shifts[k]) * scales[k]).to(dtype=dtype)
-                    for k, v in int_data.items()
-                }
-            if kind == "shift_scale":
-                print(
-                    f"shift = {shifts['key'][0, 0, 0, 0]}, scale = {scales['key'][0, 0, 0, 0]}"
-                )
-                print(data["key"][0, 0, 0, :])
-            kv_buffers.prefill(**data)
-            kv_buffers.drop_association()  # Triggers write back
-            k_and_v = kv_buffers.get_keys_values()
-            if kind == "shift_scale":
-                print(k_and_v.keys()[0, 0, 0, :])
-            torch.testing.assert_close(data["key"], k_and_v.keys(), **tol_kwargs)
-            torch.testing.assert_close(data["value"], k_and_v.values(), **tol_kwargs)
+        input_pos += q_len

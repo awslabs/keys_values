@@ -5,3 +5,24 @@ __pycache__
 *.egg-info
 .venv
 .vscode
+
+# FlashInfer source repository (vendored kernels are in keys_values/csrc/)
+flashinfer/*
+
+# Build artifacts
+build/
+*.so
+
+# Core dumps
+core.*
+
+# Tool/IDE directories
+.hypothesis/
+.claude/
+.kiro/
+
+# Benchmark results
+benchmark_full_results.csv
+benchmark_full_results.json
+benchmark_long_context_results.csv
+benchmark_long_context_results.json

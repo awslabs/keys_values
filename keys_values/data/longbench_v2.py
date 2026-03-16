@@ -13,19 +13,24 @@
 # limitations under the License.
 import os
 from typing import List, Optional, Dict, Any, Tuple
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 import json
+import random
+from heapq import nlargest
 
+import torch
+from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
+from litgpt.data import DataModule
+from litgpt.prompts import Default
 from litgpt.tokenizer import Tokenizer
 
-from keys_values.data.dataloader import MyDataLoader
-from keys_values.data.module import (
-    SequenceLengthFilteredDataModule,
-    METADATA_SEQ_LENGTHS_KEY,
-    METADATA_KEYS,
-    RawDatasetType,
+from keys_values.data.evaluation import (
+    EvaluationWithTasksDataset,
+    get_wrapped_collate_fn,
+    ReorderWrapperDataset,
 )
 from keys_values.data.sequence_classification import (
     SequenceClassificationDataset,
@@ -34,6 +39,8 @@ from keys_values.data.sequence_classification import (
 from keys_values.data.sft_dataset import (
     SFTDataset,
     get_sft_collate_fn,
+    INPUT_IDS_NAME,
+    LABELS_NAME,
 )
 from keys_values.head_model import (
     CrossEntropyOnLogits,
@@ -41,7 +48,12 @@ from keys_values.head_model import (
     SequenceClassification,
 )
 
+
 METADATA_FNAME = "longbench_v2_metadata.json"
+
+METADATA_SEQ_LENGTHS_KEY = "sequence_lengths"
+
+METADATA_KEYS = {METADATA_SEQ_LENGTHS_KEY}
 
 SUPPORTED_HEAD_MODELS = (
     CrossEntropyOnLogits.NAME,
@@ -51,12 +63,68 @@ SUPPORTED_HEAD_MODELS = (
 
 CLASS_LABELS = ("A", "B", "C", "D")
 
+
+class LongestFirstIterator(Iterator):
+    def __init__(
+        self,
+        dataset_size: int,
+        batch_size: int,
+        inds_longest: List[int],
+    ):
+        assert len(inds_longest) == batch_size
+        if not all(0 <= x < dataset_size for x in inds_longest):
+            raise ValueError(f"inds_longest = {inds_longest}: all entries must be in [0, {dataset_size})")
+        self.dataset_size = dataset_size
+        self.batch_size = batch_size
+        remainder = list(set(range(dataset_size)) - set(inds_longest))
+        assert len(remainder) == dataset_size - batch_size
+        random.shuffle(remainder)
+        self._permutation = inds_longest + remainder
+        self._pos = 0
+
+    def __next__(self) -> int:
+        if self._pos >= self.dataset_size:
+            self._permutation = list(range(self.dataset_size))
+            random.shuffle(self._permutation)
+            self._pos = 0
+        result = self._permutation[self._pos]
+        self._pos += 1
+        return result
+
+    def __iter__(self) -> Iterator:
+        return self
+
+
+class LongestFirstIterable(Iterable):
+    def __init__(
+        self,
+        dataset_size: int,
+        batch_size: int,
+        inds_longest: List[int],
+    ):
+        self._kwargs = {
+            "dataset_size": dataset_size,
+            "batch_size": batch_size,
+            "inds_longest": inds_longest.copy(),
+        }
+        self._len = dataset_size
+
+    def __iter__(self) -> Iterator:
+        return LongestFirstIterator(**self._kwargs)
+
+    def __len__(self) -> int:
+        return self._len
+
+
 SUPPORTED_TEST_SET_TAGS = [
     "rest",
 ]
 
 
-class LongBenchV2(SequenceLengthFilteredDataModule):
+RawDatasetType = List[Dict[str, str]]
+
+
+class LongBenchV2(DataModule):
     """LongBench-V2 data module for supervised finetuning.
 
     Depending on `head_model`, the dataset is treated as next token prediction
@@ -71,7 +139,6 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
       each record
 
     """
-
     def __init__(
         self,
         mask_prompt: bool = True,
@@ -79,12 +146,13 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         ignore_index: int = -100,
         max_seq_length: Optional[int] = None,
         seed: int = 42,
+        num_workers: int = 4,
+        include_multiturn_conversations: bool = False,
         repo_id: str = "THUDM/LongBench-v2",
         access_token: Optional[str] = None,
         metadata_dir: Optional[str] = None,
         debug_num_cases: Optional[int] = None,
         trainloader_longest_first: bool = False,
-        trainloader_shortest_first: bool = False,
         test_set_tag: Optional[str] = None,
     ):
         """
@@ -99,6 +167,9 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
                 filtered out. Defaults to 100000.
             seed: The random seed for creating the train/val splits and shuffling
                 the dataset.
+            num_workers: How many DataLoader processes to use for loading.
+            include_multiturn_conversations: Whether to include multi-turn
+                conversations in the dataset.
             repo_id: The Hugging Face dataset repository ID from where to
                 download the data.
             access_token: The Hugging Face API token to use for authentication.
@@ -108,11 +179,9 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
             debug_num_cases: If used, we only keep this number of records.
             trainloader_longest_first: If set, :meth:`train_dataloader` returns
                 a data loader whose first batch contain the longest sequences in
-                the dataset, otherwise uses :class:`SimilarSequenceLengthIterable`.
+                the dataset, but runs random permutations per epoch otherwise.
                 This is useful to detect OOM errors early, since they are most
                 likely to happen with the longest batch.
-            trainloader_shortest_first: Same as `trainloader_longest_first`,
-                but the first batch contain the shortest sequences.
             test_set_tag: If this is given, we also maintain a test dataset
                 and serve a test dataloader. The tag determines how the test
                 set is chosen. Current choices:
@@ -121,66 +190,80 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
 
         """
         if test_set_tag is not None and test_set_tag not in SUPPORTED_TEST_SET_TAGS:
-            raise ValueError(
-                f"test_set_tag = {test_set_tag} is not supported, must be None or in {SUPPORTED_TEST_SET_TAGS}"
-            )
-        super().__init__(
-            mask_prompt,
-            val_split_fraction,
-            ignore_index,
-            max_seq_length,
-            seed,
-            trainloader_longest_first,
-            trainloader_shortest_first,
-        )
+            raise ValueError(f"test_set_tag = {test_set_tag} is not supported, must be None or in {SUPPORTED_TEST_SET_TAGS}")
+        self.mask_prompt = mask_prompt
+        self.val_split_fraction = val_split_fraction
+        self.ignore_index = ignore_index
+        self.max_seq_length = 100000 if max_seq_length is None else max_seq_length
+        self.seed = seed
+        self.num_workers = num_workers
+        self.include_multiturn_conversations = include_multiturn_conversations
         self.repo_id = repo_id
-        self.access_token = (
-            os.getenv("HF_TOKEN") if access_token is None else access_token
-        )
+        self.access_token = os.getenv("HF_TOKEN") if access_token is None else access_token
         self.metadata_dir = metadata_dir
         self.head_model = None
         self._is_sequence_classification = None
+        self.prompt_style = Default()
         self.debug_num_cases = debug_num_cases
+        self.tokenizer = None
+        self.batch_size = None
+        self.val_batch_size = None
+        self.test_batch_size = None
+        self.train_dataset = None
+        self.val_dataset = None
+        self.test_dataset = None
+        self._trainloader_longest_first = trainloader_longest_first
         self.test_set_tag = test_set_tag
+        self._test_eval_tasks = None
+        # Maintain sequence lengths (in tokens) for cases in training set.
+        # This is used to support specialized data loaders.
+        self._sequence_lengths_for_train = None
 
     def connect(
         self,
         tokenizer: Optional[Tokenizer] = None,
         batch_size: int = 1,
-        num_devices: int = 1,
-        rank: Optional[int] = None,
         max_seq_length: Optional[int] = None,
         **kwargs,
     ) -> None:
         """
-        Extra specific arguments:
+        Specific arguments:
         - `head_model`: Head model name. Mandatory
+        - `val_batch_size`: Batch size for :meth:`val_dataloader`.
+            Defaults to `batch_size`.
+        - `test_batch_size`: Batch size for :meth:`test_dataloader`.
+            Only if `test_set_tag` is given. Defaults to `val_batch_size`.
+        - `eval_tasks`: Only if `test_set_tag` is given. See
+            :meth:`test_dataloader`.
 
         Args:
             tokenizer: Tokenizer
             batch_size: Batch size for :meth:`train_dataloader`
-            num_devices: Number of GPU devices used for distributed
-                data parallel training
-            rank: Rank (only if `num_devices > 1`)
             max_seq_length: Cutoff for sequence length
             **kwargs: See above
 
         """
-        super().connect(
-            tokenizer,
-            batch_size,
-            num_devices,
-            rank,
-            max_seq_length,
-            **kwargs,
-        )
+        if tokenizer is None:
+            raise ValueError("tokenizer must be provided")
         head_model = kwargs.get("head_model")
         if head_model is None:
             raise ValueError("head_model must be provided")
         if not head_model in SUPPORTED_HEAD_MODELS:
-            raise ValueError(
-                f"head_model '{head_model}' not supported, must be in {SUPPORTED_HEAD_MODELS}"
-            )
+            raise ValueError(f"head_model '{head_model}' not supported, must be in {SUPPORTED_HEAD_MODELS}")
+        self.tokenizer = tokenizer
+        self.batch_size = batch_size
+        if max_seq_length is not None:
+            self.max_seq_length = max_seq_length
+        self.val_batch_size = kwargs.get("val_batch_size")
+        if self.val_batch_size is None:
+            self.val_batch_size = self.batch_size
+        self.test_batch_size = None
+        self._test_eval_tasks = None
+        if self.test_set_tag is not None:
+            self.test_batch_size = kwargs.get("test_batch_size")
+            if self.test_batch_size is None:
+                self.test_batch_size = self.val_batch_size
+            self._test_eval_tasks = kwargs.get("eval_tasks")
         self.head_model = head_model
         self._is_sequence_classification = head_model != CrossEntropyOnLogits.NAME
 
@@ -190,49 +273,168 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         dataset = load_dataset(self.repo_id, token=self.access_token)
         return self._filter_and_transform(dataset["train"])
 
-    def _create_datasets(
-        self,
-        train_kwargs: Dict[str, Any],
-        val_kwargs: Dict[str, Any],
-        test_kwargs: Optional[Dict[str, Any]],
-    ):
+    def prepare_data(self) -> None:
+        # Make sure that if dataset has not yet been downloaded, the hard
+        # work is done once only.
+        self._get_dataset()
+
+    def setup(self, stage: str = "") -> None:
+        data, test_data = self._get_dataset()
+        # Partition the dataset into train and test
+        train_data, val_data = random_split(
+            data,
+            [1.0 - self.val_split_fraction, self.val_split_fraction],
+            generator=torch.Generator().manual_seed(self.seed),
+        )
+        train_data, val_data = list(train_data), list(val_data)
+        self._sequence_lengths_for_train = [
+            record["num_tokens_instruction"] for record in train_data
+        ]
+
         if not self._is_sequence_classification:
             self.train_dataset = SFTDataset(
-                **train_kwargs,
+                data=train_data,
+                tokenizer=self.tokenizer,
+                prompt_style=Default(),
+                max_seq_length=self.max_seq_length,
                 mask_prompt=self.mask_prompt,
                 ignore_index=self.ignore_index,
             )
             self.val_dataset = SFTDataset(
-                **val_kwargs,
+                data=val_data,
+                tokenizer=self.tokenizer,
+                prompt_style=Default(),
+                max_seq_length=self.max_seq_length,
                 mask_prompt=self.mask_prompt,
                 ignore_index=self.ignore_index,
             )
-            if test_kwargs is not None:
+            if test_data is not None:
                 self.test_dataset = SFTDataset(
-                    **test_kwargs,
+                    data=test_data,
+                    tokenizer=self.tokenizer,
+                    prompt_style=Default(),
+                    max_seq_length=-1,
                     mask_prompt=self.mask_prompt,
                     ignore_index=self.ignore_index,
                 )
         else:
             self.train_dataset = SequenceClassificationDataset(
-                **train_kwargs,
+                data=train_data,
+                tokenizer=self.tokenizer,
+                prompt_style=Default(),
                 class_labels=CLASS_LABELS,
+                max_seq_length=self.max_seq_length,
             )
             self.val_dataset = SequenceClassificationDataset(
-                **val_kwargs,
+                data=val_data,
+                tokenizer=self.tokenizer,
+                prompt_style=Default(),
                 class_labels=CLASS_LABELS,
+                max_seq_length=self.max_seq_length,
             )
-            if test_kwargs is not None:
+            if test_data is not None:
                 self.test_dataset = SequenceClassificationDataset(
-                    **test_kwargs,
+                    data=test_data,
+                    tokenizer=self.tokenizer,
+                    prompt_style=Default(),
                     class_labels=CLASS_LABELS,
+                    max_seq_length=-1,
                 )
 
-    def _get_collate_fn(self) -> MyDataLoader:
+    def _get_collate_fn(self):
         if not self._is_sequence_classification:
             return get_sft_collate_fn(ignore_index=self.ignore_index)
         else:
             return get_seq_class_collate_fn()
+
+    def train_dataloader(self) -> DataLoader:
+        if self._trainloader_longest_first:
+            # Make sure that longest sequences are served in the first
+            # batch.
+            # Note: Using `_sequence_lengths_for_train` based on the sequence
+            # lengths computed in preprocessing is necessary. Iterating over
+            # the dataset would require tokenization of all sequences, which
+            # takes a long time.
+            assert self._sequence_lengths_for_train is not None
+            assert len(self._sequence_lengths_for_train) == len(self.train_dataset)
+            inds_longest = [
+                x[1] for x in nlargest(
+                    self.batch_size,
+                    zip(
+                        self._sequence_lengths_for_train,
+                        range(len(self.train_dataset)),
+                    ),
+                    key=lambda y: y[0],
+                )
+            ]
+            # TODO: Better use torch random here
+            random.seed(self.seed)
+            return DataLoader(
+                self.train_dataset,
+                batch_size=self.batch_size,
+                sampler=LongestFirstIterable(
+                    dataset_size=len(self.train_dataset),
+                    batch_size=self.batch_size,
+                    inds_longest=inds_longest,
+                ),
+                num_workers=self.num_workers,
+                collate_fn=self._get_collate_fn(),
+            )
+        else:
+            return DataLoader(
+                self.train_dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                generator=torch.Generator().manual_seed(self.seed),
+                num_workers=self.num_workers,
+                collate_fn=self._get_collate_fn(),
+            )
+
+    def val_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.val_batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            collate_fn=self._get_collate_fn(),
+        )
+
+    def test_dataloader(self, num_devices: int = 1) -> DataLoader:
+        if self.test_dataset is None:
+            raise IndexError("Test dataset is not defined. Use 'test_set_tag'")
+        if self._test_eval_tasks is None:
+            return DataLoader(
+                ReorderWrapperDataset(
+                    self.test_dataset,
+                    num_devices=num_devices,
+                    batch_size=self.test_batch_size,
+                ),
+                batch_size=self.test_batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                collate_fn=self._get_collate_fn(),
+            )
+        else:
+            # Cross product between test dataset and evaluation tasks (these
+            # are typically different model checkpoints)
+            collate_fn = get_wrapped_collate_fn(self._get_collate_fn())
+            dataset = EvaluationWithTasksDataset(
+                dataset=self.test_dataset,
+                tasks=self._test_eval_tasks,
+                batch_size=self.test_batch_size,
+                num_devices=num_devices,
+            )
+            return DataLoader(
+                ReorderWrapperDataset(
+                    dataset,
+                    num_devices=num_devices,
+                    batch_size=self.test_batch_size,
+                ),
+                batch_size=self.test_batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                collate_fn=collate_fn,
+            )
 
     def head_model_kwargs(self, name: str) -> Dict[str, Any]:
         result = dict()
@@ -245,9 +447,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
             for label in CLASS_LABELS:
                 token_idx = self.tokenizer.encode(label)
                 if len(token_idx) != 1:
-                    raise ValueError(
-                        f"Class label {label} maps to tokens {token_idx}, but must map to a single token"
-                    )
+                    raise ValueError(f"Class label {label} maps to tokens {token_idx}, but must map to a single token")
                 class_label_tokens.append(int(token_idx.item()))
             result["class_label_tokens"] = class_label_tokens
             print(f"Class label tokens: {CLASS_LABELS} -> {class_label_tokens}")
@@ -305,9 +505,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         with meta_path.open("r") as fp:
             data = json.load(fp)
         if not METADATA_KEYS.issubset(data.keys()):
-            print(
-                f"Metadata loaded from {meta_path} does not contain all keys {METADATA_KEYS}:\n{data}"
-            )
+            print(f"Metadata loaded from {meta_path} does not contain all keys {METADATA_KEYS}:\n{data}")
             return None
         seq_lenghts = self._get_seq_lengths(data)
         if seq_lenghts is None:
@@ -350,7 +548,7 @@ PROMPTLINES_POSTFIX = [
 
 PROMPTLINES_FINAL = {
     CrossEntropyOnLogits.NAME: [
-        'Format your response as follows: "The correct answer is (insert answer here)".',
+        "Format your response as follows: \"The correct answer is (insert answer here)\".",
         "",
         "Answer:",
         "The correct answer is ",
@@ -398,9 +596,7 @@ def filter_and_transform(
         data_iter = tqdm(dataset)
     else:
         if len(seq_lengths) != len(dataset):
-            raise ValueError(
-                f"len(seq_lengths) = {len(seq_lengths)} != {len(dataset)} = len(dataset)"
-            )
+            raise ValueError(f"len(seq_lengths) = {len(seq_lengths)} != {len(dataset)} = len(dataset)")
         data_iter = dataset
     new_seq_lengths = []
     for idx, entry in enumerate(data_iter):
@@ -410,10 +606,10 @@ def filter_and_transform(
             for k in ("question", "choice_A", "choice_B", "choice_C", "choice_D")
         }
         instruction_list = (
-            PROMPTLINES_PREFIX
-            + [entry["context"]]
-            + [line.format(**values) for line in PROMPTLINES_POSTFIX]
-            + PROMPTLINES_FINAL[head_model]
+            PROMPTLINES_PREFIX +
+            [entry["context"]] +
+            [line.format(**values) for line in PROMPTLINES_POSTFIX] +
+            PROMPTLINES_FINAL[head_model]
         )
         instruction = "\n".join(instruction_list)
         output = entry["answer"]
@@ -447,14 +643,18 @@ def filter_and_transform(
     if test_set_tag == "rest":
         # Sort by increasing length
         test_results = sorted(
-            test_results,
-            key=lambda x: x["num_tokens_instruction"],
+            test_results, key=lambda x: x["num_tokens_instruction"],
         )
         min_length = test_results[0]["num_tokens_instruction"]
         max_length = test_results[-1]["num_tokens_instruction"]
-        print(
-            f"Test dataset has {len(test_results)} records, token lengths between {min_length} and {max_length}"
-        )
+        print(f"Test dataset has {len(test_results)} records, token lengths between {min_length} and {max_length}")
+        # DEBUG
+        #prefix_len = len(tokenizer.encode("\n".join(PROMPTLINES_PREFIX) + "\n"))
+        #test_results = [
+        #    dict(entry, prefix_len=prefix_len)
+        #    for entry in test_results
+        #]
+        # END DEBUG
     else:
         test_results = None
     if seq_lengths is None:
@@ -478,7 +678,6 @@ class LongBenchV2Truncated(LongBenchV2):
       :func:`truncate_contexts_and_transform`.
 
     """
-
     def __init__(
         self,
         metadata_dir: str,
@@ -487,11 +686,11 @@ class LongBenchV2Truncated(LongBenchV2):
         ignore_index: int = -100,
         max_seq_length: Optional[int] = None,
         seed: int = 42,
+        num_workers: int = 4,
+        include_multiturn_conversations: bool = False,
         repo_id: str = "THUDM/LongBench-v2",
         access_token: Optional[str] = None,
         debug_num_cases: Optional[int] = None,
-        trainloader_longest_first: bool = False,
-        trainloader_shortest_first: bool = False,
     ):
         if metadata_dir is None:
             raise ValueError(
@@ -504,12 +703,12 @@ class LongBenchV2Truncated(LongBenchV2):
             ignore_index=ignore_index,
             max_seq_length=max_seq_length,
             seed=seed,
+            num_workers=num_workers,
+            include_multiturn_conversations=include_multiturn_conversations,
             repo_id=repo_id,
             access_token=access_token,
             metadata_dir=metadata_dir,
             debug_num_cases=debug_num_cases,
-            trainloader_longest_first=trainloader_longest_first,
-            trainloader_shortest_first=trainloader_shortest_first,
         )
         self.truncation_context_width = None
         self.truncation_lengths = None
@@ -518,19 +717,10 @@ class LongBenchV2Truncated(LongBenchV2):
         self,
         tokenizer: Optional[Tokenizer] = None,
         batch_size: int = 1,
-        num_devices: int = 1,
-        rank: Optional[int] = None,
         max_seq_length: Optional[int] = None,
         **kwargs,
     ) -> None:
-        super().connect(
-            tokenizer,
-            batch_size,
-            num_devices,
-            rank,
-            max_seq_length,
-            **kwargs,
-        )
+        super().connect(tokenizer, batch_size, max_seq_length, **kwargs)
         truncation_context_width = kwargs.get("truncation_context_width")
         if truncation_context_width is None:
             raise ValueError("truncation_context_width must be provided")
@@ -549,10 +739,8 @@ class LongBenchV2Truncated(LongBenchV2):
         truncation_lengths = None
         tl_map = metadata.get(METADATA_TRUNCATION_LENGHTS_KEY)
         if tl_map is not None:
-            tl_map = {
-                int(k): {int(inner_k): inner_v for inner_k, inner_v in v.items()}
-                for k, v in tl_map.items()
-            }
+            tl_map = {int(k): {int(inner_k): inner_v for inner_k, inner_v in v.items()}
+                      for k, v in tl_map.items()}
             truncation_lengths = tl_map.get(self.truncation_context_width)
         try_to_store = truncation_lengths is None
         # If `truncation_lengths` could not be loaded, it is recomputed and
@@ -609,9 +797,7 @@ def truncate_contexts_and_transform(
     results: List[Dict[str, str]] = []
     num_used = 0
     num_total = 0
-    print(
-        f"\nProcessing dataset, truncating prompts for baseline with context width {truncation_context_width}"
-    )
+    print(f"\nProcessing dataset, truncating prompts for baseline with context width {truncation_context_width}")
     if truncation_lengths is None:
         # Show progress bar: This takes a while
         data_iter = tqdm(dataset)
@@ -634,32 +820,23 @@ def truncate_contexts_and_transform(
                 len_truncated_context = truncation_lengths[idx]
             else:
                 encoded_postfix = tokenizer.encode(
-                    "\n"
-                    + "\n".join(
-                        [line.format(**values) for line in PROMPTLINES_POSTFIX]
-                        + PROMPTLINES_FINAL[head_model]
+                    "\n" + "\n".join(
+                        [line.format(**values) for line in PROMPTLINES_POSTFIX] +
+                        PROMPTLINES_FINAL[head_model]
                     )
                 )
-                num_tokens_context = (
-                    truncation_context_width
-                    - len(encoded_postfix)
-                    - len(encoded_prefix)
-                )
+                num_tokens_context = truncation_context_width - len(encoded_postfix) - len(encoded_prefix)
                 if num_tokens_context <= 0:
-                    raise ValueError(
-                        f"idx={idx}: truncation_context_width={truncation_context_width} is too short (len(encoded_prefix)={len(encoded_prefix)}, len(encoded_postfix)={len(encoded_postfix)})"
-                    )
+                    raise ValueError(f"idx={idx}: truncation_context_width={truncation_context_width} is too short (len(encoded_prefix)={len(encoded_prefix)}, len(encoded_postfix)={len(encoded_postfix)})")
                 encoded_context = tokenizer.encode(entry["context"])
-                len_truncated_context = len(
-                    tokenizer.decode(encoded_context[(-num_tokens_context):])
-                )
+                len_truncated_context = len(tokenizer.decode(encoded_context[(-num_tokens_context):]))
                 new_truncation_lengths[idx] = len_truncated_context
             truncated_context = entry["context"][(-len_truncated_context):]
             instruction_list = (
-                PROMPTLINES_PREFIX
-                + [truncated_context]
-                + [line.format(**values) for line in PROMPTLINES_POSTFIX]
-                + PROMPTLINES_FINAL[head_model]
+                PROMPTLINES_PREFIX +
+                [truncated_context] +
+                [line.format(**values) for line in PROMPTLINES_POSTFIX] +
+                PROMPTLINES_FINAL[head_model]
             )
             instruction = "\n".join(instruction_list)
             output = entry["answer"]
@@ -669,6 +846,4 @@ def truncate_contexts_and_transform(
                 print(f"DEBUG: Stop with {num_used} records.")
                 break
     print(f"\nKept {num_used} of {num_total} entries.")
-    return results, (
-        new_truncation_lengths if truncation_lengths is None else truncation_lengths
-    )
+    return results, new_truncation_lengths if truncation_lengths is None else truncation_lengths

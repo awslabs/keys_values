@@ -11,22 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import random
 from itertools import product
 from dataclasses import replace
 
 import torch
 import pytest
-import lightning as L
 
-from keys_values.config import Config
-from litgpt.utils import _RunIf
+from litgpt.config import Config
 
-from keys_values.finetune.utils import (
-    may_match_twice_flex_attention_sdpa,
-    may_match_twice_fused_eager_sdpa,
-)
-from keys_values.flex_attention import FlexAttentionArgs
-from keys_values.head_model import CrossEntropyOnLogits, SequenceClassification
+from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.gradient.main import LongContextGradientModel
@@ -34,18 +28,14 @@ from keys_values.kvcache.test_utils import (
     create_kv_cache,
     copy_gradients,
     available_backends,
-    cache_names_and_devices,
 )
 from keys_values.model import GPT
-from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
-from keys_values.utils import randint_torch
 
 
 def args_complete_gradient_computation():
     return [
-        b + c + (d, a)
-        for a, b, c, d in product(
-            available_backends(),
+        a + b + (c,)
+        for a, b, c in product(
             [
                 ("lastrec", dict()),
                 ("h2o", {"replay_log_blocksize": 64}),
@@ -55,23 +45,20 @@ def args_complete_gradient_computation():
                 ([128, 128],),
                 ([96, 128],),
             ],
-            [False, True],
+            available_backends(),
         )
     ]
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths, use_old_cache, device",
+    "cache_name, cache_kwargs, cache_lengths, device",
     args_complete_gradient_computation(),
 )
 def test_complete_gradient_computation(
-    cache_name,
-    cache_kwargs,
-    cache_lengths,
-    use_old_cache,
-    device,
+    cache_name, cache_kwargs, cache_lengths, device,
 ):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
 
     dtype = torch.float32
@@ -103,16 +90,10 @@ def test_complete_gradient_computation(
         config=config,
         max_batch_size=max(batch_sizes),
         cache_length=cache_lengths[0],
+        device=device,
         dtype=dtype,
     )
-    if device == torch.device("cpu"):
-        mha_kwargs = dict()
-    else:
-        mha_kwargs = dict(flexatt_args=FlexAttentionArgs())
-    cache_kwargs.update(mha_kwargs)
-    with torch.device(device):
-        gpt_model = GPT(config, **mha_kwargs)
-        gpt_model.apply(gpt_model._init_weights)  # Initialization
+    gpt_model = GPT(config)
     gpt_model.assign_kv_caches(
         [
             create_kv_cache(
@@ -124,29 +105,20 @@ def test_complete_gradient_computation(
             for block_idx, cache_length in enumerate(cache_lengths)
         ]
     )
-    may_match_twice = (
-        may_match_twice_fused_eager_sdpa
-        if use_old_cache
-        else may_match_twice_flex_attention_sdpa
-    )
-    autograd_hooks_kwargs = dict(
-        max_match_trials_pack_arg=4,
-        may_match_twice=may_match_twice,
-    )
 
     # Create data batches
     head_model_name = CrossEntropyOnLogits.NAME
     all_input_ids = []
     all_targets = []
     for batch_size in batch_sizes:
-        seq_length = randint_torch(min_sequence_length, max_sequence_length)
+        seq_length = random.randint(min_sequence_length, max_sequence_length)
         token_ids = torch.randint(
             low=0,
             high=config.vocab_size,
             size=(batch_size, seq_length),
             device=device,
         )
-        num_output_tokens = randint_torch(4, int(seq_length * 0.75))
+        num_output_tokens = random.randint(4, int(seq_length * 0.75))
         all_input_ids.append(token_ids[:, :-1])
         all_targets.append(token_ids[:, (-num_output_tokens):])
     head_model = HeadModelFactory.create(name=head_model_name, config=config)
@@ -160,18 +132,13 @@ def test_complete_gradient_computation(
         if not debug_flag:
             print("\n*** Default computation of gradients ***")
         else:
-            print(
-                "\n*** Gradient computation with single cell per row and no autograd hooks ***"
-            )
+            print("\n*** Gradient computation with single cell per row and no autograd hooks ***")
         model = LongContextGradientModel(
             gpt_model=gpt_model,
             head_model=head_model,
             layers_per_cell=layers_per_cell,
             chunk_size=chunk_size,
-            layercp_qname=qname,
-            cachecp_qname=qname,
-            train_cache_kwargs=dict(use_old_cache=use_old_cache),
-            autograd_hooks_kwargs=autograd_hooks_kwargs,
+            qname=qname,
             debug_single_cell_per_row=debug_flag,
             debug_dont_use_autograd_hooks=debug_flag,
         )
@@ -193,9 +160,7 @@ def test_complete_gradient_computation(
             for (fli, fci), logs in model.annotation_usage_logs().items():
                 num_unmatched = len(logs.unmatched_pack_args)
                 if num_unmatched > 0:
-                    print(
-                        f"\nUnmatched pack arguments for first_layer_index={fli}, first_chunk_index={fci}"
-                    )
+                    print(f"\nUnmatched pack arguments for first_layer_index={fli}, first_chunk_index={fci}")
                     print(logs.report())
                     some_unmatched = True
             assert not some_unmatched
@@ -213,172 +178,6 @@ def test_complete_gradient_computation(
     for name, value in gradients[0].items():
         value_comp = gradients[1].get(name)
         if value_comp is None:
-            raise IndexError(
-                f"name = {name} is in gradients[0], but not in gradients[1]"
-            )
+            raise IndexError(f"name = {name} is in gradients[0], but not in gradients[1]")
         print(f"Comparing gradient for {name}")
         torch.testing.assert_close(value, value_comp, **kwargs)
-
-
-def args_copy_model_to_device():
-    return [
-        (dtype, name)
-        for dtype, name in product(
-            [torch.bfloat16, torch.float16, torch.float32],
-            [
-                name
-                for name, _ in cache_names_and_devices(only_cpu=True)
-                if not name.startswith("dense")
-            ],
-        )
-    ]
-
-
-@_RunIf(min_cuda_gpus=1)
-@pytest.mark.parametrize(
-    "dtype, cache_name",
-    args_copy_model_to_device(),
-)
-def test_copy_model_to_device(dtype, cache_name):
-    fabric = L.Fabric(
-        devices=1,
-        num_nodes=1,
-        strategy="auto",
-        precision="bf16-true",
-    )
-    fabric.launch(
-        run_copy_model_to_device,
-        dtype=dtype,
-        cache_name=cache_name,
-    )
-
-
-def run_copy_model_to_device(
-    fabric: L.Fabric,
-    dtype: torch.dtype,
-    cache_name: str,
-):
-    seed = 31415927
-    torch.random.manual_seed(seed)
-    torch.set_default_dtype(dtype)
-
-    device = torch.device("cpu")
-    cpu_offload_device = torch.device("cuda", fabric.local_rank)
-    cache_lengths = [128, 128]
-    batch_size = 5
-    n_layer = len(cache_lengths)
-    n_head = 8
-    n_query_groups = 4
-    head_size = 64
-    vocab_size = 48
-    layers_per_cell = 1
-    chunk_size = 8
-    max_sequence_length = max(cache_lengths) * 8
-    head_model_name = SequenceClassification.NAME
-
-    # Create model and KV caches
-    config = Config(
-        n_layer=n_layer,
-        n_head=n_head,
-        n_query_groups=n_query_groups,
-        n_embd=n_head * head_size,
-        block_size=max_sequence_length,
-        vocab_size=vocab_size,
-        rotary_percentage=1,
-    )
-    params = KVCacheParams.from_config(
-        config=config,
-        max_batch_size=batch_size,
-        cache_length=cache_lengths[0],
-        dtype=dtype,
-    )
-    gpt_model = GPT(config)
-    gpt_model.apply(gpt_model._init_weights)  # Initialization
-    gpt_model.assign_kv_caches(
-        [
-            create_kv_cache(
-                name=cache_name,
-                params=replace(params, cache_length=cache_length),
-                block_idx=block_idx,
-            )
-            for block_idx, cache_length in enumerate(cache_lengths)
-        ]
-    )
-    for l_ix, kv_cache in enumerate(gpt_model.get_kv_caches()):
-        assert kv_cache.device in (device, None), (l_ix, kv_cache.device, device)
-    with torch.device(cpu_offload_device):
-        head_model = HeadModelFactory.create(name=head_model_name, config=config)
-    offload_grad_accum = CPUOffloadAccumulateGradients(
-        group=[0],
-        fabric=fabric,
-    )
-    model = LongContextGradientModel(
-        gpt_model=gpt_model,
-        head_model=head_model,
-        layers_per_cell=layers_per_cell,
-        chunk_size=chunk_size,
-        layercp_qname="default",
-        cachecp_qname="default",
-        offload_device=cpu_offload_device,
-        offload_grad_accum=offload_grad_accum,
-    )
-    model.zero_grad()
-
-    # Deep copy of model
-    model_copy = model.copy_model_for_evaluation()
-    # Compare all params
-    _model = model.gpt_model
-    _model_copy = model_copy.gpt_model
-    state_dict = _model_copy.state_dict()
-    for name, param in _model.named_parameters():
-        assert name in state_dict, f"name='{name}' in original, but not copy"
-        param_copy = state_dict[name]
-        if param is None:
-            assert (
-                param_copy is None
-            ), f"name='{name}': param is None, param_copy is not None"
-        else:
-            assert param.data.device == device, (param.data.device, device)
-            assert param_copy.data.device == cpu_offload_device, (
-                param_copy.data.device,
-                cpu_offload_device,
-            )
-            torch.testing.assert_close(param.data, param_copy.data.to(device=device))
-    copy_names = _model_copy.state_dict().keys()
-    names = _model.state_dict().keys()
-    diff = set(copy_names).difference(names)
-    assert len(diff) == 0, f"Entries in copy but not in original:\n{diff}"
-    # All KV caches exist
-    assert model.gpt_model.transformer.wte.weight.device == device
-    assert model_copy.gpt_model.transformer.wte.weight.device == cpu_offload_device
-    for l_ix, (kv_cache, kv_cache_copy) in enumerate(
-        zip(
-            model.gpt_model.get_kv_caches(),
-            model_copy.gpt_model.get_kv_caches(),
-        )
-    ):
-        assert kv_cache is not None and kv_cache_copy is not None, (
-            l_ix,
-            kv_cache,
-            kv_cache_copy,
-        )
-        assert type(kv_cache) == type(kv_cache_copy), (
-            l_ix,
-            type(kv_cache),
-            type(kv_cache_copy),
-        )
-        assert kv_cache_copy.device in (cpu_offload_device, None), (
-            l_ix,
-            kv_cache_copy.device,
-            cpu_offload_device,
-        )
-
-
-if __name__ == "__main__":
-    test_complete_gradient_computation(
-        cache_name="h2o",
-        cache_kwargs={"grace_period": 10, "replay_log_blocksize": 64},
-        cache_lengths=[128, 128],
-        use_old_cache=False,
-        device=torch.device("cuda", 0),
-    )

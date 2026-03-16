@@ -16,24 +16,20 @@ from typing import Any, Callable, Dict, List, Optional, Union, Iterable
 
 import torch
 from torch import Tensor
+from torch.utils.data import Dataset
 
 from litgpt.prompts import PromptStyle, Default
 from litgpt.tokenizer import Tokenizer
 
-from keys_values.data.base import (
+from keys_values.data.sft_dataset import (
     INPUT_IDS_NAME,
     LABELS_NAME,
-    POSITION_NAME,
-    LongContextDataset,
     common_collate_fn,
-    is_pad_datacase,
 )
 
 
-class SequenceClassificationDataset(LongContextDataset):
-    """
-    An in-memory dataset for supervised finetuning of a sequence classification
-    head.
+class SequenceClassificationDataset(Dataset):
+    """An in-memory dataset for supervised finetuning of a sequence classification head
 
     Args:
         data: A list of samples (dicts). The target/label must be stored under
@@ -48,6 +44,10 @@ class SequenceClassificationDataset(LongContextDataset):
         max_seq_length: Truncate sequences that are longer than this value. By
             default, no truncation is applied.
 
+    Returns a dict with two keys:
+        input_ids: The encoded prompt
+        labels: Index of class label in `class_labels`
+
     """
 
     def __init__(
@@ -59,76 +59,52 @@ class SequenceClassificationDataset(LongContextDataset):
         max_seq_length: int = -1,
         transform: Optional[Callable[[Dict[str, str]], Dict[str, str]]] = None,
     ) -> None:
-        super().__init__(
-            data,
-            tokenizer,
-            prompt_style,
-            max_seq_length,
-            transform,
+        self.data = data
+        self.tokenizer = tokenizer
+        self.prompt_style = (
+            prompt_style if isinstance(prompt_style, PromptStyle) else PromptStyle.from_name(prompt_style)
         )
+        self.max_seq_length = max_seq_length
+        self.transform = transform
         self.class_labels = tuple(class_labels)
         self._label_indexes = None
         self._transform_labels()
 
+    def __len__(self) -> int:
+        return len(self.data)
+
     def _transform_labels(self):
         if len(set(self.class_labels)) != len(self.class_labels):
-            raise ValueError(
-                f"class_labels = {self.class_labels}, must not have duplicate entries"
-            )
+            raise ValueError(f"class_labels = {self.class_labels}, must not have duplicate entries")
         self._label_indexes = []
-        is_in_padding = False
         for idx, example in enumerate(self.data):
-            if is_pad_datacase(example):
-                is_in_padding = True
-                pos = None
-            else:
-                if is_in_padding:
-                    raise ValueError(
-                        f"data can only contain pad entries at the end, but entry {idx} is not padding, while pad entries before"
-                    )
-                label = example["output"]
-                pos = next(
-                    (i for i, cl in enumerate(self.class_labels) if cl == label), None
-                )
-                if pos is None:
-                    raise ValueError(
-                        f"data[{idx}]['output'] = '{label}' invalid, must lie in {self.class_labels}"
-                    )
+            label = example["output"]
+            pos = next((i for i, cl in enumerate(self.class_labels) if cl == label), None)
+            if pos is None:
+                raise ValueError(f"data[{idx}]['output'] = '{label}' invalid, must lie in {self.class_labels}")
             self._label_indexes.append(pos)
 
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
+    def __getitem__(self, idx: int) -> Dict[str, Union[Tensor, Dict[str, Any]]]:
         if not (0 <= idx < len(self.data)):
-            raise IndexError(
-                f"index {idx} out of range, must be in [0, {len(self.data)})"
-            )
+            raise IndexError(f"index {idx} out of range, must be in [0, {len(self.data)})")
         example = self.data[idx]
         label_idx = self._label_indexes[idx]
-        if label_idx is None:
-            return example  # Padding case
         if self.transform is not None:
             example = self.transform(example)
         prompt = self.prompt_style.apply(prompt=example["instruction"], **example)
-        encoded_prompt = self.tokenizer.encode(
-            prompt, bos=False, eos=True, max_length=self.max_seq_length
-        )
+        encoded_prompt = self.tokenizer.encode(prompt, bos=False, eos=True, max_length=self.max_seq_length)
         token_counts = {"raw_plus_prompt_template": len(encoded_prompt)}
         raw_count = example.get("num_tokens_instruction")
-        if (
-            raw_count is None
-            and self.transform is None
-            and isinstance(self.prompt_style, Default)
-        ):
+        if raw_count is None and self.transform is None and isinstance(self.prompt_style, Default):
             raw_count = len(encoded_prompt)
         if raw_count is not None:
             token_counts["raw"] = raw_count
-        result = {
+        return {
             INPUT_IDS_NAME: encoded_prompt,
             LABELS_NAME: label_idx,
+            #"prefix_len": example["prefix_len"],  # DEBUG!!
             "token_counts": token_counts,
         }
-        if POSITION_NAME in example:
-            result[POSITION_NAME] = example[POSITION_NAME]
-        return result
 
 
 def get_seq_class_collate_fn(pad_id: int = 0):
@@ -136,12 +112,10 @@ def get_seq_class_collate_fn(pad_id: int = 0):
 
 
 def _seq_class_collate_fn(
-    samples: List[Dict[str, Any]],
-    pad_id: int = 0,
+    samples: List[Dict[str, Any]], pad_id: int = 0,
 ) -> Dict[str, Union[Tensor, Dict[str, Any]]]:
-    batched, samples = common_collate_fn(samples, pad_id=pad_id)
+    batched = common_collate_fn(samples, pad_id=pad_id)
     batched[LABELS_NAME] = torch.tensor(
-        [sample[LABELS_NAME] for sample in samples],
-        dtype=torch.int64,
+        [sample[LABELS_NAME] for sample in samples], dtype=torch.int64,
     )
     return batched

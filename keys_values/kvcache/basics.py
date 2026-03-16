@@ -11,16 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import copy
 from typing import Optional, Tuple, Dict, Callable, List, Any
 
 import torch
 
-from keys_values.config import Config
+from litgpt.config import Config
 
 from keys_values.attention import KeysAndValues
 from keys_values.kvcache.base import (
-    KVCache,
     DefaultKVCache,
     DefaultKVCacheReplayLog,
     KVCacheParams,
@@ -32,9 +30,7 @@ from keys_values.kvcache.buffers import (
     KVCacheBuffersParams,
     positions_wrap_around,
 )
-from keys_values.utils import index_to_3d, bits_for_torch_dtype, bitsize_of
-
-NOT_NEEDED_ARGS = ("max_batch_size", "cache_length", "dtype")
+from keys_values.kvcache.utils import bitsize_of, bits_for_torch_dtype
 
 
 class KVCacheWithBuffers(DefaultKVCache):
@@ -42,8 +38,7 @@ class KVCacheWithBuffers(DefaultKVCache):
     Base class of all KV caches supported by KV cache buffers of type
     :class:`KVCacheBuffers`. We recommend that all KV caches separate out
     buffers, in order to keep selection orthogonal to content compression
-    (e.g., by quantization). Also, buffers can be deallocated to free up
-    GPU memory, and reallocated later on.
+    (e.g., by quantization).
 
     Checkpoint hook:
 
@@ -52,14 +47,14 @@ class KVCacheWithBuffers(DefaultKVCache):
     a call to :meth:`prefill` (the prefill call is 0, first forward is 1, ...)
     in `chunk_idx`. We then call
     `checkpoint_hook(self.kv_buffers, self.chunk_idx)` at the start of
-    :meth:`forward`. An important use case is KV cache checkpointing for
+    :meth:`forward`. An important use case is activation checkpointing for
     gradient computation.
 
     Buffers, dependence on batch size:
 
     Subclasses support buffer allocation on demand, as well as their
     deallocation, so that GPU memory is freed for other uses. Buffers are
-    allocated (if not already present) with a call of :meth:`_prefill`,
+    allocated (if not already present) with a call of :meth:`prefill`,
     and the effective batch size `batch_size` is used then. Also, if
     buffers exist, but differ in shape due to `batch_size`, they are
     reallocated. This allows us to support different batch sizes (e.g.
@@ -67,7 +62,6 @@ class KVCacheWithBuffers(DefaultKVCache):
     for `max_batch_size`.
 
     """
-
     def __init__(
         self,
         config: Config,
@@ -80,13 +74,8 @@ class KVCacheWithBuffers(DefaultKVCache):
             config: Model config
             buffers: KV cache buffers to be used
             block_idx: Index of model block (or layer)
-            base_kwargs: Further args passed to superclass constructor
 
         """
-        for name in NOT_NEEDED_ARGS:
-            if name in base_kwargs:
-                print(f"Removing {name} from base_kwargs (taken from buffers")
-                base_kwargs.pop(name)
         super().__init__(
             config=config,
             max_batch_size=buffers.max_batch_size,
@@ -100,8 +89,10 @@ class KVCacheWithBuffers(DefaultKVCache):
         self._chunk_idx = None
         if buffers.current_length is not None and buffers.current_length > 0:
             print(f"WARNING: buffers.current_length = {buffers.current_length} > 0")
-        # If `buffers.device` already determined, this fixes the device of the cache
-        self._device = buffers.device
+
+    @property
+    def device(self) -> torch.device:
+        return self.kv_buffers.device
 
     @property
     def current_length(self) -> int:
@@ -150,12 +141,8 @@ class KVCacheWithBuffers(DefaultKVCache):
         needs lots of device memory, in order to share the device memory between
         the two.
 
-        Another use case is if a model is moved to a different device, including
-        its KV caches. This works only if KV cache buffers are deallocated.
-
         """
         self.kv_buffers.deallocate()
-        self._device = None
 
     @property
     def buffers_are_allocated(self) -> bool:
@@ -191,7 +178,7 @@ class KVCacheWithBuffers(DefaultKVCache):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ):
-        raise NotImplementedError()
+        raise NotImplementedError
 
     def _forward(
         self,
@@ -215,7 +202,7 @@ class KVCacheWithBuffers(DefaultKVCache):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
-        raise NotImplementedError()
+        raise NotImplementedError
 
     def get_keys_values(self) -> Optional[KeysAndValues]:
         return self.kv_buffers.get_keys_values()
@@ -259,51 +246,18 @@ class KVCacheWithBuffers(DefaultKVCache):
         """
         raise NotImplementedError
 
-    def _default_device_for_new_params(self) -> torch.device:
-        """
-        Returns:
-            Device on which new parameters should be created first.
-
-        """
-        device = self.kv_buffers.device
-        if device is None:
-            device = torch.get_default_device()
-        return device
-
-    def _reset(self):
-        self.kv_buffers.reset()
-
-    def _base_kwargs_for_clone(self) -> Dict[str, Any]:
-        """
-        Supports :meth:`clone` implementations in subclasses.
-        Note that the copy created by :meth:`clone` uses the same `self.mha`
-        object (shallow copy).
-
-        Returns:
-            Keyword arguments for calling the constructor in :meth:`clone`
-
-        """
-        if self.kv_buffers.buffers_are_allocated:
-            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
-        result = super()._base_kwargs_for_clone()
-        for name in NOT_NEEDED_ARGS:
-            del result[name]
-        result["buffers"] = self.kv_buffers
-        return result
-
 
 class DenseKVCache(KVCacheWithBuffers):
     """
     Key-value cache for dense attention. Key and value tensors for all
-    past tokens are maintained. This cache can only process as many tokens
-    as its cache length. It requires a lot of memory, so can only be used for
+    past tokens are maintained. The cache length is the maximum sequence
+    length. This cache requires a lot of memory, it can only be used for
     moderate cache lengths.
 
     Note: If the cache is full, :meth:`forward` raises an exception. The cache
     buffers are allocated up front and are not enlarged later on.
 
     """
-
     def __init__(
         self,
         config: Config,
@@ -312,6 +266,7 @@ class DenseKVCache(KVCacheWithBuffers):
         **base_kwargs,
     ):
         super().__init__(config, buffers, block_idx, **base_kwargs)
+        self.next_position = None
         self._replay_log = None
 
     @staticmethod
@@ -324,23 +279,6 @@ class DenseKVCache(KVCacheWithBuffers):
         dtype: Optional[torch.dtype] = None,
         **base_kwargs,
     ) -> "DenseKVCache":
-        """
-        Creates cache with default buffers (no quantization).
-
-        Args:
-            config: Model config
-            max_batch_size: Inference batch size (maximum)
-            cache_length: Number of slots in cache. This is also the maximum
-                number of tokens which can be stored for this cache
-            block_idx: Index of model block (or layer). Multi-head attention
-                needs to know this.
-            device: Device for buffers. If not given, it is set with the
-                first :meth:`forward` call, based on the input arguments.
-            dtype: Data type for buffers. If not given, it is set with the
-                first :meth:`forward` call, based on the input arguments.
-            base_kwargs: Extra keyword arguments for cache and default buffer
-
-        """
         buffers_kwargs = KVCacheWithBuffers.extract_default_buffers_kwargs(base_kwargs)
         buffers = KVCacheWithBuffers.create_default_buffers(
             config=config,
@@ -352,8 +290,17 @@ class DenseKVCache(KVCacheWithBuffers):
         )
         return DenseKVCache(config, buffers, block_idx, **base_kwargs)
 
-    def max_forward_length(self) -> int:
-        return self.cache_length - self.input_pos
+    @property
+    def next_token_pos(self) -> Optional[int]:
+        return self.next_position
+
+    @property
+    def max_tokens_forward(self) -> int:
+        return self.cache_length
+
+    @property
+    def max_prefill_length(self) -> Optional[int]:
+        return self.cache_length
 
     def _forward_internal(
         self,
@@ -361,19 +308,26 @@ class DenseKVCache(KVCacheWithBuffers):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
+        if self.next_position is None:
+            raise IndexError("Cache needs to be initialized with 'prefill' before being used")
+        num = key.shape[2]
+        np = self.next_position
+        if np + num > self.cache_length:
+            raise IndexError(
+                f"Cache has at most {self.cache_length - np} free slots, cannot add {num} entries")
+        self.next_position += num
         if self._replay_log is not None:
             if not isinstance(self._replay_log, DefaultKVCacheReplayLog):
-                raise IndexError(
-                    "Cannot switch on replay logging in the middle of inference run. Call 'prefill'."
-                )
+                raise IndexError("Cannot switch on replay logging in the middle of inference run. Call 'prefill'.")
             self._replay_log.append_token_chunk(token_idx)
-        np = self.input_pos
-        num = key.shape[2]
         return self.kv_buffers.forward(
             positions=(np, np + num),
             key=key,
             value=value,
         )
+
+    def _update(self, *args, **kwargs):
+        pass
 
     def _prefill_internal(
         self,
@@ -382,28 +336,26 @@ class DenseKVCache(KVCacheWithBuffers):
         token_idx: torch.Tensor,
     ):
         self.kv_buffers.prefill(key, value)
+        init_length = key.shape[2]
+        self.next_position = init_length
         if self._replay_log is not None:
             self._replay_log = DefaultKVCacheReplayLog(
                 token_chunks=[token_idx],
                 cache_length=self.cache_length,
                 max_prefill_length=self.max_prefill_length,
+                dtype=self.dtype,
             )
 
     def token_positions(self) -> torch.Tensor:
-        device = torch.get_default_device() if self.device is None else self.device
-        return index_to_3d(
-            torch.arange(self.input_pos, device=device),
-            self.batch_size,
-            self.n_query_groups,
-        )
+        return torch.arange(self.next_position, device=self.device).reshape(
+            1, 1, -1
+        ).expand(self.batch_size, self.n_query_groups, -1)
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         return self.kv_buffers.size_estimate()
 
     @classmethod
-    def size_estimate_apriori(
-        cls, params: KVCacheParams, **kwargs
-    ) -> Tuple[int, Dict[str, int]]:
+    def size_estimate_apriori(cls, params: KVCacheParams, **kwargs) -> Tuple[int, Dict[str, int]]:
         """
         `cache_length` is required in `kwargs`. If `buffer_type` is given in
         `kwargs`, the size for this type is used, otherwise for the default
@@ -413,9 +365,7 @@ class DenseKVCache(KVCacheWithBuffers):
         buff_params = KVCacheBuffersParams.from_params(params)
         buffer_type = kwargs.get("buffer_type", DefaultKVCacheBuffers)
         return buffer_type.size_estimate_apriori(
-            buff_params,
-            cache_length=params.cache_length,
-            **kwargs,
+            buff_params, cache_length=params.cache_length, **kwargs,
         )
 
     def switch_replay_logging(self, status: bool):
@@ -430,58 +380,48 @@ class DenseKVCache(KVCacheWithBuffers):
         return self._replay_log is not None
 
     def get_replay_log(self) -> Optional[KVCacheReplayLog]:
-        return copy.copy(self._replay_log)
-
-    def clone(self) -> KVCache:
-        return DenseKVCache(**self._base_kwargs_for_clone())
+        return self._replay_log
 
 
 class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
     """
-    Replay log for :class:`LastRecentlyInsertedKVCache`.
+    Baseline key-value cache which stores the last recently inserted
+    `cache_length` key, value tensors.
 
     """
-
     def __init__(
         self,
         token_chunks: List[torch.Tensor],
         cache_length: int,
         batch_size: int,
         n_query_groups: int,
-        init_grace_tokens: int,
+        dtype: Optional[torch.dtype] = None,
     ):
         super().__init__(
             token_chunks,
             cache_length,
-            max_prefill_length=cache_length,
+            max_prefill_length=None,
             grace_period=0,
+            dtype=dtype,
         )
         self._shape = (batch_size, n_query_groups)
-        self.init_grace_tokens = init_grace_tokens
 
     def extract_index(
         self,
-        input_pos: int,
+        token_pos: int,
         num: int,
         **kwargs,
     ) -> torch.Tensor:
         seq_length = self.__len__()
-        if num <= 0 or input_pos < 0 or input_pos > seq_length - num:
-            raise ValueError(
-                f"token_pos = {input_pos}, num = {num}, seq_length = {seq_length}: Out of range"
-            )
-        if input_pos < self.cache_length:
-            raise ValueError(
-                f"input_pos = {input_pos} must be >= {self.cache_length} = cache_length"
-            )
-        device = kwargs.get("device", torch.get_default_device())
-        start = self.init_grace_tokens
-        mod = self.cache_length - start
-        current = (input_pos - self.cache_length) % mod + start
+        if num <= 0 or token_pos < 0 or token_pos > seq_length - num:
+            raise ValueError(f"token_pos = {token_pos}, num = {num}, seq_length = {seq_length}: Out of range")
+        if token_pos < self.cache_length:
+            raise ValueError(f"token_pos = {token_pos} must be >= {self.cache_length} = cache_length")
+        device = kwargs.get("device", self.device)
         return positions_wrap_around(
             num=num,
-            current=current,
-            start=start,
+            current=token_pos % self.cache_length,
+            start=0,
             end=self.cache_length,
             batch_size=self._shape[0],
             n_query_groups=self._shape[1],
@@ -493,38 +433,29 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
 class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     """
     Baseline key-value cache which stores the last recently inserted
-    `cache_length` key and value tensors. When the cache is full,
-    those slots are overwritten whose content is in the cache for the
-    longest time.
-
-    If `init_grace_tokens > 0`, this number of initial keys and values are kept
-    in the cache indefinitely. Use this in order to cater for initial prompt
-    tokens which may be important.
+    `cache_length` key, value tensors.
 
     """
-
     def __init__(
         self,
         config: Config,
         buffers: KVCacheBuffers,
         block_idx: int,
-        init_grace_tokens: int = 0,
         **base_kwargs,
     ):
-        if init_grace_tokens < 0:
-            raise ValueError(f"init_grace_tokens={init_grace_tokens}, must be >= 0")
+        """
+        Args:
+            config: Model config
+            buffers: KV cache buffers to be used
+        """
         super().__init__(config, buffers, block_idx, **base_kwargs)
-        self.init_grace_tokens = init_grace_tokens
-        # Note: We could generate `token_pos` on the fly from `input_pos`
-        # and `next_position`, but it is simpler just to maintain it.
-        device = self._default_device_for_new_params()
         self.register_buffer(
             "token_pos",
-            torch.zeros(buffers.cache_length, device=device, dtype=torch.int),
+            torch.zeros(buffers.cache_length, device=buffers.device, dtype=torch.int),
             persistent=False,
         )
-        # Position of first slot to overwrite with next :meth:`forward`
         self.next_position = None
+        self._next_token_pos = None
         self._replay_log = None
 
     @staticmethod
@@ -533,7 +464,6 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         max_batch_size: int,
         cache_length: int,
         block_idx: int,
-        init_grace_tokens: int = 0,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         **base_kwargs,
@@ -545,14 +475,8 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             config: Model config
             max_batch_size: Maximum batch size supported
             cache_length: Number of slots (i.e., tokens) in cache
-            block_idx: Block index
-            init_grace_tokens: This number of initial keys and values are
-                kept in the cache indefinitely. Defaults to 0.
-            device: Device for buffers. If not given, it is set with the
-                first :meth:`forward` call, based on the input arguments.
-            dtype: Data type for buffers. If not given, it is set with the
-                first :meth:`forward` call, based on the input arguments.
-            base_kwargs: Extra keyword arguments for cache and default buffer
+            device: Device for buffers
+            dtype: Data type for buffers
 
         """
         buffers_kwargs = KVCacheWithBuffers.extract_default_buffers_kwargs(base_kwargs)
@@ -565,19 +489,20 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             **buffers_kwargs,
         )
         return LastRecentlyInsertedKVCache(
-            config,
-            buffers,
-            block_idx,
-            init_grace_tokens=init_grace_tokens,
-            **base_kwargs,
+            config, buffers, block_idx, **base_kwargs,
         )
 
-    @classmethod
-    def _parameter_names(cls) -> List[str]:
-        return super()._parameter_names() + ["token_pos"]
+    @property
+    def next_token_pos(self) -> Optional[int]:
+        return self._next_token_pos
 
-    def max_forward_length(self) -> int:
-        return self.cache_length - self.init_grace_tokens
+    @property
+    def max_prefill_length(self) -> Optional[int]:
+        return None  # This KV cache can be prefilled with any length
+
+    @property
+    def max_tokens_forward(self) -> int:
+        return self.cache_length
 
     def _forward_internal(
         self,
@@ -585,12 +510,13 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
+        if self.next_position is None:
+            raise IndexError("Cache needs to be initialized with 'prefill' before being used")
         num = key.shape[2]
-        start = self.init_grace_tokens
         positions = positions_wrap_around(
             num=num,
             current=self.next_position,
-            start=start,
+            start=0,
             end=self.cache_length,
             batch_size=self.batch_size,
             n_query_groups=self.n_query_groups,
@@ -604,26 +530,24 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         np = self.next_position
         num1 = min(num, self.cache_length - np)
         diff = num - num1
-        ntp = self.input_pos
-        self.token_pos[np : (np + num1)] = torch.arange(
+        ntp = self._next_token_pos
+        self.token_pos[np:(np + num1)] = torch.arange(
             ntp, ntp + num1, device=self.device, dtype=torch.int
         )
         if diff > 0:
-            self.token_pos[start : (start + diff)] = torch.arange(
+            self.token_pos[:diff] = torch.arange(
                 ntp + num1, ntp + num, device=self.device, dtype=torch.int
             )
-        np += num
-        diff = np - self.cache_length
-        if diff >= 0:
-            np = diff + start
-        self.next_position = np
+        self.next_position = (np + num) % self.cache_length
         if self._replay_log is not None:
             if not isinstance(self._replay_log, DefaultKVCacheReplayLog):
-                raise IndexError(
-                    "Cannot switch on replay logging in the middle of inference run. Call 'prefill'."
-                )
+                raise IndexError("Cannot switch on replay logging in the middle of inference run. Call 'prefill'.")
             self._replay_log.append_token_chunk(token_idx)
+        self._next_token_pos += num
         return k_and_v
+
+    def _update(self, *args, **kwargs):
+        pass
 
     def _prefill_internal(
         self,
@@ -632,9 +556,15 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         token_idx: torch.Tensor,
     ):
         init_length = key.shape[2]
+        eff_init_length = min(init_length, self.cache_length)
+        if eff_init_length < init_length:
+            key = key[:, :, -eff_init_length:, :]
+            value = value[:, :, -eff_init_length:, :]
         self.kv_buffers.prefill(key, value)
-        self.next_position = init_length % self.cache_length
-        self.token_pos[:init_length] = torch.arange(
+        self._next_token_pos = init_length
+        self.next_position = eff_init_length % self.cache_length
+        self.token_pos[:eff_init_length] = torch.arange(
+            init_length - eff_init_length,
             init_length,
             dtype=self.token_pos.dtype,
             device=self.device,
@@ -645,14 +575,12 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 cache_length=self.cache_length,
                 batch_size=self.batch_size,
                 n_query_groups=self.n_query_groups,
-                init_grace_tokens=self.init_grace_tokens,
+                dtype=self.dtype,
             )
 
     def token_positions(self) -> torch.Tensor:
-        return index_to_3d(
-            self.token_pos[: self.current_length],
-            self.batch_size,
-            self.n_query_groups,
+        return self.token_pos[:self.current_length].reshape(1, 1, -1).expand(
+            self.batch_size, self.n_query_groups, -1
         )
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
@@ -661,9 +589,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         return sz_total + tk_p, {**dct_sz, "token_pos": tk_p}
 
     @classmethod
-    def size_estimate_apriori(
-        cls, params: KVCacheParams, **kwargs
-    ) -> Tuple[int, Dict[str, int]]:
+    def size_estimate_apriori(cls, params: KVCacheParams, **kwargs) -> Tuple[int, Dict[str, int]]:
         """
         `cache_length` is required in `kwargs`. If `buffer_type` is given in
         `kwargs`, the size for this type is used, otherwise for the default
@@ -673,9 +599,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         buff_params = KVCacheBuffersParams.from_params(params)
         buffer_type = kwargs.get("buffer_type", DefaultKVCacheBuffers)
         sz_total, dct_sz = buffer_type.size_estimate_apriori(
-            buff_params,
-            cache_length=params.cache_length,
-            **kwargs,
+            buff_params, cache_length=params.cache_length, **kwargs,
         )
         tk_p = params.cache_length * bits_for_torch_dtype(torch.int)
         return sz_total + tk_p, {**dct_sz, "token_pos": tk_p}
@@ -692,12 +616,4 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         return self._replay_log is not None
 
     def get_replay_log(self) -> Optional[KVCacheReplayLog]:
-        return copy.copy(self._replay_log)
-
-    def _base_kwargs_for_clone(self) -> Dict[str, Any]:
-        result = super()._base_kwargs_for_clone()
-        result["init_grace_tokens"] = self.init_grace_tokens
-        return result
-
-    def clone(self) -> KVCache:
-        return LastRecentlyInsertedKVCache(**self._base_kwargs_for_clone())
+        return self._replay_log

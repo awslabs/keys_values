@@ -16,21 +16,18 @@ from functools import partial
 from typing import List, Dict, Optional, Callable, Union, Any
 
 import torch
+from torch.utils.data import Dataset
 
 from litgpt.prompts import PromptStyle, Default
 from litgpt.tokenizer import Tokenizer
 
-from keys_values.data.base import (
-    INPUT_IDS_NAME,
-    LABELS_NAME,
-    POSITION_NAME,
-    LongContextDataset,
-    common_collate_fn,
-    is_pad_datacase,
-)
+
+INPUT_IDS_NAME = "input_ids"
+
+LABELS_NAME = "labels"
 
 
-class SFTDataset(LongContextDataset):
+class SFTDataset(Dataset):
     """
     Improved variant of :class:`litgpt.data.base.SFTDataset`.
 
@@ -39,7 +36,6 @@ class SFTDataset(LongContextDataset):
     Avoids extra costs due to tokenization.
 
     """
-
     def __init__(
         self,
         data: List[Dict[str, str]],
@@ -50,36 +46,31 @@ class SFTDataset(LongContextDataset):
         ignore_index: int = -100,
         transform: Optional[Callable[[Dict[str, str]], Dict[str, str]]] = None,
     ) -> None:
-        super().__init__(
-            data,
-            tokenizer,
-            prompt_style,
-            max_seq_length,
-            transform,
+        self.data = data
+        self.tokenizer = tokenizer
+        self.prompt_style = (
+            prompt_style if isinstance(prompt_style, PromptStyle) else PromptStyle.from_name(prompt_style)
         )
+        self.max_seq_length = max_seq_length
         self.mask_prompt = mask_prompt
         self.ignore_index = ignore_index
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.data)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         example = self.data[idx]
-        if is_pad_datacase(example):
-            return example
         if self.transform is not None:
             example = self.transform(example)
         prompt = self.prompt_style.apply(prompt=example["instruction"], **example)
         encoded_prompt = self.tokenizer.encode(
-            prompt,
-            max_length=self.max_seq_length,
+            prompt, max_length=self.max_seq_length,
         )
         encoded_response = self.tokenizer.encode(
-            example["output"],
-            bos=False,
-            eos=True,
-            max_length=self.max_seq_length,
+            example["output"], bos=False, eos=True, max_length=self.max_seq_length,
         )
-        encoded_prompt_and_response = torch.cat(
-            (encoded_prompt, encoded_response)
-        ).type(torch.int64)
+        encoded_prompt_and_response = torch.cat((encoded_prompt, encoded_response)).type(torch.int64)
         if 0 < self.max_seq_length < len(encoded_prompt_and_response):
             msl = self.max_seq_length
             encoded_prompt_and_response = encoded_prompt_and_response[:msl]
@@ -92,23 +83,16 @@ class SFTDataset(LongContextDataset):
 
         token_counts = {"raw_plus_prompt_template": len(encoded_prompt_and_response)}
         raw_count = example.get("num_tokens_instruction")
-        if (
-            raw_count is None
-            and self.transform is None
-            and isinstance(self.prompt_style, Default)
-        ):
+        if raw_count is None and self.transform is None and isinstance(self.prompt_style, Default):
             raw_count = len(encoded_prompt)
         if raw_count is not None:
             token_counts["raw"] = raw_count + len(encoded_response)
 
-        result = {
+        return {
             INPUT_IDS_NAME: encoded_prompt_and_response,
             LABELS_NAME: labels,
             "token_counts": token_counts,
         }
-        if POSITION_NAME in example:
-            result[POSITION_NAME] = example[POSITION_NAME]
-        return result
 
 
 def get_sft_collate_fn(pad_id: int = 0, ignore_index: int = -100):
@@ -121,14 +105,38 @@ def get_sft_collate_fn(pad_id: int = 0, ignore_index: int = -100):
     return partial(_sft_collate_fn, pad_id=pad_id, ignore_index=ignore_index)
 
 
+def common_collate_fn(
+    samples: List[Dict[str, Union[torch.Tensor, Dict[str, Any]]]],
+    pad_id: int = 0,
+) -> Dict[str, Union[torch.Tensor, Dict[str, Any]]]:
+    input_ids = torch.nn.utils.rnn.pad_sequence(
+        [sample[INPUT_IDS_NAME] for sample in samples],
+        batch_first=True,
+        padding_value=pad_id,
+    )
+    names = ("raw_plus_prompt_template",)
+    if all("raw" in x["token_counts"] for x in samples):
+        names += ("raw",)
+    return {
+        INPUT_IDS_NAME: input_ids,
+        "token_counts": {
+            name: torch.tensor(
+                [sample["token_counts"][name] for sample in samples],
+                dtype=torch.int64,
+            ).unsqueeze(1)
+            for name in names
+        }
+    }
+
+
 def _sft_collate_fn(
-    samples: List[Dict[str, Any]],
+    samples: List[Dict[str, Union[torch.Tensor, Dict[str, Any]]]],
     pad_id: int = 0,
     ignore_index: int = -100,
 ) -> Dict[str, Union[torch.Tensor, Dict[str, Any]]]:
-    batched, samples = common_collate_fn(samples, pad_id=pad_id)
+    batched = common_collate_fn(samples, pad_id=pad_id)
     batched[LABELS_NAME] = torch.nn.utils.rnn.pad_sequence(
-        [sample[LABELS_NAME] for sample in samples],
+        [sample[key] for sample in samples],
         batch_first=True,
         padding_value=ignore_index,
     )

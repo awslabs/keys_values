@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from itertools import product
+import random
 
 import torch
 import pytest
@@ -25,18 +26,18 @@ from keys_values.kvcache.test_utils import (
     available_backends,
     product_with_devices,
 )
-from keys_values.utils import randint_torch
 
 
 @pytest.mark.parametrize(
-    "device, name",
+    "name, device",
     product(
-        available_backends(),
         ["lastrec-default", "lastrec-torch-quantized8"],
-    ),
+        available_backends(),
+    )
 )
-def test_last_recent(device, name):
+def test_last_recent(name, device):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
     dtype = torch.bfloat16
@@ -47,29 +48,26 @@ def test_last_recent(device, name):
         cache_length=32,
         head_size=8,
         n_head=4,
+        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params)
-    num_insert = randint_torch(cache_length, 3 * cache_length)
+    num_insert = random.randint(cache_length, 3 * cache_length)
     max_prefill_length = kv_cache.max_prefill_length
-    num_prefill = randint_torch(num_insert // 3, int(num_insert * 0.75))
+    num_prefill = random.randint(num_insert // 3, int(num_insert * 0.75))
     if max_prefill_length is not None and num_prefill > max_prefill_length:
         num_prefill = max_prefill_length
 
     data = random_args_cache_forward(params, num_insert, vocab_size)
-    kv_cache(**range_from_args(data, 0, num_prefill))
+    kv_cache(**range_from_args(data, 0, num_prefill), input_pos=0)
     for pos in range(num_prefill, num_insert):
-        kv_cache(**range_from_args(data, pos, pos + 1))
+        kv_cache(**range_from_args(data, pos, pos + 1), input_pos=pos)
 
     current_length = min(cache_length, num_insert)
     assert kv_cache.current_length == current_length
     token_positions = kv_cache.token_positions().to(dtype=torch.int64)
-    assert token_positions.shape == (
-        params.max_batch_size,
-        params.n_query_groups,
-        current_length,
-    )
+    assert token_positions.shape == (params.max_batch_size, params.n_query_groups, current_length)
     assert tensor_is_simple(token_positions)
     positions = token_positions[0, 0, :].tolist()
     assert len(set(positions)) == current_length
@@ -77,17 +75,18 @@ def test_last_recent(device, name):
 
 
 @pytest.mark.parametrize(
-    *product_with_devices(
+    "dtype, tol_kwargs, device",
+    product_with_devices(
         [
             (torch.bfloat16, dict(atol=0.0005, rtol=0.03)),
             (torch.float16, dict(atol=0.00015, rtol=0.01)),
             (torch.float32, dict()),
         ],
-        "dtype, tol_kwargs",
     ),
 )
-def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
+def test_incremental_versus_singlepass(dtype, tol_kwargs, device):
     seed = 31415927
+    random.seed(seed)
     torch.random.manual_seed(seed)
     vocab_size = 128
     name = "dense-default"
@@ -99,48 +98,39 @@ def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
         cache_length=128,
         head_size=8,
         n_head=4,
+        device=device,
         dtype=dtype,
     )
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params)
-    num_prefill = randint_torch(cache_length // 3, int(cache_length * 0.75))
+    num_prefill = random.randint(cache_length // 3, int(cache_length * 0.75))
     max_prefill_length = kv_cache.max_prefill_length
     if max_prefill_length is not None and num_prefill > max_prefill_length:
         num_prefill = max_prefill_length
     num_insert = max_prefill_length if max_prefill_length is not None else cache_length
 
-    data = random_args_cache_forward(
-        params,
-        num_insert,
-        vocab_size,
-        device=device,
-    )
+    data = random_args_cache_forward(params, num_insert, vocab_size)
     # Compute MHA in a single shot
-    y_sshot = kv_cache(**data)
-    should_be = (
-        torch.arange(
-            num_insert,
-            dtype=kv_cache.token_positions().dtype,
-            device=device,
-        )
-        .view(1, 1, -1)
-        .expand(params.max_batch_size, params.n_query_groups, -1)
-    )
+    y_sshot = kv_cache(**data, input_pos=0)
+    should_be = torch.arange(
+        num_insert, dtype=kv_cache.token_positions().dtype, device=device,
+    ).view(1, 1, -1).expand(params.max_batch_size, params.n_query_groups, -1)
     assert (should_be == kv_cache.token_positions()[:, :, :num_insert]).all().item()
     # Compute MHA in steps
-    kv_cache.reset()
-    y_parts = [kv_cache(**range_from_args(data, 0, num_prefill))] + [
-        kv_cache(**range_from_args(data, pos, pos + 1))
-        for pos in range(num_prefill, num_insert)
-    ]
+    y_parts = []
+    y_parts.append(
+        kv_cache(**range_from_args(data, 0, num_prefill), input_pos=0)
+    )
+    for pos in range(num_prefill, num_insert):
+        y_parts.append(
+            kv_cache(**range_from_args(data, pos, pos + 1), input_pos=pos)
+        )
 
     assert kv_cache.current_length == num_insert
     assert (should_be == kv_cache.token_positions()[:, :, :num_insert]).all().item()
     print(f"0:{num_prefill}")
     torch.testing.assert_close(
-        y_parts[0],
-        y_sshot[:, :num_prefill, :],
-        **tol_kwargs,
+        y_parts[0], y_sshot[:, :num_prefill, :], **tol_kwargs,
     )
     # Incremental computation is not very close to single-shot for 16-bit
     # data types. This is because different code is used (PyTorch kernels with
@@ -149,7 +139,5 @@ def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
         for pos, yp in zip(range(num_prefill, num_insert), y_parts[1:]):
             print(f"{pos}:{pos + 1}")
             torch.testing.assert_close(
-                yp,
-                y_sshot[:, pos : (pos + 1), :],
-                **tol_kwargs,
+                yp, y_sshot[:, pos:(pos + 1), :], **tol_kwargs,
             )
