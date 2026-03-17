@@ -465,11 +465,19 @@ class SDPAArgs:
             which different graphs are compiled. Zero-padding of the `query`
             argument is used then. If not given, each different `q_len` value
             gets its own graph (not recommended).
+        reorder_sort_if_3d: For both SDPA variants, we (currently) reorder
+            `key, value` tensors so that standard causal masking applies.
+            If `token_positions` is inherently 3D (in that
+            `token_positions[b, h, j]` depends on `b, h`), this can be done
+            by sorting for each `b, h`, or in a way that is cheaper to
+            compute, but may need a little more memory. If this argument is
+            `True`, we use sorting.
     """
 
     flex_attention: bool = True
     flex_extend_kv: bool = True
     flex_num_q_lens: Optional[int] = 4
+    reorder_sort_if_3d: bool = False
 
     def __post_init__(self):
         if self.flex_num_q_lens is not None and self.flex_num_q_lens <= 0:

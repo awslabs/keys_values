@@ -31,7 +31,6 @@ from keys_values.kvcache.attn_weights import (
     UpdateTokenPositionsGracePeriod,
 )
 from keys_values.kvcache.base import DefaultKVCache, KVCacheReplayLog
-from keys_values.tools.debug_utils import for_debug
 from keys_values.kvcache.gradient.autograd_hooks import Annotations
 from keys_values.kvcache.gradient.annotation import (
     NodeAnnotation,
@@ -44,7 +43,13 @@ from keys_values.kvcache.gradient.sdpa_op import (
     cat_on_buffers,
 )
 from keys_values.sdpa_wrapper import ReorderAnnotationCallback
-from keys_values.utils import expand_index, shape_to_tuple
+from keys_values.tools.debug_utils import for_debug
+from keys_values.utils import (
+    expand_index,
+    shape_to_tuple,
+    is_index_1d,
+    index_to_3d,
+)
 
 
 class TrainingAttnWeightsReplayCache(DefaultKVCache):
@@ -130,7 +135,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         )
         if len(replay_log) == 0:
             raise ValueError("replay_log must not be empty")
-        self._device = replay_log.device
         if self.mha.use_eager_sdpa_always:
             raise ValueError(
                 "This replay cache does not support mha.use_eager_sdpa_always = True"
@@ -146,6 +150,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 "softcapping, or use FlexAttention by passing flexatt_args "
                 "when creating the MultiHeadSelfAttention object."
             )
+        self._device = replay_log.device
         self.replay_log = replay_log
         self._batch_size = batch_size
         self.kv_buffers = None
@@ -158,12 +163,14 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         self._token_chunk_pos = None
         self._start_token_chunk_pos = None
         self._end_token_chunk_pos = None
-        shape = (batch_size, config.n_query_groups, cache_length)
+        # Try to keep `_token_positions` 1D. This works if the underlying
+        # KV cache has 1D token positions. Keeping `token_positions` 1D has
+        # important computational advantages downstream
         self._token_positions = torch.zeros(
-            shape,
+            (1, 1, cache_length),
             dtype=torch.int,
             device=self._device,
-        )
+        ).expand(batch_size, config.n_query_groups, -1)
         self.current_length = 0
         self._initialize_replay()
         self._debug_tensors = debug_tensors
@@ -281,7 +288,13 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         """
         # Note: The `clone` is necessary to avoid this error during backward:
         # RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation: [torch.IntTensor [5, 4, 512]] is at version 8; expected version 7 instead
-        return self._token_positions[:, :, : self.current_length].clone()
+        if is_index_1d(self._token_positions):
+            return index_to_3d(
+                self._token_positions[0, 0, : self.current_length].clone(),
+                *self._token_positions.shape[:-1],
+            )
+        else:
+            return self._token_positions[:, :, : self.current_length].clone()
 
     def max_forward_length(self) -> int:
         diff = self.cache_length - self.current_length
@@ -558,33 +571,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 )
             self._append_annotation(annotation)
 
-    @staticmethod
-    def _transform_index(
-        index: torch.Tensor,
-        sort_index: torch.Tensor,
-    ) -> torch.Tensor:
-        batch_size, n_query_groups, num, head_size = index.shape
-        si_len = sort_index.shape[-1]
-        assert sort_index.shape == (batch_size, n_query_groups, si_len)
-        sort_index = sort_index.to(dtype=index.dtype)
-        index = index[:, :, :, 0]
-        result = (
-            torch.empty_like(sort_index)
-            .scatter_(
-                2,
-                sort_index,
-                torch.arange(
-                    si_len,
-                    dtype=index.dtype,
-                    device=index.device,
-                )
-                .view(1, 1, -1)
-                .expand(batch_size, n_query_groups, -1),
-            )
-            .gather(2, index)
-        )
-        return expand_index(result, head_size)
-
     def _create_callback_after_creator(
         self,
         key: torch.Tensor,
@@ -609,16 +595,16 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                     chunk_idx=chunk_idx,
                     kind=kind + "-value",
                 )
-            if NodeAnnotation.kind_is_scatter(kind):
-                annot_kwargs = dict(
-                    layer_idx=self.layer_idx,
-                    chunk_idx=chunk_idx,
-                )
-                annotation_callback = partial(
-                    create_ext_annotations,
-                    node_annotations=self._node_annotations.nodes,
-                    annot_kwargs=annot_kwargs,
-                )
+            annot_kwargs = dict(
+                layer_idx=self.layer_idx,
+                chunk_idx=chunk_idx,
+            )
+            annotation_callback = partial(
+                create_ext_annotations,
+                node_annotations=self._node_annotations.nodes,
+                annot_kwargs=annot_kwargs,
+                verbose=self.debug_print_annotations,
+            )
         if self._debug_tensors is not None:
             name = f"c{self._token_chunk_pos - 1}-l{self.layer_idx}-{kind}"
             if name in self._debug_tensors:
@@ -697,10 +683,14 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         update_result = None
         if self.current_length >= self.cache_length:
             # scatter case
-            index_kwargs = {"dtype": torch.int32, "device": self._device}
             index = self.replay_log.extract_index(
-                self.input_pos, num, **index_kwargs
+                self.input_pos,
+                num,
+                dtype=torch.int32,
+                device=self._device,
             ).detach()
+            if is_index_1d(self._token_positions) and not is_index_1d(index):
+                self._token_positions = self._token_positions.contiguous()
             update_result = update_token_positions(
                 token_positions=self._token_positions,
                 input_pos=self.input_pos,

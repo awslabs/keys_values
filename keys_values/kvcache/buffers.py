@@ -86,6 +86,7 @@ def positions_wrap_around(
     n_query_groups: int,
     device: torch.device,
     return_tensor: bool = False,
+    dtype: Optional[torch.dtype] = None,
 ) -> PositionsType:
     """
     Returns positions which form a range of length `num`, starting from
@@ -122,7 +123,9 @@ def positions_wrap_around(
         return current, current + num
     if device is None:
         raise ValueError("device must be given")
-    kwargs = dict(device=device, dtype=torch.int64)
+    if dtype is None:
+        dtype = torch.int64
+    kwargs = dict(device=device, dtype=dtype)
     positions = torch.arange(current, current + num1, **kwargs)
     if diff > 0:
         positions = torch.cat((positions, torch.arange(start, start + diff, **kwargs)))

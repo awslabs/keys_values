@@ -16,6 +16,8 @@ from typing import Dict, Optional, Callable, Any, List
 
 import torch
 
+from keys_values.utils import is_index_1d
+
 
 def for_debug(x: torch.Tensor) -> torch.Tensor:
     return x.detach().to(device=torch.device("cpu")).clone()
@@ -166,3 +168,8 @@ def debug_compare_dicts(
             for name, msg in exc_caught:
                 print(f"\n    [{name}]\n{msg}")
             raise rethrow_ex
+
+
+def debug_token_positions(index: Optional[torch.Tensor], name: str):
+    if index is not None and not is_index_1d(index):
+        print(f"{name}: token_positions: {index.stride()}")

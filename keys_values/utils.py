@@ -81,8 +81,19 @@ def index_to_3d(index: torch.Tensor, dim0: int, dim1: int) -> torch.Tensor:
 
 
 def is_index_1d(index: torch.Tensor) -> bool:
+    """
+    Tests whether `index` is inherently 1D, i.e. obtained by :func:`index_to_3d`.
+    Attention: If a dimension is length 1, its stride value may not be 0.
+
+    """
     ndim = index.ndim
-    return index.stride() == (0,) * (ndim - 1) + (1,)
+    if ndim == 1:
+        return True
+    stride = index.stride()
+    shape = tuple(index.shape)
+    return stride[-1] == 1 and all(
+        s == 0 or l == 1 for s, l in zip(stride[:-1], shape[:-1])
+    )
 
 
 def need_repeat_interleave(n_head: int, n_query_groups: int) -> bool:

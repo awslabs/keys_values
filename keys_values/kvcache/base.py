@@ -292,6 +292,15 @@ class KVCache(torch.nn.Module):
 
     def token_positions(self) -> torch.Tensor:
         """
+        Note: For many cache policies, a token is either represented in the
+        cache for all `(b, h)`, batch dimensions and heads, or for none.
+        This means that `token_positions` is essentially 1D. This simpler
+        structure is exploited downstream.
+        Make sure to return an index obtained as
+        `index_to_3d(tp_1d, batch_size, n_query_groups)` with
+        :func:`keys_values.utils.index_to_3d` in this case, so that the
+        simpler structure is recognized.
+
         Returns:
             Token positions in slots of the cache, shape
             `(batch_size, n_query_groups, current_length)`, where
@@ -570,13 +579,14 @@ class DefaultKVCache(KVCache):
 
         # Multi-head self-attention main computation
         return_attn_weights = (not for_prefill) and self.update_requires_attn_weights()
+        token_positions = None if for_prefill else self.token_positions()
         attn_outputs, attn_weights = self.mha(
             query=query,
             k_and_v=k_and_v,
             block_idx=self.block_idx,
             input_pos=input_pos,
             return_attn_weights=return_attn_weights,
-            token_positions=None if for_prefill else self.token_positions(),
+            token_positions=token_positions,
         )
         if attn_weights is not None and return_attn_weights:
             # Pass attention weights and query length to KV cache
@@ -771,9 +781,10 @@ class KVCacheReplayLog:
 
     def extract_index(
         self,
-        token_pos: int,
+        input_pos: int,
         num: int,
-        **kwargs,
+        dtype: Optional[torch.dtype] = None,
+        device: Optional[torch.device] = None,
     ) -> torch.Tensor:
         """
                 Returns slice of the slot position index, of shape
@@ -783,11 +794,12 @@ class KVCacheReplayLog:
                 batch and query group.
 
                 Args:
-                    token_pos: Token position where slice starts. Must be
+                    input_pos: Token position where slice starts. Must be
         -               `>= cache_length`.
                     num: Length of slice
-                    **kwargs: Dtype and device for the returned tensor. The default
-                        device is the one of the token chunks.
+                    dtype: Data type for returned tensor
+                    device: Device for returned tensor. The default device is the one
+                        of the token chunks.
 
                 Returns:
                     See above.

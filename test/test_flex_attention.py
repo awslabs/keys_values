@@ -22,24 +22,22 @@ from keys_values.config import Config
 from litgpt.utils import _RunIf
 
 from keys_values.attention import MultiHeadSelfAttention, DefaultKeysAndValues
+from keys_values.attention_utils import sample_token_positions
 from keys_values.flex_attention import (
     FlexAttentionArgs,
     scaled_dot_product_attention_flexatt,
 )
 from keys_values.kvcache.base import KVCacheParams
-from keys_values.kvcache.test_utils import (
-    random_args_cache_forward,
-    random_index,
-)
+from keys_values.kvcache.test_utils import random_args_cache_forward
 from keys_values.utils import index_to_3d
 
 
 @_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
-    "tp_ndim",
-    (0, 1, 3, None),
+    "tp_ndim, sort_if_3d",
+    list(product((0, 1, 3, None), (False, True))),
 )
-def test_flexatt_working(tp_ndim):
+def test_flexatt_working(tp_ndim, sort_if_3d):
     seed = 31415927
     torch.manual_seed(seed)
 
@@ -114,31 +112,33 @@ def test_flexatt_working(tp_ndim):
             attention_logit_softcapping=None,
             input_pos=0,
             token_positions=None,
+            sort_if_3d=sort_if_3d,
         )
         print(attn_outputs.sum().item())
         # Process chunk
         if tp_ndim == 0:
             token_positions = None
         elif tp_ndim == 1:
-            _ind = random_index(
-                params,
-                start=0,
-                end=cache_length + chunk_size,
-                num=cache_length,
+            _ind = sample_token_positions(
                 batch_size=1,
+                n_query_groups=1,
+                q_len=chunk_size,
+                kv_len=cache_length,
+                input_pos=cache_length,
                 device=device,
-            )
+            ).flatten()
             token_positions = index_to_3d(
-                _ind[0, 0, :],
+                _ind,
                 batch_size,
                 n_query_groups,
             )
         else:
-            token_positions = random_index(
-                params,
-                start=0,
-                end=cache_length + chunk_size,
-                num=cache_length,
+            token_positions = sample_token_positions(
+                batch_size,
+                n_query_groups,
+                chunk_size,
+                cache_length,
+                input_pos=cache_length,
                 device=device,
             )
         print(f"Computing chunk MHA (chunk_size={chunk_size})")
@@ -152,30 +152,28 @@ def test_flexatt_working(tp_ndim):
             attention_logit_softcapping=None,
             input_pos=cache_length,
             token_positions=token_positions,
+            sort_if_3d=sort_if_3d,
         )
         print(attn_outputs.sum().item())
 
 
 @_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
-    "n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size, attention_logit_softcapping, tp_ndim, atol",
+    "n_head, n_query_groups, q_len, kv_len, dtype, attention_logit_softcapping, atol, tp_ndim",
     [
         a + (b,)
         for a, b in product(
             [
-                (4, 2, 128, 512, torch.float16, None, None, 0.0002),
-                (4, 4, 8, 256, torch.bfloat16, None, None, 0.0008),
-                (8, 4, 32, 128, torch.float16, None, None, 0.0002),
-                (12, 4, 16, 512, torch.bfloat16, None, None, 0.002),
-                (24, 8, 2, 512, torch.float16, None, None, 0.0002),
-                (9, 3, 128, 512, torch.bfloat16, None, None, 0.002),
-                (12, 4, 16, 512, torch.float16, 12, None, 0.0003),
-                (24, 8, 2, 512, torch.bfloat16, 64, None, 0.0008),
-                (9, 3, 128, 512, torch.float16, 96, None, 0.0002),
-                (12, 4, 16, 512, torch.float16, None, 5, 0.0004),
-                (24, 8, 2, 512, torch.bfloat16, None, 2, 0.004),
-                (12, 4, 16, 512, torch.float16, 64, 5, 0.0004),
-                (9, 3, 128, 512, torch.float16, 12, 2, 0.0004),
+                (4, 2, 128, 512, torch.float16, None, 0.0002),
+                (4, 4, 8, 256, torch.bfloat16, None, 0.0008),
+                (8, 4, 32, 128, torch.float16, None, 0.0002),
+                (12, 4, 16, 512, torch.bfloat16, None, 0.002),
+                (24, 8, 2, 512, torch.float16, None, 0.0002),
+                (9, 3, 128, 512, torch.bfloat16, None, 0.002),
+                (12, 4, 16, 512, torch.float16, 5, 0.0004),
+                (24, 8, 2, 512, torch.bfloat16, 2, 0.004),
+                (12, 4, 16, 512, torch.float16, 5, 0.0004),
+                (9, 3, 128, 512, torch.float16, 2, 0.0004),
             ],
             [1, 3],
         )
@@ -187,10 +185,9 @@ def test_comparison(
     q_len,
     kv_len,
     dtype,
-    sliding_window_size,
     attention_logit_softcapping,
-    tp_ndim,
     atol,
+    tp_ndim,
 ):
     seed = 31415927
     torch.manual_seed(seed)
@@ -203,7 +200,7 @@ def test_comparison(
     config = Config.from_name(
         "gemma-2-27b",
         block_size=3 * kv_len,
-        sliding_window_size=sliding_window_size,
+        sliding_window_size=None,
         attention_logit_softcapping=attention_logit_softcapping,
         n_layer=1,
         n_query_groups=n_query_groups,
@@ -245,29 +242,24 @@ def test_comparison(
                 dim=2,
             )
             assert data[chunk][name].shape[2] == kv_len
-        # We need a valid `token_positions` here, which covers
-        # `range(input_pos, input_pos + q_len)`
-        end = input_pos + q_len
-        start = end - kv_len
         if tp_ndim == 1:
-            _ind = random_index(
-                params,
-                start=start,
-                end=end,
-                num=kv_len,
+            _ind = sample_token_positions(
                 batch_size=1,
+                n_query_groups=1,
+                q_len=q_len,
+                kv_len=kv_len,
+                input_pos=input_pos,
                 device=device,
-            )
-            token_positions.append(
-                index_to_3d(_ind[0, 0, :], batch_size, n_query_groups)
-            )
+            ).flatten()
+            token_positions.append(index_to_3d(_ind, batch_size, n_query_groups))
         else:
             token_positions.append(
-                random_index(
-                    params,
-                    start=start,
-                    end=end,
-                    num=kv_len,
+                sample_token_positions(
+                    batch_size,
+                    n_query_groups,
+                    q_len,
+                    kv_len,
+                    input_pos=input_pos,
                     device=device,
                 )
             )
