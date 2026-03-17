@@ -21,12 +21,12 @@ import pytest
 import torch
 from torch.nn import functional as F
 
-from keys_values.config import Config
 from litgpt.model import (
     apply_rope,
     build_rope_cache,
     batched_index_select,
 )
+from litgpt.utils import _RunIf
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import (
@@ -41,6 +41,8 @@ from keys_values.attention_utils import (
     sample_token_positions,
     ENTRIES_PER_GB,
 )
+from keys_values.config import Config
+from keys_values.flex_attention import FlexAttentionArgs
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCache, KVCacheParams, DefaultKVCache
@@ -51,11 +53,12 @@ from keys_values.kvcache.test_utils import (
     product_with_devices,
     available_backends,
     create_kv_cache,
+    random_args_cache_forward,
 )
 from keys_values.model import GPT, CausalSelfAttention
 from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
 from keys_values.pos_encoding import LinearPositionEncoding
-from keys_values.utils import repeat_interleave, randint_torch
+from keys_values.utils import repeat_interleave, randint_torch, index_to_3d
 
 
 @pytest.mark.parametrize(
@@ -951,3 +954,243 @@ def test_mha_is_passed_on(device):
         tr_caches,
         prefix="Training replay caches: ",
     )
+
+
+@pytest.mark.parametrize(
+    *product_with_devices(
+        [
+            (4, 2, 128, 512, 512, torch.float16, 5e-5),
+            (4, 4, 8, 256, 342, torch.bfloat16, 0.0004),
+            (8, 4, 128, 136, 256, torch.float16, 0.00075),
+            (12, 4, 16, 512, 512, torch.bfloat16, 0.0006),
+            (24, 8, 2, 512, 768, torch.float16, 7e-5),
+            (9, 3, 128, 512, 664, torch.bfloat16, 0.0006),
+            (12, 4, 16, 512, 512, torch.float16, 0.00015),
+        ],
+        "n_head, n_query_groups, q_len, kv_len, input_pos, dtype, atol",
+    ),
+)
+def test_reorder_key_value_tp_3d(
+    device,
+    n_head,
+    n_query_groups,
+    q_len,
+    kv_len,
+    input_pos,
+    dtype,
+    atol,
+):
+    """
+    We allow for some numerical errors on a GPU device. This is because
+    FlexAttention is used there, which does not cast to `float32` internally.
+    Even though `sort_if_3d` only determines the ordering of entries in
+    `key, value`, this results in different error patterns (of roughly the
+    same size), because internally FlexAttention uses tiling, so it matters
+    where each entry is located.
+
+    """
+    seed = 31415927
+    torch.manual_seed(seed)
+
+    batch_size = 2
+    head_size = 32
+
+    config = Config.from_name(
+        "gemma-2-27b",
+        block_size=input_pos + 2 * kv_len,
+        sliding_window_size=None,
+        attention_logit_softcapping=None,
+        n_layer=1,
+        n_query_groups=n_query_groups,
+        n_head=n_head,
+        n_embd=n_head * head_size,
+        intermediate_size=n_head * head_size * 3,
+        rotary_percentage=1.0,
+    )
+    params = KVCacheParams.from_config(
+        config=config,
+        max_batch_size=batch_size,
+        cache_length=kv_len,
+        dtype=dtype,
+    )
+    names = ["padded-query"]
+    mha_pairs = [
+        [
+            MultiHeadSelfAttention(config, sort_if_3d=sort_if_3d)
+            for sort_if_3d in (True, False)
+        ]
+    ]
+    if device.type == "cuda":
+        # FlexAttention: Only on GPU
+        # No internal zero-padding of query
+        flexatt_args_no_zp = FlexAttentionArgs(q_lens=[q_len])
+        names.append("flex-att-no-zp")
+        mha_pairs.append(
+            [
+                MultiHeadSelfAttention(
+                    config, flexatt_args=flexatt_args_no_zp, sort_if_3d=sort_if_3d
+                )
+                for sort_if_3d in (True, False)
+            ]
+        )
+        # Internal zero-padding of query
+        flexatt_args_zp = FlexAttentionArgs(q_lens=[q_len + 8])
+        names.append("flex-att-zp")
+        mha_pairs.append(
+            [
+                MultiHeadSelfAttention(
+                    config, flexatt_args=flexatt_args_zp, sort_if_3d=sort_if_3d
+                )
+                for sort_if_3d in (True, False)
+            ]
+        )
+        test_kwargs = dict(atol=atol, rtol=1)
+    else:
+        test_kwargs = dict()
+
+    last_ex = None
+    for name, mhas in zip(names, mha_pairs):
+        # Sample data
+        data = random_args_cache_forward(
+            params,
+            num=kv_len,
+            vocab_size=config.vocab_size,
+            device=device,
+        )
+        token_positions = sample_token_positions(
+            batch_size,
+            n_query_groups,
+            q_len,
+            kv_len,
+            input_pos,
+            device,
+        )
+        outputs = [
+            mha(
+                query=data["query"][:, :, :q_len, :],
+                k_and_v=DefaultKeysAndValues(data["key"], data["value"]),
+                block_idx=0,
+                input_pos=input_pos,
+                token_positions=token_positions,
+            )[0]
+            for mha in mhas
+        ]
+        try:
+            torch.testing.assert_close(outputs[0], outputs[1], **test_kwargs)
+        except AssertionError as ex:
+            print(f"\n{name}:\n" + str(ex))
+            last_ex = ex
+    if last_ex is not None:
+        raise last_ex
+
+
+@_RunIf(min_cuda_gpus=1)
+@pytest.mark.parametrize(
+    "n_head, n_query_groups, q_len, kv_len, input_pos, dtype",
+    [
+        (4, 2, 128, 512, 512, torch.float16),
+        (4, 4, 8, 256, 342, torch.bfloat16),
+        (8, 4, 128, 136, 256, torch.float16),
+        (12, 4, 16, 512, 512, torch.bfloat16),
+        (24, 8, 2, 512, 768, torch.float16),
+        (9, 3, 128, 512, 664, torch.bfloat16),
+        (12, 4, 16, 512, 512, torch.float16),
+    ],
+)
+def test_reorder_key_value_tp_1d(
+    n_head,
+    n_query_groups,
+    q_len,
+    kv_len,
+    input_pos,
+    dtype,
+):
+    seed = 31415927
+    torch.manual_seed(seed)
+
+    batch_size = 2
+    head_size = 32
+    device = torch.device("cuda", 0)
+
+    config = Config.from_name(
+        "gemma-2-27b",
+        block_size=input_pos + 2 * kv_len,
+        sliding_window_size=None,
+        attention_logit_softcapping=None,
+        n_layer=1,
+        n_query_groups=n_query_groups,
+        n_head=n_head,
+        n_embd=n_head * head_size,
+        intermediate_size=n_head * head_size * 3,
+        rotary_percentage=1.0,
+    )
+    params = KVCacheParams.from_config(
+        config=config,
+        max_batch_size=batch_size,
+        cache_length=kv_len,
+        dtype=dtype,
+    )
+    names = []
+    mha_pairs = []
+    # FlexAttention: Only on GPU
+    # No internal zero-padding of query
+    flexatt_args_no_zp = FlexAttentionArgs(q_lens=[q_len])
+    names.append("flex-att-no-zp")
+    mha_pairs.append(
+        [
+            MultiHeadSelfAttention(
+                config, flexatt_args=flexatt_args_no_zp, sort_if_3d=sort_if_3d
+            )
+            for sort_if_3d in (True, False)
+        ]
+    )
+    # Internal zero-padding of query
+    flexatt_args_zp = FlexAttentionArgs(q_lens=[q_len + 8])
+    names.append("flex-att-zp")
+    mha_pairs.append(
+        [
+            MultiHeadSelfAttention(
+                config, flexatt_args=flexatt_args_zp, sort_if_3d=sort_if_3d
+            )
+            for sort_if_3d in (True, False)
+        ]
+    )
+
+    last_ex = None
+    for name, mhas in zip(names, mha_pairs):
+        # Sample data
+        data = random_args_cache_forward(
+            params,
+            num=kv_len,
+            vocab_size=config.vocab_size,
+            device=device,
+        )
+        end = input_pos + q_len
+        start = end - kv_len
+        token_positions = index_to_3d(
+            torch.randperm(
+                end - start,
+                device=device,
+                dtype=torch.int64,
+            )
+            + start,
+            batch_size,
+            n_query_groups,
+        )
+        outputs = [
+            mha(
+                query=data["query"][:, :, :q_len, :],
+                k_and_v=DefaultKeysAndValues(data["key"], data["value"]),
+                block_idx=0,
+                input_pos=input_pos,
+                token_positions=token_positions,
+            )[0]
+            for mha in mhas
+        ]
+        try:
+            torch.testing.assert_close(outputs[0], outputs[1])
+        except AssertionError as ex:
+            print(f"\n{name}:\n" + str(ex))
+            last_ex = ex
+    if last_ex is not None:
+        raise last_ex

@@ -463,7 +463,8 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
         self,
         input_pos: int,
         num: int,
-        **kwargs,
+        dtype: Optional[torch.dtype] = None,
+        device: Optional[torch.device] = None,
     ) -> torch.Tensor:
         seq_length = self.__len__()
         if num <= 0 or input_pos < 0 or input_pos > seq_length - num:
@@ -474,11 +475,12 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
             raise ValueError(
                 f"input_pos = {input_pos} must be >= {self.cache_length} = cache_length"
             )
-        device = kwargs.get("device", torch.get_default_device())
+        if device is None:
+            device = torch.get_default_device()
         start = self.init_grace_tokens
         mod = self.cache_length - start
         current = (input_pos - self.cache_length) % mod + start
-        return positions_wrap_around(
+        result = positions_wrap_around(
             num=num,
             current=current,
             start=start,
@@ -487,7 +489,9 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
             n_query_groups=self._shape[1],
             device=device,
             return_tensor=True,
-        ).to(**kwargs)
+            dtype=dtype,
+        )
+        return result
 
 
 class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
@@ -649,11 +653,12 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             )
 
     def token_positions(self) -> torch.Tensor:
-        return index_to_3d(
+        result = index_to_3d(
             self.token_pos[: self.current_length],
             self.batch_size,
             self.n_query_groups,
         )
+        return result
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         tk_p = bitsize_of(self.token_pos)

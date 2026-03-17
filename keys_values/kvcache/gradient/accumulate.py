@@ -391,7 +391,6 @@ class GradientAccumulator:
             )
             cache_lengths.append(cache_length)
         # Checkpoint objects are selected from a pool
-        print("cache_lengths: " + str(cache_lengths))  # DEBUG
         checkpoints = self._select_checkpointers(cache_lengths)
 
         return cache_buffers, checkpoints

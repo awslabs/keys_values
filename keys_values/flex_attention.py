@@ -26,6 +26,7 @@ from keys_values.sdpa_wrapper import (
     sdpa_check_args,
     reorder_key_value,
     ReorderAnnotationCallback,
+    zeropad_query_on_left,
 )
 from keys_values.utils import repeat_interleave
 
@@ -83,7 +84,6 @@ class FlexAttnManager:
     The idea for managers is to share compiled block masks and attention
     functions across several layers and iterations, so that compilations
     are required initially only.
-
     """
 
     def __init__(self):
@@ -181,7 +181,6 @@ class FlexAttnForPrefillManager(FlexAttnManager):
 
     Note that `flex_attention` is often not used for the prefill calls, because
     standard PyTorch SDPA is faster. It is used only with non-standard SDPA.
-
     """
 
     def __init__(self):
@@ -257,6 +256,12 @@ class FlexAttnForChunkManager(FlexAttnManager):
     of compiled graphs, even if chunks with many different `q_len` sizes come
     in.
 
+    `extend_kv` field: Hack used to get around issue with FlexAttention.
+    Details: https://github.com/awslabs/keys_values/issues/34.
+    For unclear reasons, `enable_gqa=True` does not work, except for the first
+    graph to be stored in `_entries`. This is why `extend_kv=False` for the
+    first entry, `extend_kv=True` for all others. Note that the first entry
+    is the most used one in general.
     """
 
     def __init__(self, q_lens: Optional[List[int]] = None):
@@ -367,18 +372,17 @@ class FlexAttentionArgs:
     must be done by the caller.
 
     Args:
-        extend_kv: If `True` we always extend `key, value` to `n_head`. This
-            needs more memory, only use if the default does not work.
         q_lens: If given, this is a list of `q_len` chunk lengths for which
             graphs are created. Any `q_len` passed to :meth:`attn_fn` with
             `input_pos > 0` is mapped to the smallest entry `>= q_len`.
-
+        extend_kv: If `True` we always extend `key, value` to `n_head`. This
+            needs more memory, only use if the default does not work.
     """
 
     def __init__(
         self,
-        extend_kv: bool = False,
         q_lens: Optional[List[int]] = None,
+        extend_kv: bool = False,
     ):
         self.attn_prefill_manager = FlexAttnForPrefillManager()
         self.attn_chunk_manager = FlexAttnForChunkManager(q_lens)
@@ -453,6 +457,7 @@ def scaled_dot_product_attention_flexatt(
     input_pos: int,
     token_positions: Optional[torch.Tensor],
     annotation_callback: Optional[ReorderAnnotationCallback] = None,
+    sort_if_3d: bool = False,
 ) -> torch.Tensor:
     """
     Computes scaled dot product attention (SDPA) using PyTorch
@@ -488,12 +493,13 @@ def scaled_dot_product_attention_flexatt(
             given for `input_pos > 0`, it is equivalent to `arange(kv_len)`.
         annotation_callback: If this is given and `key, value` are reordered,
             the results are passed to this callback.
+        sort_if_3d: See :func:`reorder_key_value`.
 
     Returns:
         Attention outputs, shape `(batch_size, n_heads, q_len, head_size)`
 
     """
-    batch_size, n_head, n_query_groups, q_len, kv_len, _ = sdpa_check_args(
+    batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(
         query,
         key,
         value,
@@ -511,9 +517,16 @@ def scaled_dot_product_attention_flexatt(
                 f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
             )
     if token_positions is not None:
-        key, value, sort_index = reorder_key_value(key, value, token_positions)
+        key, value, extra_info = reorder_key_value(
+            key,
+            value,
+            token_positions.detach(),
+            input_pos,
+            q_len,
+            sort_if_3d,
+        )
     else:
-        sort_index = None
+        extra_info = dict()
     enable_gqa = n_query_groups < n_head
     requires_grad = query.requires_grad or key.requires_grad or value.requires_grad
     attn_fn, extend_kv = flexatt_args.attn_fn(
@@ -531,24 +544,23 @@ def scaled_dot_product_attention_flexatt(
         key = repeat_interleave(key, n_head)
         value = repeat_interleave(value, n_head)
         enable_gqa = False
+        extend_kv = True
+    else:
+        extend_kv = False
     q_len_tr = flexatt_args.transform_q_len(q_len)
     if q_len_tr > q_len:
         # Use zero padding
-        shape = tuple(query.shape[:2]) + (q_len_tr - q_len, query.shape[-1])
-        query = torch.cat(
-            (
-                query,
-                torch.zeros(*shape, dtype=query.dtype, device=query.device),
-            ),
-            dim=2,
-        )
+        # Importantly, zeros are appended **on the left**, not on the right.
+        # The real query entries must be right-aligned with key, value,
+        # otherwise our causal attention masking does not work out properly.
+        # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
+        query = zeropad_query_on_left(query, q_len_tr - q_len)
     # Deal with non-standard `scale_factor`
-    head_size = query.shape[-1]
     diff = scale_factor * math.sqrt(head_size)
     if not (0.999 < diff < 1.001):
         query = query * diff
     if annotation_callback is not None:
-        annotation_callback(key, value, sort_index)
+        annotation_callback(key, value, extra_info, extend_kv)
 
     result = attn_fn(
         query=query,
@@ -558,7 +570,7 @@ def scaled_dot_product_attention_flexatt(
         enable_gqa=enable_gqa,
     )
     if q_len_tr > q_len:
-        result = result[:, :, :q_len, :]
+        result = result[:, :, (-q_len):, :].clone()
     return result
 
 

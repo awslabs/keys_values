@@ -133,6 +133,12 @@ def random_index(
     batch_size: Optional[int] = None,
     device: Optional[torch.device] = None,
 ):
+    """
+    Creates 3D random index of shape `(batch_size, params.n_query_groups, num)`.
+    Each `result[b, h, :]` is a random subset of `range(start, end)`, no
+    duplicates.
+
+    """
     if batch_size is None:
         batch_size = params.max_batch_size
     if num is None:

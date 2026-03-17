@@ -22,15 +22,12 @@ from keys_values.attention import (
     KeysAndValues,
     DefaultKeysAndValues,
 )
-from keys_values.tools.debug_utils import for_debug
 from keys_values.kvcache.attn_weights import (
     update_token_positions,
     UpdateTokenPositionsGracePeriod,
 )
 from keys_values.kvcache.base import DefaultKVCache, KVCacheReplayLog
-from keys_values.kvcache.gradient.autograd_hooks import (
-    Annotations,
-)
+from keys_values.kvcache.gradient.autograd_hooks import Annotations
 from keys_values.kvcache.gradient.annotation import (
     NodeAnnotation,
     create_random_index,
@@ -40,7 +37,13 @@ from keys_values.kvcache.gradient.sdpa_op import (
     KVCacheCatUpdateAndSDPAFunction,
     KVCacheScatterUpdateAndSDPAFunction,
 )
-from keys_values.utils import expand_index, shape_to_tuple
+from keys_values.tools.debug_utils import for_debug
+from keys_values.utils import (
+    expand_index,
+    shape_to_tuple,
+    is_index_1d,
+    index_to_3d,
+)
 
 
 class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
@@ -101,12 +104,14 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
         self._token_chunk_pos = None
         self._start_token_chunk_pos = None
         self._end_token_chunk_pos = None
-        shape = (batch_size, config.n_query_groups, cache_length)
+        # Try to keep `_token_positions` 1D. This works if the underlying
+        # KV cache has 1D token positions. Keeping `token_positions` 1D has
+        # important computational advantages downstream
         self._token_positions = torch.zeros(
-            shape,
+            (1, 1, cache_length),
             dtype=torch.int,
             device=self._device,
-        )
+        ).expand(batch_size, config.n_query_groups, -1)
         self.current_length = 0
         self._initialize_replay()
         self._debug_tensors = debug_tensors
@@ -206,7 +211,13 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
         # using the :class:`KVCacheUpdateAndSDPAFunction` or
         # :class:`SDPAFunction` operator:
         # RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation: [torch.IntTensor [5, 4, 512]] is at version 8; expected version 7 instead
-        return self._token_positions[:, :, : self.current_length].clone()
+        if is_index_1d(self._token_positions):
+            return index_to_3d(
+                self._token_positions[0, 0, : self.current_length].clone(),
+                *self._token_positions.shape[:-1],
+            )
+        else:
+            return self._token_positions[:, :, : self.current_length].clone()
 
     def max_forward_length(self) -> int:
         diff = self.cache_length - self.current_length
@@ -561,10 +572,14 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
         update_result = None
         if self.current_length >= self.cache_length:
             # scatter case
-            index_kwargs = {"dtype": torch.int32, "device": self._device}
             index = self.replay_log.extract_index(
-                self.input_pos, num, **index_kwargs
+                self.input_pos,
+                num,
+                dtype=torch.int32,
+                device=self._device,
             ).detach()
+            if is_index_1d(self._token_positions) and not is_index_1d(index):
+                self._token_positions = self._token_positions.contiguous()
             update_result = update_token_positions(
                 token_positions=self._token_positions,
                 input_pos=self.input_pos,
