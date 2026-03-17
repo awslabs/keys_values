@@ -55,8 +55,7 @@ SOURCE_DATA_URL = (
 HELMET_REPO_URL = "https://github.com/princeton-nlp/HELMET/archive/refs/heads/main.zip"
 
 DATASET_PARENT_DIR = (
-    # "~/.cache/huggingface/helmet/data"  # the default place to store the cache data
-    "/scratch-shared/61600/.cache/huggingface/helmet/data"
+    "~/.cache/huggingface/helmet/data"  # the default place to store the cache data
 )
 
 
