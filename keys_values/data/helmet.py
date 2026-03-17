@@ -124,7 +124,9 @@ class Helmet(SequenceLengthFilteredDataModule):
             if dev_needs_store:
                 metadata[METADATA_SEQ_LENGTHS_KEY][model_name]["dev"] = dev_seq_lengths
             if eval_needs_store:
-                metadata[METADATA_SEQ_LENGTHS_KEY][model_name]["eval"] = eval_seq_lengths
+                metadata[METADATA_SEQ_LENGTHS_KEY][model_name][
+                    "eval"
+                ] = eval_seq_lengths
             self._store_metadata(metadata)
         return train_data, test_data
 
