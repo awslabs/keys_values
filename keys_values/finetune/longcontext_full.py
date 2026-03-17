@@ -54,7 +54,7 @@ from keys_values.attention_utils import (
     SDPA_KERNELS_BEST_ORDERING,
 )
 from keys_values.config import Config as ConfigFull
-from keys_values.data import LongBenchV2, INPUT_IDS_NAME, MyDataLoader
+from keys_values.data import Helmet, LongBenchV2, INPUT_IDS_NAME, MyDataLoader
 from keys_values.flex_attention import FlexAttentionArgs, choose_q_lens
 from keys_values.finetune.args import (
     TrainArgs,
@@ -384,6 +384,9 @@ def setup_internal(
     if isinstance(data, LongBenchV2) and data.metadata_dir is None:
         data.metadata_dir = str(out_dir / "data")
         print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
+    if isinstance(data, Helmet) and data.metadata_dir is None:
+        data.metadata_dir = str(out_dir / "data")
+        print(f"Setting Helmet.metadata_dir to {data.metadata_dir}")
     out_dir = init_out_dir(out_dir)
     if data.metadata_dir is not None:
         data.metadata_dir = str(init_out_dir(Path(data.metadata_dir)))

@@ -11,7 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Dict, Any, Tuple
+import json
+from pathlib import Path
+from typing import List, Optional, Dict, Any, Tuple
 
 from tqdm import tqdm
 
@@ -22,10 +24,14 @@ from keys_values.data.load_helmet_dev_eval import (
 )
 from keys_values.data.module import (
     SequenceLengthFilteredDataModule,
+    METADATA_SEQ_LENGTHS_KEY,
+    METADATA_KEYS,
     RawDatasetType,
     NUM_TOKENS_NAME,
 )
 from keys_values.data.sft_dataset import SFTDataset, get_sft_collate_fn
+
+METADATA_FNAME = "helmet_metadata.json"
 
 
 class Helmet(SequenceLengthFilteredDataModule):
@@ -50,6 +56,7 @@ class Helmet(SequenceLengthFilteredDataModule):
         ignore_index: int = -100,
         max_seq_length: Optional[int] = None,
         seed: int = 42,
+        metadata_dir: Optional[str] = None,
         trainloader_longest_first: bool = False,
         trainloader_shortest_first: bool = False,
     ):
@@ -71,6 +78,9 @@ class Helmet(SequenceLengthFilteredDataModule):
             max_seq_length: Sequences longer than this (in tokens) are filtered
                 out. Defaults to no filtering (``100000``).
             seed: Random seed for the train/val split.
+            metadata_dir: If given, sequence lengths for every case are stored
+                in a JSON metadata file in this directory so that subsequent
+                calls to :meth:`_transform` can skip re-tokenisation.
             trainloader_longest_first: If ``True``, the first training batch
                 contains the longest sequences (useful for early OOM detection).
             trainloader_shortest_first: If ``True``, the first training batch
@@ -89,7 +99,7 @@ class Helmet(SequenceLengthFilteredDataModule):
         self.dataset_key = dataset_key
         self.max_length = max_length
         self.dataset_parent_dir = dataset_parent_dir
-        self.metadata_dir = None
+        self.metadata_dir = metadata_dir
 
     def _get_dataset(self) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
         dev_data, eval_data = load_helmet_dev_eval(
@@ -98,22 +108,77 @@ class Helmet(SequenceLengthFilteredDataModule):
             dataset_parent_dir=self.dataset_parent_dir,
         )
         print(f"\nTransforming HELMET '{self.dataset_key}' ({self.max_length}) ...")
-        train_data = self._transform(dev_data, split="dev")
-        test_data = self._transform(eval_data, split="eval")
+        metadata = self._load_metadata()
+        model_name = self.tokenizer.model_name
+        train_data, dev_seq_lengths, dev_needs_store = self._transform(
+            dev_data, split="dev", seq_lengths=self._get_seq_lengths(metadata, "dev")
+        )
+        test_data, eval_seq_lengths, eval_needs_store = self._transform(
+            eval_data, split="eval", seq_lengths=self._get_seq_lengths(metadata, "eval")
+        )
+        if dev_needs_store or eval_needs_store:
+            if metadata is None or METADATA_SEQ_LENGTHS_KEY not in metadata:
+                metadata = {METADATA_SEQ_LENGTHS_KEY: {}}
+            if model_name not in metadata[METADATA_SEQ_LENGTHS_KEY]:
+                metadata[METADATA_SEQ_LENGTHS_KEY][model_name] = {}
+            if dev_needs_store:
+                metadata[METADATA_SEQ_LENGTHS_KEY][model_name]["dev"] = dev_seq_lengths
+            if eval_needs_store:
+                metadata[METADATA_SEQ_LENGTHS_KEY][model_name]["eval"] = eval_seq_lengths
+            self._store_metadata(metadata)
         return train_data, test_data
 
-    def _transform(self, dataset: Any, split: str) -> RawDatasetType:
+    def _transform(
+        self,
+        dataset: Any,
+        split: str,
+        seq_lengths: Optional[List[int]],
+    ) -> Tuple[RawDatasetType, List[int], bool]:
         """Convert HELMET instances to the internal record format.
 
         Each HELMET instance ``{"input": ..., "output": ..., "query_id": ...}``
         is converted to ``{"instruction": ..., "output": ...,
         "num_tokens_instruction": <int>}``.
 
+        If ``seq_lengths`` is ``None``, sequence lengths are computed by
+        tokenising every instance and the results are returned so the caller
+        can persist them. When ``seq_lengths`` is provided the tokenisation
+        step is skipped entirely.
+
+        Returns:
+            A tuple ``(results, seq_lengths, needs_store)`` where
+            ``needs_store`` is ``True`` when ``seq_lengths`` had to be
+            recomputed and should be written to disk by the caller.
+
         """
+        needs_store = seq_lengths is None and self.metadata_dir is not None
+        if seq_lengths is not None and len(seq_lengths) != len(dataset):
+            print(
+                f"Cached seq_lengths length mismatch for split '{split}' "
+                f"({len(seq_lengths)} vs {len(dataset)}); recomputing."
+            )
+            seq_lengths = None
+            needs_store = self.metadata_dir is not None
+        if needs_store:
+            print(
+                f"\nTokenizing HELMET '{self.dataset_key}' ({self.max_length}) split "
+                f"'{split}'. Sequence lengths will be stored in {self.metadata_dir} "
+                "so next time this split runs fast."
+            )
+        data_iter = (
+            tqdm(dataset, desc=f"Tokenizing {split}")
+            if seq_lengths is None
+            else dataset
+        )
         results: RawDatasetType = []
-        for instance in tqdm(dataset, desc=f"Tokenizing {split}"):
+        new_seq_lengths: List[int] = []
+        for idx, instance in enumerate(data_iter):
             instruction = instance["input"]
-            seq_length = self.tokenizer.encode(instruction).numel()
+            if seq_lengths is None:
+                seq_length = self.tokenizer.encode(instruction).numel()
+                new_seq_lengths.append(seq_length)
+            else:
+                seq_length = seq_lengths[idx]
             if seq_length > self.max_seq_length:
                 continue
             results.append(
@@ -123,11 +188,48 @@ class Helmet(SequenceLengthFilteredDataModule):
                     NUM_TOKENS_NAME: seq_length,
                 }
             )
+        final_seq_lengths = new_seq_lengths if seq_lengths is None else seq_lengths
         print(
             f"Kept {len(results)} of {len(dataset)} {split} records "
             f"(<= {self.max_seq_length} tokens)"
         )
-        return results
+        return results, final_seq_lengths, needs_store
+
+    def _get_seq_lengths(
+        self, metadata: Optional[Dict[str, Any]], split: str
+    ) -> Optional[List[int]]:
+        if metadata is None:
+            return None
+        result = metadata.get(METADATA_SEQ_LENGTHS_KEY)
+        if result is not None:
+            result = result.get(self.tokenizer.model_name)
+        if result is not None:
+            result = result.get(split)
+        return result
+
+    def _load_metadata(self) -> Optional[Dict[str, Any]]:
+        if self.metadata_dir is None:
+            return None
+        meta_path = Path(self.metadata_dir) / METADATA_FNAME
+        if not meta_path.exists():
+            return None
+        with meta_path.open("r") as fp:
+            data = json.load(fp)
+        if not METADATA_KEYS.issubset(data.keys()):
+            print(
+                f"Metadata loaded from {meta_path} does not contain all keys "
+                f"{METADATA_KEYS}:\n{data}"
+            )
+            return None
+        return data
+
+    def _store_metadata(self, data: Dict[str, Any]) -> None:
+        if self.metadata_dir is not None:
+            meta_path = Path(self.metadata_dir) / METADATA_FNAME
+            meta_path.parent.mkdir(parents=True, exist_ok=True)
+            with meta_path.open("w") as fp:
+                json.dump(data, fp)
+            print(f"Metadata stored in {meta_path}")
 
     def _create_datasets(
         self,
