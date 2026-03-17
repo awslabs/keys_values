@@ -19,7 +19,6 @@ from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.kvcache.buffers import KVCacheBuffersParams
 
-
 QuantizerCallback = Callable[[int, int], None]
 
 
@@ -271,6 +270,7 @@ class Quantizer(torch.nn.Module):
         self,
         device: torch.device,
         cache_length: Optional[int] = None,
+        **kwargs,
     ) -> "QuantizerState":
         raise NotImplementedError
 

@@ -55,7 +55,7 @@ class KVCacheParams:
         head_size: Optional[int] = None,
     ) -> "KVCacheParams":
         if head_size is None:
-            head_size = config.n_embd // config.n_head
+            head_size = config.head_size
         return KVCacheParams(
             max_batch_size=max_batch_size,
             n_query_groups=config.n_query_groups,

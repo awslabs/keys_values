@@ -21,7 +21,7 @@ import torch.nn as nn
 from keys_values.config import Config
 
 from keys_values.attention import DefaultKeysAndValues
-from keys_values.debug_utils import for_debug
+from keys_values.tools.debug_utils import for_debug
 from keys_values.kvcache.base import KVCacheReplayLog, DefaultKVCache
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.train_attn_weights_replay_old import (

@@ -24,7 +24,7 @@ import torch
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import MultiHeadSelfAttention
-from keys_values.debug_utils import DebugIntermediates
+from keys_values.tools.intermediates import DebugIntermediates
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.consts import SUPPORTED_QUANTIZERS
 from keys_values.kvcache.factory import (
@@ -225,10 +225,13 @@ class LongContextGradientModel(LongContextInferenceModel):
         cache_offloader: Optional[KVCacheOffloader] = None,
         set_max_seq_length: bool = True,
         debug_single_cell_per_row: bool = False,
-        qname: Optional[str] = None,
+        layercp_qname: Optional[str] = None,
+        cachecp_qname: Optional[str] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
         train_cache_kwargs: Optional[Dict[str, Any]] = None,
         backward_tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        layercp_pin_memory: bool = False,
+        cachecp_pin_memory: bool = False,
         autograd_hooks_kwargs: Optional[Dict[str, Any]] = None,
         debug_dont_use_autograd_hooks: bool = False,
         use_arrays_cleanup: bool = True,
@@ -279,8 +282,10 @@ class LongContextGradientModel(LongContextInferenceModel):
                 batch. If :meth:`forward` is called with `targets=None`, then
                 `gpt_model.max_seq_length` is not changed in any case.
             debug_single_cell_per_row: Internal option, used for unit testing.
-            qname: Determines how checkpoints are stored. See
-                :const:`SUPPORTED_QUANTIZERS`.
+            layercp_qname: Determines how layer input checkpoints are stored.
+                See :const:`SUPPORTED_QUANTIZERS`.
+            cachecp_qname: Determines how KV cache checkpoints are stored.
+                See :const:`SUPPORTED_QUANTIZERS`.
             cache_kwargs: Additional kwargs for creating the cache buffers for
                 checkpointing, and inference replay caches
             train_cache_kwargs: Arguments for training replay caches in
@@ -288,6 +293,12 @@ class LongContextGradientModel(LongContextInferenceModel):
             backward_tmp_array_limit_gb: Same role as `tmp_array_limit_gb`, but
                 for backward computations. Overrides "tmp_array_limit_gb"
                 entries in `cache_kwargs`, `train_cache_kwargs`.
+            layercp_pin_memory: If `True`, the CPU memory pages for layer input
+                checkpoints are pinned. This can run faster, but also needs more
+                real CPU memory.
+            cachecp_pin_memory: If `True`, the CPU memory pages for KV cache
+                checkpoints are pinned. This can run faster, but also needs more
+                real CPU memory.
             debug_dont_use_autograd_hooks: Internal option, used for unit
                 testing. If this is set, autograd saved tensors hooks are not
                 used, and we also do not use memory efficient attention.
@@ -298,10 +309,10 @@ class LongContextGradientModel(LongContextInferenceModel):
                 computation.
             offload_device: See above.
             offload_grad_accum: See above.
-            layer_checkpoint_chunk_size: If `qname != "default"`, layer input
-                checkpoints are quantized. Quantization is done in chunks of
-                this length. Determines GPU memory requirements. A value close
-                to the cache length is recommended.
+            layer_checkpoint_chunk_size: If `layercp_qname != "default"`, layer
+                input checkpoints are quantized. Quantization is done in chunks
+                of this length. Determines GPU memory requirements. A value
+                close to the cache length is recommended.
             track_unmatched_annotations: If given, we track for each unmatched
                 pack argument the annotations it was matched against. We
                 print this information for `(layer_idx, chunk_idx)` such that
@@ -328,18 +339,25 @@ class LongContextGradientModel(LongContextInferenceModel):
             debug_intermediates=debug_intermediates,
         )
         self.single_tokens_for_targets = single_tokens_for_targets
-        if qname is None:
-            qname = "torch-quantized8"
-        elif qname not in SUPPORTED_QUANTIZERS:
+        if layercp_qname is None:
+            layercp_qname = "torch-quantized8"
+        elif layercp_qname not in SUPPORTED_QUANTIZERS:
             raise ValueError(
-                f"qname = {qname} is not supported, must be in {SUPPORTED_QUANTIZERS}"
+                f"layercp_qname = {layercp_qname} is not supported, must be in {SUPPORTED_QUANTIZERS}"
+            )
+        if cachecp_qname is None:
+            cachecp_qname = layercp_qname
+        elif cachecp_qname not in SUPPORTED_QUANTIZERS:
+            raise ValueError(
+                f"cachecp_qname = {cachecp_qname} is not supported, must be in {SUPPORTED_QUANTIZERS}"
             )
         if not (1 <= layers_per_cell <= gpt_model.config.n_layer):
             raise ValueError(
                 f"layers_per_cell = {layers_per_cell}, must be in [1, {gpt_model.config.n_layer}]"
             )
         self.layers_per_cell = layers_per_cell
-        self.qname = qname
+        self.layercp_qname = layercp_qname
+        self.cachecp_qname = cachecp_qname
         if cache_kwargs is None:
             cache_kwargs = dict()
         elif "tmp_array_limit_gb" in cache_kwargs:
@@ -361,6 +379,8 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._autograd_hooks_kwargs = autograd_hooks_kwargs
         # Device memory limit for backward computations:
         self._backward_tmp_array_limit_gb = backward_tmp_array_limit_gb
+        self.layercp_pin_memory = layercp_pin_memory
+        self.cachecp_pin_memory = cachecp_pin_memory
         self._debug_dont_use_autograd_hooks = debug_dont_use_autograd_hooks
         self._use_arrays_cleanup = use_arrays_cleanup
         # Attention logit softcapping is not supported by the special operators
@@ -396,9 +416,9 @@ class LongContextGradientModel(LongContextInferenceModel):
         else:
             self._offload_grad_accum = None
         self._init_cpu_offloading()
-        if qname != "default" and layer_checkpoint_chunk_size is None:
+        if layercp_qname != "default" and layer_checkpoint_chunk_size is None:
             raise ValueError(
-                "layer_checkpoint_chunk_size must be given if qname != 'default'"
+                "layer_checkpoint_chunk_size must be given if layercp_qname != 'default'"
             )
         self._layer_checkpoint_chunk_size = layer_checkpoint_chunk_size
         self._track_unmatched_annotations = track_unmatched_annotations
@@ -609,8 +629,12 @@ class LongContextGradientModel(LongContextInferenceModel):
     def _create_layer_checkpointers(self):
         # Layer input checkpoints
         layer_numbers = self._create_layer_numbers()
+        if self.layercp_pin_memory:
+            pin_memory = [True] * len(layer_numbers)
+        else:
+            pin_memory = None
         dtype = self.gpt_model.get_kv_cache_params(0).dtype
-        if self.qname == "default":
+        if self.layercp_qname == "default":
             # Checkpoints are not quantized
             self.layer_checkpoints = LayerInputDefaultCheckpoints(
                 layer_numbers=layer_numbers,
@@ -618,6 +642,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 max_seq_length=self.gpt_model.max_seq_length,
                 n_embd=self.config.n_embd,
                 dtype=dtype,
+                pin_memory=pin_memory,
             )
         else:
             # Checkpoints are quantized
@@ -633,11 +658,12 @@ class LongContextGradientModel(LongContextInferenceModel):
                 layer_numbers=layer_numbers,
                 batch_size=self.batch_size,
                 chunk_size=self._layer_checkpoint_chunk_size,
-                qname=self.qname,
+                qname=self.layercp_qname,
                 cache_kwargs=dict(
                     self.cache_kwargs,
                     tmp_array_limit_gb=self._tmp_array_limit_gb,
                 ),
+                pin_memory=pin_memory,
                 **kwargs,
             )
         # Need to track `input_pos` across calls of :meth:`_checkpoint_layer_input`
@@ -663,7 +689,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         return layer_numbers + [n_layer, n_layer + 1]
 
     def _deallocate_buffers(self):
-        if self.qname != "default":
+        if self.layercp_qname != "default":
             assert isinstance(self.layer_checkpoints, LayerInputQuantizedCheckpoints)
             self.layer_checkpoints.clear()
 
@@ -691,13 +717,24 @@ class LongContextGradientModel(LongContextInferenceModel):
             self.autograd_hooks = CleanupArraysAutogradHooks(arrays_cleanup)
         else:
             self.autograd_hooks = None
+        # Determine cache length of layers in each shard
+        all_cache_lengths = [
+            cache.cache_length for cache in self.gpt_model.get_kv_caches()
+        ]
+        cache_lengths = [
+            tuple(all_cache_lengths[i] for i in range(start, end))
+            for start, end in self._get_shard_ranges()
+        ]
+        cache_params = self.gpt_model.get_kv_cache_params(0)
         # Accumulator object
         # Key and value buffers should not be annotated for the first chunk if
         # there is only a single chunk in the first cell
         self.accumulator = GradientAccumulator(
             config=self.config,
+            cache_lengths=cache_lengths,
+            cache_params=cache_params,
             autograd_hooks=self.autograd_hooks,
-            qname=self.qname,
+            qname=self.cachecp_qname,
             cache_kwargs=dict(
                 self.cache_kwargs,
                 tmp_array_limit_gb=self._backward_tmp_array_limit_gb,
@@ -707,6 +744,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 self._train_cache_kwargs,
                 tmp_array_limit_gb=self._backward_tmp_array_limit_gb,
             ),
+            pin_memory=self.cachecp_pin_memory,
         )
 
     def _checkpoint_layer_input(
@@ -726,6 +764,9 @@ class LongContextGradientModel(LongContextInferenceModel):
             # forward pass are written left to right.
             if input_pos is not None:
                 self._layer_cp_input_pos[layer_idx] += x.shape[1]
+
+    def _do_checkpoint_layer_input(self) -> bool:
+        return self.training
 
     def _inference_forward_pass(
         self,
@@ -748,7 +789,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 lines.append(f"cache_length    = {cache_length}")
             else:
                 cl_str = ", ".join(f"{i}:{j}" for i, j in cache_lengths)
-                lines.append("cache_length    = " + cl_str)
+                lines.append("cache_lengths   = " + cl_str)
             lines.extend(
                 [
                     f"chunk_sizes     = {self.chunk_sizes}",
@@ -928,6 +969,12 @@ class LongContextGradientModel(LongContextInferenceModel):
                 )
                 print("\n".join(lines))
 
+    def _get_shard_ranges(self) -> List[Tuple[int, int]]:
+        # Note that `layer_checkpoints.layer_numbers[-1] == n_layer + 1` is used
+        # for storing head gradients
+        layer_numbers = self.layer_checkpoints.layer_numbers[:-1]
+        return reversed(list(zip(layer_numbers[:-1], layer_numbers[1:])))
+
     def _backward_accumulate_gradients_nocheck(self, count: int):
         """
         Main workhorse. Runs nested activation checkpointing in order to
@@ -1067,11 +1114,8 @@ class LongContextGradientModel(LongContextInferenceModel):
             self._record_gpu_memory_snapshots.stop_recording()
 
         # Loop over rows of cells, from the top down.
-        # Note that `layer_checkpoints.layer_numbers[-1] == n_layer + 1` is used
-        # for storing head gradients
-        layer_numbers = self.layer_checkpoints.layer_numbers[:-1]
         for first_layer_idx, end_layer_idx in wrap_tqdm_if_verbose(
-            reversed(list(zip(layer_numbers[:-1], layer_numbers[1:]))),
+            self._get_shard_ranges(),
             verbose=self.verbose is VerbosityLevels.SOME,
         ):
             if self._use_arrays_cleanup and self.autograd_hooks is not None:

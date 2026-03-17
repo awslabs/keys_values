@@ -11,17 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional, Dict, Any, Tuple
-from itertools import accumulate
+from collections import Counter
+import contextlib
 from functools import partial
+from itertools import accumulate
+from typing import List, Optional, Dict, Any, Tuple
 
 import torch
 
 from keys_values.config import Config
 
 from keys_values.attention import do_softcapping
+from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import HeadModel
-from keys_values.kvcache.base import KVCacheReplayLog, DefaultKVCache
+from keys_values.kvcache.base import (
+    KVCacheReplayLog,
+    DefaultKVCache,
+    KVCacheParams,
+)
 from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.kvcache.buffers import (
     KVCacheBuffersParams,
@@ -48,10 +55,8 @@ from keys_values.kvcache.gradient.checkpoints import (
     KVCacheBufferQuantizedCheckpoints,
     KVCacheBufferDefaultCheckpoints,
 )
-from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.gradient.inference_replay import inference_replay_cache_factory
 from keys_values.kvcache.stack_layers import CellBlocks
-from keys_values.utils import VerbosityLevels
 from keys_values.long_context import (
     get_chunks_for_cells,
     get_chunk_of_targets,
@@ -59,6 +64,7 @@ from keys_values.long_context import (
     HEAD_OR_INITIAL_TENSORS_MAX_BYTES,
 )
 from keys_values.model import GPT
+from keys_values.utils import VerbosityLevels
 
 
 def checkpoint_hook(
@@ -75,7 +81,7 @@ def copy_requires_grad(x: torch.Tensor) -> torch.Tensor:
 
 class GradientAccumulator:
     """
-    Implements gradient accumulation for a row of cells, using activation
+    Implements gradient accumulation for shards of a model, using activation
     checkpointing.
 
     The initial forward pass in inference mode must have been run already,
@@ -85,13 +91,22 @@ class GradientAccumulator:
 
     * Forward inference pass to compute KV cache buffer checkpoints of type
       :class:`KVCacheBufferCheckpoints`. This is done using inference replay
-      caches created by :func:`inference_replay_cache_factory`.
+      caches created by :func:`inference_replay_cache_factory`. The KV cache
+      checkpoints are allocated in :meth:`run_head_model` and used for all
+      subsequent :meth:`run` calls.
     * Forward-backward computations over columns, from right to left, using
       :class:`CellComputation`. These use head gradients on top, produce head
       gradients on the right, and apart from accumulating the model gradients
       also compute head gradients for the row below. If `autograd_hooks` is
       given and of type :class:`CellComputationAutogradHooks`, the largest
       tensors are dealt with in a special way, saving most of the memory.
+
+    Layers of the model are grouped into shards, each call of :meth:`run` is
+    for one shard. `cache_lengths` is a list of tuples, one for each shard.
+    The tuple contains the `cache_length` for each layer in the shard. This
+    information allows to create a sufficient number of KV cache checkpointers.
+    `cache_params` are KV cache parameters used for creating the checkpointers.
+    Here, `cache_params.cache_length` is ignored.
 
     If `len(chunks_per_cell) == 1`, this is a special case, where no caching is
     done along the row. This is mostly useful for testing, or if context widths
@@ -104,18 +119,21 @@ class GradientAccumulator:
     `autograd_hooks.arrays_cleanup`. This information can be used in order
     to clean things up if an out of memory error is caught. Note that if
     `autograd_hooks` is of type :class:`CellComputationAutogradHooks`, it
-    plays two different toles (see above).
+    plays two different roles (see above).
 
     """
 
     def __init__(
         self,
         config: Config,
+        cache_lengths: List[Tuple[int, ...]],
+        cache_params: KVCacheParams,
         autograd_hooks: Optional[AutogradHooks],
         qname: Optional[str] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
         verbose: VerbosityLevels = VerbosityLevels.NONE,
         train_cache_kwargs: Optional[Dict[str, Any]] = None,
+        pin_memory: bool = False,
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
     ):
         if qname is None:
@@ -126,6 +144,12 @@ class GradientAccumulator:
             )
 
         self.config = config
+        if sum(len(x) for x in cache_lengths) != config.n_layer:
+            raise ValueError(
+                f"cache_lengths = {cache_lengths}: Sum of tuple lengths must be equal to config.n_layer = {config.n_layer}"
+            )
+        self.cache_lengths = cache_lengths
+        self._cache_params = cache_params
         self.autograd_hooks = autograd_hooks
         self.verbose = verbose
         self._verbose_more = (
@@ -135,7 +159,8 @@ class GradientAccumulator:
         if cache_kwargs is None:
             cache_kwargs = dict()
         self.cache_kwargs = cache_kwargs
-        self._kv_cache_checkpoints = None  # Created when needed
+        self._kv_cache_checkpoints = None  # Assigned when needed
+        self._checkpoints_per_length = None  # Created when needed
         self._batch_size = None
         self._clear_internal()
         # Annotation usage logs
@@ -147,6 +172,7 @@ class GradientAccumulator:
             train_cache_kwargs = train_cache_kwargs.copy()
             self._debug_intermediates = train_cache_kwargs.pop("debug_intermediates")
         self._train_cache_kwargs = train_cache_kwargs
+        self._pin_memory = pin_memory
         self._debug_tensors = debug_tensors
 
     def annotation_usage_logs(self) -> Dict[int, AnnotationUsageLog]:
@@ -163,6 +189,9 @@ class GradientAccumulator:
         if self._kv_cache_checkpoints is not None:
             del self._kv_cache_checkpoints
             self._kv_cache_checkpoints = None
+        if self._checkpoints_per_length is not None:
+            del self._checkpoints_per_length
+            self._checkpoints_per_length = None
 
     def _initialize_internal(
         self,
@@ -203,7 +232,9 @@ class GradientAccumulator:
             elem.input_range
             for elem in get_chunks_for_cells(chunks_per_cell, chunk_lens)
         ]
-        if not self.do_checkpointing:
+        if self.do_checkpointing:
+            self._create_checkpointers()
+        else:
             # Sanity check
             assert self.inputs_ranges == [(0, self.seq_length)]
         # Ranges to be used in `run_head_model` and `run_input_embeddings`
@@ -240,15 +271,105 @@ class GradientAccumulator:
         points = list(range(0, self.seq_length, chunk_size)) + [self.seq_length]
         self.top_bottom_ranges = list(zip(points[:-1], points[1:]))
 
+    def _create_checkpointers(self):
+        """
+        Given `cache_lengths` and `chunks_per_cell`, create all KV cache
+        buffer checkpoints needed in subsequent calls of :meth:`run`. These
+        are stored in `_checkpoints_per_length`. This allows us to reuse
+        checkpoint objects in several calls of :meth:`run`, which amortizes
+        the time to allocate them.
+
+        """
+        chunk_numbers = list(accumulate(self.chunks_per_cell))[:-1]
+        buffer_params = KVCacheBuffersParams.from_params(self._cache_params)
+        if self._pin_memory:
+            pin_memory = [True] * len(chunk_numbers)
+        else:
+            pin_memory = None
+        # How many checkpointers per cache length?
+        num_required: Dict[int, int] = dict()
+        for clens in self.cache_lengths:
+            c = Counter(clens)
+            for clen, count in c.items():
+                num_required[clen] = max(num_required.get(clen, 0), count)
+        if self.qname == "default":
+            self._checkpoints_per_length = {
+                cache_length: [
+                    KVCacheBufferDefaultCheckpoints(
+                        chunk_numbers=chunk_numbers,
+                        params=buffer_params,
+                        cache_length=cache_length,
+                        batch_size=self._batch_size,
+                        pin_memory=pin_memory,
+                    )
+                    for _ in range(num)
+                ]
+                for cache_length, num in num_required.items()
+            }
+        else:
+            # Checkpoints are quantized. They can all share the same
+            # quantized buffers object.
+            dequant_kwargs = dict(
+                max_num_ranges=self.cache_kwargs.get("max_num_ranges"),
+            )
+            max_cache_length = max(
+                clen for clens in self.cache_lengths for clen in clens
+            )
+            quant_buffers = create_quantized_kv_buffers(
+                qname=self.qname,
+                cache_lengths=[max_cache_length],
+                cache_params=self._cache_params,
+                cache_kwargs=self.cache_kwargs,
+                dequant_kwargs=dequant_kwargs,
+            )[0]
+            self._checkpoints_per_length = {
+                cache_length: [
+                    KVCacheBufferQuantizedCheckpoints(
+                        chunk_numbers=chunk_numbers,
+                        quant_buffers=quant_buffers,
+                        cache_length=cache_length,
+                        pin_memory=pin_memory,
+                    )
+                    for _ in range(num)
+                ]
+                for cache_length, num in num_required.items()
+            }
+
+    def _select_checkpointers(
+        self,
+        cache_lengths_of_shard: List[int],
+    ) -> List[KVCacheBufferCheckpoints]:
+        """
+        Given cache lengths of layers in shard, select KV cache checkpoints
+        from `_checkpoints_per_length`.
+
+        """
+        num_used: Dict[int, int] = dict()
+        result = []
+        for cache_length in cache_lengths_of_shard:
+            pos = num_used.get(cache_length, 0)
+            cps = self._checkpoints_per_length[cache_length]
+            if pos >= len(cps):
+                raise IndexError(
+                    f"cache_length = {cache_length}: _checkpoints_per_length has {len(cps)} entries, but need more.\n"
+                    f"GradientAccumulator has been created with cache_lengths = {self.cache_lengths}.\n"
+                    "If you created LongContextGradientModel with a certain "
+                    "`gpt_model` and `layers_per_cell`, this fixes the shards "
+                    "for which `run` can be called. Did you call it with a "
+                    "different shard?"
+                )
+            result.append(cps[pos])
+            num_used[cache_length] = pos + 1
+        return result
+
     def _create_checkpoints_and_buffers(
         self,
         model_part: CellBlocks,
-    ) -> Tuple[List[DefaultKVCacheBuffers], List[Optional[KVCacheBufferCheckpoints]]]:
+    ) -> Tuple[List[DefaultKVCacheBuffers], List[KVCacheBufferCheckpoints]]:
         """
-        Creates buffers for inference replay caches and checkpointing objects, the
-        latter only if checkpointing is used. Note that respective buffers are stored
-        on the same device as the block of a layer is on. This makes sure things work
-        in a model-parallel context as well.
+        Creates buffers for inference replay caches and checkpointing objects.
+        The latter are selected from `_checkpoints_per_length`, using
+        :meth:`_select_checkpointers`.
 
         """
         assert self.do_checkpointing
@@ -258,13 +379,9 @@ class GradientAccumulator:
         # :class:`DefaultKVCacheBuffers`, which do not quantize. Quantization is
         # only done when storing and retrieving the checkpoints.
         cache_buffers = []
-        buffer_params = None
-        cache_params = None
+        buffer_params = KVCacheBuffersParams.from_params(self._cache_params)
         cache_lengths = []
         for _, kv_cache in model_part.get_kv_caches():
-            if buffer_params is None:
-                cache_params = kv_cache.get_params()
-                buffer_params = KVCacheBuffersParams.from_params(cache_params)
             cache_length = kv_cache.cache_length
             cache_buffers.append(
                 DefaultKVCacheBuffers(
@@ -273,41 +390,9 @@ class GradientAccumulator:
                 )
             )
             cache_lengths.append(cache_length)
-        # Checkpointing objects, which may include quantizers and dequantization
-        # buffers
-        chunk_numbers = list(accumulate(self.chunks_per_cell))[:-1]
-        if self.qname == "default":
-            checkpoints = [
-                KVCacheBufferDefaultCheckpoints(
-                    chunk_numbers=chunk_numbers,
-                    params=buffer_params,
-                    cache_length=cache_length,
-                    batch_size=self._batch_size,
-                )
-                for cache_length in cache_lengths
-            ]
-        else:
-            # Checkpoints are quantized
-            dequant_kwargs = dict(
-                max_num_ranges=self.cache_kwargs.get("max_num_ranges"),
-            )
-            max_cache_length = max(cache_lengths)
-            quant_buffers = create_quantized_kv_buffers(
-                qname=self.qname,
-                cache_lengths=[max_cache_length],
-                cache_params=cache_params,
-                cache_kwargs=self.cache_kwargs,
-                dequant_kwargs=dequant_kwargs,
-                first_block_idx=model_part.first_layer_idx,
-            )[0]
-            checkpoints = [
-                KVCacheBufferQuantizedCheckpoints(
-                    chunk_numbers=chunk_numbers,
-                    quant_buffers=quant_buffers,
-                    cache_length=cache_length,
-                )
-                for cache_length in cache_lengths
-            ]
+        # Checkpoint objects are selected from a pool
+        print("cache_lengths: " + str(cache_lengths))  # DEBUG
+        checkpoints = self._select_checkpointers(cache_lengths)
 
         return cache_buffers, checkpoints
 
@@ -349,14 +434,14 @@ class GradientAccumulator:
 
     def _deallocate_buffers(self, ir_caches: List[KVCacheWithBuffers]):
         if self.do_checkpointing:
-            # Deallocate GPU buffers for checkpoints
-            for checkpoint in self._kv_cache_checkpoints:
-                if isinstance(checkpoint, KVCacheBufferQuantizedCheckpoints):
-                    checkpoint.quant_buffers.deallocate()
             # Deallocate GPU buffers for inference replay caches
             deallocate_kv_cache_buffers(ir_caches)
             for cache in ir_caches:
                 cache.set_checkpoint_hook(None)
+            # Note: GPU buffers used by KV cache checkpoints must not be
+            # deallocated, as they are reused over several calls of
+            # :meth:`run`.
+            self._kv_cache_checkpoints = None
 
     def _hooks_for_cell_computation(self) -> Optional[CellComputationAutogradHooks]:
         if self.autograd_hooks is not None and isinstance(
@@ -426,6 +511,10 @@ class GradientAccumulator:
                 infer_replay_caches,
                 get_inputs_slice,
             )
+            if torch.cuda.is_available():
+                # Synchronize here to make sure the checkpoints are properly
+                # written to CPU (host), before they are read below
+                torch.cuda.synchronize()
             # We could delete `infer_replay_caches` here. But we still use their
             # buffers to de-quantize checkpoints below
         else:
@@ -486,26 +575,18 @@ class GradientAccumulator:
                     )
                     k_buffers = [copy_requires_grad(x) for x in k_buffers]
                     v_buffers = [copy_requires_grad(x) for x in v_buffers]
+
                 # Forward-backward, using the autograd hooks (if given)
                 scalar_output = None
                 try:
-                    if self.autograd_hooks is not None:
-                        with torch.autograd.graph.saved_tensors_hooks(
+                    with (
+                        torch.autograd.graph.saved_tensors_hooks(
                             lambda x: self.autograd_hooks.pack_hook(x),
                             lambda x: self.autograd_hooks.unpack_hook(x),
-                        ):
-                            scalar_output = self.forward_computation(
-                                cell=cell,
-                                cell_inputs=cell_inputs,
-                                k_buffers=k_buffers,
-                                v_buffers=v_buffers,
-                                head_gradients_top=head_gradients_top,
-                                head_gradients_k=head_gradients_k,
-                                head_gradients_v=head_gradients_v,
-                                first_chunk_idx=first_chunk_idx,
-                                num_chunks=num_chunks,
-                            )
-                    else:
+                        )
+                        if self.autograd_hooks is not None
+                        else contextlib.nullcontext()
+                    ):
                         scalar_output = self.forward_computation(
                             cell=cell,
                             cell_inputs=cell_inputs,
@@ -530,6 +611,7 @@ class GradientAccumulator:
                         del k_buffers
                     if v_buffers is not None:
                         del v_buffers
+
                 # Store annotation usage logs
                 if self.autograd_hooks is not None:
                     cell_hooks = self._hooks_for_cell_computation()
@@ -733,6 +815,10 @@ class GradientAccumulator:
         Note that `get_inputs_slice` and `write_outputs_slice` can refer to the
         same underlying buffer or checkpoint object. We guarantee that any slice
         is read before it is written to.
+
+        Note: `gpt_model` passed here only needs to contain the blocks
+        `gpt_model.transformer.ln_f` and `gpt_model.lm_head` related to the
+        head model. This is the case if it is a shard only.
 
         Args:
             gpt_model: GPT model (or just a shard, see

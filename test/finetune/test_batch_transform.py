@@ -16,7 +16,6 @@ import torch
 
 from keys_values.finetune.batch_transform import SFTBatchTransform
 
-
 PAD_ID = 0
 
 IGNORE_INDEX = -100

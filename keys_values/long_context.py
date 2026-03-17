@@ -19,7 +19,7 @@ import torch
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import MultiHeadSelfAttention
-from keys_values.debug_utils import DebugIntermediates
+from keys_values.tools.intermediates import DebugIntermediates
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.base import DefaultKVCache
 from keys_values.kvcache.factory import deallocate_kv_cache_buffers_of_model
@@ -789,6 +789,15 @@ class LongContextInferenceModel(GPTAndHeadModel):
         """
         pass
 
+    def _do_checkpoint_layer_input(self) -> bool:
+        """
+        Returns:
+            `True` if :meth:`_checkpoint_layer_input` transfers memory
+            from GPU to CPU
+
+        """
+        return False
+
     def _forward_internal(
         self,
         input_ids: torch.Tensor,
@@ -888,11 +897,12 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     embeddings = embeddings * alpha
                 if self.debug_intermediates is not None:
                     self.debug_intermediates.store_wte(embeddings, start, end)
+
                 # Loop over layers
                 for block_idx, block in enumerate(model_blocks):
                     # Layer input checkpointing
                     self._checkpoint_layer_input(
-                        x=embeddings,
+                        x=embeddings.detach(),
                         layer_idx=block_idx,
                     )
                     if self.gpt_model.start_of_layer_hook is not None:
@@ -935,12 +945,26 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         new_embed_parts.append(y)
                         if not compute_loss:
                             # We need the final layer output for the last chunk
-                            logits_final_chunk = y
+                            logits_final_chunk = y.detach()
+                    if self._do_checkpoint_layer_input() and torch.cuda.is_available():
+                        # `_checkpoint_layer_input` called above transfers
+                        # `embeddings` to CPU. For this not to lead to
+                        # corruption of the CPU target, we need to synchronize
+                        # here.
+                        # TODO: Is this really a problem? We don't modify
+                        # `embeddings`, but just unlink it.
+                        torch.cuda.synchronize()
                     del embeddings
                     embeddings = torch.cat(new_embed_parts, dim=1)
+                    assert embeddings.shape[1] == end - start, (
+                        embeddings.shape,
+                        start,
+                        end,
+                    )
+
                 # Layer input checkpointing
                 self._checkpoint_layer_input(
-                    x=embeddings,
+                    x=embeddings.detach(),
                     layer_idx=self.config.n_layer,
                 )
                 if self.gpt_model.start_of_layer_hook is not None:
@@ -993,6 +1017,14 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     # `logits_final_chunk` has final layer outputs for last
                     # chunk. Map to logits
                     logits_final_chunk = self.gpt_model.lm_head(logits_final_chunk)
+                if self._do_checkpoint_layer_input() and torch.cuda.is_available():
+                    # `_checkpoint_layer_input` called above transfers
+                    # `embeddings` to CPU. For this not to lead to
+                    # corruption of the CPU target, we need to synchronize
+                    # here.
+                    # TODO: Is this really a problem? We don't modify
+                    # `embeddings`, but just unlink it.
+                    torch.cuda.synchronize()
 
         write_back_cache_buffers(self.gpt_model)  # Just to be safe
         if self.cache_offloader is not None:

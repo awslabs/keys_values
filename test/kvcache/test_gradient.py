@@ -256,6 +256,8 @@ def test_gradient_row_of_cells(
         debug_cache_tensors = None
     accumulator = GradientAccumulator(
         config=config,
+        cache_lengths=[tuple(cache_lengths)],
+        cache_params=params,
         autograd_hooks=autograd_hooks,
         qname=qname,
         debug_tensors=debug_cache_tensors,
@@ -309,6 +311,8 @@ def test_gradient_row_of_cells(
         debug_cache_tensors_comp = None
     accumulator_comp = GradientAccumulator(
         config=config,
+        cache_lengths=[tuple(cache_lengths)],
+        cache_params=params,
         autograd_hooks=None,
         qname="torch-quantized8",  # will not be used
         debug_tensors=debug_cache_tensors_comp,

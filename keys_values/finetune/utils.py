@@ -19,10 +19,13 @@ from typing import Optional, Tuple, Literal, Dict, Any
 import lightning as L
 import torch
 
-from litgpt.args import TrainArgs
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
-from litgpt.utils import choose_logger as _choose_logger, instantiate_torch_optimizer
+from litgpt.utils import (
+    choose_logger as _choose_logger,
+    instantiate_torch_optimizer,
+    load_checkpoint,
+)
 
 from keys_values.data.base import (
     LIT_MODEL_FNAME,
@@ -30,7 +33,13 @@ from keys_values.data.base import (
     LORA_WEIGHTS_FNAME,
 )
 from keys_values.data.dataloader import MyDataLoader
-from keys_values.finetune.args import EvalArgs, KVCacheArgs, OptimizerArgs, GradientArgs
+from keys_values.finetune.args import (
+    TrainArgs,
+    EvalArgs,
+    KVCacheArgs,
+    OptimizerArgs,
+    GradientArgs,
+)
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.gradient.annotation import NodeAnnotation
 from keys_values.kvcache.gradient.autograd_hooks import MayMatchTwiceType
@@ -42,7 +51,7 @@ from keys_values.utils import flush_io_streams
 def debug_print_param_names(model: GPT):
     rows = ["", "Names of model (GPT)", ""]
     rows.extend([name for name, _ in model.named_parameters()])
-    for i, block in enumerate(model.transformer.h):
+    for i, block in enumerate(model._get_layer_blocks()):
         rows.extend(["", f"Names of block {i} (Block)", ""])
         rows.extend([name for name, _ in block.named_parameters()])
     for pname, block in [
@@ -169,7 +178,7 @@ def validate_args(train: TrainArgs, eval: EvalArgs) -> None:
 def is_lora_model(model: GPTAndHeadModel) -> bool:
     from keys_values.lora import GPT as GPTLoRA
 
-    return isinstance(model, GPTLoRA)
+    return isinstance(model.gpt_model, GPTLoRA)
 
 
 def save_model_checkpoint(
@@ -198,6 +207,34 @@ def save_model_checkpoint(
             fabric,
         )
         fabric.save(file_path, state={"model": model.head_model})
+
+
+def load_model_checkpoint(
+    fabric: L.Fabric,
+    model: GPTAndHeadModel,
+    checkpoint_dir: Path,
+    resume_dir: Optional[Path] = None,
+) -> None:
+    is_lora = is_lora_model(model)
+    file_path = checkpoint_dir / LIT_MODEL_FNAME
+    if not is_lora and resume_dir is not None:
+        file_path = resume_dir / LIT_MODEL_FNAME
+    print_message(f"Loading model checkpoint: {file_path}", fabric)
+    load_checkpoint(fabric, model.gpt_model, file_path, strict=not is_lora)
+    if is_lora:
+        if resume_dir is not None:
+            file_path = resume_dir / LORA_WEIGHTS_FNAME
+            print_message("Loading LoRA weights checkpoint", fabric)
+            load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
+        else:
+            print_message("Reset/initialize LoRA weights", fabric)
+            model.gpt_model.reset_lora_parameters()
+    # If there are head model weights, load them as well. Otherwise, we use
+    # random initialization (or the head model may not have weights)
+    if resume_dir is not None:
+        file_path = resume_dir / HEAD_MODEL_FNAME
+        if file_path.exists():
+            load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
 
 def choose_logger(

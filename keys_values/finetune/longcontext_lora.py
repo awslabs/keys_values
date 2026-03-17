@@ -15,10 +15,10 @@
 from pathlib import Path
 from typing import Dict, Literal, Optional, Union, Any
 
-from litgpt.args import TrainArgs
 from litgpt.data import DataModule
 
 from keys_values.finetune.args import (
+    TrainArgs,
     EvalArgs,
     GradientArgs,
     KVCacheArgs,
@@ -29,7 +29,6 @@ from keys_values.finetune.args import (
 from keys_values.finetune.longcontext_full import setup_internal
 from keys_values.head_model import CrossEntropyOnLogits
 
-
 DEFAULT_OUT_DIR = "out/finetune/longcontext_lora"
 
 
@@ -39,9 +38,10 @@ def setup(
     precision: Optional[str] = None,
     devices: Union[int, str] = 1,
     num_nodes: int = 1,
+    resume: Union[bool, Literal["auto"], Path] = False,
     data: Optional[DataModule] = None,
     train: TrainArgs = TrainArgs(
-        save_interval=1000,
+        save_interval=50,
         log_interval=1,
         global_batch_size=16,
         micro_batch_size=1,
@@ -49,6 +49,8 @@ def setup(
         lr_warmup_fraction=0.15,
         epochs=5,
         max_seq_length=None,
+        intermed_save_interval=None,
+        intermed_save_num=None,
     ),
     lora: LoRAARgs = LoRAARgs(
         r=8,
@@ -60,6 +62,7 @@ def setup(
         projection=False,
         mlp=False,
         head=False,
+        kind="default",
     ),
     eval: EvalArgs = EvalArgs(
         interval=100,
@@ -87,6 +90,8 @@ def setup(
     grad: GradientArgs = GradientArgs(
         layers_per_cell=1,
         chunks_per_cell_multiplier=1.0,
+        layercp_qname=None,
+        cachecp_qname=None,
         single_tokens_for_targets=False,
         use_old_cache=False,
         max_match_trials_pack_arg=8,
@@ -101,6 +106,7 @@ def setup(
     sdpa: SDPAArgs = SDPAArgs(
         flex_attention=True,
         flex_extend_kv=False,
+        flex_num_q_lens=4,
     ),
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
@@ -108,17 +114,28 @@ def setup(
     generate_with_eval: bool = False,
     profile_grad_times: int = 0,
     profile_parts: Optional[str] = None,
+    size_log_quantiles: Optional[str] = None,
     debug_dont_use_autograd_hooks: bool = False,
 ) -> None:
     """Finetune a model using the LoRA method.
 
     Arguments:
-        checkpoint_dir: The path to the base model's checkpoint directory to load for finetuning.
+        checkpoint_dir: The path to the base model's checkpoint directory to
+            load for finetuning. In general, this will be the Hugging Face
+            model name. Use `resume` to restart fine-tuning from a checkpoint
+            stored along the way.
         out_dir: Directory in which to save checkpoints and logs. If running in a Lightning Studio Job, look for it in
             /teamspace/jobs/<job-name>/share.
         precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
-        devices: How many devices/GPUs to use.
+        devices: How many devices/GPUs to use
         num_nodes: How many nodes the code is being run on.
+        resume: Path to a checkpoint directory to resume from in case training
+            was interrupted, or ``True`` to resume from the latest checkpoint in
+            ``out_dir``. An error will be raised if no checkpoint is found. Passing
+            ``'auto'`` will resume from the latest checkpoint but not error if
+            no checkpoint exists.
+            Note: At present, we do not store the optimizer state as part of the
+            checkpoint, so fine-tuning is started from scratch from there.
         data: Data-related arguments. If not provided, the default is
             ``keys_values.data.LongBenchV2``.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
@@ -191,16 +208,22 @@ def setup(
         profile_parts: If given, we use `cProfile` to profile the first forward
             (if "forward") or first backward (if "backward") pass. Results are
             printed, then the program stops.
+        size_log_quantiles: If given, must be a list of quantile levels (between
+            0 and 1), as comma-separated string. In this case, we compute these
+            quantiles for all weights and gradients just before each update,
+            writing them to CSV files, see :class:`SizeWeightsGradientsLog` for
+            details.
 
     """
     setup_internal(
         False,
+        setup,
         checkpoint_dir,
         out_dir,
         precision,
         devices,
         num_nodes,
-        False,
+        resume,
         data,
         train,
         lora,
@@ -224,5 +247,6 @@ def setup(
         generate_with_eval,
         profile_grad_times,
         profile_parts,
+        size_log_quantiles,
         debug_dont_use_autograd_hooks,
     )

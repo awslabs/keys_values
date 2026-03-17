@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any, List, Literal
 
-from litgpt.args import EvalArgs as _EvalArgs
+from litgpt.args import EvalArgs as _EvalArgs, TrainArgs as _TrainArgs
 
 from keys_values.kvcache.factory import KVCacheFactory
-from keys_values.kvcache.consts import split_name
+from keys_values.kvcache.consts import split_name, SUPPORTED_QUANTIZERS
 from keys_values.utils import VerbosityLevels
 
 
@@ -155,6 +155,10 @@ class GradientArgs:
             If `chunks_per_cell_multiplier == 1`, this means that embeddings for
             this cell are as large as KV cache buffers. GPU memory scales
             linearly in this number.
+        layercp_qname: Name of buffer type to be used for layer input
+            checkpointing. See :const:`SUPPORTED_QUANTIZERS`.
+        cachecp_qname: Name of buffer type to be used for KV cache
+            checkpointing. See :const:`SUPPORTED_QUANTIZERS`.
         single_tokens_for_targets: If `True`, the targets part of a sequence is
             processed token per token (i.e., with chunk size 1). This is slower,
             but more realistic, mirroring how inference looks like.
@@ -174,20 +178,43 @@ class GradientArgs:
             uses quantization. We quantize / dequantize checkpoints in chunks
             of this length (along sequence axis). Larger values require more
             GPU memory.
-
+        layercp_pin_memory: If `True`, the CPU memory pages for layer input
+            checkpoints are pinned. This can run faster, but also needs more
+            real CPU memory.
+        cachecp_pin_memory: If `True`, the CPU memory pages for KV cache
+            checkpoints are pinned. This can run faster, but also needs more
+            real CPU memory.
     """
 
     layers_per_cell: int = 1
     chunks_per_cell_multiplier: float = 1.0
-    single_tokens_for_targets: bool = (False,)
+    layercp_qname: Optional[str] = None
+    cachecp_qname: Optional[str] = None
+    single_tokens_for_targets: bool = False
     use_old_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
     layer_checkpoint_chunk_size: Optional[int] = None
+    layercp_pin_memory: bool = False
+    cachecp_pin_memory: bool = False
 
     def __post_init__(self):
         _check_positive(self.layers_per_cell, "layers_per_cell")
         assert self.layers_per_cell >= 1
         _check_positive(self.chunks_per_cell_multiplier, "chunks_per_cell_multiplier")
+        if (
+            self.layercp_qname is not None
+            and self.layercp_qname not in SUPPORTED_QUANTIZERS
+        ):
+            raise ValueError(
+                f"layercp_qname = {self.layercp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}"
+            )
+        if (
+            self.cachecp_qname is not None
+            and self.cachecp_qname not in SUPPORTED_QUANTIZERS
+        ):
+            raise ValueError(
+                f"cachecp_qname = {self.cachecp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}"
+            )
         _check_int(self.max_match_trials_pack_arg, "max_match_trials_pack_arg")
         _check_int(self.layer_checkpoint_chunk_size, "layer_checkpoint_chunk_size")
 
@@ -257,7 +284,6 @@ class OptimizerArgs:
         adam_betas: `(beta1, beta2)`, only for Adam optimizers
         adadelta_rho: Rho constant (Adadelta only)
         rmspprop_alpha: Alpha constant (RMSprop only)
-
     """
 
     name: Optional[str] = None
@@ -327,10 +353,20 @@ class OptimizerArgs:
 class LoRAARgs:
     """Command line arguments for LoRA fine-tuning
 
+    With `kind`, a number of variants of LoRA can be chosen:
+
+    * "default": Standard LoRA as implemented in `LitGPT`.
+    * "rms_norm": Modification suggested by Sebastian Raschka:
+        https://github.com/rasbt/dora-from-scratch/blob/main/Using-LinearDoRA.ipynb
+        He calls this DoRA, but the modification is simpler, runs faster, but
+        may work less well.
+    * "dora": DoRA, see :class:`keys_values.dora_utils.DoRALinear`. Note that
+        `lora_dropout` is ignored for this variant
+
     Args:
         r: LoRA rank
         alpha: LoRA alpha
-        dropout: LoRA dropout value
+        dropout: LoRA dropout value (not if `kind == "dora"`)
         query: Whether to apply LoRA to the query weights in attention
         key: Whether to apply LoRA to the key weights in attention
         value: Whether to apply LoRA to the value weights in attention
@@ -339,7 +375,7 @@ class LoRAARgs:
         mlp: Whether to apply LoRA to the weights of the MLP in the attention
             block.
         head: Whether to apply LoRA to linear output weights in the head.
-
+        kind: See above. Defaults to "default".
     """
 
     r: int = 8
@@ -351,6 +387,48 @@ class LoRAARgs:
     projection: bool = False
     mlp: bool = False
     head: bool = False
+    kind: Literal["default", "rms_norm", "dora"] = "default"
+
+
+@dataclass
+class TrainArgs(_TrainArgs):
+    """
+    Extends arguments in :class:`litgpt.args.TrainArgs`.
+
+    Storing intermediate checkpoints: Normal checkpoints are stored whenever
+    `state["step_count"] % train.save_interval == 0`. If
+    `intermed_save_interval` is given, we also store checkpoints whenever
+    `state["step_count"] % train.intermed_save_interval == 0`. The value
+    should be smaller than `save_interval` and can be 1. However, we make
+    sure that no more than `intermed_save_num` intermediate checkpoints are
+    stored (by removing the oldest one after a new one has been written).
+
+    Args:
+        intermed_save_interval: See above
+        intermed_save_num: See above
+    """
+
+    intermed_save_interval: Optional[int] = None
+    intermed_save_num: Optional[int] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.intermed_save_interval is not None:
+            if self.intermed_save_interval <= 0:
+                raise ValueError("intermed_save_interval must be positive")
+            if (
+                self.save_interval is not None
+                and self.intermed_save_interval >= self.save_interval
+            ):
+                raise ValueError(
+                    f"intermed_save_interval = {self.intermed_save_interval}, must be smaller than save_interval = {self.save_interval}"
+                )
+            if self.intermed_save_num is None or self.intermed_save_num <= 0:
+                raise ValueError("intermed_save_num must be given and positive")
+        elif self.intermed_save_num is not None:
+            raise ValueError(
+                "intermed_save_num only needed if intermed_save_interval is given"
+            )
 
 
 @dataclass
@@ -361,7 +439,6 @@ class EvalArgs(_EvalArgs):
     Args:
         micro_batch_size: If given, this overrides `train.micro_batch_size`
             for evaluation
-
     """
 
     micro_batch_size: Optional[int] = None
@@ -384,8 +461,16 @@ class SDPAArgs:
         flex_extend_kv: If `True`, we apply `repeat_interleave` to
             `key, value` to avoid the GQA case. This may be needed to get
             around bugs in `flex_attention`.
-
+        flex_num_q_lens: If given, this is the number of `q_len` values for
+            which different graphs are compiled. Zero-padding of the `query`
+            argument is used then. If not given, each different `q_len` value
+            gets its own graph (not recommended).
     """
 
     flex_attention: bool = True
     flex_extend_kv: bool = True
+    flex_num_q_lens: Optional[int] = 4
+
+    def __post_init__(self):
+        if self.flex_num_q_lens is not None and self.flex_num_q_lens <= 0:
+            raise ValueError("flex_num_q_lens must be positive")

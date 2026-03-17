@@ -442,8 +442,9 @@ class BitsAndBytesQuantizer(Quantizer):
         self,
         device: torch.device,
         cache_length: Optional[int] = None,
+        **kwargs,
     ) -> "QuantizerState":
-        return BitsAndBytesQuantizerState(self, device, cache_length)
+        return BitsAndBytesQuantizerState(self, device, cache_length, **kwargs)
 
     @staticmethod
     def supported_source_dtypes() -> Tuple[torch.dtype, ...]:
@@ -464,6 +465,7 @@ class BitsAndBytesQuantizerState(QuantizerState):
         quantizer: BitsAndBytesQuantizer,
         device: Optional[torch.device] = None,
         cache_length: Optional[int] = None,
+        pin_memory: bool = False,
     ):
         if not isinstance(quantizer, BitsAndBytesQuantizer):
             raise ValueError(
@@ -478,11 +480,13 @@ class BitsAndBytesQuantizerState(QuantizerState):
             shape,
             dtype=quantizer.target_dtype,
             device=self.device,
+            pin_memory=pin_memory,
         )
         self.quant_absmax = torch.zeros(
             shape[:-1],
             dtype=torch.float32,
             device=self.device,
+            pin_memory=pin_memory,
         )
 
     def copy_(

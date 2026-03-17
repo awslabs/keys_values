@@ -41,7 +41,6 @@ from keys_values.head_model import (
     SequenceClassification,
 )
 
-
 METADATA_FNAME = "longbench_v2_metadata.json"
 
 SUPPORTED_HEAD_MODELS = (

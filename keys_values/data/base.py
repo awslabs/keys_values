@@ -18,7 +18,6 @@ from torch.utils.data import Dataset
 
 from litgpt import Tokenizer, PromptStyle
 
-
 INPUT_IDS_NAME = "input_ids"
 
 LABELS_NAME = "labels"

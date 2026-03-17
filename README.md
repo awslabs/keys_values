@@ -239,6 +239,15 @@ Basic arguments are:
     distributed data parallel. For `finetune_offload_*`, this value is set
     automatically.
   - `train.save_interval`: Number of optimizer steps between saving checkpoints.
+  - `train.intermed_save_interval`, `train.intermed_save_num`: If these are given,
+    additional intermediate checkpoints are stored every `train.intermed_save_interval`
+    steps. There are at most `train.intermed_save_num` intermediate checkpoints
+    stored, the oldest ones are removed again. Example:
+    `train.save_interval = 10, train.intermed_save_interval = 2,
+    `train.intermed_save_num = 5` means that checkpoints are stored every
+    two steps, but only those stored every ten steps are kept. If training
+    fails starting from step 19 (say), you can recover from step 18 or 16
+    and do not have to go back to step 10.
 * `eval.*`: Parameters controlling evaluations on validation set. Taken from
   `LitGPT` with little modification. Most important ones:
   - `eval.interval`: Number of optimizer steps between evaluations.
@@ -249,8 +258,22 @@ Basic arguments are:
   - `eval.micro_batch_size`: Local batch size to be bused for validation. Overrides
     `train.micro_batch_size`. This can often be larger, because evaluation needs
     less GPU memory than training.
+
+### Full Fine-tuning or LoRA
+
+A basic decision is whether to fine-tune all model weights (using
+`finetune_long_full`, `finetune_offload_full`) or only LoRA adapter weights
+(using `finetune_long_full`, `finetune_offload_full`). The latter needs much
+less memory for gradients and can work better for small datasets. When using
+LoRA, the following arguments are important:
+
+* `lora.kind`: Selects the LoRA type from `("default", "rms_norm", "dora")`.
+  Here, `default` is standard LoRA as implemented in `LitGPT`. `rms_norm` is
+  a modification
+  [suggested by Sebastian Raschka](https://github.com/rasbt/dora-from-scratch/blob/main/Using-LinearDoRA.ipynb).
+  `dora` is [DoRA](https://arxiv.org/abs/2402.09353).
 * `lora.*`: Only for `finetune_long_lora`, `finetune_offload_lora` modes.
-  Controls LoRA parameterization of  base model. This is taken from `LitGPT`
+  Controls LoRA parameterization of base model. This is taken from `LitGPT`
   without modification. Most important ones:
   - `lora.r`: Rank of LoRA parameterization. One axis of LoRA parameters have
     this size.
@@ -406,8 +429,8 @@ we use `torch.gather` to extract information for slots, and `torch.scatter`
 to write information for new tokens into the cache.
 
 For the CLI, a cache is identified by `kv_cache.name`, which can be a string
-`{cname}-{bname}`, where `cname` determines the KV cache policy (i.e., which
-slots are overwritten once the cache is full) and `bname` determines the buffer
+`{cname}-{qname}`, where `cname` determines the KV cache policy (i.e., which
+slots are overwritten once the cache is full) and `qname` determines the buffer
 strategy (i.e., how is the KV information stored). These KV cache policies are
 currently supported:
 
@@ -639,6 +662,17 @@ Relevant arguments are:
 
 * `sdpa.flex_attention`: Selects `flex_attention`. Otherwise, query-padded SDPA
   is used. `sdpa.flex_extend_kv` is a parameter for `flex_attention`.
+* `sdpa.flex_num_q_lens`: `flex_attention` works by compiling graphs for certain
+  input sizes (which is expensive), using them over and over. We typically use
+  one graph for prefill calls, several ones for subsequent chunks of different
+  lengths. The most frequent chunk length is `kv_cache.chunk_size`, but the
+  final chunks in batches may all have different lengths. We limit the number of
+  graphs to at most `sdpa.flex_num_q_lens + 1`, namely `sdpa.flex_num_q_lens`
+  at equal spacing (the last one being `kv_cache.chunk_size`), and one for
+  length 1 (used to generate single tokens). We use zero-padding to the next
+  supported chunk length.
+  If this is set to `None`, the limiting mechanism is not used. This may lead
+  to `torch._dynamo.exc.FailOnRecompileLimitHit` errors.
 * `attention_forward_temp_size_gb`: Size limit (in GB) for temporary buffers
   in naive SDPA, used in `forward` pass.
 * `attention_backward_temp_size_gb`: Same size limit, but for SDPA computations
@@ -672,9 +706,9 @@ go into full details, but our technique is a combination of several ideas:
 To be precise, gradients are computed in two phases:
 
 * Forward phase: This is what we also do for inference, with KV cache policies
-  in action. However, we store activation checkpoints at each cell boundary
-  to CPU, and we also log all KV cache eviction decisions into a so-called
-  *replay log*.
+  in action. However, we store activation checkpoints (also called layer input
+  checkpoints) at each cell boundary to CPU, and we also log all KV cache
+  eviction decisions into a so-called *replay log*.
 * Backward phase: In this phase, we use *replay caches*. These are replicas of
   the original KV caches, but instead of running a policy depending on inputs,
   they just replay all decisions made during the forward pass. The backward
@@ -719,7 +753,7 @@ Important arguments for gradient computations are:
 * `--grad.layers_per_cell`: Second phase GPU memory requirements depend
   linearly on this number. It states how many layers are processed in a cell.
   The default is 1. Larger values mean less sequential processing, so faster
-  computation. Note that the CPU memory for layer input checkpoints scales
+  computation. Note that the CPU memory for activation checkpoints scales
   inverse linearly with this number.
 * `--grad.chunks_per_cell_multiplier`: The length of a cell is the sum of
   its chunk's lengths. If `max_cell_length = int(factor * kv_cache.cache_length *
@@ -761,6 +795,16 @@ which can be slower.
 
 Other arguments for fine-tuning are:
 
+* `--grad.layercp_qname`: Selects how activation checkpoints are stored in CPU
+  memory. Same values as `qname` part of `--kv_cache.name`.
+  Defaults to "torch-quantized8". For "default", the checkpoints are not
+  quantized. This is more accurate, but needs more CPU memory and is slower,
+  because more memory has to be transferred to CPU.
+* `--grad.cachecp_qname`: Selects how KV cache checkpoints are stored in CPU
+  memory. Same values as `qname` part of `--kv_cache.name`.
+  Defaults to "torch-quantized8". For "default", the checkpoints are not
+  quantized. This is more accurate, but needs more CPU memory and is slower,
+  because more memory has to be transferred to CPU.
 * `--grad.use_old_cache`: If this is `True`, an older training replay cache is
   used for gradient computations. This used a fused naive SDPA kernel, which
   requires less GPU memory, but is also slower (if `flex_attention` is used).
@@ -770,11 +814,16 @@ Other arguments for fine-tuning are:
   is processed token per token (i.e., with chunk size 1). This is slower, but
   more realistic, mirroring how inference looks like. If the targets part is
   short, it does not make a big time difference.
-* `--grad.layer_checkpoint_chunk_size`: Only relevant if layer input
+* `--grad.layer_checkpoint_chunk_size`: Only relevant if activation
   checkpointing uses quantization. We quantize and de-quantize checkpoints in
   chunks of this length (along sequence axis). Larger values save time, but
   require more GPU memory. The default value is equal to
   `--kv_cache.cache_length`.
+* `--grad.layercp_pin_memory`: If `True`, the CPU memory pages for activation
+  checkpoints are pinned. This can run faster, but needs more real CPU memory.
+* `--grad.cachecp_pin_memory`: If `True`, the CPU memory pages for KV cache
+  checkpoints are pinned. This can run faster, but needs more real CPU memory.
+
 
 ### Profiling GPU Memory and Runtime
 
@@ -789,7 +838,7 @@ The kind of profiling is chosen with `--record_gpu_memory_kind`, with values 0, 
 
 * `${OUT_DIR}/gpu_memory_snapshots/iteration${ITER}/snapshot_initial.pickle`:
   From start of iteration until backward over top-most layer. Includes the
-  forward pass for layer input checkpoints and KV cache logs, as well as the
+  forward pass for activation checkpoints and KV cache logs, as well as the
   backward for the head model.
 * `${OUT_DIR}/gpu_memory_snapshots/iteration${ITER}/snapshot_layer${FST_LAYER_IDX}.pickle`:
   Backward over one row of cells. Here, `FST_LAYER_IDX` the index of the first

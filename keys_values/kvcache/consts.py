@@ -18,7 +18,6 @@ from keys_values.kvcache.quantize import (
     BitsAndBytesQuantizer,
 )
 
-
 SUPPORTED_QUANTIZERS = {
     "default": None,
     "torch-quantized4": TorchBasicQuantizer,

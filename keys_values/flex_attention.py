@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from functools import partial
-from typing import Optional, Callable, Tuple
+import math
+from typing import Optional, Callable, Tuple, List
 
 import torch
 from torch.nn.attention.flex_attention import (
@@ -27,7 +28,6 @@ from keys_values.sdpa_wrapper import (
     ReorderAnnotationCallback,
 )
 from keys_values.utils import repeat_interleave
-
 
 FlexAttnWithBlockMask = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, float, bool],
@@ -101,6 +101,9 @@ class FlexAttnManager:
     ) -> tuple:
         raise NotImplementedError
 
+    def _args_to_str(self, *args) -> str:
+        raise NotImplementedError
+
     def _create_block_mask(
         self,
         kv_len: int,
@@ -144,10 +147,13 @@ class FlexAttnManager:
                 score_mod = partial(logit_softcapping, thresh=thresh)
             else:
                 score_mod = None
-            attn_fn = partial(
-                torch.compile(flex_attention, fullgraph=True),
-                score_mod=score_mod,
-                block_mask=block_mask,
+            attn_fn = torch.compile(
+                partial(
+                    flex_attention,
+                    score_mod=score_mod,
+                    block_mask=block_mask,
+                ),
+                fullgraph=True,
             )
             extend_kv = True if self._entries else False
             result = (attn_fn, extend_kv)
@@ -157,11 +163,24 @@ class FlexAttnManager:
             self.num_hits[args] = self.num_hits[args] + 1
         return result
 
+    def report(self) -> str:
+        parts = [
+            self._args_to_str(*args) + f": {num_hits}"
+            for args, num_hits in sorted(
+                self.num_hits.items(),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+        ]
+        return "\n".join(parts)
+
 
 class FlexAttnForPrefillManager(FlexAttnManager):
     """
-    FlexAttention manager for prefill case
-    (`q_len == kv_len, input_pos == 0`).
+    FlexAttention manager for prefill case (`q_len == kv_len, input_pos == 0`).
+
+    Note that `flex_attention` is often not used for the prefill calls, because
+    standard PyTorch SDPA is faster. It is used only with non-standard SDPA.
 
     """
 
@@ -178,6 +197,18 @@ class FlexAttnForPrefillManager(FlexAttnManager):
         **kwargs,
     ) -> tuple:
         return kv_len, device, requires_grad, sliding_window_size, als_signature
+
+    def _args_to_str(self, *args) -> str:
+        parts = [
+            f"kv_len:{args[0]:5d}",
+            f"requires_grad:{int(args[2]):1d}",
+            f"device:{args[1]}",
+        ]
+        if args[3] is not None:
+            parts.append(f"sliding_window_size:{args[3]:3d}")
+        if args[4] is not None:
+            parts.append(f"als_signature:{args[4]}")
+        return ",".join(parts)
 
     def _create_block_mask(
         self,
@@ -217,8 +248,24 @@ def causal_mask_for_chunk(
 
 
 class FlexAttnForChunkManager(FlexAttnManager):
-    def __init__(self):
+    """
+    FlexAttention manager for chunk case.
+
+    If `q_lens` is provided, then for each `q_len` argument passed, we
+    replace this with the smallest entry in `q_lens` which is `>= q_len`.
+    If `q_len > max(q_lens)`, an exception is raised. This limits the number
+    of compiled graphs, even if chunks with many different `q_len` sizes come
+    in.
+
+    """
+
+    def __init__(self, q_lens: Optional[List[int]] = None):
         super().__init__()
+        if q_lens is not None:
+            q_lens = sorted(q_lens)
+            assert all(x > 0 for x in q_lens)
+            assert all(x < y for x, y in zip(q_lens[:-1], q_lens[1:]))
+        self.q_lens = q_lens
 
     def _unpack_kwargs(
         self,
@@ -235,6 +282,15 @@ class FlexAttnForChunkManager(FlexAttnManager):
             unpacked_args.append(kwargs[name])
         return tuple(unpacked_args)
 
+    def transform_q_len(self, q_len: int) -> int:
+        if self.q_lens is None:
+            return q_len
+        else:
+            try:
+                return next(x for x in self.q_lens if x >= q_len)
+            except StopIteration:
+                raise ValueError(f"q_len={q_len}, must be <= {max(self.q_lens)}")
+
     def _get_args(
         self,
         kv_len: int,
@@ -246,7 +302,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
     ) -> tuple:
         q_len, batch_size, n_head = self._unpack_kwargs(**kwargs)
         return (
-            q_len,
+            self.transform_q_len(q_len),
             kv_len,
             batch_size,
             n_head,
@@ -256,6 +312,21 @@ class FlexAttnForChunkManager(FlexAttnManager):
             als_signature,
         )
 
+    def _args_to_str(self, *args) -> str:
+        parts = [
+            f"q_len:{args[0]:5d}",
+            f"kv_len:{args[1]:5d}",
+            f"batch_size:{args[2]:3d}",
+            f"n_head:{args[3]:3d}",
+            f"requires_grad:{int(args[5]):1d}",
+            f"device:{args[4]}",
+        ]
+        if args[6] is not None:
+            parts.append(f"sliding_window_size:{args[6]:3d}")
+        if args[7] is not None:
+            parts.append(f"als_signature:{args[7]}")
+        return ",".join(parts)
+
     def _create_block_mask(
         self,
         kv_len: int,
@@ -263,7 +334,11 @@ class FlexAttnForChunkManager(FlexAttnManager):
         sliding_window_size: Optional[int],
         **kwargs,
     ) -> BlockMask:
-        q_len = self._unpack_kwargs(**kwargs)[0]
+        q_len = self.transform_q_len(self._unpack_kwargs(**kwargs)[0])
+        if q_len > kv_len:
+            raise ValueError(
+                f"q_len={q_len}, kv_len={kv_len}: Must have q_len <= kv_len"
+            )
         mask_mod = partial(
             causal_mask_for_chunk,
             offset=kv_len - q_len,
@@ -284,18 +359,29 @@ class FlexAttentionArgs:
     """
     Maintains managers (for prefill and chunk computations).
 
+    Using `q_lens` is strongly recommended. You can use :func:`choose_q_lens`.
+
+    Note: If `q_lens` is used, the expression returned by :meth:`attn_fn` for
+    `input_pos > 0` must be used with `query` tensors of length
+    `transform_q_len(q_len)`, which may be larger than `q_len`. The padding
+    must be done by the caller.
+
     Args:
         extend_kv: If `True` we always extend `key, value` to `n_head`. This
             needs more memory, only use if the default does not work.
+        q_lens: If given, this is a list of `q_len` chunk lengths for which
+            graphs are created. Any `q_len` passed to :meth:`attn_fn` with
+            `input_pos > 0` is mapped to the smallest entry `>= q_len`.
 
     """
 
     def __init__(
         self,
         extend_kv: bool = False,
+        q_lens: Optional[List[int]] = None,
     ):
         self.attn_prefill_manager = FlexAttnForPrefillManager()
-        self.attn_chunk_manager = FlexAttnForChunkManager()
+        self.attn_chunk_manager = FlexAttnForChunkManager(q_lens)
         self.extend_kv = extend_kv
 
     def attn_fn(
@@ -334,13 +420,34 @@ class FlexAttentionArgs:
             )
             return _attn_fn, extend_kv or self.extend_kv
 
+    def transform_q_len(self, q_len: int) -> int:
+        return self.attn_chunk_manager.transform_q_len(q_len)
+
+    def report(self) -> str:
+        parts = []
+        if self.attn_prefill_manager.num_hits:
+            parts.extend(
+                [
+                    "FlexAttention: attn_fn graphs and usage for prefill:",
+                    self.attn_prefill_manager.report(),
+                ]
+            )
+        if self.attn_chunk_manager.num_hits:
+            parts.extend(
+                [
+                    "FlexAttention: attn_fn graphs and usage for chunks:",
+                    self.attn_chunk_manager.report(),
+                ]
+            )
+        return "\n".join(parts)
+
 
 def scaled_dot_product_attention_flexatt(
     flexatt_args: FlexAttentionArgs,
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    scale_factor: float,
+    scale_factor: Optional[float],
     sliding_window_size: Optional[int],
     attention_logit_softcapping: Optional[float],
     input_pos: int,
@@ -357,6 +464,11 @@ def scaled_dot_product_attention_flexatt(
     (`input_pos > 0`). In the latter case, the KV cache buffers `key`, `value`
     must have been updated, meaning that `range(input_pos, input_pos + q_len)`
     must be in each `token_positions[b, h]`.
+
+    Note: `flex_attention` is always called with `scale=None`, the default
+    scale factor. If `scale_factor` is different, we multiply a factor into
+    `query`. This avoids bogus graph re-compilations due to small numerical
+    differences in `scale`.
 
     Args:
         flexatt_args: Arguments for `flex_attention`. Most important are the
@@ -419,13 +531,62 @@ def scaled_dot_product_attention_flexatt(
         key = repeat_interleave(key, n_head)
         value = repeat_interleave(value, n_head)
         enable_gqa = False
+    q_len_tr = flexatt_args.transform_q_len(q_len)
+    if q_len_tr > q_len:
+        # Use zero padding
+        shape = tuple(query.shape[:2]) + (q_len_tr - q_len, query.shape[-1])
+        query = torch.cat(
+            (
+                query,
+                torch.zeros(*shape, dtype=query.dtype, device=query.device),
+            ),
+            dim=2,
+        )
+    # Deal with non-standard `scale_factor`
+    head_size = query.shape[-1]
+    diff = scale_factor * math.sqrt(head_size)
+    if not (0.999 < diff < 1.001):
+        query = query * diff
     if annotation_callback is not None:
         annotation_callback(key, value, sort_index)
 
-    return attn_fn(
+    result = attn_fn(
         query=query,
         key=key,
         value=value,
-        scale=scale_factor,
+        scale=None,
         enable_gqa=enable_gqa,
     )
+    if q_len_tr > q_len:
+        result = result[:, :, :q_len, :]
+    return result
+
+
+def choose_q_lens(
+    chunk_size: int,
+    num_q_lens: int,
+    add_one: bool = True,
+) -> Optional[List[int]]:
+    """
+    Chooses `q_lens` argument for :class:`FlexAttentionArgs`. This supports
+    `q_len` values up to `chunk_size`. The list is equi-spaced, containing
+    `chunk_size`.
+
+    Args:
+        chunk_size: Maximum `q_len` size, is contained in `q_lens`
+        num_q_lens: `len(q_lens) = num_q_lens + int(add_one)`
+        add_one: If `True`, then `q_lens[0] = 1` as additional entry. This
+            makes sense if the model is ever used to generate tokens. It does
+            not hurt, because a graph for length 1 is created only if
+            `q_len == 1` is encountered.
+
+    """
+    if num_q_lens < chunk_size:
+        q_lens = [
+            math.ceil(i * chunk_size / num_q_lens) for i in range(1, num_q_lens + 1)
+        ]
+        if add_one and q_lens[0] > 1:
+            q_lens.insert(0, 1)
+    else:
+        q_lens = None
+    return q_lens

@@ -17,7 +17,6 @@ from torch.utils.data import Dataset
 
 from keys_values.data.iterators import BatchSampler
 
-
 Collator = Callable[[List[Dict[str, Any]]], Dict[str, Any]]
 
 

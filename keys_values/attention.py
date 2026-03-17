@@ -18,8 +18,6 @@ import torch
 from torch.nn import functional as F
 from torch.nn.attention import SDPBackend
 
-from keys_values.config import Config
-
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention_utils import (
     attention_compute_scores,
@@ -31,6 +29,7 @@ from keys_values.attention_utils import (
     slice_as_flat,
     pytorch_scaled_dot_product_attention,
 )
+from keys_values.config import Config
 from keys_values.flex_attention import (
     scaled_dot_product_attention_flexatt,
     FlexAttentionArgs,
@@ -206,7 +205,7 @@ class MultiHeadSelfAttention:
             # This is a good choice for `kv_len = 32768`
             use_eager_kernel = lambda kv_len, q_len: q_len < 512
         self._use_eager_kernel = use_eager_kernel
-        self._flexatt_args = flexatt_args
+        self.flexatt_args = flexatt_args
 
     @property
     def sdpa_kernels(self) -> Union[SDPBackend, List[SDPBackend]]:
@@ -218,7 +217,7 @@ class MultiHeadSelfAttention:
 
     @property
     def has_flex_attention(self) -> bool:
-        return self._flexatt_args is not None
+        return self.flexatt_args is not None
 
     def set_tmp_array_limit_gb(self, limit: Optional[TemporaryArrayLimit]):
         if limit is not None:
@@ -356,7 +355,7 @@ class MultiHeadSelfAttention:
 
         """
         must_eager = return_attn_weights or self.use_eager_sdpa_always
-        use_flex_att = self._flexatt_args is not None and not must_eager
+        use_flex_att = self.flexatt_args is not None and not must_eager
         if self.config.attention_logit_softcapping is not None:
             if use_flex_att:
                 return SDPA_IMPL_FLEXATTENTION
@@ -426,7 +425,7 @@ class MultiHeadSelfAttention:
                 self._sdpa_kernels = filtered_kernels
         elif sdpa_mode == SDPA_IMPL_FLEXATTENTION:
             attn_outputs = scaled_dot_product_attention_flexatt(
-                flexatt_args=self._flexatt_args,
+                flexatt_args=self.flexatt_args,
                 query=query,
                 key=k_and_v.keys(),
                 value=k_and_v.values(),

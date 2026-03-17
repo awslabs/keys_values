@@ -18,17 +18,16 @@ import torch
 import pytest
 
 from litgpt.config import name_to_config
-from litgpt.lora import mark_only_lora_as_trainable
 from litgpt.utils import _RunIf
 
-from keys_values.debug_utils import DebugIntermediates, debug_intermediates_all
+from keys_values.tools.intermediates import debug_intermediates_all, DebugIntermediates
 from keys_values.head_model import HeadModel
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.gradient.accumulate import copy_requires_grad
 from keys_values.kvcache.gradient.main import LongContextGradientModel
 from keys_values.kvcache.test_utils import create_kv_cache, copy_gradients
-from keys_values.lora import GPT, Config
+from keys_values.lora import GPT, Config, mark_only_lora_as_trainable
 from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
 from keys_values.optimize.model_factory import (
     GPTShardCellBlock,
@@ -155,7 +154,8 @@ def test_gradient_sharded(
                 head_model=head_model,
                 layers_per_cell=layers_per_cell,
                 chunk_size=chunk_size,
-                qname="default",
+                layercp_qname="default",
+                cachecp_qname="default",
                 debug_gpt_model=debug_gpt_model,
                 debug_intermediates=DebugIntermediates(
                     predicate=debug_intermediates_all,
@@ -268,7 +268,7 @@ def compute_gradients_on_device(
     with torch.no_grad():
         x = gpt_model_on_device.transformer.wte(input_ids)
         layer_inputs = []
-        for block in gpt_model_on_device.transformer.h:
+        for block in gpt_model_on_device._get_layer_blocks():
             layer_inputs.append(x)
             x = block(x, input_ids, gpt_model_on_device.mha)
     head_input = copy_requires_grad(x)
