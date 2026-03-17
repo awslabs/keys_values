@@ -32,7 +32,12 @@ from keys_values.kvcache.buffers import (
     positions_wrap_around,
     PositionsType,
 )
-from keys_values.utils import index_to_3d, bits_for_torch_dtype, bitsize_of
+from keys_values.utils import (
+    index_to_3d,
+    bits_for_torch_dtype,
+    bitsize_of,
+    is_index_1d,
+)
 
 
 class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
@@ -174,23 +179,37 @@ class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
         self,
         input_pos: int,
         num: int,
-        **kwargs,
+        dtype: Optional[torch.dtype] = None,
+        device: Optional[torch.device] = None,
     ) -> torch.Tensor:
         relpos, bstart = self._position_and_offset(input_pos)
         parts = []
         block = self._slot_positions[relpos]
         blocksize = block.shape[-1]
         bend = min(bstart + num, blocksize)
-        parts.append(block[:, :, bstart:bend].to(**kwargs))
+        if device is None:
+            device = torch.get_default_device()
+        if dtype is None:
+            dtype = torch.int64
+        kwargs = dict(dtype=dtype, device=device)
+        parts.append(block[:, :, bstart:bend])
         done = bend - bstart
         while done < num:
             relpos += 1
             block = self._slot_positions[relpos]
             blocksize = block.shape[-1]
             bend = min(num - done, blocksize)
-            parts.append(block[:, :, :bend].to(**kwargs))
+            parts.append(block[:, :, :bend])
             done += bend
-        return torch.cat(parts, dim=-1)
+        # If all parts are 1D, the result should be 1D as well
+        if all(is_index_1d(part) for part in parts):
+            result = index_to_3d(
+                torch.cat([part[0, 0, :].to(**kwargs) for part in parts]),
+                *parts[0].shape[:-1],
+            )
+        else:
+            result = torch.cat([part.to(**kwargs) for part in parts], dim=-1)
+        return result
 
 
 @dataclass(frozen=True)
@@ -210,8 +229,8 @@ def update_token_positions(
     next_grace_pos: Optional[int] = None,
 ) -> Optional[UpdateTokenPositionsGracePeriod]:
     """
-    `token_positions` of shape `(batch_size, n_query_groups, cache_length)`
-    contains token positions for each slot. If `batch_size < batch_size`,
+    `token_positions` of shape `(bs, n_query_groups, cache_length)`
+    contains token positions for each slot. If `batch_size < bs`,
     only the leading rows are used. It is updated here with new token positions
     `input_pos` to `input_pos + num - 1`.
 
@@ -223,6 +242,7 @@ def update_token_positions(
 
     """
     assert token_positions.ndim == 3
+    tp_is_1d = is_index_1d(token_positions)
     bs, n_query_groups, cache_length = token_positions.shape
     assert 1 <= batch_size <= bs
     assert num >= 1 and input_pos >= 0
@@ -231,20 +251,27 @@ def update_token_positions(
     assert cache_full or input_pos + num <= cache_length
     assert grace_period >= 0
     device = token_positions.device
-    arange_kwargs = dict(dtype=token_positions.dtype, device=device)
+    dtype = token_positions.dtype
+    arange_kwargs = dict(dtype=dtype, device=device)
     result = None
     if not cache_full:
         start = input_pos
         end = input_pos + num
-        token_positions[:batch_size, :, start:end] = torch.arange(
-            start,
-            end,
-            **arange_kwargs,
-        ).view(1, 1, -1)
+        new_tps = torch.arange(start, end, **arange_kwargs)
+        if tp_is_1d:
+            # Note: We keep `token_positions` 1D even if `batch_size < bs`
+            token_positions[0, 0, start:end] = new_tps
+        else:
+            token_positions[:batch_size, :, start:end] = new_tps.view(1, 1, -1)
     else:
         assert index is not None
         shape = (batch_size, n_query_groups, num)
         assert index.shape == shape, (index.shape, shape)
+        index_is_1d = is_index_1d(index)
+        if tp_is_1d and not index_is_1d:
+            raise ValueError(
+                "token_positions is essentially 1D, but index is not. Resize token_positions to 3D before calling this function."
+            )
         if grace_period > 0:
             assert next_grace_pos is not None
             # Grace period, and the cache buffer is already full:
@@ -262,15 +289,20 @@ def update_token_positions(
                 n_query_groups=n_query_groups,
                 device=device,
                 return_tensor=True,
+                dtype=dtype,
             )
             # Update token_pos
             new_pos = torch.arange(
                 input_pos + num1,
                 input_pos + num,
                 **arange_kwargs,
-            ).view(1, 1, -1)
+            )
             pos_flat = positions[0, 0, :]
-            token_positions[:batch_size, :, pos_flat] = new_pos
+            if tp_is_1d:
+                # Note: We keep `token_positions` 1D even if `batch_size < bs`
+                token_positions[0, 0, pos_flat] = new_pos
+            else:
+                token_positions[:batch_size, :, pos_flat] = new_pos.view(1, 1, -1)
             start_token_pos = input_pos - grace_period
             result = UpdateTokenPositionsGracePeriod(
                 positions=positions,
@@ -280,17 +312,17 @@ def update_token_positions(
         else:
             start_token_pos = input_pos
 
-        new_token_pos = index_to_3d(
-            torch.arange(start_token_pos, start_token_pos + num, **arange_kwargs),
-            batch_size,
-            n_query_groups,
-        )
-        token_positions[:batch_size, ...].scatter_(
-            -1,
-            index,
-            new_token_pos,
-        )
-        return result
+        new_tps = torch.arange(start_token_pos, start_token_pos + num, **arange_kwargs)
+        if tp_is_1d and index_is_1d:
+            # Note: We keep `token_positions` 1D even if `batch_size < bs`
+            token_positions[0, 0, index[0, 0, :]] = new_tps
+        else:
+            token_positions[:batch_size, ...].scatter_(
+                -1,
+                index,
+                index_to_3d(new_tps, batch_size, n_query_groups),
+            )
+    return result
 
 
 DEFAULT_REPLAY_LOG_BLOCKSIZE = 1024
