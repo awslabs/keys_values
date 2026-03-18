@@ -31,7 +31,6 @@ from keys_values.kvcache.attn_weights import (
     UpdateTokenPositionsGracePeriod,
 )
 from keys_values.kvcache.base import DefaultKVCache, KVCacheReplayLog
-from keys_values.tools.debug_utils import for_debug
 from keys_values.kvcache.gradient.autograd_hooks import Annotations
 from keys_values.kvcache.gradient.annotation import (
     NodeAnnotation,
@@ -44,6 +43,7 @@ from keys_values.kvcache.gradient.sdpa_op import (
     cat_on_buffers,
 )
 from keys_values.sdpa_wrapper import ReorderAnnotationCallback
+from keys_values.tools.debug_utils import for_debug
 from keys_values.utils import (
     expand_index,
     shape_to_tuple,
@@ -135,7 +135,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         )
         if len(replay_log) == 0:
             raise ValueError("replay_log must not be empty")
-        self._device = replay_log.device
         if self.mha.use_eager_sdpa_always:
             raise ValueError(
                 "This replay cache does not support mha.use_eager_sdpa_always = True"
@@ -151,6 +150,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 "softcapping, or use FlexAttention by passing flexatt_args "
                 "when creating the MultiHeadSelfAttention object."
             )
+        self._device = replay_log.device
         self.replay_log = replay_log
         self._batch_size = batch_size
         self.kv_buffers = None

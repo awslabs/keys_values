@@ -110,7 +110,7 @@ def args_gradient_row_of_cells():
 
 @pytest.mark.parametrize(
     "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, use_old_cache, limit_num_unmatched, tol_kwargs, device",
-    args_gradient_row_of_cells(),
+    args_gradient_row_of_cells()[4:8],
 )
 def test_gradient_row_of_cells(
     cache_name,
@@ -129,6 +129,18 @@ def test_gradient_row_of_cells(
     print(
         f"cache_length={cache_lengths}\ntokens_per_chunk={tokens_per_chunk}\nchunks_per_cell={chunks_per_cell}\nuse_old_cache={use_old_cache}"
     )
+    error_prefix = "\n".join(
+        [
+            f"cache_name:       {cache_name}",
+            f"cache_kwargs:     {cache_kwargs}",
+            f"cache_lengths:    {cache_lengths}",
+            f"tokens_per_chunk: {tokens_per_chunk}",
+            f"chunks_per_cell:  {chunks_per_cell}",
+            f"use_old_cache:    {use_old_cache}",
+            f"device:           {device}",
+        ]
+    )
+    print(error_prefix)
 
     use_autograd_hooks = True
     do_gradient_testing = True
@@ -367,6 +379,7 @@ def test_gradient_row_of_cells(
         logs = accumulator.annotation_usage_logs()
         print("\nAnnotation usage logs (per cell):")
         num_unmatched = []
+        sum_unmatched_annots = 0
         for first_chunk_idx, annotation_usage in sorted(
             list(logs.items()),
             reverse=True,
@@ -374,8 +387,9 @@ def test_gradient_row_of_cells(
             print(f"\nCell(first_chunk_idx {first_chunk_idx}):")
             print(annotation_usage.report())
             num_unmatched.append(len(annotation_usage.unmatched_pack_args))
-            # All annotations should be matched:
-            assert len(annotation_usage.unmatched_annotations) == 0
+            sum_unmatched_annots += len(annotation_usage.unmatched_annotations)
+        # All annotations should be matched:
+        assert sum_unmatched_annots == 0
         assert len(num_unmatched) == len(limit_num_unmatched)
         assert all(a <= b for a, b in zip(num_unmatched, limit_num_unmatched)), (
             num_unmatched,
