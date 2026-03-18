@@ -192,24 +192,16 @@ class AttnWeightsReplayLog(DefaultKVCacheReplayLog):
         if dtype is None:
             dtype = torch.int64
         kwargs = dict(dtype=dtype, device=device)
-        parts.append(block[:, :, bstart:bend])
+        parts.append(block[:, :, bstart:bend].to(**kwargs))
         done = bend - bstart
         while done < num:
             relpos += 1
             block = self._slot_positions[relpos]
             blocksize = block.shape[-1]
             bend = min(num - done, blocksize)
-            parts.append(block[:, :, :bend])
+            parts.append(block[:, :, :bend].to(**kwargs))
             done += bend
-        # If all parts are 1D, the result should be 1D as well
-        if all(is_index_1d(part) for part in parts):
-            result = index_to_3d(
-                torch.cat([part[0, 0, :].to(**kwargs) for part in parts]),
-                *parts[0].shape[:-1],
-            )
-        else:
-            result = torch.cat([part.to(**kwargs) for part in parts], dim=-1)
-        return result
+        return torch.cat(parts, dim=-1)
 
 
 @dataclass(frozen=True)
