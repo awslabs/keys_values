@@ -622,16 +622,16 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                     chunk_idx=chunk_idx,
                     kind=kind + "-value",
                 )
-            if NodeAnnotation.kind_is_scatter(kind):
-                annot_kwargs = dict(
-                    layer_idx=self.layer_idx,
-                    chunk_idx=chunk_idx,
-                )
-                annotation_callback = partial(
-                    create_ext_annotations,
-                    node_annotations=self._node_annotations.nodes,
-                    annot_kwargs=annot_kwargs,
-                )
+            annot_kwargs = dict(
+                layer_idx=self.layer_idx,
+                chunk_idx=chunk_idx,
+            )
+            annotation_callback = partial(
+                create_ext_annotations,
+                node_annotations=self._node_annotations.nodes,
+                annot_kwargs=annot_kwargs,
+                verbose=self.debug_print_annotations,
+            )
         if self._debug_tensors is not None:
             name = f"c{self._token_chunk_pos - 1}-l{self.layer_idx}-{kind}"
             if name in self._debug_tensors:

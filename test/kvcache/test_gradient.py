@@ -25,6 +25,7 @@ from keys_values.finetune.utils import (
     may_match_twice_flex_attention_sdpa,
     may_match_twice_fused_eager_sdpa,
 )
+from keys_values.flex_attention import FlexAttentionArgs
 from keys_values.kvcache.gradient.accumulate import GradientAccumulator
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.cell import GetInputSlice, WriteOutputsSlice
@@ -53,8 +54,9 @@ def make_write_outputs_slice(x: torch.Tensor) -> WriteOutputsSlice:
 
 def args_gradient_row_of_cells():
     setups = [
-        a + b + (c,)
-        for a, b, c in product(
+        a + b + (c, d)
+        for d, a, b, c in product(
+            available_backends(),
             [
                 ("lastrec", dict()),
                 ("h2o", {"replay_log_blocksize": 64}),
@@ -75,42 +77,63 @@ def args_gradient_row_of_cells():
     tol_kwargs = dict(atol=3e-5, rtol=2e-5)
     tol_kwargs2 = dict(atol=0.0005, rtol=0.001)
     tol_kwargs3 = dict(atol=0.0015, rtol=0.01)
+    # Note: We use `flex_attention` for GPU, zero-padded query SDPA for
+    # CPU. This is why limits depend on device
     return [
-        a + b + (c,)
-        for c, (a, b) in product(
-            available_backends(),
+        a + b
+        for a, b in (
             zip(
                 setups,
                 [
                     ([4, 8, 8, 12], tol_kwargs),
-                    ([8, 14, 14, 12], tol_kwargs),
+                    ([4, 10, 10, 12], tol_kwargs),
                     ([4, 8, 8, 8, 12], tol_kwargs),
-                    ([8, 14, 14, 16, 12], tol_kwargs3),
+                    ([4, 10, 10, 8, 12], tol_kwargs3),
                     ([4, 8, 8, 12], tol_kwargs),
                     ([8, 14, 14, 12], tol_kwargs),
                     ([4, 8, 8, 8, 12], tol_kwargs),
-                    ([8, 14, 14, 16, 12], tol_kwargs2),
+                    ([8, 14, 14, 10, 12], tol_kwargs2),
                     ([4, 8, 8, 12], tol_kwargs),
                     ([8, 14, 14, 12], tol_kwargs),
                     ([4, 8, 8, 8, 12], tol_kwargs),
-                    ([8, 14, 14, 16, 12], tol_kwargs2),
+                    ([8, 14, 14, 10, 12], tol_kwargs2),
                     ([4, 8, 8, 12], tol_kwargs),
                     ([16, 26, 26, 12], tol_kwargs),
                     ([4, 8, 8, 8, 12], tol_kwargs),
-                    ([16, 26, 26, 20, 12], tol_kwargs3),
+                    ([16, 26, 26, 14, 12], tol_kwargs3),
                     ([4, 8, 8, 12], tol_kwargs),
                     ([16, 26, 26, 12], tol_kwargs),
                     ([4, 8, 8, 8, 12], tol_kwargs),
-                    ([16, 26, 26, 20, 12], tol_kwargs3),
+                    ([16, 26, 26, 14, 12], tol_kwargs3),
+                    ([4, 8, 8, 12], tol_kwargs),
+                    ([0, 4, 4, 12], tol_kwargs),
+                    ([4, 8, 8, 8, 12], tol_kwargs),
+                    ([0, 4, 4, 4, 12], tol_kwargs3),
+                    ([4, 8, 8, 12], tol_kwargs),
+                    ([4, 8, 8, 12], tol_kwargs),
+                    ([4, 8, 8, 8, 12], tol_kwargs),
+                    ([4, 8, 8, 6, 12], tol_kwargs2),
+                    ([4, 8, 8, 12], tol_kwargs),
+                    ([4, 8, 8, 12], tol_kwargs),
+                    ([4, 8, 8, 8, 12], tol_kwargs),
+                    ([4, 8, 8, 6, 12], tol_kwargs2),
+                    ([4, 8, 8, 12], tol_kwargs),
+                    ([12, 20, 20, 12], tol_kwargs),
+                    ([4, 8, 8, 8, 12], tol_kwargs),
+                    ([12, 20, 20, 10, 12], tol_kwargs3),
+                    ([4, 8, 8, 12], tol_kwargs),
+                    ([12, 20, 20, 12], tol_kwargs),
+                    ([4, 8, 8, 8, 12], tol_kwargs),
+                    ([12, 20, 20, 10, 12], tol_kwargs3),
                 ],
-            ),
+            )
         )
     ]
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, use_old_cache, limit_num_unmatched, tol_kwargs, device",
-    args_gradient_row_of_cells()[4:8],
+    "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, use_old_cache, device, limit_num_unmatched, tol_kwargs",
+    args_gradient_row_of_cells(),
 )
 def test_gradient_row_of_cells(
     cache_name,
@@ -119,9 +142,9 @@ def test_gradient_row_of_cells(
     tokens_per_chunk,
     chunks_per_cell,
     use_old_cache,
+    device,
     limit_num_unmatched,
     tol_kwargs,
-    device,
 ):
     seed = 31415927
     torch.random.manual_seed(seed)
@@ -195,8 +218,14 @@ def test_gradient_row_of_cells(
         cache_length=cache_lengths[0],
         dtype=dtype,
     )
+    if device.type == "cuda":
+        mha_kwargs = dict(
+            flexatt_args=FlexAttentionArgs(q_lens=[max(tokens_per_chunk[1:])])
+        )
+    else:
+        mha_kwargs = dict()
     with torch.device(device):
-        gpt_model = GPT(config)
+        gpt_model = GPT(config, **mha_kwargs)
         gpt_model.apply(gpt_model._init_weights)  # Initialization
     gpt_model.set_start_of_layer_hook(start_of_layer_hook)
     token_idxs = torch.randint(
@@ -211,6 +240,7 @@ def test_gradient_row_of_cells(
             name=cache_name + "-" + qname,
             params=replace(params, cache_length=cache_length),
             block_idx=block_idx,
+            **mha_kwargs,
             **cache_kwargs,
         )
         kv_cache.switch_replay_logging(True)
@@ -387,8 +417,15 @@ def test_gradient_row_of_cells(
             print(f"\nCell(first_chunk_idx {first_chunk_idx}):")
             print(annotation_usage.report())
             num_unmatched.append(len(annotation_usage.unmatched_pack_args))
-            sum_unmatched_annots += len(annotation_usage.unmatched_annotations)
-        # All annotations should be matched:
+            # We don't care about unmatched cat/scatter, they are dealt with
+            # anyway. They do happen if `autograd` decides to not create a node
+            # for them in the graph.
+            num_unmatched_annots = (
+                len(annotation_usage.unmatched_annotations)
+                - annotation_usage.num_unmatched_scatter_cat
+            )
+            sum_unmatched_annots += num_unmatched_annots
+        # All non-(scatter/cat) annotations should be matched:
         assert sum_unmatched_annots == 0
         assert len(num_unmatched) == len(limit_num_unmatched)
         assert all(a <= b for a, b in zip(num_unmatched, limit_num_unmatched)), (

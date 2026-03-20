@@ -531,6 +531,9 @@ def scaled_dot_product_attention_flexatt(
         key = repeat_interleave(key, n_head)
         value = repeat_interleave(value, n_head)
         enable_gqa = False
+        extend_kv = True
+    else:
+        extend_kv = False
     q_len_tr = flexatt_args.transform_q_len(q_len)
     if q_len_tr > q_len:
         # Use zero padding
@@ -548,7 +551,7 @@ def scaled_dot_product_attention_flexatt(
     if not (0.999 < diff < 1.001):
         query = query * diff
     if annotation_callback is not None:
-        annotation_callback(key, value, sort_index)
+        annotation_callback(key, value, sort_index, extend_kv)
 
     result = attn_fn(
         query=query,

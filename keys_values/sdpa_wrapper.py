@@ -18,7 +18,7 @@ import torch
 from torch.nn.attention import SDPBackend
 
 from keys_values.attention_utils import pytorch_scaled_dot_product_attention
-from keys_values.utils import expand_index, is_index_1d
+from keys_values.utils import expand_index, is_index_1d, index_to_3d
 
 
 def sdpa_check_args(
@@ -48,7 +48,7 @@ def sdpa_check_args(
 
 
 ReorderAnnotationCallback = Callable[
-    [torch.Tensor, torch.Tensor, Optional[torch.Tensor]], None
+    [torch.Tensor, torch.Tensor, Optional[torch.Tensor], bool], None
 ]
 
 
@@ -85,7 +85,7 @@ def scaled_dot_product_attention(
     `token_positions`, since reordering buffer entries takes time and memory.
 
     Args:
-        query: Queries, shape `(batch_size, n_heads, q_len, head_size)`
+        query: Queries, shape `(batch_size, n_head, q_len, head_size)`
         key: Keys, shape `(batch_size, n_query_groups, kv_len, head_size)`
         value: Values, shape `(batch_size, n_query_groups, kv_len, head_size)`
         scale_factor: Scale factor for attention
@@ -104,7 +104,7 @@ def scaled_dot_product_attention(
         Attention outputs, shape `(batch_size, n_heads, q_len, head_size)`
 
     """
-    batch_size, n_head, _, q_len, kv_len, head_size = sdpa_check_args(
+    batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(
         query,
         key,
         value,

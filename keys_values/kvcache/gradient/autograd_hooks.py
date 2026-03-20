@@ -31,6 +31,8 @@ from keys_values.utils import (
     expand_index,
     bytes_for_torch_dtype,
     shape_to_tuple,
+    is_index_1d,
+    index_to_3d,
 )
 
 
@@ -1307,22 +1309,25 @@ class CellComputationAutogradHooks(AutogradHooks):
     def _pack_4d_index(x: torch.Tensor) -> Optional[PackArgumentAsIndex]:
         """
         Helper for :meth:`pack_hook`. `x` must be 4D of integer
-        type. The assumption is that the final dimension is
-        broadcast-extended. We run a (randomized) test for this (full test is
-        too expensive). If positive, we return a packed version, otherwise
-        `None`.
+        type. If `x` is broadcast-extended along the final dimension, we
+        return the packed version, otherwise `None`.
+        Works also if `x` is essentially 1D.
 
         """
         if x.ndim != 4 or x.dtype not in (torch.int64, torch.int32, torch.int):
             return None
         final_dim = x.shape[-1]
-        rem_size = x.numel() // final_dim
-        check_ind = torch.randperm(rem_size)[:5].to(device=x.device)
-        arg1 = x.view(-1, final_dim)[check_ind, :]
-        arg2 = arg1[:, 0].unsqueeze(-1).expand(-1, final_dim)
-        if arg1.equal(arg2):
+        if x.stride()[-1] == 0 or final_dim == 1:
+            index_3d = x[..., 0]
+            if is_index_1d(index_3d):
+                index_3d = index_to_3d(
+                    index_3d[0, 0, :].clone(),
+                    *index_3d.shape[:-1],
+                )
+            else:
+                index_3d = index_3d.clone()
             return PackArgumentAsIndex(
-                index_3d=x[..., 0].clone(),
+                index_3d=index_3d,
                 final_dim=final_dim,
             )
         else:

@@ -17,7 +17,12 @@ from typing import Tuple, Optional, Dict, Any, Set, List
 import torch
 
 from keys_values.sdpa_wrapper import reorder_buffer_given_sort_index
-from keys_values.utils import shape_to_tuple, expand_index, repeat_interleave
+from keys_values.utils import (
+    shape_to_tuple,
+    expand_index,
+    repeat_interleave,
+    is_index_1d,
+)
 
 # The typical shape for `annotation.delta` in phase (1), matching annotations
 # against pack arguments, is
@@ -180,8 +185,10 @@ def create_ext_annotations(
     key: torch.Tensor,
     value: torch.Tensor,
     sort_index: Optional[torch.Tensor],
+    extend_kv: bool,
     node_annotations: List[NodeAnnotation],
     annot_kwargs: Dict[str, Any],
+    verbose: bool,
 ):
     """
     Creates annotations "ext-key", "ext-value".
@@ -196,6 +203,8 @@ def create_ext_annotations(
             (optional)
         sort_index: Sort index determining reordering (3D or 1D).
             Stored in `NodeAnnotation.extra_info`.
+        extend_kv: Have `key`, `value` been extended to have
+            `shape[1] == n_head`?
 
     """
     for buffer, name in ((key, "key"), (value, "value")):
@@ -213,16 +222,17 @@ def create_ext_annotations(
             extra_info = {"sort_index": sort_index}
         else:
             extra_info = None
-        node_annotations.append(
-            NodeAnnotation(
-                **annot_kwargs,
-                kind=kind,
-                shape=shape,
-                index=index,
-                delta=delta,
-                extra_info=extra_info,
-            )
+        annotation = NodeAnnotation(
+            **annot_kwargs,
+            kind=kind,
+            shape=shape,
+            index=index,
+            delta=delta,
+            extra_info=extra_info,
         )
+        if verbose:
+            print("Create " + str(annotation))
+        node_annotations.append(annotation)
 
 
 def apply_ext_annotation(

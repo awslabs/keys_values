@@ -855,6 +855,12 @@ def get_mha_and_cache_kwargs(
     yarn_rope: bool,
     fabric: Optional[L.Fabric],
 ) -> Dict[str, Any]:
+    """
+    Compiles `mha_kwargs` to be used for creating the model. We also update
+    `kv_cache.cache_kwargs` with these arguments, so that KV caches use them
+    as well.
+
+    """
     cache_kwargs = kv_cache.cache_kwargs
     # Order of preference for SDPA kernels
     limit_gb = attention_forward_temp_size_gb
@@ -929,10 +935,7 @@ def wrap_gpt_model(
     )
     gpt_model.clear_kv_caches()
     cache_kwargs = dict() if kv_cache.cache_kwargs is None else kv_cache.cache_kwargs
-    cache_kwargs = dict(
-        cache_kwargs,
-        max_chunk_size=kv_cache.maximum_chunk_size(),
-    )
+    cache_kwargs["max_chunk_size"] = kv_cache.maximum_chunk_size()
     cache_kwargs = cleanup_cache_kwargs(
         split_name(kv_cache.name)[0],
         cache_kwargs,
