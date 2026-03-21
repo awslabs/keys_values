@@ -22,6 +22,7 @@ from keys_values.config import Config
 from litgpt.utils import _RunIf
 
 from keys_values.attention import MultiHeadSelfAttention, DefaultKeysAndValues
+from keys_values.attention_utils import sample_token_positions
 from keys_values.flex_attention import (
     FlexAttentionArgs,
     scaled_dot_product_attention_flexatt,
@@ -135,11 +136,12 @@ def test_flexatt_working(tp_ndim, sort_if_3d):
                 n_query_groups,
             )
         else:
-            token_positions = random_index(
-                params,
-                start=0,
-                end=cache_length + chunk_size,
-                num=cache_length,
+            token_positions = sample_token_positions(
+                batch_size,
+                n_query_groups,
+                chunk_size,
+                cache_length,
+                input_pos=cache_length,
                 device=device,
             )
         print(f"Computing chunk MHA (chunk_size={chunk_size})")
@@ -265,11 +267,12 @@ def test_comparison(
             )
         else:
             token_positions.append(
-                random_index(
-                    params,
-                    start=start,
-                    end=end,
-                    num=kv_len,
+                sample_token_positions(
+                    batch_size,
+                    n_query_groups,
+                    q_len,
+                    kv_len,
+                    input_pos=input_pos,
                     device=device,
                 )
             )

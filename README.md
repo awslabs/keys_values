@@ -903,6 +903,14 @@ features generically:
   [AttnWeightsReplayLog](./keys_values/kvcache/attn_weights.py#L39), you need
   to create a subclass.
 
+**Note**: `AttnWeightsKVCache` allows the KV information for tokens to be in
+the cache for some `(b, h)`, batch dimensions and heads, but not for others.
+This means that `token_positions` is a genuine 3D index. If your score-based
+cache policy does not require this (so that KV information for a token is
+either in the cache for all `(b, h)`, or not at all), it may be better to not
+inherit from `AttnWeightsKVCache`. This is because the fact that `token_positions`
+is essentially 1D, is used to save time and memory downstreams.
+
 ### [KVCacheWithBuffers](./keys_values/kvcache/basics.py#L42)
 
 Choose this base class to implement a KV cache policy which makes use of one of
