@@ -571,33 +571,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 )
             self._append_annotation(annotation)
 
-    @staticmethod
-    def _transform_index(
-        index: torch.Tensor,
-        sort_index: torch.Tensor,
-    ) -> torch.Tensor:
-        batch_size, n_query_groups, num, head_size = index.shape
-        si_len = sort_index.shape[-1]
-        assert sort_index.shape == (batch_size, n_query_groups, si_len)
-        sort_index = sort_index.to(dtype=index.dtype)
-        index = index[:, :, :, 0]
-        result = (
-            torch.empty_like(sort_index)
-            .scatter_(
-                2,
-                sort_index,
-                torch.arange(
-                    si_len,
-                    dtype=index.dtype,
-                    device=index.device,
-                )
-                .view(1, 1, -1)
-                .expand(batch_size, n_query_groups, -1),
-            )
-            .gather(2, index)
-        )
-        return expand_index(result, head_size)
-
     def _create_callback_after_creator(
         self,
         key: torch.Tensor,

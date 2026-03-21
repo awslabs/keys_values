@@ -882,6 +882,7 @@ def get_mha_and_cache_kwargs(
         mha_kwargs["sdpa_kernels"] = cache_kwargs["sdpa_kernels"]
     else:
         mha_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
+    mha_kwargs["sort_if_3d"] = sdpa.reorder_sort_if_3d
     if sdpa.flex_attention:
         # The block mask managers (for prefill, for chunks) are shared
         # among all multi-head attention blocks

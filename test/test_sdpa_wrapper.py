@@ -257,11 +257,21 @@ def test_reorder_key_value_for_1d_token_positions():
             batch_size,
             n_query_groups,
         )
-        res_1 = reorder_key_value(key, value, token_positions)
+        res_1 = reorder_key_value(
+            key,
+            value,
+            token_positions,
+            input_pos=16,
+            q_len=8,
+            sort_if_3d=True,
+        )
         res_2 = reorder_key_value(
             key,
             value,
             token_positions.contiguous(),
+            input_pos=16,
+            q_len=8,
+            sort_if_3d=True,
         )
         for i in range(2):
             torch.testing.assert_close(res_1[i], res_2[i])

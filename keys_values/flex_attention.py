@@ -453,6 +453,7 @@ def scaled_dot_product_attention_flexatt(
     input_pos: int,
     token_positions: Optional[torch.Tensor],
     annotation_callback: Optional[ReorderAnnotationCallback] = None,
+    sort_if_3d: bool = False,
 ) -> torch.Tensor:
     """
     Computes scaled dot product attention (SDPA) using PyTorch
@@ -488,6 +489,7 @@ def scaled_dot_product_attention_flexatt(
             given for `input_pos > 0`, it is equivalent to `arange(kv_len)`.
         annotation_callback: If this is given and `key, value` are reordered,
             the results are passed to this callback.
+        sort_if_3d: See :func:`reorder_key_value`.
 
     Returns:
         Attention outputs, shape `(batch_size, n_heads, q_len, head_size)`
@@ -511,9 +513,16 @@ def scaled_dot_product_attention_flexatt(
                 f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
             )
     if token_positions is not None:
-        key, value, sort_index = reorder_key_value(key, value, token_positions)
+        key, value, extra_info = reorder_key_value(
+            key,
+            value,
+            token_positions.detach(),
+            input_pos,
+            q_len,
+            sort_if_3d,
+        )
     else:
-        sort_index = None
+        extra_info = dict()
     enable_gqa = n_query_groups < n_head
     requires_grad = query.requires_grad or key.requires_grad or value.requires_grad
     attn_fn, extend_kv = flexatt_args.attn_fn(
@@ -551,7 +560,7 @@ def scaled_dot_product_attention_flexatt(
     if not (0.999 < diff < 1.001):
         query = query * diff
     if annotation_callback is not None:
-        annotation_callback(key, value, sort_index, extend_kv)
+        annotation_callback(key, value, extra_info, extend_kv)
 
     result = attn_fn(
         query=query,

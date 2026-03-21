@@ -36,10 +36,10 @@ from keys_values.utils import index_to_3d
 
 @_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
-    "tp_ndim",
-    (0, 1, 3, None),
+    "tp_ndim, sort_if_3d",
+    list(product((0, 1, 3, None), (False, True))),
 )
-def test_flexatt_working(tp_ndim):
+def test_flexatt_working(tp_ndim, sort_if_3d):
     seed = 31415927
     torch.manual_seed(seed)
 
@@ -114,6 +114,7 @@ def test_flexatt_working(tp_ndim):
             attention_logit_softcapping=None,
             input_pos=0,
             token_positions=None,
+            sort_if_3d=sort_if_3d,
         )
         print(attn_outputs.sum().item())
         # Process chunk
@@ -152,6 +153,7 @@ def test_flexatt_working(tp_ndim):
             attention_logit_softcapping=None,
             input_pos=cache_length,
             token_positions=token_positions,
+            sort_if_3d=sort_if_3d,
         )
         print(attn_outputs.sum().item())
 

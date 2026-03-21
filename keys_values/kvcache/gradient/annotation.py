@@ -16,12 +16,11 @@ from typing import Tuple, Optional, Dict, Any, Set, List
 
 import torch
 
-from keys_values.sdpa_wrapper import reorder_buffer_given_sort_index
+from keys_values.sdpa_wrapper import reorder_buffer_given_extra_info
 from keys_values.utils import (
     shape_to_tuple,
     expand_index,
     repeat_interleave,
-    is_index_1d,
 )
 
 # The typical shape for `annotation.delta` in phase (1), matching annotations
@@ -184,7 +183,7 @@ def create_random_index(
 def create_ext_annotations(
     key: torch.Tensor,
     value: torch.Tensor,
-    sort_index: Optional[torch.Tensor],
+    extra_info: Dict[str, Any],
     extend_kv: bool,
     node_annotations: List[NodeAnnotation],
     annot_kwargs: Dict[str, Any],
@@ -194,17 +193,17 @@ def create_ext_annotations(
     Creates annotations "ext-key", "ext-value".
 
     Args:
-        node_annotations: Annotations appended here
-        annot_kwargs: Args for :class:`NodeAnnotation`, must contain
-            "layer_idx", "chunk_idx"
         key: Keys after reordering (optional) and repeat_interleave
             (optional)
         value: Values after reordering (optional) and repeat_interleave
             (optional)
-        sort_index: Sort index determining reordering (3D or 1D).
-            Stored in `NodeAnnotation.extra_info`.
+        extra_info: Information about reordering, see
+            :func:`reorder_key_value`. Stored in `NodeAnnotation.extra_info`.
         extend_kv: Have `key`, `value` been extended to have
             `shape[1] == n_head`?
+        node_annotations: Annotations appended here
+        annot_kwargs: Args for :class:`NodeAnnotation`, must contain
+            "layer_idx", "chunk_idx"
 
     """
     for buffer, name in ((key, "key"), (value, "value")):
@@ -218,9 +217,7 @@ def create_ext_annotations(
             dtype=torch.int32,
         )
         delta = buffer.gather(2, index)
-        if sort_index is not None:
-            extra_info = {"sort_index": sort_index}
-        else:
+        if not extra_info:
             extra_info = None
         annotation = NodeAnnotation(
             **annot_kwargs,
@@ -258,8 +255,7 @@ def apply_ext_annotation(
             f"annotation.kind = {annotation.kind}, must be in {allowed_kinds}"
         )
     extra_info = annotation.extra_info
-    sort_index = None if extra_info is None else extra_info.get("sort_index")
-    if sort_index is not None:
-        buffer = reorder_buffer_given_sort_index(buffer, sort_index)
+    if extra_info is not None:
+        buffer = reorder_buffer_given_extra_info(buffer, **extra_info)
     buffer = repeat_interleave(buffer, n_head=target_dim1)
     return buffer

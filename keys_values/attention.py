@@ -184,6 +184,7 @@ class MultiHeadSelfAttention:
         use_eager_kernel: Optional[UseEagerPredicate] = None,
         filter_sdpa_kernels: bool = True,
         flexatt_args: Optional[FlexAttentionArgs] = None,
+        sort_if_3d: bool = False,
     ) -> None:
         self.config = config
         if pos_encoding is None:
@@ -206,6 +207,7 @@ class MultiHeadSelfAttention:
             use_eager_kernel = lambda kv_len, q_len: q_len < 512
         self._use_eager_kernel = use_eager_kernel
         self.flexatt_args = flexatt_args
+        self._sort_if_3d = sort_if_3d
 
     @property
     def sdpa_kernels(self) -> Union[SDPBackend, List[SDPBackend]]:
@@ -256,7 +258,7 @@ class MultiHeadSelfAttention:
                 part of the mask matrix
             annotation_callback: If this is given, it is a callback passed
                 to specialized SDPA variants. Its arguments are
-                `key, value, sort_index`.
+                `key, value, extra_info, extend_kv`.
 
         Returns:
             `attn_output, attn_weights`, where `attn_weights` is `None` if
@@ -419,6 +421,7 @@ class MultiHeadSelfAttention:
                 sdpa_kernels=self.sdpa_kernels,
                 do_filter_kernels=self._do_filter_kernels,
                 annotation_callback=annotation_callback,
+                sort_if_3d=self._sort_if_3d,
             )
             if self._do_filter_kernels:
                 self._do_filter_kernels = False
@@ -435,6 +438,7 @@ class MultiHeadSelfAttention:
                 input_pos=input_pos,
                 token_positions=token_positions,
                 annotation_callback=annotation_callback,
+                sort_if_3d=self._sort_if_3d,
             )
         elif sdpa_mode == SDPA_IMPL_PYTORCH:
             # We need `key` and `value` at the same time here. For the training
@@ -443,7 +447,7 @@ class MultiHeadSelfAttention:
             if annotation_callback is not None:
                 annotation_callback = partial(
                     annotation_callback,
-                    sort_index=None,
+                    extra_info=dict(),
                 )
             attn_outputs, filtered_kernels = pytorch_scaled_dot_product_attention(
                 query=query,
