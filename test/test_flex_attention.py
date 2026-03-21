@@ -162,7 +162,7 @@ def test_flexatt_working(tp_ndim, sort_if_3d):
 
 @_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
-    "n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size, attention_logit_softcapping, tp_ndim, atol",
+    "n_head, n_query_groups, q_len, kv_len, dtype, sliding_window_size, attention_logit_softcapping, atol, tp_ndim",
     [
         a + (b,)
         for a, b in product(
@@ -193,8 +193,8 @@ def test_comparison(
     dtype,
     sliding_window_size,
     attention_logit_softcapping,
-    tp_ndim,
     atol,
+    tp_ndim,
 ):
     seed = 31415927
     torch.manual_seed(seed)
