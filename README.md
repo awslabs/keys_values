@@ -630,10 +630,10 @@ library (and would be very happy for help, see
 * PyTorch `flex_attention` SDPA: We use
   `torch.nn.attention.flex_attention.flex_attention`, see
   [keys_values/flex_attention.py](./keys_values/flex_attention.py) for details.
-  These kernels are the default. We support `config.sliding_window_size` and
-  `config.attention_logit_softcapping` with them. We also reorder `key`,
-  `query` so that the new entries (corresponding to `query`) are on the right
-  end. Cannot return attention weights.
+  These kernels are the default. We support `config.attention_logit_softcapping`
+  with them, but not (currently) `config.sliding_window_size`. We also reorder
+  `key`, `query` so that the new entries (corresponding to `query`) are on the
+  right end. Cannot return attention weights.
   
 * Query-padded PyTorch SDPA: We use
   `torch.nn.functional.scaled_dot_product_attention`, but pad `query` with
@@ -677,6 +677,18 @@ Relevant arguments are:
   in naive SDPA, used in `forward` pass.
 * `attention_backward_temp_size_gb`: Same size limit, but for SDPA computations
   during the `backward` pass. This is discussed [below](#gradient-computation).
+
+**Note**: We do not currently support `config.sliding_window_size` with any of
+our fast SDPA kernels (for reasons explained below). This feature is used in
+`Gemma-2`, `Gemma-3` or `Mistral` models. You can attain the same effect by
+using the `lastrec` KV cache policy with cache length set to the window size.
+This not only allows to use a fast SDPA kernel, but also saves time and memory
+due to a small KV cache length.
+
+Why don't we support `config.sliding_window_size` with `flex_attention`? This
+is because for almost all KV cache policies, the cache entries become reordered.
+We can undo the reordering to support `flex_attention` with standard causal
+attention mask, but not with `config.sliding_window_size`.
 
 ### Gradient Computation
 

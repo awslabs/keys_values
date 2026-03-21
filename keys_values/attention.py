@@ -138,6 +138,9 @@ class MultiHeadSelfAttention:
         used for non-prefill (`input_pos > 0`) if `flexatt_args` is provided
         and attention weights are not required. Cannot be used if attention
         weights are required.
+        Note: Currently, `flex_attention` cannot be used if a sliding window
+        size is used. This is because our current mechanism to support
+        `token_positions` is not compatible with a sliding window size.
     - :const:`SDPA_IMPL_QPADDED_PYTORCH: Variant of PyTorch kernel, where
         `query` is zero-padded. This is implemented in
         :func:`sdpa_wrapper.scaled_dot_product_attention`. Cannot be used
@@ -201,6 +204,16 @@ class MultiHeadSelfAttention:
                 "only with FlexAttention (provide flexatt_args for that). You "
                 "may run out of GPU memory. Consider using a model without "
                 "attention logit softcapping or provide flexatt_args."
+            )
+        if self.config.sliding_window_size is not None:
+            print(
+                "Your model uses sliding window attention "
+                "(config.sliding_window_size != None). This is not supported "
+                "at the moment with any of our efficient SDPA kernels. You can "
+                "obtain the same effect with choosing a 'lastrec' KV cache "
+                "policy, saving time, memory, and being able to use an efficient "
+                "SDPA kernel. I will continue, but this may run really quite "
+                "slowly."
             )
         if use_eager_kernel is None and not use_eager_sdpa_always:
             # This is a good choice for `kv_len = 32768`
@@ -357,7 +370,10 @@ class MultiHeadSelfAttention:
 
         """
         must_eager = return_attn_weights or self.use_eager_sdpa_always
-        use_flex_att = self.flexatt_args is not None and not must_eager
+        sws_given = sliding_window_size is not None
+        use_flex_att = (
+            self.flexatt_args is not None and not must_eager and not sws_given
+        )
         if self.config.attention_logit_softcapping is not None:
             if use_flex_att:
                 return SDPA_IMPL_FLEXATTENTION
@@ -368,11 +384,7 @@ class MultiHeadSelfAttention:
             return SDPA_IMPL_PYTORCH
         if use_flex_att:
             return SDPA_IMPL_FLEXATTENTION
-        elif (
-            must_eager
-            or sliding_window_size is not None
-            or self._use_eager_kernel(kv_len, q_len)
-        ):
+        elif must_eager or sws_given or self._use_eager_kernel(kv_len, q_len):
             return SDPA_IMPL_EAGER_BLOCKS
         else:
             return SDPA_IMPL_QPADDED_PYTORCH
@@ -427,13 +439,15 @@ class MultiHeadSelfAttention:
                 self._do_filter_kernels = False
                 self._sdpa_kernels = filtered_kernels
         elif sdpa_mode == SDPA_IMPL_FLEXATTENTION:
+            if sliding_window_size is not None:
+                raise ValueError("Sliding window size not supported with FlexAttention")
             attn_outputs = scaled_dot_product_attention_flexatt(
                 flexatt_args=self.flexatt_args,
                 query=query,
                 key=k_and_v.keys(),
                 value=k_and_v.values(),
                 scale_factor=scale_factor,
-                sliding_window_size=sliding_window_size,
+                sliding_window_size=None,
                 attention_logit_softcapping=self.config.attention_logit_softcapping,
                 input_pos=input_pos,
                 token_positions=token_positions,

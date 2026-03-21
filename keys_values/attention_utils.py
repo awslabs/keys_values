@@ -451,6 +451,10 @@ def sample_token_positions(
     input_pos: int,
     device: torch.device,
 ) -> torch.Tensor:
+    if input_pos < kv_len:
+        raise ValueError(f"input_pos = {input_pos}, must be >= kv_len = {kv_len}")
+    if q_len >= kv_len:
+        raise ValueError(f"q_len = {q_len}, must be <  kv_len = {kv_len}")
     index_kwargs = dict(dtype=torch.int64, device=device)
     token_positions = torch.zeros(
         (batch_size, n_query_groups, kv_len),
@@ -458,17 +462,18 @@ def sample_token_positions(
     )
     for bs in range(batch_size):
         for nq in range(n_query_groups):
-            token_positions[bs, nq, :] = torch.randperm(
+            row = torch.randperm(
                 input_pos,
                 **index_kwargs,
             )[:kv_len]
             # Ensure that `input_pos:(input_pos + q_len)` is present
             index = torch.randperm(kv_len, **index_kwargs)[:q_len]
-            token_positions[bs, nq, index] = torch.arange(
+            row[index] = torch.arange(
                 input_pos,
                 input_pos + q_len,
                 **index_kwargs,
             )
+            token_positions[bs, nq, :] = row
     return token_positions
 
 
