@@ -41,6 +41,7 @@ from keys_values.attention_utils import (
     sample_token_positions,
     ENTRIES_PER_GB,
 )
+from keys_values.flex_attention import FlexAttentionArgs
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCache, KVCacheParams, DefaultKVCache
@@ -51,6 +52,7 @@ from keys_values.kvcache.test_utils import (
     product_with_devices,
     available_backends,
     create_kv_cache,
+    random_args_cache_forward,
 )
 from keys_values.model import GPT, CausalSelfAttention
 from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
@@ -951,3 +953,112 @@ def test_mha_is_passed_on(device):
         tr_caches,
         prefix="Training replay caches: ",
     )
+
+
+@pytest.mark.parametrize(
+    *product_with_devices(
+        [
+            (4, 2, 128, 512, 512, torch.float16),
+            (4, 4, 8, 256, 342, torch.bfloat16),
+            (8, 4, 128, 136, 256, torch.float16),
+            (12, 4, 16, 512, 512, torch.bfloat16),
+            (24, 8, 2, 512, 768, torch.float16),
+            (9, 3, 128, 512, 664, torch.bfloat16),
+            (12, 4, 16, 512, 512, torch.float16),
+            (24, 8, 2, 512, 2048, torch.bfloat16),
+            (9, 3, 128, 512, 768, torch.float16),
+        ],
+        "n_head, n_query_groups, q_len, kv_len, input_pos, dtype",
+    ),
+)
+def test_reorder_key_value_tp_3d(
+    device,
+    n_head,
+    n_query_groups,
+    q_len,
+    kv_len,
+    input_pos,
+    dtype,
+):
+    seed = 31415927
+    torch.manual_seed(seed)
+
+    batch_size = 2
+    head_size = 32
+
+    config = Config.from_name(
+        "gemma-2-27b",
+        block_size=input_pos + 2 * kv_len,
+        sliding_window_size=None,
+        attention_logit_softcapping=None,
+        n_layer=1,
+        n_query_groups=n_query_groups,
+        n_head=n_head,
+        n_embd=n_head * head_size,
+        intermediate_size=n_head * head_size * 3,
+        rotary_percentage=1.0,
+    )
+    params = KVCacheParams.from_config(
+        config=config,
+        max_batch_size=batch_size,
+        cache_length=kv_len,
+        dtype=dtype,
+    )
+    names = [f"padded-query({sort_if_3d})" for sort_if_3d in (True, False)]
+    mhas = [
+        MultiHeadSelfAttention(config, sort_if_3d=sort_if_3d)
+        for sort_if_3d in (True, False)
+    ]
+    if device.type == "cuda":
+        flexatt_args_no_zp = FlexAttentionArgs(q_lens=[q_len])
+        names.extend([f"flex-att-no-zp({sort_if_3d})" for sort_if_3d in (True, False)])
+        mhas.extend(
+            [
+                MultiHeadSelfAttention(config, flexatt_args=flexatt_args_no_zp, sort_if_3d=sort_if_3d)
+                for sort_if_3d in (True, False)
+            ]
+        )
+        flexatt_args_zp = FlexAttentionArgs(q_lens=[q_len + 8])
+        names.extend([f"flex-att-zp({sort_if_3d})" for sort_if_3d in (True, False)])
+        mhas.extend(
+            [
+                MultiHeadSelfAttention(config, flexatt_args=flexatt_args_zp, sort_if_3d=sort_if_3d)
+                for sort_if_3d in (True, False)
+            ]
+        )
+    # Sample data
+    data = random_args_cache_forward(
+        params,
+        num=kv_len,
+        vocab_size=config.vocab_size,
+        device=device,
+    )
+    token_positions = sample_token_positions(
+        batch_size,
+        n_query_groups,
+        q_len,
+        kv_len,
+        input_pos,
+        device,
+    )
+    outputs = [
+        mha(
+            query=data["query"][:, :, :q_len, :],
+            k_and_v=DefaultKeysAndValues(data["key"], data["value"]),
+            block_idx=0,
+            input_pos=input_pos,
+            token_positions=token_positions,
+        )[0]
+        for mha in mhas
+    ]
+    last_ex = None
+    out1 = outputs[0]
+    name1 = names[0]
+    for out2, name2 in zip(outputs[1:], names[1:]):
+        try:
+            torch.testing.assert_close(out1, out2)
+        except AssertionError as ex:
+            print(f"\n{name1} vs {name2}:\n" + str(ex))
+            last_ex = ex
+    if last_ex is not None:
+        raise last_ex

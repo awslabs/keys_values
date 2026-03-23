@@ -453,8 +453,8 @@ def sample_token_positions(
 ) -> torch.Tensor:
     if input_pos < kv_len:
         raise ValueError(f"input_pos = {input_pos}, must be >= kv_len = {kv_len}")
-    if q_len >= kv_len:
-        raise ValueError(f"q_len = {q_len}, must be <  kv_len = {kv_len}")
+    if q_len > kv_len:
+        raise ValueError(f"q_len = {q_len}, must be <=  kv_len = {kv_len}")
     index_kwargs = dict(dtype=torch.int64, device=device)
     token_positions = torch.zeros(
         (batch_size, n_query_groups, kv_len),

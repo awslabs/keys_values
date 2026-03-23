@@ -26,6 +26,7 @@ from keys_values.sdpa_wrapper import (
     sdpa_check_args,
     reorder_key_value,
     ReorderAnnotationCallback,
+    zeropad_query_on_left,
 )
 from keys_values.utils import repeat_interleave
 
@@ -495,7 +496,7 @@ def scaled_dot_product_attention_flexatt(
         Attention outputs, shape `(batch_size, n_heads, q_len, head_size)`
 
     """
-    batch_size, n_head, n_query_groups, q_len, kv_len, _ = sdpa_check_args(
+    batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(
         query,
         key,
         value,
@@ -546,16 +547,12 @@ def scaled_dot_product_attention_flexatt(
     q_len_tr = flexatt_args.transform_q_len(q_len)
     if q_len_tr > q_len:
         # Use zero padding
-        shape = tuple(query.shape[:2]) + (q_len_tr - q_len, query.shape[-1])
-        query = torch.cat(
-            (
-                query,
-                torch.zeros(*shape, dtype=query.dtype, device=query.device),
-            ),
-            dim=2,
-        )
+        # Importantly, zeros are appended **on the left**, not on the right.
+        # The real query entries must be right-aligned with key, value,
+        # otherwise our causal attention masking does not work out properly.
+        # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
+        query = zeropad_query_on_left(query, q_len_tr - q_len)
     # Deal with non-standard `scale_factor`
-    head_size = query.shape[-1]
     diff = scale_factor * math.sqrt(head_size)
     if not (0.999 < diff < 1.001):
         query = query * diff
@@ -570,7 +567,7 @@ def scaled_dot_product_attention_flexatt(
         enable_gqa=enable_gqa,
     )
     if q_len_tr > q_len:
-        result = result[:, :, :q_len, :]
+        result = result[:, :, (-q_len):, :].clone()
     return result
 
 

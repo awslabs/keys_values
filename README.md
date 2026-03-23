@@ -680,10 +680,13 @@ Relevant arguments are:
 
 **Note**: We do not currently support `config.sliding_window_size` with any of
 our fast SDPA kernels (for reasons explained below). This feature is used in
-`Gemma-2`, `Gemma-3` or `Mistral` models. You can attain the same effect by
+`Gemma-2`, `Gemma-3` or `Mistral` models. You can attain much the same effect by
 using the `lastrec` KV cache policy with cache length set to the window size.
 This not only allows to use a fast SDPA kernel, but also saves time and memory
-due to a small KV cache length.
+due to a small KV cache length (strictly speaking, using the `lastrec` policy is
+equivalent to `config.sliding_window_size` only if `kv_cache.chunk_size == 1`,
+which would run slowly; `lastrec` with an economical chunk size is a reasonable
+approximation, see [here](#cache-length-and-chunk-size)).
 
 Why don't we support `config.sliding_window_size` with `flex_attention`? This
 is because for almost all KV cache policies, the cache entries become reordered.
