@@ -469,15 +469,15 @@ class SDPAArgs:
             `key, value` tensors so that standard causal masking applies.
             If `token_positions` is inherently 3D (in that
             `token_positions[b, h, j]` depends on `b, h`), this can be done
-            by sorting for each `b, h`, or in a way that is cheaper to
-            compute, but may need a little more memory. If this argument is
-            `True`, we use sorting.
+            by sorting for each `b, h`, or in a different way (if this
+            argument is `False`). In some comparisons, sorting ended up
+            being faster overall.
     """
 
     flex_attention: bool = True
     flex_extend_kv: bool = True
     flex_num_q_lens: Optional[int] = 4
-    reorder_sort_if_3d: bool = False
+    reorder_sort_if_3d: bool = True
 
     def __post_init__(self):
         if self.flex_num_q_lens is not None and self.flex_num_q_lens <= 0:
