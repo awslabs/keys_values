@@ -174,10 +174,6 @@ class GradientArgs:
             after this number of :meth:`pack_hook` calls. This avoids running
             up costs trying to match pack args over and over, which can be
             significant.
-        layer_checkpoint_chunk_size: Only relevant if layer input checkpointing
-            uses quantization. We quantize / dequantize checkpoints in chunks
-            of this length (along sequence axis). Larger values require more
-            GPU memory.
         layercp_pin_memory: If `True`, the CPU memory pages for layer input
             checkpoints are pinned. This can run faster, but also needs more
             real CPU memory.
@@ -193,7 +189,6 @@ class GradientArgs:
     single_tokens_for_targets: bool = False
     use_old_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
-    layer_checkpoint_chunk_size: Optional[int] = None
     layercp_pin_memory: bool = False
     cachecp_pin_memory: bool = False
 
@@ -216,7 +211,6 @@ class GradientArgs:
                 f"cachecp_qname = {self.cachecp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}"
             )
         _check_int(self.max_match_trials_pack_arg, "max_match_trials_pack_arg")
-        _check_int(self.layer_checkpoint_chunk_size, "layer_checkpoint_chunk_size")
 
 
 HAS_LEARNING_RATE = {

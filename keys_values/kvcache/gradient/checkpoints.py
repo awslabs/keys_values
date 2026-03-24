@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import replace
-import math
 from typing import List, Optional, Tuple, Dict, Any
 
 import torch
@@ -609,9 +608,20 @@ class LayerInputCheckpoints:
     input of every layer. The object will store inputs for layer indexes in
     `layer_numbers`.
 
+    `cell_ranges` contains tuples `(start, end)`, so that
+    `start[k + 1] == end[k]`, `start[0] == 0`. Internally, buffers for
+    different cell ranges are kept separate (i.e., different tensors).
+    This simplifies CPU-GPU transfers. While it is most efficient to call
+    :meth:`get_checkpoint` and :meth:`set_checkpoint` with
+    `range(input_pos, input_pos + num)` being a cell range, they can be
+    called with any range.
     """
 
-    def __init__(self, layer_numbers: List[int]):
+    def __init__(
+        self,
+        layer_numbers: List[int],
+        cell_ranges: List[Tuple[int, int]],
+    ):
         """
         Args:
             layer_numbers: List of layer numbers for which inputs checkpoints
@@ -619,11 +629,52 @@ class LayerInputCheckpoints:
                 output of the final layer `n_layer - 1` is stored. We also use
                 an entry `n_layer + 1` to store the head gradient during the
                 backward pass.
-
+            cell_ranges: List of tuples `(start, end)`, see above.
         """
+
         assert len(layer_numbers) >= 1
         assert all(x >= 0 for x in layer_numbers)
         self.layer_numbers = layer_numbers.copy()
+        assert cell_ranges[0][0] == 0
+        for rng1, rng2 in zip(cell_ranges[:-1], cell_ranges[1:]):
+            assert rng1[0] < rng1[1]
+            assert rng2[0] == rng1[1]
+        assert cell_ranges[-1][0] < cell_ranges[-1][1]
+        self.cell_ranges = cell_ranges.copy()
+        self.max_seq_length = cell_ranges[-1][1]
+
+    def get_ranges(
+        self,
+        input_pos: int,
+        num: int,
+    ) -> List[Tuple[int, int, int, int, int]]:
+        if not (0 <= input_pos and num > 0 and input_pos + num <= self.max_seq_length):
+            raise ValueError(
+                f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self.max_seq_length}]"
+            )
+        result = []
+        _start = input_pos
+        _end = input_pos + num
+        left_ind = None
+        sum_sizes = 0
+        for ind, (start, end) in enumerate(self.cell_ranges):
+            if start <= _start < end:
+                result.append((ind, _start, min(end, _end), start))
+                left_ind = ind
+                sum_sizes += min(end, _end) - _start
+            if start < _end <= end:
+                if ind > left_ind:
+                    for _ind in range(left_ind + 1, ind):
+                        s, e = self.cell_ranges[_ind]
+                        result.append((_ind, s, e, s))
+                        sum_sizes += e - s
+                    result.append((ind, start, _end, start))
+                    sum_sizes += _end - start
+        assert sum_sizes == num, (sum_sizes, num)
+        return [
+            (ind, l - input_pos, r - input_pos, l - off, r - off)
+            for ind, l, r, off in result
+        ]
 
     def set_checkpoint(
         self,
@@ -645,6 +696,25 @@ class LayerInputCheckpoints:
             is set, or `None` otherwise.
 
         """
+        result = None
+        for ind, start1, end1, start2, end2 in self.get_ranges(
+            input_pos, buffers.shape[1]
+        ):
+            result = self._set_checkpoint(
+                layer_idx,
+                buffers[:, start1:end1, :],
+                ind,
+                start2,
+            )
+        return result
+
+    def _set_checkpoint(
+        self,
+        layer_idx: int,
+        buffers: torch.Tensor,
+        ind: int,
+        rstart: int,
+    ) -> Optional[int]:
         raise NotImplementedError
 
     def get_checkpoint(
@@ -668,6 +738,26 @@ class LayerInputCheckpoints:
             Slice of checkpoint requested
 
         """
+        parts = [
+            self._get_checkpoint(
+                layer_idx,
+                ind,
+                start2,
+                end2,
+                device,
+            )
+            for ind, _, _, start2, end2 in self.get_ranges(input_pos, num)
+        ]
+        return torch.cat(parts, dim=1)
+
+    def _get_checkpoint(
+        self,
+        layer_idx: int,
+        ind: int,
+        rstart: int,
+        rend: int,
+        device: torch.device,
+    ) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -677,17 +767,17 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
     splitting two halves to keys and values.
 
     In fact, we use a list of :class:`KVCacheBufferQuantizedCheckpoints`
-    objects, which share their :class:`QuantizedKVCacheBuffers` object, in
-    order to limit the amount of GPU memory being used.
-
+    objects, one for each cell range, which share their
+    :class:`QuantizedKVCacheBuffers` object, in order to limit the amount
+    of GPU memory being used.
     """
 
     def __init__(
         self,
         model: GPT,
         layer_numbers: List[int],
+        cell_ranges: List[Tuple[int, int]],
         batch_size: int,
-        chunk_size: int,
         qname: str,
         cache_kwargs: Optional[Dict[str, Any]] = None,
         allocate_buffers: bool = False,
@@ -695,21 +785,15 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
         pin_memory: Optional[List[bool]] = None,
     ):
         """
-        If `layers_and_buffers` has more than one entry, the layers in different
-        entries reside on different devices (model-parallel).
-        For each entry, we create a list of
-        :class:`KVCacheBufferQuantizedCheckpoints` objects, all based on the
-        same :class:`QuantizedKVCacheBuffers` from `layers_and_buffers`, so
-        that the sum of `cache_length` is `>= max_seq_length`. This allows to
-        maintain checkpoints of length `max_seq_length`, while limiting the
-        GPU memory being used.
+        We create a list of :class:`KVCacheBufferQuantizedCheckpoints` objects,
+        one for each cell range.
 
         Args:
             model: GPT model
             layer_numbers: List of layer numbers for which inputs checkpoints
                 are stored
+            cell_ranges: List of tuples `(start, end)`, see above.
             batch_size: Batch size
-            chunk_size: We quantize sequence batches in chunks of this length
             qname: Determines quantization buffers
             cache_kwargs: Additional keyword arguments for
                 :class:`QuantizedKVCacheBuffers`.
@@ -720,14 +804,15 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             pin_memory: If given, must have the same length as `layer_numbers`.
                 Checkpoints for layers with `True` entries are pinned in CPU
                 memory. Default: No checkpoints are pinned.
-
         """
-        super().__init__(layer_numbers)
+
+        super().__init__(layer_numbers, cell_ranges)
         if pin_memory is not None and len(pin_memory) != len(layer_numbers):
             raise ValueError(
                 f"pin_memory = {pin_memory}, layer_numbers = {layer_numbers}: Must have same length"
             )
         self.max_seq_length = model.max_seq_length
+        max_cell_length = max(end - start for start, end in cell_ranges)
         # Create quantization buffer to be used
         cache_params = replace(
             model.get_kv_cache_params(0),
@@ -735,7 +820,7 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             n_query_groups=1,
             n_head=1,
             head_size=model.config.n_embd // 2,
-            cache_length=chunk_size,
+            cache_length=max_cell_length,
         )
         if cache_kwargs is not None:
             dequant_kwargs = dict(max_num_ranges=cache_kwargs.get("max_num_ranges"))
@@ -743,7 +828,7 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             dequant_kwargs = None
         quant_buffers = create_quantized_kv_buffers(
             qname=qname,
-            cache_lengths=[chunk_size],
+            cache_lengths=[max_cell_length],
             cache_params=cache_params,
             cache_kwargs=cache_kwargs,
             dequant_kwargs=dequant_kwargs,
@@ -751,20 +836,15 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             device=device,
         )[0]
         # Internally, we use :class:`KVCacheBufferQuantizedCheckpoints` objects
-        num_parts = int(math.ceil(self.max_seq_length / chunk_size))
-        fin_chunk_size = self.max_seq_length - chunk_size * (num_parts - 1)
-        assert 0 < fin_chunk_size <= chunk_size  # Sanity check
-        cache_lengths = [chunk_size] * (num_parts - 1) + [fin_chunk_size]
         self._checkpoints_int = [
             KVCacheBufferQuantizedCheckpoints(
                 chunk_numbers=layer_numbers,
                 quant_buffers=quant_buffers,
-                cache_length=cache_length,
+                cache_length=end - start,
                 pin_memory=pin_memory,
             )
-            for cache_length in cache_lengths
+            for start, end in cell_ranges
         ]
-        self.cache_length = chunk_size
         self.n_embd = model.config.n_embd
 
     def clear(self):
@@ -776,99 +856,69 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
         self._checkpoints_int[0].quant_buffers.deallocate()
         self._checkpoints_int = None
 
-    def _get_ranges(
-        self,
-        input_pos: int,
-        num: int,
-    ) -> List[Tuple[int, int, int]]:
-        if not (0 <= input_pos and num > 0 and input_pos + num <= self.max_seq_length):
-            raise ValueError(
-                f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self.max_seq_length}]"
-            )
-        start_ind = input_pos // self.cache_length
-        start = input_pos % self.cache_length
-        result = []
-        while num > 0:
-            sz = min(num, self.cache_length - start)
-            result.append((start_ind, start, sz))
-            start_ind += 1
-            start = 0
-            num -= sz
-        return result
-
-    def set_checkpoint(
+    def _set_checkpoint(
         self,
         layer_idx: int,
         buffers: torch.Tensor,
-        input_pos: int,
+        ind: int,
+        rstart: int,
     ) -> Optional[int]:
         if layer_idx not in self.layer_numbers:
             return None
-        cp_int = self._checkpoints_int
+        cp_int = self._checkpoints_int[ind]
         if buffers.ndim != 3:
             raise ValueError(f"buffers.shape = {buffers.shape}, must be 3D")
         num = buffers.shape[1]
-        batch_size = cp_int[0].batch_size
-        if batch_size is None and input_pos == 0:
+        batch_size = cp_int.batch_size
+        if batch_size is None:
             batch_size = buffers.shape[0]
         shape = (batch_size, num, self.n_embd)
         if buffers.shape != shape:
             raise ValueError(f"buffers.shape = {buffers.shape}, must be {shape}")
         ne2 = self.n_embd // 2
-        pos = 0
-        l_pos = None
-        for ind, start, sz in self._get_ranges(input_pos, num):
-            l_pos = cp_int[ind].set_checkpoint_slice(
-                chunk_idx=layer_idx,
-                key=buffers[:, None, pos : (pos + sz), :ne2],
-                value=buffers[:, None, pos : (pos + sz), ne2:],
-                input_pos=start,
-            )
-            pos += sz
-        return l_pos
+        return cp_int.set_checkpoint_slice(
+            chunk_idx=layer_idx,
+            key=buffers[:, None, :, :ne2],
+            value=buffers[:, None, :, ne2:],
+            input_pos=rstart,
+        )
 
-    def get_checkpoint(
+    def _get_checkpoint(
         self,
         layer_idx: int,
-        input_pos: int,
-        num: int,
+        ind: int,
+        rstart: int,
+        rend: int,
         device: torch.device,
     ) -> torch.Tensor:
         if layer_idx not in self.layer_numbers:
             raise ValueError(
                 f"layer_idx = {layer_idx} not in layer numbers [{self.layer_numbers}]"
             )
-        cp_int = self._checkpoints_int
-        ranges = self._get_ranges(input_pos, num)
-        result_parts = []
-        for ind, start, sz in ranges:
-            k_and_v = cp_int[ind].get_checkpoint_slice(
-                chunk_idx=layer_idx,
-                input_pos=start,
-                num=sz,
-                device=device,
-            )
-            result_parts.append(
-                torch.cat(
-                    (k_and_v.keys().squeeze(1), k_and_v.values().squeeze(1)),
-                    dim=-1,
-                )
-            )
-        return torch.cat(result_parts, dim=1)
+        cp_int = self._checkpoints_int[ind]
+        k_and_v = cp_int.get_checkpoint_slice(
+            chunk_idx=layer_idx,
+            input_pos=rstart,
+            num=rend - rstart,
+            device=device,
+        )
+        return torch.cat(
+            (k_and_v.keys().squeeze(1), k_and_v.values().squeeze(1)),
+            dim=-1,
+        )
 
 
 class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
     """
-    Internally, we use a :class:`KVCacheBufferDefaultCheckpoints` object,
-    splitting two halves to keys and values.
-
+    Internally, we use :class:`KVCacheBufferDefaultCheckpoints` objects
+    (one for each cell range), splitting two halves to keys and values.
     """
 
     def __init__(
         self,
         layer_numbers: List[int],
+        cell_ranges: List[Tuple[int, int]],
         batch_size: int,
-        max_seq_length: int,
         n_embd: int,
         dtype: Optional[torch.dtype],
         pin_memory: Optional[List[bool]] = None,
@@ -877,16 +927,16 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
         Args:
             layer_numbers: List of layer numbers for which inputs checkpoints
                 are stored
+            cell_ranges: List of tuples `(input_pos, num)`, see above.
             batch_size: Batch size
-            max_seq_length: Maximum sequence length
             n_embd: Number of embedding dimensions
             dtype: Data type
             pin_memory: If given, must have the same length as `layer_numbers`.
                 Checkpoints for layers with `True` entries are pinned in CPU
                 memory. Default: No checkpoints are pinned.
-
         """
-        super().__init__(layer_numbers)
+
+        super().__init__(layer_numbers, cell_ranges)
         if pin_memory is not None and len(pin_memory) != len(layer_numbers):
             raise ValueError(
                 f"pin_memory = {pin_memory}, layer_numbers = {layer_numbers}: Must have same length"
@@ -898,67 +948,63 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
             dtype=dtype,
             device=torch.device("cpu"),
         )
-        self._checkpoints_int = KVCacheBufferDefaultCheckpoints(
-            chunk_numbers=layer_numbers,
-            params=self._buffer_params,
-            cache_length=max_seq_length,
-            pin_memory=pin_memory,
-        )
+        self._checkpoints_int = [
+            KVCacheBufferDefaultCheckpoints(
+                chunk_numbers=layer_numbers,
+                params=self._buffer_params,
+                cache_length=end - start,
+                pin_memory=pin_memory,
+            )
+            for start, end in cell_ranges
+        ]
         self.n_embd = n_embd
 
     def pos_for_layer_idx(self, layer_idx: int) -> Optional[int]:
-        return self._checkpoints_int.pos_for_chunk_idx(layer_idx)
+        return self._checkpoints_int[0].pos_for_chunk_idx(layer_idx)
 
-    def set_checkpoint(
+    def _set_checkpoint(
         self,
         layer_idx: int,
         buffers: torch.Tensor,
-        input_pos: int,
+        ind: int,
+        rstart: int,
     ) -> Optional[int]:
+        cp_int = self._checkpoints_int[ind]
         if buffers.ndim != 3:
             raise ValueError(f"buffers.shape = {buffers.shape}, must be 3D")
         num = buffers.shape[1]
-        batch_size = self._checkpoints_int.batch_size
-        if batch_size is None and input_pos == 0:
+        batch_size = cp_int.batch_size
+        if batch_size is None:
             batch_size = buffers.shape[0]
         shape = (batch_size, num, self.n_embd)
         if buffers.shape != shape:
             raise ValueError(f"buffers.shape = {buffers.shape}, must be {shape}")
-        max_seq_length = self._checkpoints_int.cache_length
-        if not (0 <= input_pos and num > 0 and input_pos + num <= max_seq_length):
-            raise ValueError(
-                f"input_pos = {input_pos}, num = {num}, does not fit into [0, {max_seq_length}]"
-            )
         ne2 = self.n_embd // 2
         device = torch.device("cpu")
-        return self._checkpoints_int.set_checkpoint_slice(
+        return cp_int.set_checkpoint_slice(
             chunk_idx=layer_idx,
             key=buffers[:, None, :, :ne2].to(device=device),
             value=buffers[:, None, :, ne2:].to(device=device),
-            input_pos=input_pos,
+            input_pos=rstart,
         )
 
-    def get_checkpoint(
+    def _get_checkpoint(
         self,
         layer_idx: int,
-        input_pos: int,
-        num: int,
+        ind: int,
+        rstart: int,
+        rend: int,
         device: torch.device,
     ) -> torch.Tensor:
-        max_seq_length = self._checkpoints_int.cache_length
-        if not (0 <= input_pos and num > 0 and input_pos + num <= max_seq_length):
-            raise ValueError(
-                f"input_pos = {input_pos}, num = {num}, does not fit into [0, {max_seq_length}]"
-            )
-        pos = self._checkpoints_int.pos_for_chunk_idx(layer_idx)
-        if pos is None:
+        cp_int = self._checkpoints_int[ind]
+        if cp_int.pos_for_chunk_idx(layer_idx) is None:
             raise ValueError(
                 f"layer_idx = {layer_idx} is not in layer numbers [{self.layer_numbers}]"
             )
-        k_and_v = self._checkpoints_int.get_checkpoint_slice(
+        k_and_v = cp_int.get_checkpoint_slice(
             chunk_idx=layer_idx,
-            input_pos=input_pos,
-            num=num,
+            input_pos=rstart,
+            num=rend - rstart,
             device=device,
         )
         return torch.cat(

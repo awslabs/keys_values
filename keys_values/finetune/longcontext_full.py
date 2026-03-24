@@ -184,7 +184,6 @@ def setup(
         single_tokens_for_targets=False,
         use_old_cache=False,
         max_match_trials_pack_arg=8,
-        layer_checkpoint_chunk_size=None,
         layercp_pin_memory=False,
         cachecp_pin_memory=False,
     ),
@@ -1014,19 +1013,6 @@ def wrap_gpt_model(
                 offload_grad_accum.test_all_reduce()
         else:
             offload_grad_accum = None
-        layer_checkpoint_chunk_size = grad.layer_checkpoint_chunk_size
-        if layer_checkpoint_chunk_size is None:
-            # Default value for chunk size if not given
-            layer_checkpoint_chunk_size = kv_cache.cache_length
-            add_msg = " (default)"
-        else:
-            add_msg = ""
-        if grad.layercp_qname != "default":
-            print_message(
-                f"Using layer_checkpoint_chunk_size = {layer_checkpoint_chunk_size}"
-                + add_msg,
-                fabric,
-            )
         if grad.layercp_pin_memory:
             print_message(
                 "CPU pages for activation (layer input) checkpointing are pinned",
@@ -1052,7 +1038,6 @@ def wrap_gpt_model(
             profile_steps=profile_grad_times,
             offload_device=cpu_offload_device,
             offload_grad_accum=offload_grad_accum,
-            layer_checkpoint_chunk_size=layer_checkpoint_chunk_size,
             debug_profile_forward=profile_parts == "forward",
             debug_profile_backward=profile_parts == "backward",
             debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
