@@ -21,7 +21,10 @@ from keys_values.config import Config
 
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.consts import split_name
-from keys_values.kvcache.gradient.checkpoints import LayerInputQuantizedCheckpoints
+from keys_values.kvcache.gradient.checkpoints import (
+    LayerInputQuantizedCheckpoints,
+    LayerInputDefaultCheckpoints,
+)
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     cache_names_and_devices,
@@ -93,6 +96,15 @@ def test_layer_input_quantized_checkpoints(
 
     # Create two checkpointers, one with chunk size `chunk_size`, the
     # other with chunk size `max_seq_length` (single chunk)
+    starts = list(range(0, max_seq_length, chunk_size))
+    final_size = max_seq_length - starts[-1]
+    cell_ranges = [
+        (start, start + sz)
+        for start, sz in zip(
+            starts,
+            [chunk_size] * (len(starts) - 1) + [final_size],
+        )
+    ]
     kwargs = dict(
         model=gpt_model,
         layer_numbers=[0],
@@ -100,9 +112,9 @@ def test_layer_input_quantized_checkpoints(
         qname=qname,
     )
     checkpoints = []
-    for csize in (chunk_size, max_seq_length):
+    for ranges in (cell_ranges, [(0, max_seq_length)]):
         checkpoints.append(
-            LayerInputQuantizedCheckpoints(chunk_size=csize, **kwargs),
+            LayerInputQuantizedCheckpoints(cell_ranges=ranges, **kwargs),
         )
 
     # Comparison loop
@@ -138,3 +150,40 @@ def test_layer_input_quantized_checkpoints(
                 )
             )
         torch.testing.assert_close(results[0], results[1])
+
+
+@pytest.mark.parametrize(
+    "input_pos, end, desired",
+    [
+        (
+            0,
+            6789,
+            [
+                (0, 0, 1024, 0, 1024),
+                (1, 1024, 1234, 0, 210),
+                (2, 1234, 4096, 0, 2862),
+                (3, 4096, 6789, 0, 2693),
+            ],
+        ),
+        (0, 1024, [(0, 0, 1024, 0, 1024)]),
+        (1024, 4096, [(1, 0, 210, 0, 210), (2, 210, 3072, 0, 2862)]),
+        (111, 1020, [(0, 0, 909, 111, 1020)]),
+        (
+            1030,
+            5555,
+            [(1, 0, 204, 6, 210), (2, 204, 3066, 0, 2862), (3, 3066, 4525, 0, 1459)],
+        ),
+        (1024, 1235, [(1, 0, 210, 0, 210), (2, 210, 211, 0, 1)]),
+    ],
+)
+def test_layer_input_get_ranges(input_pos, end, desired):
+    cell_ranges = [(0, 1024), (1024, 1234), (1234, 4096), (4096, 6789)]
+    checkpoints = LayerInputDefaultCheckpoints(
+        layer_numbers=[0],
+        cell_ranges=cell_ranges,
+        batch_size=1,
+        n_embd=128,
+        dtype=torch.bfloat16,
+    )
+    result = checkpoints.get_ranges(input_pos, end - input_pos)
+    assert result == desired
