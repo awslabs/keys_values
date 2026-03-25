@@ -122,18 +122,30 @@ class Helmet(SequenceLengthFilteredDataModule):
                 metadata = {METADATA_SEQ_LENGTHS_KEY: {}}
             if self.dataset_key not in metadata[METADATA_SEQ_LENGTHS_KEY]:
                 metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key] = {}
-            if self.max_length not in metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key]:
-                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][self.max_length] = {}
-            if model_name not in metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][self.max_length]:
-                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][self.max_length][model_name] = {}
+            if (
+                self.max_length
+                not in metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key]
+            ):
+                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][
+                    self.max_length
+                ] = {}
+            if (
+                model_name
+                not in metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][
+                    self.max_length
+                ]
+            ):
+                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][self.max_length][
+                    model_name
+                ] = {}
             if dev_needs_store:
-                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][self.max_length][model_name][
-                    "dev"
-                ] = dev_seq_lengths
+                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][self.max_length][
+                    model_name
+                ]["dev"] = dev_seq_lengths
             if eval_needs_store:
-                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][self.max_length][model_name][
-                    "eval"
-                ] = eval_seq_lengths
+                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][self.max_length][
+                    model_name
+                ]["eval"] = eval_seq_lengths
             self._store_metadata(metadata)
         return train_data, test_data
 
@@ -180,8 +192,13 @@ class Helmet(SequenceLengthFilteredDataModule):
             else dataset
         )
         _list_output_datasets = {
-            "nq", "trivia_qa", "hotpot_qa", "pop_qa",
-            "narrative_qa", "ruler_mk_needle", "ruler_mk_uuid",
+            "nq",
+            "trivia_qa",
+            "hotpot_qa",
+            "pop_qa",
+            "narrative_qa",
+            "ruler_mk_needle",
+            "ruler_mk_uuid",
         }
         results: RawDatasetType = []
         new_seq_lengths: List[int] = []
