@@ -119,12 +119,16 @@ class Helmet(SequenceLengthFilteredDataModule):
         if dev_needs_store or eval_needs_store:
             if metadata is None or METADATA_SEQ_LENGTHS_KEY not in metadata:
                 metadata = {METADATA_SEQ_LENGTHS_KEY: {}}
-            if model_name not in metadata[METADATA_SEQ_LENGTHS_KEY]:
-                metadata[METADATA_SEQ_LENGTHS_KEY][model_name] = {}
+            if self.dataset_key not in metadata[METADATA_SEQ_LENGTHS_KEY]:
+                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key] = {}
+            if model_name not in metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key]:
+                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][model_name] = {}
             if dev_needs_store:
-                metadata[METADATA_SEQ_LENGTHS_KEY][model_name]["dev"] = dev_seq_lengths
+                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][model_name][
+                    "dev"
+                ] = dev_seq_lengths
             if eval_needs_store:
-                metadata[METADATA_SEQ_LENGTHS_KEY][model_name][
+                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][model_name][
                     "eval"
                 ] = eval_seq_lengths
             self._store_metadata(metadata)
@@ -203,6 +207,8 @@ class Helmet(SequenceLengthFilteredDataModule):
         if metadata is None:
             return None
         result = metadata.get(METADATA_SEQ_LENGTHS_KEY)
+        if result is not None:
+            result = result.get(self.dataset_key)
         if result is not None:
             result = result.get(self.tokenizer.model_name)
         if result is not None:
