@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import random
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -121,14 +122,16 @@ class Helmet(SequenceLengthFilteredDataModule):
                 metadata = {METADATA_SEQ_LENGTHS_KEY: {}}
             if self.dataset_key not in metadata[METADATA_SEQ_LENGTHS_KEY]:
                 metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key] = {}
-            if model_name not in metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key]:
-                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][model_name] = {}
+            if self.max_length not in metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key]:
+                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][self.max_length] = {}
+            if model_name not in metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][self.max_length]:
+                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][self.max_length][model_name] = {}
             if dev_needs_store:
-                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][model_name][
+                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][self.max_length][model_name][
                     "dev"
                 ] = dev_seq_lengths
             if eval_needs_store:
-                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][model_name][
+                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][self.max_length][model_name][
                     "eval"
                 ] = eval_seq_lengths
             self._store_metadata(metadata)
@@ -176,6 +179,10 @@ class Helmet(SequenceLengthFilteredDataModule):
             if seq_lengths is None
             else dataset
         )
+        _list_output_datasets = {
+            "nq", "trivia_qa", "hotpot_qa", "pop_qa",
+            "narrative_qa", "ruler_mk_needle", "ruler_mk_uuid",
+        }
         results: RawDatasetType = []
         new_seq_lengths: List[int] = []
         for idx, instance in enumerate(data_iter):
@@ -187,10 +194,16 @@ class Helmet(SequenceLengthFilteredDataModule):
                 seq_length = seq_lengths[idx]
             if seq_length > self.max_seq_length:
                 continue
+            if self.dataset_key in _list_output_datasets:
+                seed = idx * 10086 % 1024
+                random.seed(seed)
+                output = str(random.choice(instance["output"]))
+            else:
+                output = instance["output"]
             results.append(
                 {
                     "instruction": instruction,
-                    "output": instance["output"],
+                    "output": output,
                     NUM_TOKENS_NAME: seq_length,
                 }
             )
@@ -209,6 +222,8 @@ class Helmet(SequenceLengthFilteredDataModule):
         result = metadata.get(METADATA_SEQ_LENGTHS_KEY)
         if result is not None:
             result = result.get(self.dataset_key)
+        if result is not None:
+            result = result.get(self.max_length)
         if result is not None:
             result = result.get(self.tokenizer.model_name)
         if result is not None:
