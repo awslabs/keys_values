@@ -184,7 +184,6 @@ def setup(
         single_tokens_for_targets=False,
         use_old_cache=False,
         max_match_trials_pack_arg=8,
-        layer_checkpoint_chunk_size=None,
         layercp_pin_memory=False,
         cachecp_pin_memory=False,
     ),
@@ -859,6 +858,12 @@ def get_mha_and_cache_kwargs(
     yarn_rope: bool,
     fabric: Optional[L.Fabric],
 ) -> Dict[str, Any]:
+    """
+    Compiles `mha_kwargs` to be used for creating the model. We also update
+    `kv_cache.cache_kwargs` with these arguments, so that KV caches use them
+    as well.
+
+    """
     cache_kwargs = kv_cache.cache_kwargs
     # Order of preference for SDPA kernels
     limit_gb = attention_forward_temp_size_gb
@@ -880,6 +885,7 @@ def get_mha_and_cache_kwargs(
         mha_kwargs["sdpa_kernels"] = cache_kwargs["sdpa_kernels"]
     else:
         mha_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
+    mha_kwargs["sort_if_3d"] = sdpa.reorder_sort_if_3d
     if sdpa.flex_attention:
         # The block mask managers (for prefill, for chunks) are shared
         # among all multi-head attention blocks
@@ -933,10 +939,7 @@ def wrap_gpt_model(
     )
     gpt_model.clear_kv_caches()
     cache_kwargs = dict() if kv_cache.cache_kwargs is None else kv_cache.cache_kwargs
-    cache_kwargs = dict(
-        cache_kwargs,
-        max_chunk_size=kv_cache.maximum_chunk_size(),
-    )
+    cache_kwargs["max_chunk_size"] = kv_cache.maximum_chunk_size()
     cache_kwargs = cleanup_cache_kwargs(
         split_name(kv_cache.name)[0],
         cache_kwargs,
@@ -1014,19 +1017,6 @@ def wrap_gpt_model(
                 offload_grad_accum.test_all_reduce()
         else:
             offload_grad_accum = None
-        layer_checkpoint_chunk_size = grad.layer_checkpoint_chunk_size
-        if layer_checkpoint_chunk_size is None:
-            # Default value for chunk size if not given
-            layer_checkpoint_chunk_size = kv_cache.cache_length
-            add_msg = " (default)"
-        else:
-            add_msg = ""
-        if grad.layercp_qname != "default":
-            print_message(
-                f"Using layer_checkpoint_chunk_size = {layer_checkpoint_chunk_size}"
-                + add_msg,
-                fabric,
-            )
         if grad.layercp_pin_memory:
             print_message(
                 "CPU pages for activation (layer input) checkpointing are pinned",
@@ -1052,7 +1042,6 @@ def wrap_gpt_model(
             profile_steps=profile_grad_times,
             offload_device=cpu_offload_device,
             offload_grad_accum=offload_grad_accum,
-            layer_checkpoint_chunk_size=layer_checkpoint_chunk_size,
             debug_profile_forward=profile_parts == "forward",
             debug_profile_backward=profile_parts == "backward",
             debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,

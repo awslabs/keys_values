@@ -25,15 +25,39 @@ from keys_values.kvcache.gradient.annotation import (
     create_random_index,
     MAX_DELTA_TRANS_LENGTH,
 )
-from keys_values.kvcache.gradient.train_attn_weights_replay import (
-    TrainingAttnWeightsReplayCache,
-)
 from keys_values.kvcache.test_utils import (
     random_tensor,
     available_backends,
     random_index,
 )
 from keys_values.utils import expand_index, repeat_interleave, randint_torch
+
+
+def _transform_index(
+    index: torch.Tensor,
+    sort_index: torch.Tensor,
+) -> torch.Tensor:
+    batch_size, n_query_groups, num, head_size = index.shape
+    si_len = sort_index.shape[-1]
+    assert sort_index.shape == (batch_size, n_query_groups, si_len)
+    sort_index = sort_index.to(dtype=index.dtype)
+    index = index[:, :, :, 0]
+    result = (
+        torch.empty_like(sort_index)
+        .scatter_(
+            2,
+            sort_index,
+            torch.arange(
+                si_len,
+                dtype=index.dtype,
+                device=index.device,
+            )
+            .view(1, 1, -1)
+            .expand(batch_size, n_query_groups, -1),
+        )
+        .gather(2, index)
+    )
+    return expand_index(result, head_size)
 
 
 @pytest.mark.parametrize(
@@ -115,7 +139,7 @@ def test_extract_delta(device, dtype):
         delta = repeat_interleave(keys.gather(2, ext_index), n_head)
         assert delta.shape == (batch_size, n_head, MAX_DELTA_TRANS_LENGTH, head_size)
         ext_index = repeat_interleave(
-            TrainingAttnWeightsReplayCache._transform_index(
+            _transform_index(
                 index=ext_index,
                 sort_index=sort_index,
             ),

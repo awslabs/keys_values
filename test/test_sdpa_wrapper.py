@@ -31,8 +31,11 @@ from keys_values.kvcache.test_utils import (
     random_args_cache_forward,
     range_from_args,
 )
-from keys_values.sdpa_wrapper import scaled_dot_product_attention as wrapper_sdpa
-from keys_values.utils import randint_torch
+from keys_values.sdpa_wrapper import (
+    scaled_dot_product_attention as wrapper_sdpa,
+    reorder_key_value,
+)
+from keys_values.utils import randint_torch, index_to_3d
 
 
 @pytest.mark.parametrize(
@@ -234,3 +237,41 @@ def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
             **tol_kwargs,
         )
         input_pos = end
+
+
+def test_reorder_key_value_for_1d_token_positions():
+    seed = 31415927
+    torch.random.manual_seed(seed)
+
+    num_repeat = 50
+    for _ in range(num_repeat):
+        batch_size = randint_torch(1, 4)
+        n_query_groups = randint_torch(1, 8)
+        cache_length = randint_torch(64, 256)
+        head_size = 2 ** randint_torch(4, 7)
+        shape = (batch_size, n_query_groups, cache_length, head_size)
+        key = torch.randn(shape)
+        value = torch.randn(shape)
+        token_positions = index_to_3d(
+            torch.randperm(cache_length),
+            batch_size,
+            n_query_groups,
+        )
+        res_1 = reorder_key_value(
+            key,
+            value,
+            token_positions,
+            input_pos=16,
+            q_len=8,
+            sort_if_3d=True,
+        )
+        res_2 = reorder_key_value(
+            key,
+            value,
+            token_positions.contiguous(),
+            input_pos=16,
+            q_len=8,
+            sort_if_3d=True,
+        )
+        for i in range(2):
+            torch.testing.assert_close(res_1[i], res_2[i])

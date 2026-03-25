@@ -174,10 +174,6 @@ class GradientArgs:
             after this number of :meth:`pack_hook` calls. This avoids running
             up costs trying to match pack args over and over, which can be
             significant.
-        layer_checkpoint_chunk_size: Only relevant if layer input checkpointing
-            uses quantization. We quantize / dequantize checkpoints in chunks
-            of this length (along sequence axis). Larger values require more
-            GPU memory.
         layercp_pin_memory: If `True`, the CPU memory pages for layer input
             checkpoints are pinned. This can run faster, but also needs more
             real CPU memory.
@@ -193,7 +189,6 @@ class GradientArgs:
     single_tokens_for_targets: bool = False
     use_old_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
-    layer_checkpoint_chunk_size: Optional[int] = None
     layercp_pin_memory: bool = False
     cachecp_pin_memory: bool = False
 
@@ -216,7 +211,6 @@ class GradientArgs:
                 f"cachecp_qname = {self.cachecp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}"
             )
         _check_int(self.max_match_trials_pack_arg, "max_match_trials_pack_arg")
-        _check_int(self.layer_checkpoint_chunk_size, "layer_checkpoint_chunk_size")
 
 
 HAS_LEARNING_RATE = {
@@ -465,11 +459,19 @@ class SDPAArgs:
             which different graphs are compiled. Zero-padding of the `query`
             argument is used then. If not given, each different `q_len` value
             gets its own graph (not recommended).
+        reorder_sort_if_3d: For both SDPA variants, we (currently) reorder
+            `key, value` tensors so that standard causal masking applies.
+            If `token_positions` is inherently 3D (in that
+            `token_positions[b, h, j]` depends on `b, h`), this can be done
+            by sorting for each `b, h`, or in a different way (if this
+            argument is `False`). In some comparisons, sorting ended up
+            being faster overall.
     """
 
     flex_attention: bool = True
     flex_extend_kv: bool = True
     flex_num_q_lens: Optional[int] = 4
+    reorder_sort_if_3d: bool = True
 
     def __post_init__(self):
         if self.flex_num_q_lens is not None and self.flex_num_q_lens <= 0:

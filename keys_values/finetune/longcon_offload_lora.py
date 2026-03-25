@@ -93,7 +93,6 @@ def setup(
         single_tokens_for_targets=False,
         use_old_cache=False,
         max_match_trials_pack_arg=8,
-        layer_checkpoint_chunk_size=None,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
     head_model_kwargs: Optional[Dict[str, Any]] = None,

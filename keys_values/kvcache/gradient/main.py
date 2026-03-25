@@ -238,7 +238,6 @@ class LongContextGradientModel(LongContextInferenceModel):
         profile_steps: bool = False,
         offload_device: Optional[torch.device] = None,
         offload_grad_accum: Optional[CPUOffloadAccumulateGradients] = None,
-        layer_checkpoint_chunk_size: Optional[int] = None,
         track_unmatched_annotations: Optional[Callable[[int, int], bool]] = None,
         debug_gpt_model: Optional[GPT] = None,
         debug_intermediates: Optional[DebugIntermediates] = None,
@@ -309,10 +308,6 @@ class LongContextGradientModel(LongContextInferenceModel):
                 computation.
             offload_device: See above.
             offload_grad_accum: See above.
-            layer_checkpoint_chunk_size: If `layercp_qname != "default"`, layer
-                input checkpoints are quantized. Quantization is done in chunks
-                of this length. Determines GPU memory requirements. A value
-                close to the cache length is recommended.
             track_unmatched_annotations: If given, we track for each unmatched
                 pack argument the annotations it was matched against. We
                 print this information for `(layer_idx, chunk_idx)` such that
@@ -416,11 +411,6 @@ class LongContextGradientModel(LongContextInferenceModel):
         else:
             self._offload_grad_accum = None
         self._init_cpu_offloading()
-        if layercp_qname != "default" and layer_checkpoint_chunk_size is None:
-            raise ValueError(
-                "layer_checkpoint_chunk_size must be given if layercp_qname != 'default'"
-            )
-        self._layer_checkpoint_chunk_size = layer_checkpoint_chunk_size
         self._track_unmatched_annotations = track_unmatched_annotations
         self._work_device = None
         self._debug_gpt_model = debug_gpt_model
@@ -626,6 +616,17 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._input_ids = input_ids
         self._targets = targets
 
+    def _get_cell_ranges(self) -> List[Tuple[int, int]]:
+        start = 0
+        ch_pos = 0
+        ranges = []
+        for num_chunks in self.chunks_per_cell:
+            num = sum(sz for sz in self.chunk_sizes[ch_pos : ch_pos + num_chunks])
+            ranges.append((start, start + num))
+            start += num
+            ch_pos += num_chunks
+        return ranges
+
     def _create_layer_checkpointers(self):
         # Layer input checkpoints
         layer_numbers = self._create_layer_numbers()
@@ -634,12 +635,13 @@ class LongContextGradientModel(LongContextInferenceModel):
         else:
             pin_memory = None
         dtype = self.gpt_model.get_kv_cache_params(0).dtype
+        cell_ranges = self._get_cell_ranges()
         if self.layercp_qname == "default":
             # Checkpoints are not quantized
             self.layer_checkpoints = LayerInputDefaultCheckpoints(
                 layer_numbers=layer_numbers,
+                cell_ranges=cell_ranges,
                 batch_size=self.batch_size,
-                max_seq_length=self.gpt_model.max_seq_length,
                 n_embd=self.config.n_embd,
                 dtype=dtype,
                 pin_memory=pin_memory,
@@ -656,8 +658,8 @@ class LongContextGradientModel(LongContextInferenceModel):
             self.layer_checkpoints = LayerInputQuantizedCheckpoints(
                 model=self.gpt_model,
                 layer_numbers=layer_numbers,
+                cell_ranges=cell_ranges,
                 batch_size=self.batch_size,
-                chunk_size=self._layer_checkpoint_chunk_size,
                 qname=self.layercp_qname,
                 cache_kwargs=dict(
                     self.cache_kwargs,

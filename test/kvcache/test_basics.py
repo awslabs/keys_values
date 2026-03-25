@@ -25,7 +25,7 @@ from keys_values.kvcache.test_utils import (
     available_backends,
     product_with_devices,
 )
-from keys_values.utils import randint_torch
+from keys_values.utils import randint_torch, index_to_3d, is_index_1d
 
 
 @pytest.mark.parametrize(
@@ -153,3 +153,26 @@ def test_incremental_versus_singlepass(device, dtype, tol_kwargs):
                 y_sshot[:, pos : (pos + 1), :],
                 **tol_kwargs,
             )
+
+
+def test_index_to_3d():
+    for shape in [
+        (2, 3, 4),
+        (1, 2, 3),
+        (2, 1, 3),
+        (1, 1, 2),
+        (3, 1, 1),
+        (1, 2, 1),
+        (1, 1, 1),
+    ]:
+        size = shape[2]
+        index = torch.arange(size)
+        result = index_to_3d(index, *shape[:-1])
+        assert is_index_1d(result), ("type 1", shape, result.shape, result.stride())
+        if size > 1:
+            # Can change the 1D row, tensor remains 1D
+            result[0, 0, :size] = 321
+            assert is_index_1d(result), ("type 3", shape, result.shape, result.stride())
+        index = torch.arange(size * 2)[:size]
+        result = index_to_3d(index, *shape[:-1])
+        assert is_index_1d(result), ("type 2", shape, result.shape, result.stride())
