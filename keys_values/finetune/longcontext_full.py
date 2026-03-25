@@ -1001,6 +1001,7 @@ def wrap_gpt_model(
         }
         autograd_hooks_kwargs: Dict[str, Any] = dict(
             may_match_twice=may_match_twice_factory(grad, gpt_model),
+            debug_print_annotations=grad.debug_print_annotations,
         )
         if grad.max_match_trials_pack_arg is not None:
             autograd_hooks_kwargs["max_match_trials_pack_arg"] = (

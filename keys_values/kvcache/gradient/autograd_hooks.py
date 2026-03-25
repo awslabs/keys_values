@@ -459,6 +459,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         track_unmatched_annotations: bool = False,
         arrays_cleanup: Optional[ArraysForCleanup] = None,
         track_largest_shape: bool = False,
+        debug_print_annotations: bool = False,
     ):
         """
         Args:
@@ -481,6 +482,8 @@ class CellComputationAutogradHooks(AutogradHooks):
                 layer_idx, chunk_idx`) it was matched against. For the remaining
                 unmatched pack arguments, this lists all annotations the argument
                 was unsuccessfully matched against.
+            debug_print_annotations: If `True`, we log all annotations being
+                matched.
 
         """
         self.batch_size = batch_size
@@ -521,7 +524,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self.cache_lengths = None
         self.grace_period = None
         # If this is set, we log all annotations being matched
-        self.debug_print_annotations = False
+        self.debug_print_annotations = debug_print_annotations
         self._track_largest_shape = track_largest_shape
         self._largest_shape = None
         self._track_unmatched_annotations = track_unmatched_annotations

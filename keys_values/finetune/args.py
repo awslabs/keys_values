@@ -180,6 +180,9 @@ class GradientArgs:
         cachecp_pin_memory: If `True`, the CPU memory pages for KV cache
             checkpoints are pinned. This can run faster, but also needs more
             real CPU memory.
+        debug_print_annotations: If `True`, debug logging during `backward`
+            computations are written which allow to track annotations for
+            `autograd` saved tensors hooks.
     """
 
     layers_per_cell: int = 1
@@ -189,8 +192,9 @@ class GradientArgs:
     single_tokens_for_targets: bool = False
     use_old_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
-    layercp_pin_memory: bool = False
-    cachecp_pin_memory: bool = False
+    layercp_pin_memory: bool = True
+    cachecp_pin_memory: bool = True
+    debug_print_annotations: bool = False
 
     def __post_init__(self):
         _check_positive(self.layers_per_cell, "layers_per_cell")
