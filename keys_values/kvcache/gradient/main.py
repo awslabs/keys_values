@@ -411,6 +411,9 @@ class LongContextGradientModel(LongContextInferenceModel):
         else:
             self._offload_grad_accum = None
         self._init_cpu_offloading()
+        # `scale_factor` value passed in last recent :meth:`forward` call.
+        # This is needed in :meth:`backward`
+        self._current_scale_factor = None
         self._track_unmatched_annotations = track_unmatched_annotations
         self._work_device = None
         self._debug_gpt_model = debug_gpt_model
@@ -492,6 +495,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 targets,
                 scale_factor,
             )
+            self._current_scale_factor = scale_factor
         else:
             loss_value = self._forward_only(
                 input_ids,
@@ -523,6 +527,8 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._check_status("forward_done")
         if not self.training:
             raise IndexError("Must be in training mode for gradient computations")
+        if self._current_scale_factor is None:
+            raise IndexError("Must call `forward` in training mode first")
         self._backward_accumulate_gradients()
         self.clear()  # Reset, also status to "init"
 
@@ -539,6 +545,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._replay_logs = None
         self._record_gpu_memory_snapshots = None
         self._record_gpu_memory_kind = None
+        self._current_scale_factor = None
         self._clear_backward()
 
     def _clear_backward(self):
@@ -1068,6 +1075,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         self.accumulator.run_head_model(
             gpt_model=shard_on_device,
             head_model=self.head_model,
+            scale_factor=self._current_scale_factor,
             replay_logs=self._replay_logs,
             chunks_per_cell=self.chunks_per_cell,
             get_inputs_slice=partial(get_inputs_slice, layer_idx=self.config.n_layer),

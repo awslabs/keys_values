@@ -58,6 +58,30 @@ DATASET_PARENT_DIR = (
     "~/.cache/huggingface/helmet/data"  # the default place to store the cache data
 )
 
+SUPPORTED_DATASET_KEYS = [
+    "nq",
+    "trivia_qa",
+    "hotpot_qa",
+    "pop_qa",
+    "alce_asqa",
+    "alce_qampari",
+    "ms_macro",
+    "trec_coarse",
+    "trec_fine",
+    "nlu",
+    "banking77",
+    "clinc150",
+    "narrative_qa",
+    "infinite_bench_qa",
+    "infinite_bench_mc",
+    "infinite_bench_sum",
+    "multi_lex_sum",
+    "json_kv",
+    "ruler_mk_needle",
+    "ruler_mk_uuid",
+    "ruler_mv",
+]
+
 
 def download_source_data(download_dir: str) -> None:
     """

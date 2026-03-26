@@ -1310,6 +1310,19 @@ def fit(
             if train_iterator.epoch >= train.epochs:
                 break
 
+            if devices > 1:
+                # Cater for token-averaging of loss values and gradients
+                num_tokens_batch = model.head_model.num_target_entries(batch["targets"])
+                sum_tokens_tensor = torch.tensor(
+                    num_tokens_batch,
+                    device=fabric.device,
+                    dtype=torch.int64,
+                )
+                fabric.all_reduce(sum_tokens_tensor, reduce_op="sum")
+                loss_weight = num_tokens_batch * devices / sum_tokens_tensor.item()
+            else:
+                loss_weight = 1.0
+
             if record_gpu_memory_snapshots is not None:
                 run_no = state["iter_num"] - 1
                 if record_gpu_memory_period >= 1:
@@ -1347,7 +1360,7 @@ def fit(
             model_kwargs = dict(
                 input_ids=batch[INPUT_IDS_NAME],
                 targets=batch["targets"],
-                scale_factor=1.0
+                scale_factor=loss_weight
                 / train.gradient_accumulation_iters(devices, num_nodes),
                 record_gpu_memory_snapshots=record_gpu_memory_snapshots,
                 record_gpu_memory_kind=(
@@ -1563,7 +1576,12 @@ def validate_and_all_reduce(
     with torch.no_grad():
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
         time_start = time.perf_counter()
-        val_loss = validate(model, val_dataloader, eval, batch_transform)
+        val_loss, num_target_tokens = validate(
+            model,
+            val_dataloader,
+            eval,
+            batch_transform,
+        )
         if generate_example_kwargs is not None:
             generate_example(
                 fabric=fabric,
@@ -1577,13 +1595,20 @@ def validate_and_all_reduce(
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
 
     if fabric is not None:
-        val_loss_tensor = val_loss.clone().to(fabric.device)
+        sum_tokens_tensor = torch.tensor(
+            num_target_tokens,
+            device=fabric.device,
+            dtype=torch.int64,
+        )
+        fabric.all_reduce(sum_tokens_tensor, reduce_op="sum")
+        weight = num_target_tokens / sum_tokens_tensor.item()
+        val_loss_tensor = (val_loss.clone() * weight).to(fabric.device)
+        fabric.all_reduce(val_loss_tensor, reduce_op="sum")
         val_time_tensor = torch.tensor(
             val_time,
             device=fabric.device,
             dtype=torch.float32,
         )
-        fabric.all_reduce(val_loss_tensor, reduce_op="mean")
         fabric.all_reduce(val_time_tensor, reduce_op="mean")
         val_time = val_time_tensor.item()
     else:
@@ -1606,18 +1631,22 @@ def validate(
     val_dataloader: MyDataLoader,
     eval: EvalArgs,
     batch_transform: BatchTransform,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, int]:
     model.eval()
     losses = torch.zeros(min(len(val_dataloader), eval.max_iters))
+    num_target_tokens = 0
     for k, batch in enumerate(val_dataloader):
         if k >= eval.max_iters:
             break
         batch = batch_transform(batch)
-        losses[k] = model(batch[INPUT_IDS_NAME], batch["targets"]).mean()
+        targets = batch["targets"]
+        num_tokens_this_batch = model.head_model.num_target_entries(targets)
+        num_target_tokens += num_tokens_this_batch
+        losses[k] = model(batch[INPUT_IDS_NAME], targets).mean() * num_tokens_this_batch
 
-    val_loss = losses.mean()
+    val_loss = losses.sum() / num_target_tokens
     model.train()
-    return val_loss
+    return val_loss, num_target_tokens
 
 
 @torch.no_grad()
