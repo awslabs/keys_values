@@ -76,7 +76,7 @@ This example runs on a single `Nvidia A 100` GPU with 40 GB of RAM.
 
 ```bash
 cd ${KEYS_VALUES_PATH}
-python3 keys_values/__main__.py finetune_long_lora Qwen/Qwen2.5-0.5B --out_dir /home/ubuntu/out/finetune/longcontext_lora --data LongBenchV2 --data.max_seq_length 100000 --data.metadata_dir /home/ubuntu/out/finetune/longcontext_lora/data --head_model seq_classification_on_logits --precision bf16-true --verbose some --kv_cache.name h2o-default --kv_cache.cache_length 16384 --kv_cache.chunk_size 1024 --train.save_interval 10 --train.micro_batch_size 4 --train.global_batch_size 4 --eval.interval 10
+python3 keys_values/__main__.py finetune_long_lora Qwen/Qwen2.5-0.5B --out_dir /home/ubuntu/out/finetune/longcontext_lora --data LongBenchV2 --data.max_seq_length 100000 --data.metadata_dir /home/ubuntu/out/finetune/longcontext_lora/data --head_model seq_classification_on_logits --precision bf16-true --verbose some --kv_cache.name h2o-default --kv_cache.cache_length 16384 --kv_cache.chunk_size 1024 --train.save_interval 10 --train.micro_batch_size 4 --eval.interval 10
 ```
 
 What is happening here?
@@ -109,12 +109,11 @@ CLI command above like runs training with an effective batch size of 32:
 
 ```bash
 cd ${KEYS_VALUES_PATH}
-python3 keys_values/__main__.py finetune_long_lora Qwen/Qwen2.5-0.5B --out_dir /home/ubuntu/out/finetune/longcontext_lora --devices 8 --data LongBenchV2 --data.max_seq_length 100000 --data.metadata_dir /home/ubuntu/out/finetune/longcontext_lora/data --head_model seq_classification_on_logits --precision bf16-true --verbose some --kv_cache.name h2o-default --kv_cache.cache_length 16384 --kv_cache.chunk_size 1024 --train.save_interval 10 --train.micro_batch_size 4 --train.global_batch_size 32 --eval.interval 10
+python3 keys_values/__main__.py finetune_long_lora Qwen/Qwen2.5-0.5B --out_dir /home/ubuntu/out/finetune/longcontext_lora --devices 8 --data LongBenchV2 --data.max_seq_length 100000 --data.metadata_dir /home/ubuntu/out/finetune/longcontext_lora/data --head_model seq_classification_on_logits --precision bf16-true --verbose some --kv_cache.name h2o-default --kv_cache.cache_length 16384 --kv_cache.chunk_size 1024 --train.save_interval 10 --train.micro_batch_size 4 --eval.interval 10
 ```
 
-Here, `--devices 8 --train.micro_batch_size 4 --train.global_batch_size 32` sets the
-effective batch size to 32, the per-device batch size to 4, and asks to use 8
-devices.
+Here, `--devices 8 --train.micro_batch_size 4` sets `train.global_batch_size`
+to 32, the per-device batch size to 4, and asks to use 8 devices.
 
 ### What's Next?
 
@@ -234,10 +233,9 @@ Basic arguments are:
   - `train.micro_batch_size`: Batch size for individual computations on single
     device.
   - `train.global_batch_size`: Not for `finetune_offload_*`. Batch size used
-    for optimizer updates. Must be  multiple of `train.micro_batch_size`. If
-    `train.global_batch_size == train.micro_batch_size * devices`, this is
-    distributed data parallel. For `finetune_offload_*`, this value is set
-    automatically.
+    for optimizer updates. Must be multiple of `train.micro_batch_size * devices`.
+    Defaults to `train.micro_batch_size * devices`. For `finetune_offload_*`,
+    this value is set automatically.
   - `train.save_interval`: Number of optimizer steps between saving checkpoints.
   - `train.intermed_save_interval`, `train.intermed_save_num`: If these are given,
     additional intermediate checkpoints are stored every `train.intermed_save_interval`

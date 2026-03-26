@@ -200,7 +200,13 @@ class CrossEntropyOnLogits(HeadModel):
                 ignore_index=self._ignore_index,
                 reduction="none",
             )
-            return losses.view(*logits.shape[:2]).mean(dim=-1)
+            denom = (
+                (targets != self._ignore_index)
+                .sum(dim=-1)
+                .to(dtype=logits.dtype)
+                .clamp(min=1e-6)
+            )
+            return losses.view(*logits.shape[:2]).sum(dim=-1) / denom
         else:
             return torch.zeros(
                 model_outputs.shape[0],
@@ -251,7 +257,6 @@ class SequenceClassificationOnLogits(HeadModel):
     separate linear head to be trained. On the other hand, predictions are
     more computationally wasteful, because the logits over the whole
     vocabulary are determined.
-
     """
 
     NAME = "seq_classification_on_logits"
@@ -342,7 +347,6 @@ class SequenceClassification(HeadModel):
 
     - "last": Outpyt embedding for final input token
     - "mean": Mean of output embeddings for all tokens
-
     """
 
     NAME = "seq_classification"

@@ -486,6 +486,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         chunks_per_cell_multiplier: float = 1.0,
         verbose: VerbosityLevels = VerbosityLevels.SOME,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        oom_error_recovery: bool = False,
         cache_offloader: Optional[KVCacheOffloader] = None,
         set_max_seq_length: bool = True,
         debug_single_cell_per_row: bool = False,
@@ -493,11 +494,11 @@ class LongContextInferenceModel(GPTAndHeadModel):
         debug_no_deallocate_buffers: bool = False,
     ):
         """
-        If `tmp_array_limit_gb` is given, it maintains a limit on
-        temporary device memory used in forward computations. Objects
-        such as KV caches in `gpt_model` must keep a reference. We
-        catch out of memory exceptions during forward computations,
-        reduce the limit and try again.
+        If `tmp_array_limit_gb` is given, it maintains a limit on temporary
+        device memory used in forward computations. Objects such as KV caches
+        in `gpt_model` must keep a reference. If `oom_error_recovery == True`,
+        we catch out of memory exceptions during forward computations, reduce
+        the limit and try again.
 
         Args:
             gpt_model: GPT model to train on sequence data. All layers must have
@@ -521,6 +522,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 For ``VerbosityLevels.ALL``, we print deep diagnostic
                 information
             tmp_array_limit_gb: See above.
+            oom_error_recovery: See above. If `True`, `tmp_array_limit_gb` must
+                be given.
             cache_offloader: If CPU offloading of KV cache buffers is used,
                 this must be supplied. It maintains the quantization states on
                 the CPU.
@@ -539,7 +542,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
 
         """
         super().__init__(gpt_model, head_model)
-        self._check_args(gpt_model, chunk_size, tmp_array_limit_gb)
+        self._check_args(gpt_model, chunk_size, tmp_array_limit_gb, oom_error_recovery)
         self.config = gpt_model.config
         self.chunk_size = chunk_size
         self.randomize_chunk_sizes = randomize_chunk_sizes
@@ -562,6 +565,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self.chunks_per_cell = None
         self.batch_size = None
         self._tmp_array_limit_gb = tmp_array_limit_gb
+        self._oom_error_recovery = oom_error_recovery
         self.cache_offloader = cache_offloader
         self._set_max_seq_length = set_max_seq_length
         self._record_gpu_memory_snapshots = None
@@ -574,9 +578,14 @@ class LongContextInferenceModel(GPTAndHeadModel):
         gpt_model: GPT,
         chunk_size: int,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit],
+        oom_error_recovery: bool,
     ):
         if chunk_size < 1:
             raise ValueError(f"chunk_size = {chunk_size}, must be >= 1")
+        if oom_error_recovery and tmp_array_limit_gb is None:
+            raise ValueError(
+                "tmp_array_limit_gb is required if oom_error_recovery=True"
+            )
         if tmp_array_limit_gb is not None:
             mha = gpt_model.mha
             if mha.tmp_array_limit_gb is None:
@@ -811,7 +820,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         number of times, see :class:`TemporaryArrayLimit`.
 
         """
-        if self._tmp_array_limit_gb is None:
+        if not self._oom_error_recovery:
             return self._forward_internal_no_check(
                 input_ids,
                 targets,

@@ -144,8 +144,8 @@ def setup(
     train: TrainArgs = TrainArgs(
         save_interval=50,
         log_interval=1,
-        global_batch_size=16,
-        micro_batch_size=1,
+        global_batch_size=None,
+        micro_batch_size=2,
         lr_warmup_steps=None,
         lr_warmup_fraction=0.15,
         epochs=5,
@@ -159,6 +159,7 @@ def setup(
         max_iters=100,
         initial_validation=None,  # Default set below
         final_validation=True,
+        micro_batch_size=None,
     ),
     optimizer: Optional[OptimizerArgs] = None,
     logger_name: Literal["wandb", "tensorboard", "csv", "mlflow"] = "csv",
@@ -192,6 +193,7 @@ def setup(
     verbose: Optional[str] = None,
     attention_forward_temp_size_gb: Optional[float] = None,
     attention_backward_temp_size_gb: Optional[float] = None,
+    oom_error_recovery: bool = False,
     yarn_rope: bool = True,
     sdpa: SDPAArgs = SDPAArgs(
         flex_attention=True,
@@ -259,6 +261,10 @@ def setup(
         attention_backward_temp_size_gb: Size of GPU memory buffers (in GB) used
             in naive SDPA during backward computations. At present, naive SDPA
             is used in backward if `grad.use_old_cache == True`.
+        oom_error_recovery: If `True`, we try to recover from device out of
+            memory errors by lowering `attention_forward_temp_size_gb`,
+            `attention_backward_temp_size_gb` and trying again.
+            NOTE: This feature does not properly work at the moment!
         yarn_rope: Should YaRN be used to adjust RoPE (position encoding) to the
             sequence length for each batch? Defaults to `True`. If not, RoPE is
             determined by the model configuration, and is static (no dependence
@@ -324,6 +330,7 @@ def setup(
         verbose,
         attention_forward_temp_size_gb,
         attention_backward_temp_size_gb,
+        oom_error_recovery,
         yarn_rope,
         sdpa,
         record_gpu_memory_snapshots,
@@ -361,6 +368,7 @@ def setup_internal(
     verbose: Optional[str],
     attention_forward_temp_size_gb: Optional[float],
     attention_backward_temp_size_gb: Optional[float],
+    oom_error_recovery: bool,
     yarn_rope: bool,
     sdpa: SDPAArgs,
     record_gpu_memory_snapshots: Optional[int],
@@ -407,11 +415,22 @@ def setup_internal(
         )
     else:
         print(str(optimizer))
-    if do_cpu_offload:
-        global_batch_size = train.micro_batch_size * devices
+    global_batch_size = train.micro_batch_size * devices
+    if train.global_batch_size is None:
+        train.global_batch_size = global_batch_size
+    elif do_cpu_offload:
         if train.global_batch_size != global_batch_size:
             print(f"train.global_batch_size not supported, set to {global_batch_size}")
             train.global_batch_size = global_batch_size
+    elif (
+        train.global_batch_size % global_batch_size != 0
+        or train.global_batch_size < global_batch_size
+    ):
+        raise ValueError(
+            f"train.global_batch_size = {train.global_batch_size}, must be "
+            "positive multiple of devices * train.micro_batch_size = "
+            f"{global_batch_size}."
+        )
     if profile_parts is not None and profile_parts not in ("forward", "backward"):
         raise ValueError("profile_parts: Must be 'forward' or 'backward'")
     if size_log_quantiles is not None:
@@ -426,6 +445,11 @@ def setup_internal(
             raise ValueError(
                 f"size_log_quantiles = {size_log_quantiles}, must not have duplicates"
             )
+    if oom_error_recovery:
+        print(
+            "Warning: Device out of memory error recovery does not properly "
+            "work at the moment."
+        )
     # Legacy arguments
     if verbose is None:
         if kv_cache.verbose is not None:
@@ -518,6 +542,7 @@ def setup_internal(
         verbose=verbose,
         attention_forward_temp_size_gb=attention_forward_temp_size_gb,
         attention_backward_temp_size_gb=attention_backward_temp_size_gb,
+        oom_error_recovery=oom_error_recovery,
         yarn_rope=yarn_rope,
         sdpa=sdpa,
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
@@ -566,6 +591,7 @@ def main(
     verbose: VerbosityLevels,
     attention_forward_temp_size_gb: float,
     attention_backward_temp_size_gb: float,
+    oom_error_recovery: bool,
     yarn_rope: bool,
     sdpa: SDPAArgs,
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
@@ -667,6 +693,7 @@ def main(
             profile_parts=profile_parts,
             fabric=fabric,
             debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
+            oom_error_recovery=oom_error_recovery,
             **wrap_kwargs,
         )
 
@@ -924,6 +951,7 @@ def wrap_gpt_model(
     offload_num_devices: int = 1,
     fabric: Optional[L.Fabric] = None,
     debug_dont_use_autograd_hooks: bool = False,
+    oom_error_recovery: bool = False,
     model_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Tuple[
     Union[LongContextGradientModel, LongContextInferenceModel],
@@ -976,6 +1004,7 @@ def wrap_gpt_model(
         chunks_per_cell_multiplier=multiplier,
         verbose=verbose,
         tmp_array_limit_gb=tmp_array_limit_gb,
+        oom_error_recovery=oom_error_recovery,
         cache_offloader=cache_offloader,
     )
     if model_kwargs is not None:

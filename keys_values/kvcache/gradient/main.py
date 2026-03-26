@@ -222,6 +222,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         single_tokens_for_targets: bool = False,
         verbose: VerbosityLevels = VerbosityLevels.SOME,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        oom_error_recovery: bool = False,
         cache_offloader: Optional[KVCacheOffloader] = None,
         set_max_seq_length: bool = True,
         debug_single_cell_per_row: bool = False,
@@ -273,6 +274,8 @@ class LongContextGradientModel(LongContextInferenceModel):
                 information
             tmp_array_limit_gb: Size limit for temporary buffers in device
                 memory, for forward computations
+            oom_error_recovery: See above. If `True`, `tmp_array_limit_gb` must
+                be given.
             set_max_seq_length: If `True`, we set `gpt_model.max_seq_length` to
                 the length of `input_ids` with each call of :meth:`forward`
                 for which `targets is not None`. The value is passed through
@@ -328,11 +331,16 @@ class LongContextGradientModel(LongContextInferenceModel):
             chunks_per_cell_multiplier=chunks_per_cell_multiplier,
             verbose=verbose,
             tmp_array_limit_gb=tmp_array_limit_gb,
+            oom_error_recovery=oom_error_recovery,
             cache_offloader=cache_offloader,
             set_max_seq_length=set_max_seq_length,
             debug_single_cell_per_row=debug_single_cell_per_row,
             debug_intermediates=debug_intermediates,
         )
+        if oom_error_recovery and backward_tmp_array_limit_gb is None:
+            raise ValueError(
+                "backward_tmp_array_limit_gb must be given if oom_error_recovery=True"
+            )
         self.single_tokens_for_targets = single_tokens_for_targets
         if layercp_qname is None:
             layercp_qname = "torch-quantized8"
@@ -602,6 +610,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             chunks_per_cell_multiplier=self.chunks_per_cell_multiplier,
             verbose=self.verbose,
             tmp_array_limit_gb=self._tmp_array_limit_gb,
+            oom_error_recovery=self._oom_error_recovery,
             debug_single_cell_per_row=self._debug_single_cell_per_row,
             debug_intermediates=self.debug_intermediates,
         )
@@ -906,7 +915,7 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         # Call :meth:`_backward_accumulate_gradients_nocheck`. May be done
         # several times with reduced memory limits
-        if self._backward_tmp_array_limit_gb is None:
+        if not self._oom_error_recovery:
             self._backward_accumulate_gradients_nocheck(0)
         else:
             is_done = False
