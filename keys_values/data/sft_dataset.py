@@ -38,6 +38,10 @@ class SFTDataset(LongContextDataset):
     included only if it is given or available from what is done anyway.
     Avoids extra costs due to tokenization.
 
+    It is admissible for `data[idx]["output"]` to be a list of strings.
+    In this case, we choose one of them at random in each
+    :meth:`__getitem__` call. The semantics is that any of the entries
+    is a valid target sequence.
     """
 
     def __init__(
@@ -49,6 +53,7 @@ class SFTDataset(LongContextDataset):
         mask_prompt: bool = True,
         ignore_index: int = -100,
         transform: Optional[Callable[[Dict[str, str]], Dict[str, str]]] = None,
+        seed: Optional[int] = None,
     ) -> None:
         super().__init__(
             data,
@@ -59,6 +64,10 @@ class SFTDataset(LongContextDataset):
         )
         self.mask_prompt = mask_prompt
         self.ignore_index = ignore_index
+        # We need
+        if seed is None:
+            seed = 31415927
+        self._prng = torch.Generator().manual_seed(seed)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         example = self.data[idx]
@@ -71,8 +80,13 @@ class SFTDataset(LongContextDataset):
             prompt,
             max_length=self.max_seq_length,
         )
+        targets = example["output"]
+        if isinstance(targets, list):
+            targets = targets[
+                torch.randint(0, len(targets), (1,), generator=self._prng).item()
+            ]
         encoded_response = self.tokenizer.encode(
-            example["output"],
+            targets,
             bos=False,
             eos=True,
             max_length=self.max_seq_length,

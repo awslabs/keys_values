@@ -919,6 +919,7 @@ def test_mha_is_passed_on(device):
     accumulator.run_head_model(
         gpt_model=lc_model.gpt_model,
         head_model=lc_model.head_model,
+        scale_factor=1.0,
         replay_logs=lc_model._replay_logs,
         chunks_per_cell=lc_model.chunks_per_cell,
         get_inputs_slice=get_inputs_slice,

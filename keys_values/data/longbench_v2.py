@@ -40,6 +40,7 @@ from keys_values.head_model import (
     SequenceClassificationOnLogits,
     SequenceClassification,
 )
+from keys_values.utils import get_dict, set_dict
 
 METADATA_FNAME = "longbench_v2_metadata.json"
 
@@ -66,10 +67,10 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
 
     If `metadata_dir` is given, a metadata file is loaded and/or stored. This
     is strongly recommended to save time. A dictionary is stored as JSON, with
-    keys:
-    - `METADATA_SEQ_LENGTHS_KEY`: List of sequence lengths (in tokens) for
-      each record
-
+    this structure:
+    - `data[METADATA_SEQ_LENGTHS_KEY][model_name]`: List of sequence lengths
+      (in tokens) for each record. Here, `model_name` because the tokenizer
+      depends on the model.
     """
 
     def __init__(
@@ -255,12 +256,15 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
             result["num_classes"] = len(CLASS_LABELS)
         return result
 
+    def _metadata_keys(self) -> List[str]:
+        return [METADATA_SEQ_LENGTHS_KEY, self.tokenizer.model_name]
+
     def _filter_and_transform(
         self,
         dataset: Any,
     ) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
         metadata = self._load_metadata(len(dataset))
-        seq_lengths = None if metadata is None else self._get_seq_lengths(metadata)
+        seq_lengths = self._get_seq_lengths(metadata)
         try_to_store = seq_lengths is None and self.metadata_dir is not None
         model_name = self.tokenizer.model_name
         # If `seq_lengths` could not be loaded, it is recomputed and stored below.
@@ -281,20 +285,16 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
             debug_num_cases=self.debug_num_cases,
         )
         if try_to_store:
-            if metadata is None or METADATA_SEQ_LENGTHS_KEY not in metadata:
-                metadata = {
-                    METADATA_SEQ_LENGTHS_KEY: {model_name: seq_lengths},
-                }
-            else:
-                metadata[METADATA_SEQ_LENGTHS_KEY][model_name] = seq_lengths
+            if metadata is None:
+                metadata = dict()
+            set_dict(metadata, self._metadata_keys(), seq_lengths)
             self._store_metadata(metadata)
         return transformed_data, test_data
 
-    def _get_seq_lengths(self, metadata: Dict[str, Any]) -> Optional[List[int]]:
-        result = metadata.get(METADATA_SEQ_LENGTHS_KEY)
-        if result is not None:
-            result = result.get(self.tokenizer.model_name)
-        return result
+    def _get_seq_lengths(
+        self, metadata: Optional[Dict[str, Any]]
+    ) -> Optional[List[int]]:
+        return get_dict(metadata, self._metadata_keys())
 
     def _load_metadata(self, num_records: int) -> Optional[Dict[str, Any]]:
         if self.metadata_dir is None:

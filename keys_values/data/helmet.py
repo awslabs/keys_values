@@ -13,7 +13,7 @@
 # limitations under the License.
 import json
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Literal
 
 from tqdm import tqdm
 
@@ -21,6 +21,7 @@ from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.load_helmet_dev_eval import (
     load_helmet_dev_eval,
     DATASET_PARENT_DIR,
+    SUPPORTED_DATASET_KEYS,
 )
 from keys_values.data.module import (
     SequenceLengthFilteredDataModule,
@@ -30,6 +31,7 @@ from keys_values.data.module import (
     NUM_TOKENS_NAME,
 )
 from keys_values.data.sft_dataset import SFTDataset, get_sft_collate_fn
+from keys_values.utils import get_dict, set_dict
 
 METADATA_FNAME = "helmet_metadata.json"
 
@@ -44,12 +46,19 @@ class Helmet(SequenceLengthFilteredDataModule):
     Each HELMET instance already has its prompt fully formatted, so no prompt
     construction or truncation is performed here.
 
+    If `metadata_dir` is given, a metadata file is loaded and/or stored. This
+    is strongly recommended to save time. A dictionary is stored as JSON, with
+    this structure:
+    - `data[METADATA_SEQ_LENGTHS_KEY][dataset_key][max_length][model_name][split]`:
+      List of sequence lengths (in tokens) for each record. Here, `model_name`
+      because the tokenizer depends on the model, and `split` is "dev" or
+      "eval".
     """
 
     def __init__(
         self,
         dataset_key: str,
-        max_length: str = "8k",
+        max_length: Literal["8k", "16k", "32k", "64k", "128k"] = "8k",
         dataset_parent_dir: str = DATASET_PARENT_DIR,
         mask_prompt: bool = True,
         val_split_fraction: float = 0.1,
@@ -63,8 +72,8 @@ class Helmet(SequenceLengthFilteredDataModule):
         """
         Args:
             dataset_key: Name of the HELMET dataset to load (e.g. ``"nq"``,
-                ``"json_kv"``). See :func:`load_helmet_dev_eval` for all
-                supported keys.
+                ``"json_kv"``). Supported keys are
+                :const:`keys_values.data.load_helmet_dev_eval.SUPPORTED_DATASET_KEYS`.
             max_length: Context-length bucket to load. One of ``"8k"``,
                 ``"16k"``, ``"32k"``, ``"64k"``, ``"128k"``.
             dataset_parent_dir: Directory where HELMET data is cached on disk.
@@ -96,10 +105,24 @@ class Helmet(SequenceLengthFilteredDataModule):
             trainloader_longest_first=trainloader_longest_first,
             trainloader_shortest_first=trainloader_shortest_first,
         )
+        if dataset_key not in SUPPORTED_DATASET_KEYS:
+            raise ValueError(
+                f"dataset_key = {dataset_key} is not supported. Choose from:\n"
+                + str(SUPPORTED_DATASET_KEYS)
+            )
         self.dataset_key = dataset_key
         self.max_length = max_length
         self.dataset_parent_dir = dataset_parent_dir
         self.metadata_dir = metadata_dir
+
+    def _metadata_keys(self, split: str) -> List[str]:
+        return [
+            METADATA_SEQ_LENGTHS_KEY,
+            self.dataset_key,
+            self.max_length,
+            self.tokenizer.model_name,
+            split,
+        ]
 
     def _get_dataset(self) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
         dev_data, eval_data = load_helmet_dev_eval(
@@ -109,7 +132,6 @@ class Helmet(SequenceLengthFilteredDataModule):
         )
         print(f"\nTransforming HELMET '{self.dataset_key}' ({self.max_length}) ...")
         metadata = self._load_metadata()
-        model_name = self.tokenizer.model_name
         train_data, dev_seq_lengths, dev_needs_store = self._transform(
             dev_data, split="dev", seq_lengths=self._get_seq_lengths(metadata, "dev")
         )
@@ -117,20 +139,12 @@ class Helmet(SequenceLengthFilteredDataModule):
             eval_data, split="eval", seq_lengths=self._get_seq_lengths(metadata, "eval")
         )
         if dev_needs_store or eval_needs_store:
-            if metadata is None or METADATA_SEQ_LENGTHS_KEY not in metadata:
-                metadata = {METADATA_SEQ_LENGTHS_KEY: {}}
-            if self.dataset_key not in metadata[METADATA_SEQ_LENGTHS_KEY]:
-                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key] = {}
-            if model_name not in metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key]:
-                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][model_name] = {}
+            if metadata is None:
+                metadata = dict()
             if dev_needs_store:
-                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][model_name][
-                    "dev"
-                ] = dev_seq_lengths
+                set_dict(metadata, self._metadata_keys("dev"), dev_seq_lengths)
             if eval_needs_store:
-                metadata[METADATA_SEQ_LENGTHS_KEY][self.dataset_key][model_name][
-                    "eval"
-                ] = eval_seq_lengths
+                set_dict(metadata, self._metadata_keys("eval"), eval_seq_lengths)
             self._store_metadata(metadata)
         return train_data, test_data
 
@@ -187,10 +201,11 @@ class Helmet(SequenceLengthFilteredDataModule):
                 seq_length = seq_lengths[idx]
             if seq_length > self.max_seq_length:
                 continue
+            output = instance["output"]
             results.append(
                 {
                     "instruction": instruction,
-                    "output": instance["output"],
+                    "output": output,
                     NUM_TOKENS_NAME: seq_length,
                 }
             )
@@ -204,16 +219,7 @@ class Helmet(SequenceLengthFilteredDataModule):
     def _get_seq_lengths(
         self, metadata: Optional[Dict[str, Any]], split: str
     ) -> Optional[List[int]]:
-        if metadata is None:
-            return None
-        result = metadata.get(METADATA_SEQ_LENGTHS_KEY)
-        if result is not None:
-            result = result.get(self.dataset_key)
-        if result is not None:
-            result = result.get(self.tokenizer.model_name)
-        if result is not None:
-            result = result.get(split)
-        return result
+        return get_dict(metadata, self._metadata_keys(split))
 
     def _load_metadata(self) -> Optional[Dict[str, Any]]:
         if self.metadata_dir is None:
@@ -249,17 +255,20 @@ class Helmet(SequenceLengthFilteredDataModule):
             **train_kwargs,
             mask_prompt=self.mask_prompt,
             ignore_index=self.ignore_index,
+            seed=self.seed,
         )
         self.val_dataset = SFTDataset(
             **val_kwargs,
             mask_prompt=self.mask_prompt,
             ignore_index=self.ignore_index,
+            seed=self.seed,
         )
         if test_kwargs is not None:
             self.test_dataset = SFTDataset(
                 **test_kwargs,
                 mask_prompt=self.mask_prompt,
                 ignore_index=self.ignore_index,
+                seed=self.seed,
             )
 
     def _get_collate_fn(self) -> MyDataLoader:

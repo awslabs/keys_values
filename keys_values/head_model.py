@@ -82,6 +82,14 @@ class HeadModel(torch.nn.Module):
         For some loss functions, the loss parts are simply summed up, in which
         case this method returns `None` for all chunks.
 
+        For loss functions which are token-averaged (the default), this
+        returns the number of non-masked target tokens for this chunk. For a
+        chunk not containing target entries (i.e., a prompt chunk), this is 0.
+        The sum of these values across all chunks gives the number of
+        non-masked target tokens for the whole batch. When using gradient
+        averaging over several micro-batches, the reduction must be weighted
+        using these sums.
+
         """
         raise NotImplementedError()
 
@@ -157,7 +165,6 @@ class CrossEntropyOnLogits(HeadModel):
     function. For example, teaching a model to use tools, we can use data cases
     coming from trajectories with several tool calls. Apart from the initial
     prompt, we also mask out the tool outputs in `targets`.
-
     """
 
     NAME = "next_token_prediction"

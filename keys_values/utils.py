@@ -320,3 +320,31 @@ def bitsize_of(x: torch.Tensor) -> int:
 
 def shape_to_tuple(x: torch.Tensor) -> Tuple[int, ...]:
     return tuple(int(d) for d in x.shape)
+
+
+def get_dict(
+    nested_dict: Optional[Dict[str, Any]],
+    keys: List[str],
+) -> Optional[Any]:
+    value = nested_dict
+    for key in keys:
+        if value is None:
+            break
+        value = value.get(key)
+    return value
+
+
+def set_dict(
+    nested_dict: Dict[str, Any],
+    keys: List[str],
+    value: Any,
+):
+    sub_dict = nested_dict
+    for key in keys[:-1]:
+        if key in sub_dict:
+            sub_dict = sub_dict[key]
+        else:
+            slot = dict()
+            sub_dict[key] = slot
+            sub_dict = slot
+    sub_dict[keys[-1]] = value

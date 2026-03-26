@@ -800,6 +800,7 @@ class GradientAccumulator:
         self,
         gpt_model: GPT,
         head_model: HeadModel,
+        scale_factor: float,
         replay_logs: List[KVCacheReplayLog],
         chunks_per_cell: List[int],
         get_inputs_slice: GetInputSlice,
@@ -823,6 +824,7 @@ class GradientAccumulator:
             gpt_model: GPT model (or just a shard, see
                 :class:`keys_values.optimize.GPTShardOfBlocks`)
             head_model: Head model and loss function
+            scale_factor: Scale factor the loss function is multiplied with
             replay_logs: KV cache replay logs recorded during the initial
                 forward pass. Needed in calls of :meth:`run`, stored as
                 internal here.
@@ -898,7 +900,7 @@ class GradientAccumulator:
                 targets=targets,
                 num_input_tokens=self.seq_length,
                 input_pos=start,
-                scale_factor=weight,
+                scale_factor=weight * scale_factor,
             )
             loss_part = loss_part.mean()
             if loss_part.grad_fn is not None:
