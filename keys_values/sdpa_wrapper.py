@@ -387,3 +387,43 @@ def reorder_buffer_given_extra_info(
         index_scat = kwargs["index_scat"]
         buffer = _reorder(buffer, index_gat, index_scat)
     return buffer
+
+
+def reorder_inverse(
+    buffer: torch.Tensor,
+    **kwargs,
+) -> torch.Tensor:
+    """
+    Inverse of :meth:`reorder_buffer_given_extra_info`.
+
+    """
+    ndim = buffer.ndim
+    if not (3 <= ndim <= 4):
+        raise ValueError("buffer must be 3D or 4D")
+    sort_index = kwargs.get("sort_index")
+    if sort_index is not None:
+        if sort_index.ndim == 1:
+            inv_index = torch.zeros_like(sort_index)
+            inv_index[sort_index] = torch.arange(
+                sort_index.shape[0],
+                dtype=sort_index.dtype,
+                device=sort_index.device,
+            )
+            if ndim == 3:
+                return buffer[:, :, inv_index]
+            else:
+                return buffer[:, :, inv_index, :]
+        else:
+            if ndim == 4:
+                sort_index = expand_index(sort_index, buffer.shape[-1])
+            return (
+                torch.zeros(
+                    (1,) * ndim,
+                    device=buffer.device,
+                    dtype=buffer.dtype,
+                )
+                .expand(*buffer.shape)
+                .scatter(2, sort_index, buffer)
+            )
+    else:
+        raise NotImplementedError("Not implemented for sort_if_3d=False")
