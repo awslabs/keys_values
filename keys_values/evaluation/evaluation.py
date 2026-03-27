@@ -27,7 +27,7 @@ from keys_values.evaluation.metrics import (
 )
 
 
-def _eval_rag(responses: List[str], targets: List[List]) -> float:
+def _eval_rag(responses: List[str], targets: List[List[str]]) -> float:
     """
     Compute the SubEM score for the outputs for an RAG task
 

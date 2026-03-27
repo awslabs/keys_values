@@ -18,7 +18,7 @@ from enum import unique, Enum
 from filelock import FileLock, Timeout
 from pathlib import Path
 import time
-from typing import List, Dict, Any, Optional, Iterable, Union, Iterator, Tuple
+from typing import List, Dict, Any, Optional, Iterable, Union, Iterator, Tuple, Set
 
 import torch
 from tqdm import tqdm
@@ -348,3 +348,10 @@ def set_dict(
             sub_dict[key] = slot
             sub_dict = slot
     sub_dict[keys[-1]] = value
+
+
+def remove_keys(
+    kwargs: Dict[str, Any],
+    names: Set[str],
+) -> Dict[str, Any]:
+    return {k: v for k, v in kwargs.items() if k not in names}

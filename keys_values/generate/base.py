@@ -144,6 +144,7 @@ def generate_fn(
     assert (
         max_returned_tokens > prompt_size
     ), f"Not enough space for {prompt_size} prompt tokens in a context length of {max_returned_tokens}."
+    model.gpt_model.max_seq_length = max_returned_tokens
 
     # Yield the prompt if include_prompt is True
     if include_prompt:
@@ -263,6 +264,7 @@ def batched_generate_fn(
     assert (
         max_returned_tokens > max_prompt_size
     ), f"Not enough space for {max_prompt_size} prompt tokens in a context length of {max_returned_tokens}."
+    model.gpt_model.max_seq_length = max_returned_tokens
 
     # Yield the prompts if include_prompt is True
     if include_prompt:

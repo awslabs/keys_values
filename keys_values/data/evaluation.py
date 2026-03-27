@@ -168,7 +168,8 @@ class EvaluationWithTasksHelper:
             return None
         finally:
             lock.release()
-            lock_path.unlink()
+            if lock_path.exists():
+                lock_path.unlink()
             return file_path
 
 

@@ -516,9 +516,29 @@ class EvalArgs(_EvalArgs):
     Args:
         micro_batch_size: If given, this overrides `train.micro_batch_size`
             for evaluation
+        use_sample_metric: If `True`, evaluation is done with a sample based
+            metric (determined by the dataset), not with the loss used for
+            training
+        sample_metric_max_generated_tokens: Maximum number of tokens
+            generated for sample based metric evaluation
+        sample_metric_kwargs: Keyword arguments for token sampling (params
+            can be "temperature", "top_k", "top_p")
     """
 
     micro_batch_size: Optional[int] = None
+    use_sample_metric: bool = False
+    sample_metric_max_generated_tokens: int = 10
+    sample_metric_kwargs: Optional[Dict[str, Any]] = None
+
+    def __post_init__(self) -> None:
+        if self.micro_batch_size is not None:
+            assert self.micro_batch_size > 0
+        assert self.sample_metric_max_generated_tokens > 0
+        if self.sample_metric_kwargs is not None:
+            assert isinstance(self.sample_metric_kwargs, dict)
+            assert set(self.sample_metric_kwargs.keys()).issubset(
+                {"temperature", "top_k", "top_p"}
+            )
 
 
 @dataclass
