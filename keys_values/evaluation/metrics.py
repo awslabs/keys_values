@@ -18,7 +18,7 @@ import math
 from decimal import Decimal, InvalidOperation
 from typing import Iterable, Optional, List, Dict, Set
 
-from .response_parser import normalize_string_response
+from keys_values.evaluation.response_parser import normalize_string_response
 
 
 def _ngram_counts(tokens: list[str], n: int) -> Counter:
