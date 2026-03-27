@@ -22,6 +22,8 @@ INPUT_IDS_NAME = "input_ids"
 
 LABELS_NAME = "labels"
 
+TARGETS_STRINGS_NAME = "targets_as_strings"
+
 POSITION_NAME = "position"
 
 LIT_MODEL_FNAME = "lit_model.pth"

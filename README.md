@@ -498,7 +498,12 @@ are:
   `query.shape[2]` for calls to `kv_cache.forward` except for the prefill (when
   `input_pos == 0`). This is used to speed up finding the score minimizers.
 * `init_grace_tokens`: Only for `lastrec`. KV information for the first
-  `init_grace_tokens` tokens remains in the cache.
+  `init_grace_tokens` tokens remains in the cache.<br>
+  **Note**: Use knowledge about system prompt and "pinned context" in order to
+  set `init_grace_tokens`. A better solution would be a KV cache policy which
+  retains initial tokens up to some control sequence. This is not currently
+  supported, but would be easy to implement (see
+  [below](#implementing-new-kv-cache-policies)).
 * `keep_initial_fraction`: Not for `dense`, `lastrec`. See docstring of
   [AttnWeightsKVCache](./keys_values/kvcache/attn_weights.py#L283).
 * `normalize_scores`: Not for `dense`, `lastrec`. Scores are cumulative over
@@ -507,16 +512,17 @@ are:
   `normalize_scores=True`.
 
 An important property of a KV cache policy is whether its evaluation requires
-attention weights (summed over the query axis) to be returned by SDPA or not:
+attention weights (summed over the query axis) returned by SDPA or not. For
+currently supported policies:
 
 * Does not require attention weights: `dense`, `lastrec`
 * Requires attention weights: `h2o`, `h2o-vlen`, `h2o-orig`, `qh2o`, `qh2o-vlen`
 
-Attention weights are a powerful information, and cache policies using them tend
+Attention weights are powerful information, and cache policies using them tend
 to outperform those which do not. However, none of the current fast SDPA kernel
 implementations return summed attention weights. There is no inherent reason for
-this: it seems the significance of summed attention weights has simply been
-overlooked. This library contains code to compute summed attention weights
+this: it seems the significance of summed attention weights has been overlooked
+so far. This library contains code to compute summed attention weights
 alongside SDPA with a second `flex_attention` call. Given we observe robust and
 significant improvements with `h2o` over `lastrec`, an important direction for
 future work is to extend SotA SDPA implementations to return summed attention

@@ -23,6 +23,7 @@ from litgpt.tokenizer import Tokenizer
 from keys_values.data.base import (
     INPUT_IDS_NAME,
     LABELS_NAME,
+    TARGETS_STRINGS_NAME,
     POSITION_NAME,
     LongContextDataset,
     common_collate_fn,
@@ -42,6 +43,11 @@ class SFTDataset(LongContextDataset):
     In this case, we choose one of them at random in each
     :meth:`__getitem__` call. The semantics is that any of the entries
     is a valid target sequence.
+
+    If `retain_targets_strings == True`, we also append the original
+    targets `data[idx]["output"]`, either string or list of strings,
+    as :const:`TARGETS_STRINGS_NAME` field. This is needed by a number of
+    evaluation metrics.
     """
 
     def __init__(
@@ -54,6 +60,7 @@ class SFTDataset(LongContextDataset):
         ignore_index: int = -100,
         transform: Optional[Callable[[Dict[str, str]], Dict[str, str]]] = None,
         seed: Optional[int] = None,
+        retain_targets_strings: bool = True,
     ) -> None:
         super().__init__(
             data,
@@ -68,6 +75,7 @@ class SFTDataset(LongContextDataset):
         if seed is None:
             seed = 31415927
         self._prng = torch.Generator().manual_seed(seed)
+        self._retain_target_strings = retain_targets_strings
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         example = self.data[idx]
@@ -82,11 +90,13 @@ class SFTDataset(LongContextDataset):
         )
         targets = example["output"]
         if isinstance(targets, list):
-            targets = targets[
+            _targets = targets[
                 torch.randint(0, len(targets), (1,), generator=self._prng).item()
             ]
+        else:
+            _targets = targets
         encoded_response = self.tokenizer.encode(
-            targets,
+            _targets,
             bos=False,
             eos=True,
             max_length=self.max_seq_length,
@@ -94,8 +104,8 @@ class SFTDataset(LongContextDataset):
         encoded_prompt_and_response = torch.cat(
             (encoded_prompt, encoded_response)
         ).type(torch.int64)
-        if 0 < self.max_seq_length < len(encoded_prompt_and_response):
-            msl = self.max_seq_length
+        msl = self.max_seq_length
+        if 0 < msl < len(encoded_prompt_and_response):
             encoded_prompt_and_response = encoded_prompt_and_response[:msl]
             encoded_prompt_and_response[msl - 1] = self.tokenizer.eos_id
 
@@ -122,6 +132,8 @@ class SFTDataset(LongContextDataset):
         }
         if POSITION_NAME in example:
             result[POSITION_NAME] = example[POSITION_NAME]
+        if self._retain_target_strings:
+            result[TARGETS_STRINGS_NAME] = targets
         return result
 
 
@@ -146,4 +158,8 @@ def _sft_collate_fn(
         batch_first=True,
         padding_value=ignore_index,
     )
+    if TARGETS_STRINGS_NAME in samples[0]:
+        batched[TARGETS_STRINGS_NAME] = [
+            sample[TARGETS_STRINGS_NAME] for sample in samples
+        ]
     return batched
