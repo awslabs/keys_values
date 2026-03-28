@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import time
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any, List, Tuple, Set
+from typing import Dict, Literal, Optional, Union, Any, List, Tuple
 
 import lightning as L
 import torch
@@ -72,6 +72,7 @@ from keys_values.utils import (
     flush_io_streams,
     VerbosityLevels,
     fabric_precision_to_dtype,
+    remove_keys,
 )
 
 
@@ -90,13 +91,6 @@ class ConfigFull_OLD(ConfigFull):
 @dataclass
 class ConfigLoRA_OLD(ConfigLoRA):
     start_of_layer_hook: Optional[callable] = None
-
-
-def remove_keys(
-    kwargs: Dict[str, Any],
-    names: Set[str],
-) -> Dict[str, Any]:
-    return {k: v for k, v in kwargs.items() if k not in names}
 
 
 def cleanup_longbench_v2_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:

@@ -79,12 +79,14 @@ class SampleBasedMetricsEvaluator:
     """
     def __init__(
         self,
-        model: LongContextInferenceModel,
+        metrics: List[str],
         max_generated_tokens: int,
         tokenizer: Tokenizer,
         sample_kwargs: Optional[Dict[str, Any]] = None,
     ):
-        self.model = model
+        if not all(metric in self.supported_metrics() for metric in metrics):
+            raise ValueError(f"Metrics {metrics} not all supported")
+        self.metrics = metrics
         self.max_generated_tokens = max_generated_tokens
         if sample_kwargs is None:
             sample_kwargs = dict()
@@ -118,25 +120,24 @@ class SampleBasedMetricsEvaluator:
 
     def __call__(
         self,
-        input_ids: torch.Tensor,
+        model: LongContextInferenceModel,
+        prompts: torch.Tensor,
         targets: List[TargetType],
-        metrics: List[str],
     ) -> Dict[str, torch.Tensor]:
         """
         Computes metric values for data case `(input_ids, targets)`. The
         metrics to be computed are in `metrics`.
 
         Args:
-            input_ids: Prompts, `(batch_size, prompt_len)`. Aligned on the
+            model: LongContextInferenceModel
+            prompts: Prompts, `(batch_size, prompt_len)`. Aligned on the
                 right (if there is padding, it is on the left)
             targets: List of targets of length `batch_size`. Each entry is a
                 string or list of strings. Some metrics allow for lists of
                 strings, others require a single string
-            metrics: List of metrics to be computed. All metrics are computed
-                based on the same generated tokens
 
         Returns:
-            Dictionary with entries `{name: values}`, where `name in metrics`
+            Dictionary with entries `{name: values}`, where `name in self.metrics`
             and `values.shape = (batch_size,)`, the metric values for each
             entry in the batch.
 
@@ -153,21 +154,19 @@ class SampleBasedMetricsEvaluator:
                 for s, p in zip(elem, pads)
             ]
 
-        assert input_ids.ndim == 2
-        batch_size = input_ids.shape[0]
+        assert prompts.ndim == 2
+        batch_size = prompts.shape[0]
         if len(targets) != batch_size:
             raise ValueError(f"len(targets) = {len(targets)} != {batch_size} = batch_size")
-        if not all(metric in self.supported_metrics() for metric in metrics):
-            raise ValueError(f"Metrics {metrics} not all supported")
         for target in targets:
-            for metric in metrics:
+            for metric in self.metrics:
                 validate_targets(target, metric)
 
         # Generate tokens
         parts = [
             right_pad(elem) for elem in batched_generate_fn(
-                model=self.model,
-                prompts=input_ids,
+                model=model,
+                prompts=prompts,
                 max_generated_tokens=self.max_generated_tokens,
                 sample_kwargs=self.sample_kwargs,
                 stop_tokens=([self._eos_id],),
@@ -185,7 +184,7 @@ class SampleBasedMetricsEvaluator:
                     for output, target in zip(outputs, targets)
                 ],
                 dtype=torch.float32,
-                device=input_ids.device,
+                device=prompts.device,
             )
-            for metric in metrics
+            for metric in self.metrics
         }

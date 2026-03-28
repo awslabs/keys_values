@@ -104,8 +104,8 @@ class SFTDataset(LongContextDataset):
         encoded_prompt_and_response = torch.cat(
             (encoded_prompt, encoded_response)
         ).type(torch.int64)
-        if 0 < self.max_seq_length < len(encoded_prompt_and_response):
-            msl = self.max_seq_length
+        msl = self.max_seq_length
+        if 0 < msl < len(encoded_prompt_and_response):
             encoded_prompt_and_response = encoded_prompt_and_response[:msl]
             encoded_prompt_and_response[msl - 1] = self.tokenizer.eos_id
 
