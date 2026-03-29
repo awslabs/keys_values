@@ -13,18 +13,20 @@
 # limitations under the License.
 from functools import partial
 import math
-from typing import Optional, Callable, Tuple, List
+from typing import Optional, Callable, Tuple, List, Dict, Any
 
 import torch
 from torch.nn.attention.flex_attention import (
     flex_attention,
     create_block_mask,
     BlockMask,
+    AuxRequest,
 )
 
 from keys_values.sdpa_wrapper import (
     sdpa_check_args,
     reorder_key_value,
+    reorder_inverse,
     ReorderAnnotationCallback,
     zeropad_query_on_left,
 )
@@ -113,6 +115,9 @@ class FlexAttnManager:
     ) -> BlockMask:
         raise NotImplementedError
 
+    def _extra_flex_attention_kwargs(self, args: tuple) -> Dict[str, Any]:
+        return dict()
+
     def __call__(
         self,
         kv_len: int,
@@ -152,6 +157,7 @@ class FlexAttnManager:
                     flex_attention,
                     score_mod=score_mod,
                     block_mask=block_mask,
+                    **self._extra_flex_attention_kwargs(args),
                 ),
                 fullgraph=True,
             )
@@ -246,6 +252,18 @@ def causal_mask_for_chunk(
     return result
 
 
+def causal_mask_for_chunk_reversed(
+    batch: torch.Tensor,
+    head: torch.Tensor,
+    q_idx: torch.Tensor,
+    kv_idx: torch.Tensor,
+    offset: int,
+) -> torch.Tensor:
+    left_arg = kv_idx + offset
+    result = left_arg >= q_idx
+    return result
+
+
 class FlexAttnForChunkManager(FlexAttnManager):
     """
     FlexAttention manager for chunk case.
@@ -262,20 +280,36 @@ class FlexAttnForChunkManager(FlexAttnManager):
     graph to be stored in `_entries`. This is why `extend_kv=False` for the
     first entry, `extend_kv=True` for all others. Note that the first entry
     is the most used one in general.
+
+    Support of :func:`sdpa_flexatt_with_attn_weights`:
+
+    First, if `forward_return_lse == True`, the compute graphs returned
+    for `requires_grad == False` output `attn_outputs, aux`, where `aux.lse`
+    are log-sum-exp of attention weights. Second, an extra boolean argument
+    `reverse` can be passed (defaults to `False`). If this is `True`, we flip
+    `query` and `key` as inputs, so that the score matrix is transposed.
+    Internally, this means that :func:`causal_mask_for_chunk_reversed` is used
+    instead of :func:`causal_mask_for_chunk`. In this case, `sliding_window_size`
+    and `als_signature` cannot be used.
     """
 
-    def __init__(self, q_lens: Optional[List[int]] = None):
+    def __init__(
+        self,
+        q_lens: Optional[List[int]] = None,
+        forward_return_lse: bool = False,
+    ):
         super().__init__()
         if q_lens is not None:
             q_lens = sorted(q_lens)
             assert all(x > 0 for x in q_lens)
             assert all(x < y for x, y in zip(q_lens[:-1], q_lens[1:]))
         self.q_lens = q_lens
+        self.forward_return_lse = forward_return_lse
 
     def _unpack_kwargs(
         self,
         **kwargs,
-    ) -> Tuple[int, int, int]:
+    ) -> Tuple[int, int, int, bool]:
         unpacked_args = []
         for name in (
             "q_len",
@@ -285,6 +319,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
             if name not in kwargs:
                 raise ValueError(f"{name} is required")
             unpacked_args.append(kwargs[name])
+        unpacked_args.append(kwargs.get("reverse", False))
         return tuple(unpacked_args)
 
     def transform_q_len(self, q_len: int) -> int:
@@ -305,7 +340,9 @@ class FlexAttnForChunkManager(FlexAttnManager):
         als_signature: Optional[int],
         **kwargs,
     ) -> tuple:
-        q_len, batch_size, n_head = self._unpack_kwargs(**kwargs)
+        q_len, batch_size, n_head, reverse = self._unpack_kwargs(**kwargs)
+        if reverse and sliding_window_size is not None:
+            raise ValueError("Cannot use reverse=True and sliding_window_size")
         return (
             self.transform_q_len(q_len),
             kv_len,
@@ -315,6 +352,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
             requires_grad,
             sliding_window_size,
             als_signature,
+            reverse,
         )
 
     def _args_to_str(self, *args) -> str:
@@ -330,6 +368,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
             parts.append(f"sliding_window_size:{args[6]:3d}")
         if args[7] is not None:
             parts.append(f"als_signature:{args[7]}")
+        parts.append(f"reverse:{int(args[8]):1d}")
         return ",".join(parts)
 
     def _create_block_mask(
@@ -339,16 +378,27 @@ class FlexAttnForChunkManager(FlexAttnManager):
         sliding_window_size: Optional[int],
         **kwargs,
     ) -> BlockMask:
-        q_len = self.transform_q_len(self._unpack_kwargs(**kwargs)[0])
-        if q_len > kv_len:
-            raise ValueError(
-                f"q_len={q_len}, kv_len={kv_len}: Must have q_len <= kv_len"
+        q_len, _, _, reverse = self._unpack_kwargs(**kwargs)
+        q_len = self.transform_q_len(q_len)
+        if not reverse:
+            if q_len > kv_len:
+                raise ValueError(
+                    f"q_len={q_len}, kv_len={kv_len}: Must have q_len <= kv_len"
+                )
+            mask_mod = partial(
+                causal_mask_for_chunk,
+                offset=kv_len - q_len,
+                sliding_window_size=sliding_window_size,
             )
-        mask_mod = partial(
-            causal_mask_for_chunk,
-            offset=kv_len - q_len,
-            sliding_window_size=sliding_window_size,
-        )
+        else:
+            if q_len < kv_len:
+                raise ValueError(
+                    f"q_len={q_len}, kv_len={kv_len}: Must have q_len >= kv_len"
+                )
+            mask_mod = partial(
+                causal_mask_for_chunk_reversed,
+                offset=q_len - kv_len,
+            )
         return create_block_mask(
             mask_mod,
             B=None,
@@ -358,8 +408,14 @@ class FlexAttnForChunkManager(FlexAttnManager):
             device=device,
         )
 
+    def _extra_flex_attention_kwargs(self, args: tuple) -> Dict[str, Any]:
+        requires_grad = args[5]
+        if self.forward_return_lse and not requires_grad:
+            return {"return_aux": AuxRequest(lse=True)}
+        else:
+            return dict()
 
-# TODO: Further args concerning `flex_attention`
+
 class FlexAttentionArgs:
     """
     Maintains managers (for prefill and chunk computations).
@@ -377,16 +433,23 @@ class FlexAttentionArgs:
             `input_pos > 0` is mapped to the smallest entry `>= q_len`.
         extend_kv: If `True` we always extend `key, value` to `n_head`. This
             needs more memory, only use if the default does not work.
+        forward_return_lse: If `True`, the forward graphs also return the
+            `lse` tensors. This is done for `input_pos > 0` only.
     """
 
     def __init__(
         self,
         q_lens: Optional[List[int]] = None,
         extend_kv: bool = False,
+        forward_return_lse: bool = False,
     ):
         self.attn_prefill_manager = FlexAttnForPrefillManager()
-        self.attn_chunk_manager = FlexAttnForChunkManager(q_lens)
+        self.attn_chunk_manager = FlexAttnForChunkManager(
+            q_lens,
+            forward_return_lse,
+        )
         self.extend_kv = extend_kv
+        self.forward_return_lse = forward_return_lse
 
     def attn_fn(
         self,
@@ -399,7 +462,15 @@ class FlexAttentionArgs:
         sliding_window_size: Optional[int],
         attention_logit_softcapping: Optional[float],
         input_pos: int,
+        reverse: bool = False,
     ) -> Tuple[FlexAttnWithBlockMask, bool]:
+        """
+        If `forward_return_lse == True`, `input_pos > 0`, and
+        `requires_grad == False`, the returned graph outputs two arguments:
+        `attn_outputs` as usual, and `aux` of type `AuxOutput`, with the
+        `lse` attribute being set.
+
+        """
         if input_pos == 0:
             return (
                 self.attn_prefill_manager(
@@ -412,6 +483,8 @@ class FlexAttentionArgs:
                 False,
             )
         else:
+            if reverse and sliding_window_size is not None:
+                raise ValueError("Cannot use reverse=True and sliding_window_size")
             _attn_fn, extend_kv = self.attn_chunk_manager(
                 kv_len=kv_len,
                 device=device,
@@ -421,6 +494,7 @@ class FlexAttentionArgs:
                 q_len=q_len,
                 batch_size=batch_size,
                 n_head=n_head,
+                reverse=reverse,
             )
             return _attn_fn, extend_kv or self.extend_kv
 
@@ -496,7 +570,7 @@ def scaled_dot_product_attention_flexatt(
         sort_if_3d: See :func:`reorder_key_value`.
 
     Returns:
-        Attention outputs, shape `(batch_size, n_heads, q_len, head_size)`
+        Attention outputs, shape `(batch_size, n_head, q_len, head_size)`
 
     """
     batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(
@@ -602,3 +676,173 @@ def choose_q_lens(
     else:
         q_lens = None
     return q_lens
+
+
+MIN_HEAD_DIM = 16
+
+
+def sdpa_flexatt_with_attn_weights(
+    flexatt_args: FlexAttentionArgs,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    scale_factor: Optional[float],
+    attention_logit_softcapping: Optional[float],
+    input_pos: int,
+    token_positions: Optional[torch.Tensor],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Baseline implementation for SDPA returning attention weights summed over
+    query axis alongside attention outputs. This is done by calling PyTorch
+    `flex_attention` twice. Details are provided in a technical report.
+
+    Can be called for `input_pos > 0` and in `no_grad` mode only. Moreover,
+    `sliding_window_size` and `attention_logit_softcapping` are not supported.
+    And we must have `flexatt_args.forward_return_lse == True`.
+
+    Args:
+        flexatt_args: Arguments for `flex_attention`. Must have
+            `forward_return_lse == True`.
+        query: Queries, shape `(batch_size, n_head, q_len, head_size)`
+        key: Keys, shape `(batch_size, n_query_groups, kv_len, head_size)`
+        value: Values, shape `(batch_size, n_query_groups, kv_len, head_size)`
+        scale_factor: Scale factor for attention
+        attention_logit_softcapping: Attention logit softcapping threshold,
+            optional. Note that this value is quantized so the manager can
+            cache compiled graphs
+        input_pos: Position in input sequence. Must be positive
+        token_positions: Contains token positions in KV cache, shape
+            `(batch_size, n_query_groups, kv_len)`. If not given, it is
+            equivalent to `arange(kv_len)`.
+
+    Returns:
+        `(attn_outputs, attn_weights)`, where `attn_outputs` has shape
+        `(batch_size, n_head, q_len, head_size)`, `attn_weights` has shape
+        `(batch_size, n_head, kv_len)`.
+
+    """
+    batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(
+        query,
+        key,
+        value,
+    )
+    if query.requires_grad or key.requires_grad or value.requires_grad:
+        raise ValueError("Cannot be used with autograd")
+    if input_pos <= 0:
+        raise ValueError("input_pos must be positive")
+    if not flexatt_args.forward_return_lse:
+        raise ValueError("flexatt_args.forward_return_lse must be True")
+    if token_positions is not None and token_positions.shape != key.shape[:-1]:
+        raise ValueError(
+            f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
+        )
+    if token_positions is not None:
+        key, value, extra_info = reorder_key_value(
+            key,
+            value,
+            token_positions.detach(),
+            input_pos,
+            q_len,
+            sort_if_3d=True,
+        )
+    else:
+        extra_info = dict()
+    enable_gqa = n_query_groups < n_head
+
+    # (1) First call: SDPA(Q, K, V)
+    attn_kwargs = dict(
+        batch_size=batch_size,
+        n_head=n_head,
+        device=query.device,
+        requires_grad=False,
+        sliding_window_size=None,
+        attention_logit_softcapping=attention_logit_softcapping,
+        input_pos=input_pos,
+    )
+    attn_fn, extend_kv = flexatt_args.attn_fn(
+        q_len=q_len,
+        kv_len=kv_len,
+        reverse=False,
+        **attn_kwargs,
+    )
+    if enable_gqa and extend_kv:
+        key = repeat_interleave(key, n_head)
+        value = repeat_interleave(value, n_head)
+        enable_gqa = False
+        extend_kv = True
+    else:
+        extend_kv = False
+    q_len_tr = flexatt_args.transform_q_len(q_len)
+    if q_len_tr > q_len:
+        # Use zero padding
+        # Importantly, zeros are appended **on the left**, not on the right.
+        # The real query entries must be right-aligned with key, value,
+        # otherwise our causal attention masking does not work out properly.
+        # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
+        query = zeropad_query_on_left(query, q_len_tr - q_len)
+    # Deal with non-standard `scale_factor`
+    diff = scale_factor * math.sqrt(head_size)
+    if not (0.999 < diff < 1.001):
+        query = query * diff
+    attn_output, aux = attn_fn(
+        query=query,
+        key=key,
+        value=value,
+        scale=None,
+        enable_gqa=enable_gqa,
+    )
+    if q_len_tr > q_len:
+        attn_output = attn_output[:, :, (-q_len):, :].clone()
+
+    # (2) Second call: SDPA_rev(K, Q, V_tilde)
+    if not extend_kv:
+        # Second call cannot use `enable_gqa=True`
+        key = repeat_interleave(key, n_head)
+    attn_fn, _ = flexatt_args.attn_fn(
+        q_len=kv_len,
+        kv_len=q_len,
+        reverse=True,
+        **attn_kwargs,
+    )
+    # Multiply by a factor `exp(mean_lse)` here, divide by the same below
+    mean_lse = aux.lse.mean(dim=-1, keepdim=True)
+    vtil_vec = torch.exp(-(aux.lse - mean_lse)).to(dtype=query.dtype)
+    if q_len_tr > q_len:
+        vtil_vec[:, :, : (q_len_tr - q_len)] = 0.0
+    value_tilde = torch.cat(
+        (
+            vtil_vec.unsqueeze(-1),
+            torch.zeros(
+                (1, 1, 1, 1),
+                dtype=query.dtype,
+                device=query.device,
+            ).expand(batch_size, n_head, q_len_tr, MIN_HEAD_DIM - 1),
+        ),
+        dim=-1,
+    )
+    output2, aux = attn_fn(
+        query=key,
+        key=query,
+        value=value_tilde,
+        scale=None,
+        enable_gqa=False,
+    )
+    attn_weights = output2[:, :, :, 0].to(dtype=torch.float32) * torch.exp(
+        aux.lse - mean_lse
+    )
+    if n_query_groups < n_head:
+        # Undo `repeat_interleave`
+        attn_weights = torch.mean(
+            attn_weights.view(
+                batch_size,
+                n_query_groups,
+                -1,
+                kv_len,
+            ),
+            dim=2,
+        )
+    if token_positions is not None:
+        # Undo reordering
+        attn_weights = reorder_inverse(attn_weights, **extra_info)
+
+    return attn_output, attn_weights
