@@ -506,6 +506,22 @@ are:
   favor earlier tokens. Scores are normalized by the age of the entry if
   `normalize_scores=True`.
 
+An important property of a KV cache policy is whether its evaluation requires
+attention weights (summed over the query axis) to be returned by SDPA or not:
+
+* Does not require attention weights: `dense`, `lastrec`
+* Requires attention weights: `h2o`, `h2o-vlen`, `h2o-orig`, `qh2o`, `qh2o-vlen`
+
+Attention weights are a powerful information, and cache policies using them tend
+to outperform those which do not. However, none of the current fast SDPA kernel
+implementations return summed attention weights. There is no inherent reason for
+this: it seems the significance of summed attention weights has simply been
+overlooked. This library contains code to compute summed attention weights
+alongside SDPA with a second `flex_attention` call. Given we observe robust and
+significant improvements with `h2o` over `lastrec`, an important direction for
+future work is to extend SotA SDPA implementations to return summed attention
+weights at small extra cost.
+
 ### Cache Length and Chunk Size
 
 The most important argument for a KV cache is `kv_cache.cache_length`, the
@@ -675,16 +691,27 @@ Relevant arguments are:
   in naive SDPA, used in `forward` pass.
 * `attention_backward_temp_size_gb`: Same size limit, but for SDPA computations
   during the `backward` pass. This is discussed [below](#gradient-computation).
+* `sdpa.use_flex_for_attn_weights`: KV cache policies like H2O require SDPA to
+  return attention weights, summed over the query axis. Currently, none of the
+  fast implementations do that. If `flex_attention` is used, we can obtain the
+  weights by a second call. If this argument is `False`, we do not use this
+  trick, but our eager (naive) implementation, which is slower.
+* `sdpa.dynamo_cache_size_limit`: Value for
+  `torch._dynamo.config.cache_size_limit`. The built-in default (8) is too small
+  for our purposes, we raise it to 16. If you encounter
+  `torch._dynamo.exc.FailOnRecompileLimitHit`, it may help to increase this
+  number. However, excessive recompilation hints at something going wrong, see
+  https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/compile/programming_model.recompilation.html.
 
-**Note**: We do not currently support `config.sliding_window_size` with any of
-our fast SDPA kernels (for reasons explained below). This feature is used in
-`Gemma-2`, `Gemma-3` or `Mistral` models. You can attain much the same effect by
-using the `lastrec` KV cache policy with cache length set to the window size.
-This not only allows to use a fast SDPA kernel, but also saves time and memory
-due to a small KV cache length (strictly speaking, using the `lastrec` policy is
-equivalent to `config.sliding_window_size` only if `kv_cache.chunk_size == 1`,
-which would run slowly; `lastrec` with an economical chunk size is a reasonable
-approximation, see [here](#cache-length-and-chunk-size)).
+> We do not currently support `config.sliding_window_size` with any of our fast
+> SDPA kernels (for reasons explained below). This feature is used in `Gemma-2`,
+> `Gemma-3` or `Mistral` models. You can attain much the same effect by using
+> the `lastrec` KV cache policy with cache length set to the window size. This
+> not only allows to use a fast SDPA kernel, but also saves time and memory due
+> to a small KV cache length (strictly speaking, using the `lastrec` policy is
+> equivalent to `config.sliding_window_size` only if `kv_cache.chunk_size == 1`,
+> which would run slowly; `lastrec` with an economical chunk size is a
+> reasonable approximation, see [here](#cache-length-and-chunk-size)).
 
 Why don't we support `config.sliding_window_size` with `flex_attention`? This
 is because for almost all KV cache policies, the cache entries become reordered.
