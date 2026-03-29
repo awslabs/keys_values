@@ -400,7 +400,9 @@ def setup_internal(
         data.metadata_dir = str(out_dir / "data")
         print(f"Setting Helmet.metadata_dir to {data.metadata_dir}")
     if not isinstance(data, Helmet) and eval.use_sample_metric:
-        raise ValueError("use_sample_metric=True currently supported only for Helmet datasets")
+        raise ValueError(
+            "use_sample_metric=True currently supported only for Helmet datasets"
+        )
     out_dir = init_out_dir(out_dir)
     if data.metadata_dir is not None:
         data.metadata_dir = str(init_out_dir(Path(data.metadata_dir)))
@@ -786,7 +788,9 @@ def main(
     if eval.use_sample_metric:
         assert isinstance(data, Helmet)
         evaluator = SampleBasedMetricsEvaluator(
-            metrics=[SampleBasedMetricsEvaluator.metric_for_helmet_task(data.dataset_key)],
+            metrics=[
+                SampleBasedMetricsEvaluator.metric_for_helmet_task(data.dataset_key)
+            ],
             max_generated_tokens=eval.sample_metric_max_generated_tokens,
             tokenizer=tokenizer,
             sample_kwargs=eval.sample_metric_kwargs,
@@ -880,7 +884,9 @@ def main(
         )
         fabric.log_dict(metrics, step=state["iter_num"])
         print_message(
-            f"Final evaluation | " + string_for_val_metrics(metrics, evaluator) + " | val_time: {metrics['val_time']:.3f} s",
+            f"Final evaluation | "
+            + string_for_val_metrics(metrics, evaluator)
+            + f" | val_time: {metrics['val_time']:.3f} s",
             fabric,
         )
         flush_io_streams()
@@ -1218,7 +1224,9 @@ def fit(
                 fabric=fabric,
             )
             print_message(
-                f"Initial evaluation | " + string_for_val_metrics(metrics, evaluator) + " | val_time: {metrics['val_time']:.3f} s",
+                f"Initial evaluation | "
+                + string_for_val_metrics(metrics, evaluator)
+                + f" | val_time: {metrics['val_time']:.3f} s",
                 fabric,
             )
         else:
@@ -1577,7 +1585,9 @@ def fit(
                     fabric.global_rank,
                 )
                 print_message(
-                    f"Epoch {train_iterator.epoch} | iter {state['iter_num']:3d} | " + string_for_val_metrics(metrics, evaluator) + " | val_time: {metrics['val_time']:.3f} s",
+                    f"Epoch {train_iterator.epoch} | iter {state['iter_num']:3d} | "
+                    + string_for_val_metrics(metrics, evaluator)
+                    + f" | val_time: {metrics['val_time']:.3f} s",
                     fabric,
                 )
                 flush_io_streams()
@@ -1763,7 +1773,9 @@ def string_for_val_metrics(
     evaluator: Optional[SampleBasedMetricsEvaluator],
 ) -> str:
     if evaluator is None:
-        return f"val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f}"
+        return (
+            f"val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f}"
+        )
     else:
         name = evaluator.metrics[0]
         return f"{name}: {metrics[name]:.3f}"

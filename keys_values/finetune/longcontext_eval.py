@@ -35,12 +35,14 @@ from litgpt.utils import (
 
 from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.config import Config as ConfigFull
-from keys_values.data import LongBenchV2, INPUT_IDS_NAME
+from keys_values.data import LongBenchV2, Helmet
 from keys_values.data.base import (
     LIT_MODEL_FNAME,
     HEAD_MODEL_FNAME,
     LORA_WEIGHTS_FNAME,
     LORA_WEIGHTS_FNAME_OLD,
+    INPUT_IDS_NAME,
+    TARGETS_STRINGS_NAME,
 )
 from keys_values.data.evaluation import (
     TASK_NAME,
@@ -49,6 +51,7 @@ from keys_values.data.evaluation import (
     EvaluationWithTasksHelper,
     EvaluationDataLoader,
 )
+from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
 from keys_values.finetune.args import KVCacheArgs, SDPAArgs
 from keys_values.finetune.batch_transform import BatchTransformFactory
 from keys_values.finetune.longcontext_full import (
@@ -119,6 +122,9 @@ def setup(
     verbose: Optional[str] = None,
     attention_forward_temp_size_gb: Optional[float] = None,
     lora_dropout: Optional[float] = None,
+    use_sample_metric: bool = True,
+    sample_metric_max_generated_tokens: int = 10,
+    sample_metric_kwargs: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Evaluate a range of model checkpoints on a test set
 
@@ -170,6 +176,13 @@ def setup(
             stored with the checkpoints
         lora_dropout: If given and `model_type == "lora"`, this overwrites the
             `config.lora_dropout` values. Pass 0 to switch dropout off
+        use_sample_metric: If `True` and the dataset has an associated
+            sample-based metric, this is used. Otherwise, we use the same loss
+            as used for training
+        sample_metric_max_generated_tokens: Maximum number of tokens sampled
+            for sample-based metric evaluation
+        sample_metric_kwargs: Keyword arguments for token sampling (params
+            can be "temperature", "top_k", "top_p")
 
     """
     devices = parse_devices(devices)
@@ -180,6 +193,8 @@ def setup(
             )
     elif devices != 1:
         raise ValueError("CUDA is not available, can only do devices = 1")
+    if sample_metric_kwargs is None:
+        sample_metric_kwargs = dict()
     # Collect evaluation tasks
     eval = EvaluationTasks(out_dir, model_type)
     if not eval.tasks:
@@ -208,17 +223,26 @@ def setup(
     )
     pprint(locals())
     # Dataset
-    if not hyp_pars["data"]["class_path"].endswith("data.LongBenchV2"):
-        raise ValueError(
-            f"Currently, this script supports --data LongBenchV2 only, but got {hyp_pars['data']['class_path']}"
-        )
-    data = LongBenchV2(**cleanup_longbench_v2_kwargs(hyp_pars["data"]["init_args"]))
-    if data.metadata_dir is None:
-        data.metadata_dir = str(out_dir / "data")
-        print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
-    if data.test_set_tag is None:
-        data.test_set_tag = "rest"
-        print(f"Setting LongBenchV2.test_set_tag to {data.test_set_tag}")
+    data_class_path = hyp_pars["data"]["class_path"]
+    if data_class_path.endswith("data.LongBenchV2"):
+        data = LongBenchV2(**cleanup_longbench_v2_kwargs(hyp_pars["data"]["init_args"]))
+        if data.metadata_dir is None:
+            data.metadata_dir = str(out_dir / "data")
+            print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
+        if data.test_set_tag is None:
+            data.test_set_tag = "rest"
+            print(f"Setting LongBenchV2.test_set_tag to {data.test_set_tag}")
+        if use_sample_metric:
+            print(
+                "LongBenchV2 does not support a sample-based metric. Switching to loss used during training"
+            )
+    elif data_class_path.endswith("data.Helmet"):
+        data = Helmet(**hyp_pars["data"]["init_args"])
+        if data.metadata_dir is None:
+            data.metadata_dir = str(out_dir / "data")
+            print(f"Setting Helmet.metadata_dir to {data.metadata_dir}")
+    else:
+        raise ValueError(f"Data class path {data_class_path} is not supported")
     if batch_size is None:
         batch_size = hyp_pars["evals"]["micro_batch_size"]
         if batch_size is None:
@@ -284,6 +308,9 @@ def setup(
         verbose=verbose,
         attention_forward_temp_size_gb=attention_forward_temp_size_gb,
         yarn_rope=yarn_rope,
+        use_sample_metric=use_sample_metric,
+        sample_metric_max_generated_tokens=sample_metric_max_generated_tokens,
+        sample_metric_kwargs=sample_metric_kwargs,
     )
 
 
@@ -303,6 +330,9 @@ def main(
     verbose: VerbosityLevels,
     attention_forward_temp_size_gb: float,
     yarn_rope: bool,
+    use_sample_metric: bool,
+    sample_metric_max_generated_tokens,
+    sample_metric_kwargs: Dict[str, Any],
 ) -> None:
     is_lora = model_type == "lora"
     if torch.cuda.is_available():
@@ -335,7 +365,7 @@ def main(
         mha_kwargs = get_mha_and_cache_kwargs(
             attention_forward_temp_size_gb,
             model_config.config,
-            kv_cache.cache_kwargs,
+            kv_cache,
             sdpa,
             yarn_rope,
             fabric,
@@ -384,6 +414,20 @@ def main(
             model_kwargs=None,
         )
 
+    if use_sample_metric:
+        assert isinstance(data, Helmet)
+        evaluator = SampleBasedMetricsEvaluator(
+            metrics=[
+                SampleBasedMetricsEvaluator.metric_for_helmet_task(data.dataset_key)
+            ],
+            max_generated_tokens=sample_metric_max_generated_tokens,
+            tokenizer=tokenizer,
+            sample_kwargs=sample_metric_kwargs,
+        )
+        print(f"Evaluation metric: {evaluator.metrics[0]}")
+    else:
+        evaluator = None
+
     # Load base model
     file_path = checkpoint_dir / LIT_MODEL_FNAME
     load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
@@ -397,7 +441,11 @@ def main(
     # Note: `test_dataloader` returns the same batches on each rank. We use
     # a file lock to assign a batch to the first rank asking for a batch.
     # Others skip any batch that is locked or already done.
-    tasks_helper = EvaluationWithTasksHelper(out_dir, data.test_set_tag)
+    if hasattr(data, "test_set_tag"):
+        tag = data.test_set_tag
+    else:
+        tag = None
+    tasks_helper = EvaluationWithTasksHelper(out_dir, tag)
     current_task = None
     test_dataiter = iter(test_dataloader)
     if devices > 1:
@@ -444,18 +492,25 @@ def main(
             # END DEBUG
             t0 = time.perf_counter()
             # One entry per batch dimension:
-            with torch.no_grad():
-                loss_values = model(batch[INPUT_IDS_NAME], batch["targets"])
-            loss_value = loss_values.mean().item()
+            input_ids = batch[INPUT_IDS_NAME]
+            if evaluator is None:
+                with torch.no_grad():
+                    metric_values = model(input_ids, batch["targets"])
+                metric_name = "eval_loss"
+            else:
+                metric_name = evaluator.metrics[0]
+                targets = batch[TARGETS_STRINGS_NAME]
+                prompt_len = input_ids.shape[1] - batch["targets"].shape[1] + 1
+                prompts = input_ids[:, :prompt_len]
+                metric_values = evaluator(model, prompts, targets)[metric_name]
             eval_time = time.perf_counter() - t0
             print_with_rank_and_timestamp(
-                f"Batch {task}, {orig_idxs}: loss = {loss_value:.3f}, "
-                f"eval_time = {eval_time * 1000:.2f} ms",
+                f"Batch {task}, {orig_idxs}: {metric_name} = {metric_values.mean().item():.3f}, eval_time = {eval_time * 1000:.2f} ms",
                 fabric.global_rank,
             )
             flush_io_streams()
             print(f"Storing to {eval_metrics_path}")
-            store_eval_metrics(loss_values, batch, eval_metrics_path)
+            store_eval_metrics(metric_name, metric_values, batch, eval_metrics_path)
             # DEBUG
             # if batch[ORIG_IDX_NAME][0] == 0 and model.debug_intermediates is not None:
             #   debug_intermediates = model.debug_intermediates.entries
@@ -601,14 +656,15 @@ def load_model_checkpoint(
 
 
 def store_eval_metrics(
-    loss_values: torch.Tensor,
+    metric_name: str,
+    metric_values: torch.Tensor,
     batch: dict[str, Any],
     eval_metrics_path: Path,
 ):
-    fieldnames = ["idx", "task", "loss"]
+    fieldnames = ["idx", "task", metric_name]
     task = batch[TASK_NAME]
     with eval_metrics_path.open("w") as fp:
         writer = csv.writer(fp, delimiter=",")
         writer.writerow(fieldnames)
-        for idx, loss in zip(batch[ORIG_IDX_NAME], loss_values):
+        for idx, loss in zip(batch[ORIG_IDX_NAME], metric_values):
             writer.writerow([idx, task, loss.item()])

@@ -44,7 +44,9 @@ def validate_targets(targets: TargetType, metric: str):
     is_list_str = isinstance(targets, list) and all(isinstance(x, str) for x in targets)
     is_str = isinstance(targets, str) or (is_list_str and len(targets) == 1)
     if metric == "sub_exact_match" and not (is_list_str or is_str):
-        raise ValueError(f"Metric {metric} needs list of string targets, got: {targets}")
+        raise ValueError(
+            f"Metric {metric} needs list of string targets, got: {targets}"
+        )
     if metric != "sub_exact_match" and not is_str:
         raise ValueError(f"Metric {metric} needs string targets, got: {targets}")
 
@@ -77,6 +79,7 @@ class SampleBasedMetricsEvaluator:
     tokens.
 
     """
+
     def __init__(
         self,
         metrics: List[str],
@@ -142,6 +145,7 @@ class SampleBasedMetricsEvaluator:
             entry in the batch.
 
         """
+
         def right_pad(elem: List[Union[torch.Tensor, None]]) -> List[torch.Tensor]:
             lens = [0 if s is None else s.shape[0] for s in elem]
             max_len = max(lens)
@@ -149,22 +153,22 @@ class SampleBasedMetricsEvaluator:
             x = next(s for s in elem if s is not None)
             kwargs = dict(fill_value=self._eos_id, dtype=x.dtype, device=x.device)
             pads = [torch.full((max_len - l,), **kwargs) for l in lens]
-            return [
-                p if s is None else torch.cat((s, p))
-                for s, p in zip(elem, pads)
-            ]
+            return [p if s is None else torch.cat((s, p)) for s, p in zip(elem, pads)]
 
         assert prompts.ndim == 2
         batch_size = prompts.shape[0]
         if len(targets) != batch_size:
-            raise ValueError(f"len(targets) = {len(targets)} != {batch_size} = batch_size")
+            raise ValueError(
+                f"len(targets) = {len(targets)} != {batch_size} = batch_size"
+            )
         for target in targets:
             for metric in self.metrics:
                 validate_targets(target, metric)
 
         # Generate tokens
         parts = [
-            right_pad(elem) for elem in batched_generate_fn(
+            right_pad(elem)
+            for elem in batched_generate_fn(
                 model=model,
                 prompts=prompts,
                 max_generated_tokens=self.max_generated_tokens,
@@ -173,9 +177,7 @@ class SampleBasedMetricsEvaluator:
                 include_prompt=False,
             )
         ]
-        outputs = [
-            self.tokenizer.decode(torch.cat(elems)) for elems in zip(*parts)
-        ]
+        outputs = [self.tokenizer.decode(torch.cat(elems)) for elems in zip(*parts)]
         assert len(outputs) == batch_size, (outputs, batch_size)
         return {
             metric: torch.tensor(
