@@ -153,7 +153,7 @@ def get_dataloaders(
 
 def validate_args(train: TrainArgs, eval: EvalArgs) -> None:
     issues = []
-    unsupported = [(train, ["max_tokens", "max_norm", "tie_embeddings"])]
+    unsupported = [(train, ["max_tokens", "tie_embeddings"])]
     for args, names in unsupported:
         for name in names:
             if getattr(args, name) is not None:

@@ -33,6 +33,7 @@ from keys_values.config import Config
 from keys_values.flex_attention import (
     scaled_dot_product_attention_flexatt,
     FlexAttentionArgs,
+    sdpa_flexatt_with_attn_weights,
 )
 from keys_values.pos_encoding import position_encoding_factory, PositionEncoding
 from keys_values.sdpa_wrapper import (
@@ -101,6 +102,8 @@ SDPA_IMPL_EAGER_NO_BLOCKS = 3
 
 SDPA_IMPL_FLEXATTENTION = 4
 
+SDPA_IMPL_FLEXATT_ATTN_WEIGHTS = 5
+
 
 UseEagerPredicate = Callable[[int, int], bool]
 
@@ -146,18 +149,16 @@ class MultiHeadSelfAttention:
         :func:`sdpa_wrapper.scaled_dot_product_attention`. Cannot be used
         if attention weights are required.
         Note: This is slower in general than `flex_attention`.
+    - :const:`SDPA_IMPL_FLEXATT_ATTN_WEIGHTS`: Implements SDPA if attention
+        weights are required, by calling `flex_attention` twice. This is faster
+        than the eager implementation, but does not support a sliding window
+        size.
     - :const:`SDPA_IMPL_EAGER_BLOCKS`: Eager (own) implementation, using
         blocking to limit GPU memory usage.
     - :const:`SDPA_IMPL_EAGER_NO_BLOCKS: Eager (own) implementation without
         blocking. This is the worst, it is chosen only if
         `config.attention_logit_softcapping` is not `None` and `flex_attention`
         is not used.
-
-    PyTorch kernels are most efficient for the `is_causal=True` case
-    (where queries and keys are over the same tokens), but do not return
-    attention weights. While they can be called for `is_causal=False`, they
-    require an explicit mask matrix to be passed, which can lead to OOM errors.
-    We do not use them in this case.
 
     If attention weights are not needed, the decision between
     :const:`SDPA_IMPL_EAGER_BLOCKS` and :const:`SDPA_IMPL_QPADDED_PYTORCH` is
@@ -175,6 +176,14 @@ class MultiHeadSelfAttention:
     Use :class:`DefaultUseEagerKernel` for an optimized choice of
     `use_eager_kernel`.
 
+    FlexAttention based SDPA kernels:
+
+    These are :const:`SDPA_IMPL_FLEXATTENTION` or
+    :const:`SDPA_IMPL_FLEXATT_ATTN_WEIGHTS`. The latter returns attention
+    weights as well, by calling `flex_attention` twice. This works only if
+    `flexatt_args.forward_return_lse == True`, and neither sliding window
+    size nor attention logit softcapping is used. If any of these do not
+    hold, our eager implementation is used (which is quite a bit slower).
     """
 
     def __init__(
@@ -187,7 +196,7 @@ class MultiHeadSelfAttention:
         use_eager_kernel: Optional[UseEagerPredicate] = None,
         filter_sdpa_kernels: bool = True,
         flexatt_args: Optional[FlexAttentionArgs] = None,
-        sort_if_3d: bool = False,
+        sort_if_3d: bool = True,
     ) -> None:
         self.config = config
         if pos_encoding is None:
@@ -374,6 +383,13 @@ class MultiHeadSelfAttention:
         use_flex_att = (
             self.flexatt_args is not None and not must_eager and not sws_given
         )
+        if (
+            return_attn_weights
+            and self.flexatt_args is not None
+            and self.flexatt_args.forward_return_lse
+            and not sws_given
+        ):
+            return SDPA_IMPL_FLEXATT_ATTN_WEIGHTS
         if self.config.attention_logit_softcapping is not None:
             if use_flex_att:
                 return SDPA_IMPL_FLEXATTENTION
@@ -384,7 +400,7 @@ class MultiHeadSelfAttention:
             return SDPA_IMPL_PYTORCH
         if use_flex_att:
             return SDPA_IMPL_FLEXATTENTION
-        elif must_eager or sws_given or self._use_eager_kernel(kv_len, q_len):
+        if must_eager or sws_given or self._use_eager_kernel(kv_len, q_len):
             return SDPA_IMPL_EAGER_BLOCKS
         else:
             return SDPA_IMPL_QPADDED_PYTORCH
@@ -439,8 +455,7 @@ class MultiHeadSelfAttention:
                 self._do_filter_kernels = False
                 self._sdpa_kernels = filtered_kernels
         elif sdpa_mode == SDPA_IMPL_FLEXATTENTION:
-            if sliding_window_size is not None:
-                raise ValueError("Sliding window size not supported with FlexAttention")
+            assert sliding_window_size is None
             attn_outputs = scaled_dot_product_attention_flexatt(
                 flexatt_args=self.flexatt_args,
                 query=query,
@@ -454,10 +469,20 @@ class MultiHeadSelfAttention:
                 annotation_callback=annotation_callback,
                 sort_if_3d=self._sort_if_3d,
             )
+        elif sdpa_mode == SDPA_IMPL_FLEXATT_ATTN_WEIGHTS:
+            assert self.flexatt_args.forward_return_lse
+            assert sliding_window_size is None
+            attn_outputs, attn_weights = sdpa_flexatt_with_attn_weights(
+                flexatt_args=self.flexatt_args,
+                query=query,
+                key=k_and_v.keys(),
+                value=k_and_v.values(),
+                scale_factor=scale_factor,
+                attention_logit_softcapping=self.config.attention_logit_softcapping,
+                input_pos=input_pos,
+                token_positions=token_positions,
+            )
         elif sdpa_mode == SDPA_IMPL_PYTORCH:
-            # We need `key` and `value` at the same time here. For the training
-            # use case, this will be the case, since `k_and_v` is the default
-            # in this case.
             if annotation_callback is not None:
                 annotation_callback = partial(
                     annotation_callback,
