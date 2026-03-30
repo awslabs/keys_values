@@ -489,6 +489,10 @@ class KVCacheFactory:
             raise ValueError(f"name = {name} not supported")
 
     @staticmethod
+    def needs_attn_weights(name: str) -> bool:
+        return name.startswith("h2o") or name.startswith("qh2o")
+
+    @staticmethod
     def _get_caches(model_or_caches: Union[GPT, List[KVCache]]) -> List[KVCache]:
         if isinstance(model_or_caches, GPT):
             caches = model_or_caches.get_kv_caches()

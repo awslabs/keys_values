@@ -927,10 +927,17 @@ def get_mha_and_cache_kwargs(
                 print(
                     f"Using q_lens = {q_lens} as anchor chunk lengths for FlexAttention"
                 )
-        flexatt_args = FlexAttentionArgs(
+        fa_kwargs = dict(
             extend_kv=sdpa.flex_extend_kv,
             q_lens=q_lens,
         )
+        if kv_cache.needs_attn_weights():
+            if sdpa.use_flex_for_attn_weights:
+                fa_kwargs["forward_return_lse"] = True
+                print("KV cache needs attention weights: Using 2x FlexAttention baseline")
+            else:
+                print("KV cache needs attention weights: Using naive eager implementation, since sdpa.use_flex_for_attn_weights == False")
+        flexatt_args = FlexAttentionArgs(**fa_kwargs)
         mha_kwargs["flexatt_args"] = flexatt_args
     cache_kwargs.update(mha_kwargs)
     return mha_kwargs

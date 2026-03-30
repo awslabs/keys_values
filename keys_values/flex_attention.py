@@ -341,10 +341,14 @@ class FlexAttnForChunkManager(FlexAttnManager):
         **kwargs,
     ) -> tuple:
         q_len, batch_size, n_head, reverse = self._unpack_kwargs(**kwargs)
-        if reverse and sliding_window_size is not None:
-            raise ValueError("Cannot use reverse=True and sliding_window_size")
+        if reverse:
+            if sliding_window_size is not None:
+                raise ValueError("Cannot use reverse=True and sliding_window_size")
+            kv_len = self.transform_q_len(kv_len)
+        else:
+            q_len = self.transform_q_len(q_len)
         return (
-            self.transform_q_len(q_len),
+            q_len,
             kv_len,
             batch_size,
             n_head,
@@ -379,8 +383,8 @@ class FlexAttnForChunkManager(FlexAttnManager):
         **kwargs,
     ) -> BlockMask:
         q_len, _, _, reverse = self._unpack_kwargs(**kwargs)
-        q_len = self.transform_q_len(q_len)
         if not reverse:
+            q_len = self.transform_q_len(q_len)
             if q_len > kv_len:
                 raise ValueError(
                     f"q_len={q_len}, kv_len={kv_len}: Must have q_len <= kv_len"
@@ -391,6 +395,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
                 sliding_window_size=sliding_window_size,
             )
         else:
+            kv_len = self.transform_q_len(kv_len)
             if q_len < kv_len:
                 raise ValueError(
                     f"q_len={q_len}, kv_len={kv_len}: Must have q_len >= kv_len"
@@ -643,6 +648,11 @@ def scaled_dot_product_attention_flexatt(
         scale=None,
         enable_gqa=enable_gqa,
     )
+    if flexatt_args.forward_return_lse and not requires_grad:
+        assert isinstance(result, tuple), (type(result), flexatt_args.forward_return_lse, requires_grad)
+        result = result[0]
+    else:
+        assert isinstance(result, torch.Tensor), (type(result), flexatt_args.forward_return_lse, requires_grad)
     if q_len_tr > q_len:
         result = result[:, :, (-q_len):, :].clone()
     return result
