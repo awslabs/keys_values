@@ -101,6 +101,7 @@ def setup(
     verbose: Optional[str] = None,
     attention_forward_temp_size_gb: Optional[float] = None,
     attention_backward_temp_size_gb: Optional[float] = None,
+    oom_error_recovery: bool = False,
     yarn_rope: bool = True,
     sdpa: SDPAArgs = SDPAArgs(
         flex_attention=True,
@@ -173,6 +174,10 @@ def setup(
         attention_backward_temp_size_gb: Size of GPU memory buffers (in GB) used
             in naive SDPA during backward computations. At present, naive SDPA
             is used in backward if `grad.use_old_cache == True`.
+        oom_error_recovery: If `True`, we try to recover from device out of
+            memory errors by lowering `attention_forward_temp_size_gb`,
+            `attention_backward_temp_size_gb` and trying again.
+            NOTE: This feature does not properly work at the moment!
         yarn_rope: Should YaRN be used to adjust RoPE (position encoding) to the
             sequence length for each batch? Defaults to `True`. If not, RoPE is
             determined by the model configuration, and is static (no dependence
@@ -238,6 +243,7 @@ def setup(
         verbose,
         attention_forward_temp_size_gb,
         attention_backward_temp_size_gb,
+        oom_error_recovery,
         yarn_rope,
         sdpa,
         record_gpu_memory_snapshots,
