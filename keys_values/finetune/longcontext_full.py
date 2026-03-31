@@ -797,6 +797,7 @@ def main(
         )
         print(f"Evaluation metric: {evaluator.metrics[0]}")
     else:
+        print("Evaluation metric: eval_loss (same as training loss)")
         evaluator = None
 
     resume_dir = find_resume_path(resume, out_dir)

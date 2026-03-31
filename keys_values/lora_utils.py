@@ -314,23 +314,21 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
 
     @property
     def lora_ind(self) -> torch.Tensor:
-        """Lazy creation of a buffer with LoRA indices to overcome the limitation when FSDP with meta device is used."""
-        # Indices are needed to properly pad weight updates with zeros.
-        if not hasattr(self, "_lora_ind"):
-            off = 0
-            lora_ind = []
-            for enable, size in zip(self.enable_lora, self._all_qkv_shapes):
-                if enable:
-                    lora_ind.extend(range(off, off + size))
-                off += size
-            assert len(lora_ind) == sum(self.qkv_shapes)  # Sanity check
-            self.register_buffer(
-                "_lora_ind",
-                torch.tensor(lora_ind, device=self.linear.weight.device),
-                persistent=False,
-            )
+        """
+        Created with each call. If we buffer this, then use the same model first
+        for inference, then for training, we get this error:
 
-        return self._lora_ind
+        RuntimeError: Inference tensors cannot be saved for backward. Please do not use Tensors created in inference mode in computation tracked by autograd. To work around this, you can make a clone to get a normal tensor and use it in autograd, or use `torch.no_grad()` instead of `torch.inference_mode()`.
+        """
+        # Indices are needed to properly pad weight updates with zeros.
+        off = 0
+        lora_ind = []
+        for enable, size in zip(self.enable_lora, self._all_qkv_shapes):
+            if enable:
+                lora_ind.extend(range(off, off + size))
+            off += size
+        assert len(lora_ind) == sum(self.qkv_shapes)  # Sanity check
+        return torch.tensor(lora_ind, device=self.linear.weight.device)
 
     def reset_parameters(self):
         super().reset_parameters()
