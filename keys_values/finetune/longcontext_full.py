@@ -914,6 +914,9 @@ def get_mha_and_cache_kwargs(
         mha_kwargs["sdpa_kernels"] = SDPA_KERNELS_BEST_ORDERING
     mha_kwargs["sort_if_3d"] = sdpa.reorder_sort_if_3d
     if sdpa.flex_attention:
+        if sdpa.dynamo_cache_size_limit is not None:
+            torch._dynamo.config.cache_size_limit = sdpa.dynamo_cache_size_limit
+        print(f"Value of torch._dynamo.config.cache_size_limit = {torch._dynamo.config.cache_size_limit}")
         # The block mask managers (for prefill, for chunks) are shared
         # among all multi-head attention blocks
         if sdpa.flex_num_q_lens is None:

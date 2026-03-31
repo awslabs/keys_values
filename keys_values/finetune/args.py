@@ -552,6 +552,8 @@ class SDPAArgs:
         use_flex_for_attn_weights: If `False`, we do not use the FlexAttention
             baseline to compute SDPA with summed attention weights. This is
             slower.
+        dynamo_cache_size_limit: Value for `torch._dynamo.config.cache_size_limit`.
+            Defaults to 16. The built-in default 8 is too small for our purposes.
     """
 
     flex_attention: bool = True
@@ -559,6 +561,7 @@ class SDPAArgs:
     flex_num_q_lens: Optional[int] = 4
     reorder_sort_if_3d: bool = True
     use_flex_for_attn_weights: bool = True
+    dynamo_cache_size_limit: int = 16
 
     def __post_init__(self):
         if self.flex_num_q_lens is not None and self.flex_num_q_lens <= 0:
