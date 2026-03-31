@@ -636,7 +636,7 @@ def main(
         train.epochs * steps_per_epoch, (train.max_steps or float("inf"))
     )
     print_message(
-        f"Number of optimizer steps per epoch: {lr_max_steps}",
+        f"\nNumber of optimizer steps per epoch: {lr_max_steps}",
         fabric,
     )
     fabric.seed_everything(seed)
@@ -1763,6 +1763,7 @@ def validate_sample_metric(
     eval: EvalArgs,
     batch_transform: BatchTransform,
 ) -> Tuple[torch.Tensor, int]:
+    model.eval()
     num_cases = 0
     sum_metric_values = None
     for k, batch in enumerate(val_dataloader):
@@ -1781,6 +1782,7 @@ def validate_sample_metric(
         else:
             sum_metric_values += sum_vals
     avg_metric_values = sum_metric_values / num_cases
+    model.train()
     return avg_metric_values, num_cases
 
 

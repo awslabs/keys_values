@@ -455,7 +455,7 @@ class LongContextGradientModel(LongContextInferenceModel):
     def forward(
         self,
         input_ids: torch.Tensor,
-        targets: torch.Tensor,
+        targets: Optional[torch.Tensor],
         scale_factor: float = 1.0,
         **kwargs,
     ) -> Union[LossValue, torch.Tensor]:
@@ -466,14 +466,18 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         Args:
             input_ids: Batch of full input token sequences
-            targets: Targets, these are right-aligned with `input_ids`
+            targets: Targets, these are right-aligned with `input_ids`. If
+                this is `None`, we return logits for the final chunk (only
+                if `self.training == False`)
             scale_factor: Loss is multiplied by this factor. Defaults to 1.
 
         Returns:
             Loss value(s). In training mode, this is of type :class:`LossValue`,
             for which :meth:`backward` is overwritten, and of shape `(1,)`.
             In evaluation mode, we return loss values for batch dimension,
-            shape `(batch_size,)`.
+            shape `(batch_size,)`, or if `targets is None`, we return logits
+            for the final chunk, shape `(batch_size, chunk_size,
+            config.padded_vocab_size)`.
 
         """
         self._check_status("init")
@@ -482,7 +486,8 @@ class LongContextGradientModel(LongContextInferenceModel):
         else:
             self._work_device = self.gpt_model.transformer.wte.weight.device
         input_ids = input_ids.to(self._work_device)
-        targets = targets.to(self._work_device)
+        if targets is not None:
+            targets = targets.to(self._work_device)
         self._init_members_from_tokens(input_ids, targets)
         # Reset KV caches
         self.gpt_model.reset()
@@ -497,6 +502,10 @@ class LongContextGradientModel(LongContextInferenceModel):
             if self._record_gpu_memory_snapshots is not None:
                 self._record_gpu_memory_kind = kwargs.get("record_gpu_memory_kind")
         if self.training:
+            if targets is None:
+                raise ValueError(
+                    "In training mode (self.training == True), targets must be given"
+                )
             self._timer_start = time.perf_counter()  # Start timer
             loss_value = self._inference_forward_pass(
                 input_ids,

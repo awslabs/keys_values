@@ -452,6 +452,7 @@ class DequantizedKVCacheBuffers:
 
     def reset(self):
         self.current_length = 0
+        self._needs_write_back = False
 
     def deallocate(self):
         """
