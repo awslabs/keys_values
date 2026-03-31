@@ -649,10 +649,18 @@ def scaled_dot_product_attention_flexatt(
         enable_gqa=enable_gqa,
     )
     if flexatt_args.forward_return_lse and not requires_grad and input_pos > 0:
-        assert isinstance(result, tuple), (type(result), flexatt_args.forward_return_lse, requires_grad)
+        assert isinstance(result, tuple), (
+            type(result),
+            flexatt_args.forward_return_lse,
+            requires_grad,
+        )
         result = result[0]
     else:
-        assert isinstance(result, torch.Tensor), (type(result), flexatt_args.forward_return_lse, requires_grad)
+        assert isinstance(result, torch.Tensor), (
+            type(result),
+            flexatt_args.forward_return_lse,
+            requires_grad,
+        )
     if q_len_tr > q_len:
         result = result[:, :, (-q_len):, :].clone()
     return result

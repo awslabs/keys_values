@@ -916,7 +916,9 @@ def get_mha_and_cache_kwargs(
     if sdpa.flex_attention:
         if sdpa.dynamo_cache_size_limit is not None:
             torch._dynamo.config.cache_size_limit = sdpa.dynamo_cache_size_limit
-        print(f"Value of torch._dynamo.config.cache_size_limit = {torch._dynamo.config.cache_size_limit}")
+        print(
+            f"Value of torch._dynamo.config.cache_size_limit = {torch._dynamo.config.cache_size_limit}"
+        )
         # The block mask managers (for prefill, for chunks) are shared
         # among all multi-head attention blocks
         if sdpa.flex_num_q_lens is None:
@@ -937,9 +939,13 @@ def get_mha_and_cache_kwargs(
         if kv_cache.needs_attn_weights():
             if sdpa.use_flex_for_attn_weights:
                 fa_kwargs["forward_return_lse"] = True
-                print("KV cache needs attention weights: Using 2x FlexAttention baseline")
+                print(
+                    "KV cache needs attention weights: Using 2x FlexAttention baseline"
+                )
             else:
-                print("KV cache needs attention weights: Using naive eager implementation, since sdpa.use_flex_for_attn_weights == False")
+                print(
+                    "KV cache needs attention weights: Using naive eager implementation, since sdpa.use_flex_for_attn_weights == False"
+                )
         flexatt_args = FlexAttentionArgs(**fa_kwargs)
         mha_kwargs["flexatt_args"] = flexatt_args
     cache_kwargs.update(mha_kwargs)
