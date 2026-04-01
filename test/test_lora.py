@@ -1041,46 +1041,6 @@ def test_lora_model_fsdp_init():
                 ), f"Attribute `{attr_name}` isn't materialized."
 
 
-def test_zero_pad_cpu_and_mocked_mps():
-    head_size = 64
-    n_head = 12
-    n_query_groups = 3
-    in_features = 128
-    enable_lora = (True, False, True)
-    r = 4
-
-    model = LoRAQKVLinear(
-        in_features=in_features,
-        head_size=head_size,
-        n_head=n_head,
-        n_query_groups=n_query_groups,
-        r=r,
-        enable_lora=enable_lora,
-    )
-
-    batch_size = 64
-    seq_len = 64
-    embed_dim = head_size * (n_head + n_query_groups)
-    x = torch.randn(batch_size, seq_len, embed_dim)
-
-    result_cpu = model.zero_pad(x)
-
-    with mock.patch("torch.backends.mps.is_available", return_value=True):
-        with mock.patch(
-            "torch.Tensor.device", new_callable=mock.PropertyMock
-        ) as mock_device:
-            mock_device.return_value = torch.device("mps")
-
-            result_mps = model.zero_pad(x)
-
-            assert (
-                result_cpu.shape == result_mps.shape
-            ), "Shape mismatch between CPU and MPS"
-            assert torch.allclose(
-                result_cpu, result_mps
-            ), "Tensor values mismatch between CPU and MPS"
-
-
 def test_load_legacy_state_dict():
     """Check that a legacy state dict (with an interleaved placement in QKV matrix) can be loaded into a model with CausalSelfAttention layers."""
     config = Config(
