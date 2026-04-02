@@ -449,6 +449,13 @@ class TrainArgs:
             )
         if self.lr_warmup_fraction and not (0 <= self.lr_warmup_fraction <= 1):
             raise ValueError("`--train.lr_warmup_fraction` must be between 0 and 1.")
+        if (
+            self.global_batch_size is not None
+            and self.global_batch_size % self.micro_batch_size != 0
+        ):
+            raise ValueError(
+                f"global_batch_size = {self.global_batch_size}, must be multiple of micro_batch_size = {self.micro_batch_size}"
+            )
 
         if (
             self.lr_warmup_steps
@@ -487,7 +494,10 @@ class TrainArgs:
 
     def batch_size(self, devices: int, num_nodes: int = 1) -> int:
         """Number of samples between optimizer steps per data-parallel rank"""
-        batch_size = self.global_batch_size // (devices * num_nodes)
+        if self.global_batch_size is None:
+            batch_size = self.micro_batch_size
+        else:
+            batch_size = self.global_batch_size // (devices * num_nodes)
         assert batch_size > 0
         return batch_size
 
@@ -573,7 +583,7 @@ class SDPAArgs:
             baseline to compute SDPA with summed attention weights. This is
             slower.
         dynamo_cache_size_limit: Value for `torch._dynamo.config.cache_size_limit`.
-            Defaults to 16. The built-in default 8 is too small for our purposes.
+            Defaults to 32. The built-in default 8 is too small for our purposes.
     """
 
     flex_attention: bool = True
@@ -581,7 +591,7 @@ class SDPAArgs:
     flex_num_q_lens: Optional[int] = 4
     reorder_sort_if_3d: bool = True
     use_flex_for_attn_weights: bool = True
-    dynamo_cache_size_limit: int = 16
+    dynamo_cache_size_limit: int = 32
 
     def __post_init__(self):
         if self.flex_num_q_lens is not None and self.flex_num_q_lens <= 0:
