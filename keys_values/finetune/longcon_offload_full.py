@@ -41,7 +41,7 @@ def setup(
     train: TrainArgs = TrainArgs(
         save_interval=50,
         log_interval=1,
-        global_batch_size=2,
+        global_batch_size=None,
         micro_batch_size=2,
         lr_warmup_steps=None,
         lr_warmup_fraction=0.15,

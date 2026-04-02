@@ -413,6 +413,10 @@ def setup_internal(
         raise ValueError(
             f"devices = {devices}, must be in [1, {torch.cuda.device_count()}]"
         )
+    if num_nodes <= 0:
+        raise ValueError(f"num_nodes = {num_nodes}, must be positive")
+    if do_cpu_offload and num_nodes > 1:
+        raise ValueError(f"Must have num_nodes = 1 with CPU offloading")
     if eval.initial_validation is None:
         # Run initial evaluation in multi-device setup, but not with a
         # single device
@@ -424,7 +428,7 @@ def setup_internal(
         )
     else:
         print(str(optimizer))
-    global_batch_size = train.micro_batch_size * devices
+    global_batch_size = train.micro_batch_size * devices * num_nodes
     if train.global_batch_size is None:
         train.global_batch_size = global_batch_size
     elif do_cpu_offload:
@@ -437,7 +441,7 @@ def setup_internal(
     ):
         raise ValueError(
             f"train.global_batch_size = {train.global_batch_size}, must be "
-            "positive multiple of devices * train.micro_batch_size = "
+            "positive multiple of devices * num_nodes * train.micro_batch_size = "
             f"{global_batch_size}."
         )
     if profile_parts is not None and profile_parts not in ("forward", "backward"):
@@ -458,6 +462,11 @@ def setup_internal(
         print(
             "Warning: Device out of memory error recovery does not properly "
             "work at the moment."
+        )
+    gradacc_iters = train.gradient_accumulation_iters(devices, num_nodes)
+    if gradacc_iters > 1:
+        print(
+            f"Using sequential gradient accumulation with {gradacc_iters} iterations per update step"
         )
     # Legacy arguments
     if verbose is None:
@@ -658,6 +667,7 @@ def main(
             sdpa,
             yarn_rope,
             fabric,
+            devices,
         )
         dtype = fabric_precision_to_dtype(fabric._precision.precision)
         torch.set_default_dtype(dtype)
@@ -913,6 +923,7 @@ def get_mha_and_cache_kwargs(
     sdpa: SDPAArgs,
     yarn_rope: bool,
     fabric: Optional[L.Fabric],
+    devices: int,
 ) -> Dict[str, Any]:
     """
     Compiles `mha_kwargs` to be used for creating the model. We also update
@@ -945,6 +956,10 @@ def get_mha_and_cache_kwargs(
     if sdpa.flex_attention:
         if sdpa.dynamo_cache_size_limit is not None:
             torch._dynamo.config.cache_size_limit = sdpa.dynamo_cache_size_limit
+            multiplier = max(devices, 4)
+            torch._dynamo.config.accumulated_cache_size_limit = max(
+                multiplier * sdpa.dynamo_cache_size_limit, 64
+            )
         print(
             f"Value of torch._dynamo.config.cache_size_limit = {torch._dynamo.config.cache_size_limit}"
         )
