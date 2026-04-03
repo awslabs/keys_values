@@ -11,20 +11,91 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple, List, Dict, Optional, Any
+from typing import Tuple, List, Dict, Optional, Any, Union
 
 import torch
 
 from keys_values.config import Config
 
-from keys_values.kvcache.basics import KVCache
+from keys_values.kvcache.base import KVCache
+from keys_values.kvcache.basics import KVCacheWithBuffersState
 from keys_values.kvcache.buffers import KVCacheBuffers
-from keys_values.kvcache.h2o import H2OKVCache, VLengthInstantScoreMixin
+from keys_values.kvcache.h2o import (
+    H2OKVCache,
+    H2OKVCacheState,
+    VLengthInstantScoreMixin,
+)
 from keys_values.kvcache.quant_buffers import QuantizedKVCacheBuffers
 
 DEFAULT_COMBINATION_CONSTANT = 0.5
 
 DEFAULT_SCRATCH_BLOCKSIZE = 1024
+
+
+class QuantizedH2OKVCacheState(H2OKVCacheState):
+    def __init__(
+        self,
+        n_head: int,
+        n_query_groups: int,
+        head_size: int,
+        max_batch_size: int,
+        cache_length: int,
+        block_idx: int,
+        dtype: Optional[torch.dtype],
+        device: Optional[torch.device],
+        input_pos: int,
+        grace_period: int,
+        replay_log_blocksize: int,
+        keep_initial_fraction: float,
+        next_grace_pos: Optional[int],
+        prefill_length: Optional[int],
+        token_pos: torch.Tensor,
+        next_positions: Optional[torch.Tensor],
+        normalize_scores: bool,
+        scores: torch.Tensor,
+        combination_constant: float,
+        scratch_blocksize: int,
+        q_errors: torch.Tensor,
+    ):
+        super().__init__(
+            n_head,
+            n_query_groups,
+            head_size,
+            max_batch_size,
+            cache_length,
+            block_idx,
+            dtype,
+            device,
+            input_pos,
+            grace_period,
+            replay_log_blocksize,
+            keep_initial_fraction,
+            next_grace_pos,
+            prefill_length,
+            token_pos,
+            next_positions,
+            normalize_scores,
+            scores,
+        )
+        self.combination_constant = combination_constant
+        self.scratch_blocksize = scratch_blocksize
+        self.q_errors = q_errors.clone()
+
+    def is_compatible(
+        self,
+        state_or_buffers: Union["KVCacheWithBuffersState", KVCacheBuffers],
+    ) -> Optional[str]:
+        return self._is_compatible(
+            state_or_buffers,
+            (
+                "grace_period",
+                "replay_log_blocksize",
+                "keep_initial_fraction",
+                "normalize_scores",
+                "combination_constant",
+                "scratch_blocksize",
+            ),
+        )
 
 
 class QuantizedH2OKVCache(H2OKVCache):
@@ -219,6 +290,94 @@ class QuantizedH2OKVCache(H2OKVCache):
             scratch_blocksize=self._scratch_blocksize,
         )
 
+    def get_state(self) -> KVCacheWithBuffersState:
+        return QuantizedH2OKVCacheState(
+            n_head=self.n_head,
+            n_query_groups=self.n_query_groups,
+            head_size=self.head_size,
+            max_batch_size=self.max_batch_size,
+            cache_length=self.cache_length,
+            block_idx=self.block_idx,
+            dtype=self.dtype,
+            device=self.device,
+            input_pos=self.input_pos,
+            grace_period=self.grace_period,
+            replay_log_blocksize=self.replay_log_blocksize,
+            keep_initial_fraction=self._keep_initial_fraction,
+            next_grace_pos=self.next_grace_pos,
+            prefill_length=self.prefill_length,
+            token_pos=self.token_pos,
+            next_positions=self._next_positions,
+            normalize_scores=self.normalize_scores,
+            scores=self.scores,
+            combination_constant=self.combination_constant,
+            scratch_blocksize=self._scratch_blocksize,
+            q_errors=self.q_errors,
+        )
+
+    def switch_buffers(
+        self,
+        new_buffers: KVCacheBuffers,
+        cache_state: Optional[KVCacheWithBuffersState] = None,
+    ):
+        super().switch_buffers(new_buffers, cache_state)
+        if cache_state is not None:
+            if not isinstance(cache_state, QuantizedH2OKVCacheState):
+                raise TypeError(f"type(cache_state) = {type(cache_state)}, must be QuantizedH2OKVCacheState")
+            self.q_errors.copy_(cache_state.q_errors)
+
+
+class QuantizedVLengthH2OKVCacheState(QuantizedH2OKVCacheState):
+    def __init__(
+        self,
+        n_head: int,
+        n_query_groups: int,
+        head_size: int,
+        max_batch_size: int,
+        cache_length: int,
+        block_idx: int,
+        dtype: Optional[torch.dtype],
+        device: Optional[torch.device],
+        input_pos: int,
+        grace_period: int,
+        replay_log_blocksize: int,
+        keep_initial_fraction: float,
+        next_grace_pos: Optional[int],
+        prefill_length: Optional[int],
+        token_pos: torch.Tensor,
+        next_positions: Optional[torch.Tensor],
+        normalize_scores: bool,
+        scores: torch.Tensor,
+        combination_constant: float,
+        scratch_blocksize: int,
+        q_errors: torch.Tensor,
+        v_norm: torch.Tensor,
+    ):
+        super().__init__(
+            n_head,
+            n_query_groups,
+            head_size,
+            max_batch_size,
+            cache_length,
+            block_idx,
+            dtype,
+            device,
+            input_pos,
+            grace_period,
+            replay_log_blocksize,
+            keep_initial_fraction,
+            next_grace_pos,
+            prefill_length,
+            token_pos,
+            next_positions,
+            normalize_scores,
+            scores,
+            combination_constant,
+            scratch_blocksize,
+            q_errors,
+        )
+        self.v_norm = v_norm.clone()
+
 
 class QuantizedVLengthH2OKVCache(QuantizedH2OKVCache, VLengthInstantScoreMixin):
     """
@@ -257,21 +416,17 @@ class QuantizedVLengthH2OKVCache(QuantizedH2OKVCache, VLengthInstantScoreMixin):
         shape = (buffers.max_batch_size, self.n_query_groups, buffers.cache_length)
         device = self._default_device_for_new_params()
         self.register_buffer(
-            self.get_name_v_norm(),
+            "v_norm",
             torch.zeros(shape, device=device, dtype=torch.float32),
             persistent=False,
         )
 
-    @classmethod
-    def get_name_v_norm(cls) -> str:
-        return "v_norm"
-
     def _score_buffers(self) -> List[Tuple[torch.Tensor, str]]:
-        return super()._score_buffers() + [(self.v_norm, self.get_name_v_norm())]
+        return super()._score_buffers() + [(self.v_norm, "v_norm")]
 
     @classmethod
     def _score_buffer_names(cls) -> List[str]:
-        return super()._score_buffer_names() + [cls.get_name_v_norm()]
+        return super()._score_buffer_names() + ["v_norm"]
 
     def fix_dtype_of_score_buffers(self):
         super().fix_dtype_of_score_buffers()
@@ -280,7 +435,7 @@ class QuantizedVLengthH2OKVCache(QuantizedH2OKVCache, VLengthInstantScoreMixin):
 
     @classmethod
     def _parameter_names(cls) -> List[str]:
-        return super()._parameter_names() + [cls.get_name_v_norm()]
+        return super()._parameter_names() + ["v_norm"]
 
     def _initial_scores_in_forward(
         self,
@@ -308,3 +463,40 @@ class QuantizedVLengthH2OKVCache(QuantizedH2OKVCache, VLengthInstantScoreMixin):
 
     def clone(self) -> KVCache:
         return QuantizedVLengthH2OKVCache(**self._base_kwargs_for_clone())
+
+    def get_state(self) -> KVCacheWithBuffersState:
+        return QuantizedVLengthH2OKVCacheState(
+            n_head=self.n_head,
+            n_query_groups=self.n_query_groups,
+            head_size=self.head_size,
+            max_batch_size=self.max_batch_size,
+            cache_length=self.cache_length,
+            block_idx=self.block_idx,
+            dtype=self.dtype,
+            device=self.device,
+            input_pos=self.input_pos,
+            grace_period=self.grace_period,
+            replay_log_blocksize=self.replay_log_blocksize,
+            keep_initial_fraction=self._keep_initial_fraction,
+            next_grace_pos=self.next_grace_pos,
+            prefill_length=self.prefill_length,
+            token_pos=self.token_pos,
+            next_positions=self._next_positions,
+            normalize_scores=self.normalize_scores,
+            scores=self.scores,
+            combination_constant=self.combination_constant,
+            scratch_blocksize=self._scratch_blocksize,
+            q_errors=self.q_errors,
+            v_norm=self.v_norm,
+        )
+
+    def switch_buffers(
+        self,
+        new_buffers: KVCacheBuffers,
+        cache_state: Optional[KVCacheWithBuffersState] = None,
+    ):
+        super().switch_buffers(new_buffers, cache_state)
+        if cache_state is not None:
+            if not isinstance(cache_state, QuantizedVLengthH2OKVCacheState):
+                raise TypeError(f"type(cache_state) = {type(cache_state)}, must be QuantizedVLengthH2OKVCacheState")
+            self.v_norm.copy_(cache_state.v_norm)
