@@ -64,6 +64,7 @@ from keys_values.finetune.utils import (
     print_with_rank_and_timestamp,
 )
 from keys_values.head_model_factory import HeadModelFactory
+from keys_values.kvcache.replay_buffers import ModelForTokenGeneration
 from keys_values.long_context import LongContextInferenceModel
 from keys_values.lora import (
     GPT as GPTLoRA,
@@ -177,8 +178,8 @@ def setup(
         lora_dropout: If given and `model_type == "lora"`, this overwrites the
             `config.lora_dropout` values. Pass 0 to switch dropout off
         use_sample_metric: If `True` and the dataset has an associated
-            sample-based metric, this is used. Otherwise, we use the same loss
-            as used for training
+            sample-based metric, we compute and store this alongside the
+            loss
         sample_metric_max_generated_tokens: Maximum number of tokens sampled
             for sample-based metric evaluation
         sample_metric_kwargs: Keyword arguments for token sampling (params
@@ -369,6 +370,7 @@ def main(
             sdpa,
             yarn_rope,
             fabric,
+            devices,
         )
         dtype = fabric_precision_to_dtype(fabric._precision.precision)
         torch.set_default_dtype(dtype)
@@ -413,6 +415,7 @@ def main(
             fabric=fabric,
             model_kwargs=None,
         )
+        model.eval()
 
     if use_sample_metric:
         assert isinstance(data, Helmet)
@@ -424,9 +427,14 @@ def main(
             tokenizer=tokenizer,
             sample_kwargs=sample_metric_kwargs,
         )
-        print(f"Evaluation metric: {evaluator.metrics[0]}")
+        gen_wrapper = ModelForTokenGeneration(model.gpt_model)
+        metric_name = evaluator.metrics[0]
+        print(f"Evaluation metrics: val_loss, {metric_name}")
     else:
+        print("Evaluation metric: val_loss")
         evaluator = None
+        gen_wrapper = None
+        metric_name = None
 
     # Load base model
     file_path = checkpoint_dir / LIT_MODEL_FNAME
@@ -493,24 +501,37 @@ def main(
             t0 = time.perf_counter()
             # One entry per batch dimension:
             input_ids = batch[INPUT_IDS_NAME]
+            targets = batch["targets"]
             if evaluator is None:
                 with torch.no_grad():
-                    metric_values = model(input_ids, batch["targets"])
-                metric_name = "eval_loss"
+                    metrics_values = {"val_loss": model(input_ids, targets)}
             else:
-                metric_name = evaluator.metrics[0]
-                targets = batch[TARGETS_STRINGS_NAME]
-                prompt_len = input_ids.shape[1] - batch["targets"].shape[1] + 1
-                prompts = input_ids[:, :prompt_len]
-                metric_values = evaluator(model, prompts, targets)[metric_name]
+                # We first compute the sample-based metric, then the loss. The
+                # prompt is processed once only.
+                with torch.no_grad():
+                    logits = model(input_ids, targets, mode="inputs")
+                gen_wrapper.switch_status(True)
+                metrics_values = evaluator(
+                    model=model,
+                    prompts_or_logits=logits,
+                    targets=batch[TARGETS_STRINGS_NAME],
+                )
+                gen_wrapper.switch_status(False)
+                with torch.no_grad():
+                    metrics_values["val_loss"] = model(
+                        input_ids, targets, mode="targets"
+                    )
             eval_time = time.perf_counter() - t0
+            msg = ", ".join(
+                f"{k} = {v.mean().item():.3f}" for k, v in metrics_values.items()
+            )
             print_with_rank_and_timestamp(
-                f"Batch {task}, {orig_idxs}: {metric_name} = {metric_values.mean().item():.3f}, eval_time = {eval_time * 1000:.2f} ms",
+                f"Batch {task}, {orig_idxs}: {msg}, eval_time = {eval_time:.3f} s",
                 fabric.global_rank,
             )
             flush_io_streams()
             print(f"Storing to {eval_metrics_path}")
-            store_eval_metrics(metric_name, metric_values, batch, eval_metrics_path)
+            store_eval_metrics(metrics_values, batch, eval_metrics_path)
             # DEBUG
             # if batch[ORIG_IDX_NAME][0] == 0 and model.debug_intermediates is not None:
             #   debug_intermediates = model.debug_intermediates.entries
@@ -654,15 +675,15 @@ def load_model_checkpoint(
 
 
 def store_eval_metrics(
-    metric_name: str,
-    metric_values: torch.Tensor,
-    batch: dict[str, Any],
+    metrics_values: Dict[str, torch.Tensor],
+    batch: Dict[str, Any],
     eval_metrics_path: Path,
 ):
-    fieldnames = ["idx", "task", metric_name]
+    names, values = zip(*metrics_values.items())
+    fieldnames = ["idx", "task"] + list(names)
     task = batch[TASK_NAME]
     with eval_metrics_path.open("w") as fp:
         writer = csv.writer(fp, delimiter=",")
         writer.writerow(fieldnames)
-        for idx, loss in zip(batch[ORIG_IDX_NAME], metric_values):
-            writer.writerow([idx, task, loss.item()])
+        for i, idx in enumerate(batch[ORIG_IDX_NAME]):
+            writer.writerow([idx, task] + [x[i] for x in values])

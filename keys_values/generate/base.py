@@ -111,7 +111,7 @@ def generate_fn(
     stop_tokens: Tuple[List[int], ...] = (),
     include_prompt: bool,
     include_eos: bool,
-    deallocate_cache_buffers: bool = True,
+    deallocate_cache_buffers: bool,
 ) -> Iterator[torch.Tensor]:
     """
     Generates tokens for a single prompt.
@@ -221,29 +221,39 @@ def generate_fn(
 @torch.inference_mode()
 def batched_generate_fn(
     model: LongContextInferenceModel,
-    prompts: torch.Tensor,
+    prompts_or_logits: torch.Tensor,
     max_returned_tokens: int,
     *,
     sample_args: Union[list[dict], dict],
     stop_tokens: Tuple[List[int], ...] = (),
     include_prompt: bool,
-    deallocate_cache_buffers: bool = True,
+    deallocate_cache_buffers: bool,
 ) -> Iterator[list[Union[torch.Tensor, None]]]:
     """
     Generates tokens for a batch of prompts.
 
+    Prompts may have been processed already, in which case `prompts_or_logits`
+    can be the logits for the final chunk, whose last column is used to
+    generate the first token. Even if `prompts_or_logits` are prompts, these
+    need not be the start, in that `input_pos` of the KV caches may be
+    positive.
+
     Args:
         model: The model to use. Must be :class:`LongContextInferenceModel`,
             defining the chunking to be used.
-        prompts: A 2D tensor of shape [batch_size, prompt_length]. Note that
-            all prompts need to have the same length (TODO: Relax this)
+        prompts_or_logits: Either prompts, shape `(batch_size, prompt_length)`,
+            or logits of final chunk, shape
+            `(batch_size, num, padded_vocab_size)`, where `num >= 1`. In the
+            latter case, we skip prompt processing, assuming the KV caches
+            have been prepared appropriately.
         max_returned_tokens: The maximum number of tokens to return, including
-            the prompt tokens.
+            the prompt tokens (if any).
         sample_args: The dictionary of kwargs to pass to sample() for each
             token for each index in the batch.
         stop_tokens: A tuple of stop sequences. If any of the sequences are
             generated, the generation stops early before max_returned_tokens.
-        include_prompt: Whether to output the prompt tokens.
+        include_prompt: Whether to output the prompt tokens. Only if
+            `prompts_or_logits` are prompts.
         deallocate_cache_buffers: Whether to deallocate KV cache buffers at
             the end.
 
@@ -251,11 +261,25 @@ def batched_generate_fn(
         A list of tokens for each prompt in the batch, or None if a stop sequence has already been encountered for that index in the batch.
 
     """
-    if prompts.ndim == 1:
-        prompts = prompts.unsqueeze(0)
-    assert prompts.ndim == 2, "Prompts must be a 2D tensor."
-
-    batch_size, max_prompt_size = prompts.shape
+    is_logits = prompts_or_logits.ndim == 3
+    gpt_model = model.gpt_model
+    input_pos = gpt_model.kv_cache_input_pos()
+    if input_pos is None:
+        raise AssertionError("model must have KV caches assigned")
+    if not is_logits:
+        if prompts_or_logits.ndim == 1:
+            prompts_or_logits = prompts_or_logits.unsqueeze(0)
+        assert (
+            prompts_or_logits.ndim == 2
+        ), "prompts_or_logits must be a 2D or 3D tensor."
+        batch_size, max_prompt_size = prompts_or_logits.shape
+    else:
+        if include_prompt:
+            raise ValueError(
+                "include_prompts=True invalid if prompts_or_logits are logits"
+            )
+        batch_size = prompts_or_logits.shape[0]
+        max_prompt_size = 0
 
     if isinstance(sample_args, dict):
         sample_args = [sample_args] * batch_size
@@ -267,23 +291,22 @@ def batched_generate_fn(
     assert (
         max_returned_tokens > max_prompt_size
     ), f"Not enough space for {max_prompt_size} prompt tokens in a context length of {max_returned_tokens}."
-    model.gpt_model.max_seq_length = max_returned_tokens
+    gpt_model.max_seq_length = max_returned_tokens + input_pos
 
-    # Yield the prompts if include_prompt is True
-    if include_prompt:
-        for i in range(max_prompt_size):
-            yield [prompt[i].view(-1) for prompt in prompts]
-
-    # Prompt processing. This is dealt with by the long context inference
-    # model. Processing is done in chunks, the first one being as long as
-    # KV caches permit, subsequent ones (if any) chosen by the model.
-    # We need the logits for the final chunk in order to generate the
-    # first token below. Chunk size does not matter, just must be nonzero.
-    gpt_model = model.gpt_model
-    logits_final_position = model(prompts, targets=None)
-    assert logits_final_position.ndim == 3 and logits_final_position.shape[1] == 1, (
-        logits_final_position.shape,
-    )
+    # Prompt processing
+    if not is_logits:
+        # Yield the prompts if include_prompt is True
+        if include_prompt:
+            for i in range(max_prompt_size):
+                yield [prompt[i].view(-1) for prompt in prompts_or_logits]
+        # Prompt processing is dealt with by the long context inference
+        # model. Processing is done in chunks, the first one being as long as
+        # KV caches permit, subsequent ones (if any) chosen by the model.
+        # We need the logits for the final chunk in order to generate the
+        # first token below. Chunk size does not matter, just must be nonzero.
+        logits_final_position = model(prompts_or_logits, targets=None)
+    else:
+        logits_final_position = prompts_or_logits[:, -1:, :]
 
     stop_progresses = [
         [0] * len(stop_tokens) for _ in range(batch_size)
@@ -382,7 +405,7 @@ def generate(
     top_p: float = 1.0,
     eos_id: Optional[int] = None,
     include_prompt: bool = True,
-    deallocate_cache_buffers: bool = True,
+    deallocate_cache_buffers: bool = False,
 ) -> torch.Tensor:
     """
     Takes a conditioning sequence (prompt) as input and continues to generate
@@ -429,7 +452,7 @@ def generate(
         eos_id: If specified, stop generating any more token once the <eos> token is triggered.
         include_prompt: If true (default) prepends the prompt (after applying the prompt style) to the output.
         deallocate_cache_buffers: Whether to deallocate KV cache buffers at
-            the end.
+            the end. Defaults to `False`.
 
     """
     token_list = list(
