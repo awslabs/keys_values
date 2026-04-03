@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Tuple, Dict, List, Any
+from typing import Optional, Tuple, Dict, List, Any, Union
 from dataclasses import dataclass
 
 import torch
@@ -24,7 +24,10 @@ from keys_values.kvcache.base import (
     DefaultKVCacheReplayLog,
     KVCacheReplayLog,
 )
-from keys_values.kvcache.basics import KVCacheWithBuffers
+from keys_values.kvcache.basics import (
+    KVCacheWithBuffers,
+    KVCacheWithBuffersState,
+)
 from keys_values.kvcache.buffers import (
     DefaultKVCacheBuffers,
     KVCacheBuffers,
@@ -320,6 +323,55 @@ def update_token_positions(
 DEFAULT_REPLAY_LOG_BLOCKSIZE = 1024
 
 DEFAULT_KEEP_INITIAL_FRACTION = 0.05
+
+
+class AttnWeightsKVCacheState(KVCacheWithBuffersState):
+    def __init__(
+        self,
+        n_head: int,
+        n_query_groups: int,
+        head_size: int,
+        max_batch_size: int,
+        cache_length: int,
+        block_idx: int,
+        dtype: Optional[torch.dtype],
+        device: Optional[torch.device],
+        input_pos: int,
+        grace_period: int,
+        replay_log_blocksize: int,
+        keep_initial_fraction: float,
+        next_grace_pos: Optional[int],
+        prefill_length: Optional[int],
+        token_pos: torch.Tensor,
+        next_positions: Optional[torch.Tensor],
+    ):
+        super().__init__(
+            n_head,
+            n_query_groups,
+            head_size,
+            max_batch_size,
+            cache_length,
+            block_idx,
+            dtype,
+            device,
+            input_pos,
+        )
+        self.grace_period = grace_period
+        self.replay_log_blocksize = replay_log_blocksize
+        self.keep_initial_fraction = keep_initial_fraction
+        self.next_grace_pos = next_grace_pos
+        self.prefill_length = prefill_length
+        self.token_pos = token_pos.clone()
+        self.next_positions = None if next_positions is None else next_positions.clone()
+
+    def is_compatible(
+        self,
+        state_or_buffers: Union["KVCacheWithBuffersState", KVCacheBuffers],
+    ) -> Optional[str]:
+        return self._is_compatible(
+            state_or_buffers,
+            ("grace_period", "replay_log_blocksize", "keep_initial_fraction"),
+        )
 
 
 class AttnWeightsKVCache(KVCacheWithBuffers):
@@ -1027,3 +1079,40 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             )
         )
         return base_kwargs
+
+    def get_state(self) -> KVCacheWithBuffersState:
+        return AttnWeightsKVCacheState(
+            n_head=self.n_head,
+            n_query_groups=self.n_query_groups,
+            head_size=self.head_size,
+            max_batch_size=self.max_batch_size,
+            cache_length=self.cache_length,
+            block_idx=self.block_idx,
+            dtype=self.dtype,
+            device=self.device,
+            input_pos=self.input_pos,
+            grace_period=self.grace_period,
+            replay_log_blocksize=self.replay_log_blocksize,
+            keep_initial_fraction=self._keep_initial_fraction,
+            next_grace_pos=self.next_grace_pos,
+            prefill_length=self.prefill_length,
+            token_pos=self.token_pos,
+            next_positions=self._next_positions,
+        )
+
+    def switch_buffers(
+        self,
+        new_buffers: KVCacheBuffers,
+        cache_state: Optional[KVCacheWithBuffersState] = None,
+    ):
+        super().switch_buffers(new_buffers, cache_state)
+        if cache_state is not None:
+            if not isinstance(cache_state, AttnWeightsKVCacheState):
+                raise TypeError(
+                    f"type(cache_state) = {type(cache_state)}, must be AttnWeightsKVCacheState"
+                )
+            self.next_grace_pos = cache_state.next_grace_pos
+            self.prefill_length = cache_state.prefill_length
+            self.token_pos.copy_(cache_state.token_pos)
+            self._next_positions = cache_state.next_positions
+        self._replay_log = None
