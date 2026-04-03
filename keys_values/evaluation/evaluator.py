@@ -127,17 +127,19 @@ class SampleBasedMetricsEvaluator:
     def __call__(
         self,
         model: LongContextInferenceModel,
-        prompts: torch.Tensor,
+        prompts_or_logits: torch.Tensor,
         targets: List[TargetType],
     ) -> Dict[str, torch.Tensor]:
         """
-        Computes metric values for data case `(input_ids, targets)`. The
-        metrics to be computed are in `metrics`.
+        Computes metric values for data case.
 
         Args:
             model: LongContextInferenceModel
-            prompts: Prompts, `(batch_size, prompt_len)`. Aligned on the
-                right (if there is padding, it is on the left)
+            prompts_or_logits: Either prompts, shape `(batch_size,
+                prompt_length)`, or logits of final token_position, shape
+                `(batch_size, 1, padded_vocab_size)`. In the latter case, we
+                skip prompt processing, assuming the KV caches have been
+                prepared appropriately.
             targets: List of targets of length `batch_size`. Each entry is a
                 string or list of strings. Some metrics allow for lists of
                 strings, others require a single string
@@ -148,8 +150,8 @@ class SampleBasedMetricsEvaluator:
             entry in the batch.
 
         """
-        assert prompts.ndim == 2
-        batch_size = prompts.shape[0]
+        assert 2 <= prompts_or_logits.ndim == 3
+        batch_size = prompts_or_logits.shape[0]
         if len(targets) != batch_size:
             raise ValueError(
                 f"len(targets) = {len(targets)} != {batch_size} = batch_size"
@@ -163,7 +165,7 @@ class SampleBasedMetricsEvaluator:
             list(
                 batched_generate_fn(
                     model=model,
-                    prompts=prompts,
+                    prompts_or_logits=prompts_or_logits,
                     max_returned_tokens=self.max_generated_tokens,
                     ignore_index=self._eos_id,
                     sample_args=self.sample_kwargs,
@@ -183,7 +185,7 @@ class SampleBasedMetricsEvaluator:
                     for output, target in zip(outputs, targets)
                 ],
                 dtype=torch.float32,
-                device=prompts.device,
+                device=prompts_or_logits.device,
             )
             for metric in self.metrics
         }

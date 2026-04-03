@@ -309,7 +309,7 @@ Basic arguments are:
     fails starting from step 19 (say), you can recover from step 18 or 16
     and do not have to go back to step 10.
 * `eval.*`: Parameters controlling evaluations on validation set. Taken from
-  `LitGPT` with little modification. Most important ones:
+  `LitGPT` with some modification. Most important ones:
   - `eval.interval`: Number of optimizer steps between evaluations.
   - `eval.initial_validation`: Run validation before training starts? If this
     is `False`, we run validation on two cases just to check whether things
@@ -318,6 +318,14 @@ Basic arguments are:
   - `eval.micro_batch_size`: Local batch size to be bused for validation. Overrides
     `train.micro_batch_size`. This can often be larger, because evaluation needs
     less GPU memory than training.
+  - `eval.use_sample_metric`: If `True` and the dataset comes with a
+    sample-based metric (i.e., a metric based on generated tokens), then both
+    the standard `val_loss` and this metric are evaluated on the validation set.
+    The prompt needs to be processed only once per data case.
+  - `eval.sample_metric_max_generated_tokens`: Maximum number of tokens
+    generated for sample based metric evaluation.
+  - `eval.sample_metric_kwargs`: Keyword arguments for token sampling (params
+    can be "temperature", "top_k", "top_p").
 
 ### Full Fine-tuning or LoRA
 

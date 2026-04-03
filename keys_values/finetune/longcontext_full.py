@@ -16,7 +16,6 @@ import csv
 import dataclasses
 import gc
 
-import math
 import os
 import time
 from pathlib import Path
@@ -45,7 +44,6 @@ from litgpt.utils import (
     instantiate_torch_optimizer,
     num_parameters,
     parse_devices,
-    select_sft_generate_example,
 )
 
 from keys_values.array_limit import TemporaryArrayLimit
@@ -72,7 +70,6 @@ from keys_values.finetune.batch_transform import (
     BatchTransform,
 )
 from keys_values.finetune.utils import (
-    print_but_limit_size,
     get_lr_scheduler,
     get_dataloaders,
     validate_args,
@@ -87,7 +84,6 @@ from keys_values.finetune.utils import (
     may_match_twice_factory,
     fix_dtype_of_score_buffers,
 )
-from keys_values.generate.base import generate
 from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import HeadModel, CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
@@ -102,6 +98,7 @@ from keys_values.kvcache.gradient.main import (
     NaiveGPTAndHeadModel,
 )
 from keys_values.kvcache.offloading import KVCacheOffloader
+from keys_values.kvcache.replay_buffers import ModelForTokenGeneration
 from keys_values.long_context import (
     GPTAndHeadModel,
     LongContextInferenceModel,
@@ -162,7 +159,7 @@ def setup(
         initial_validation=None,  # Default set below
         final_validation=True,
         micro_batch_size=None,
-        use_sample_metric=False,
+        use_sample_metric=True,
     ),
     optimizer: Optional[OptimizerArgs] = None,
     logger_name: Literal["wandb", "tensorboard", "csv", "mlflow"] = "csv",
@@ -206,7 +203,6 @@ def setup(
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
     record_gpu_memory_period: int = 0,
-    generate_with_eval: bool = False,
     profile_grad_times: int = 0,
     profile_parts: Optional[str] = None,
     size_log_quantiles: Optional[str] = None,
@@ -295,8 +291,6 @@ def setup(
             directory `f"iteration{step % record_gpu_memory_period}"`.
             If this is 0, files are not overwritten, we use `f"iteration{step}"`.
             Defaults to 0.
-        generate_with_eval: If `True`, we test token generation with each
-            evaluation
         profile_grad_times: If given, we profile complete gradient computation
             for this many steps, then stop. Results are written to CSV file.
         profile_parts: If given, we use `cProfile` to profile the first forward
@@ -339,7 +333,6 @@ def setup(
         record_gpu_memory_snapshots,
         record_gpu_memory_kind,
         record_gpu_memory_period,
-        generate_with_eval,
         profile_grad_times,
         profile_parts,
         size_log_quantiles,
@@ -377,7 +370,6 @@ def setup_internal(
     record_gpu_memory_snapshots: Optional[int],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
-    generate_with_eval: bool,
     profile_grad_times: int,
     profile_parts: Optional[str],
     size_log_quantiles: Optional[str],
@@ -397,10 +389,8 @@ def setup_internal(
     if isinstance(data, Helmet) and data.metadata_dir is None:
         data.metadata_dir = str(out_dir / "data")
         print(f"Setting Helmet.metadata_dir to {data.metadata_dir}")
-    if not isinstance(data, Helmet) and eval.use_sample_metric:
-        raise ValueError(
-            "use_sample_metric=True currently supported only for Helmet datasets"
-        )
+    if isinstance(data, LongBenchV2) and eval.use_sample_metric:
+        raise ValueError("use_sample_metric=True not supported for LongBenchV2 dataset")
     out_dir = init_out_dir(out_dir)
     if data.metadata_dir is not None:
         data.metadata_dir = str(init_out_dir(Path(data.metadata_dir)))
@@ -564,7 +554,6 @@ def setup_internal(
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
-        generate_with_eval=generate_with_eval,
         profile_grad_times=profile_grad_times,
         profile_parts=profile_parts,
         size_log_quantiles=size_log_quantiles,
@@ -613,7 +602,6 @@ def main(
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
-    generate_with_eval: bool,
     profile_grad_times: int,
     profile_parts: Optional[str],
     size_log_quantiles: List[float],
@@ -803,9 +791,9 @@ def main(
             tokenizer=tokenizer,
             sample_kwargs=eval.sample_metric_kwargs,
         )
-        print(f"Evaluation metric: {evaluator.metrics[0]}")
+        print(f"Evaluation metrics: val_loss, {evaluator.metrics[0]}")
     else:
-        print("Evaluation metric: eval_loss (same as training loss)")
+        print("Evaluation metric: val_loss")
         evaluator = None
 
     resume_dir = find_resume_path(resume, out_dir)
@@ -848,7 +836,6 @@ def main(
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
-        generate_with_eval=generate_with_eval,
         profile_grad_params=profile_grad_params,
         size_log_quantiles=size_log_quantiles,
     )
@@ -870,13 +857,6 @@ def main(
             f"\nFinal validation evaluation (batch_size = {val_dataloader.batch_size}) ...",
             fabric,
         )
-        if generate_with_eval:
-            generate_example_kwargs = dict(
-                tokenizer=tokenizer,
-                data=data,
-            )
-        else:
-            generate_example_kwargs = None
         if do_cpu_offload:
             valid_model = model.copy_model_for_evaluation()
         else:
@@ -888,7 +868,6 @@ def main(
             eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
             batch_transform=batch_transform,
             log_metrics=False,
-            generate_example_kwargs=generate_example_kwargs,
             fabric=fabric,
         )
         fabric.log_dict(metrics, step=state["iter_num"])
@@ -1177,7 +1156,6 @@ def fit(
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
-    generate_with_eval: bool,
     profile_grad_params: Optional[Dict[str, Any]],
     size_log_quantiles: List[float],
 ) -> Dict[str, Any]:
@@ -1195,10 +1173,6 @@ def fit(
         cpu_optimizer = state["cpu_optimizer"]
         cpu_scheduler = state["cpu_scheduler"]
         optim_device = torch.device("cpu")
-    if evaluator is None:
-        eval_metric_name = "val_loss"
-    else:
-        eval_metric_name = evaluator.metrics[0]
 
     try:
 
@@ -1222,7 +1196,7 @@ def fit(
             )
             record_gpu_memory_snapshots.start_recording()
 
-        val_loss = "n/a"
+        val_metrics_str = "n/a"
         if do_cpu_offloading:
             valid_model = model.copy_model_for_evaluation()
         else:
@@ -1241,47 +1215,31 @@ def fit(
                 f"\nInitial validation evaluation  (batch_size = {val_dataloader.batch_size}) ...",
                 fabric,
             )
-            if generate_with_eval:
-                generate_example_kwargs = dict(
-                    tokenizer=tokenizer,
-                    data=data,
-                )
-            else:
-                generate_example_kwargs = None
             metrics = validate_and_all_reduce(
                 model=valid_model,
                 evaluator=evaluator,
                 val_dataloader=val_dataloader,
                 eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
                 batch_transform=batch_transform,
-                generate_example_kwargs=generate_example_kwargs,
                 fabric=fabric,
             )
-            val_loss = metrics[eval_metric_name]
+            val_metrics_str = string_for_val_metrics(metrics, evaluator)
             print_message(
                 f"Initial evaluation          | "
-                + string_for_val_metrics(metrics, evaluator)
+                + val_metrics_str
                 + f" | val_time: {metrics['val_time']:.3f} s",
                 fabric,
             )
         else:
             print_message("Verifying settings ...", fabric)
             with torch.no_grad():
-                if evaluator is None:
-                    validate(
-                        valid_model,
-                        val_dataloader,
-                        dataclasses.replace(eval, max_iters=1),
-                        batch_transform,
-                    )
-                else:
-                    validate_sample_metric(
-                        valid_model,
-                        evaluator,
-                        val_dataloader,
-                        dataclasses.replace(eval, max_iters=1),
-                        batch_transform,
-                    )
+                validate(
+                    valid_model,
+                    val_dataloader,
+                    dataclasses.replace(eval, max_iters=1),
+                    batch_transform,
+                    evaluator,
+                )
         flush_io_streams()
         if do_cpu_offloading:
             deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
@@ -1572,14 +1530,12 @@ def fit(
                     "learning_rate": learning_rate,
                     **log_memory_all_devices(),
                 }
-                if not isinstance(val_loss, str):
-                    val_loss = f"{val_loss:.3f}"
                 print_message(
                     f"\nEpoch {metrics['epoch']} | iter {metrics['iter']:3d} step {metrics['step']:3d} |"
-                    f" loss train: {metrics['loss']:.3f},"
-                    f" {eval_metric_name} valid: {val_loss} |"
-                    f" iter time: {metrics['iter_time']:.3f} s"
-                    f"{' (step)' if not is_accumulating else ''}",
+                    + f" loss train: {metrics['loss']:.3f} | "
+                    + val_metrics_str
+                    + f" | iter time: {metrics['iter_time']:.3f} s"
+                    + f"{' (step)' if not is_accumulating else ''}",
                     fabric,
                 )
                 fabric.log_dict(metrics, step=state["iter_num"])
@@ -1593,13 +1549,6 @@ def fit(
                     f"\nPeriodic validation evaluation  (batch_size = {val_dataloader.batch_size}) ...",
                     fabric,
                 )
-                if generate_with_eval:
-                    generate_example_kwargs = dict(
-                        tokenizer=tokenizer,
-                        data=data,
-                    )
-                else:
-                    generate_example_kwargs = None
                 if do_cpu_offloading:
                     valid_model = model.copy_model_for_evaluation()
                 else:
@@ -1610,11 +1559,10 @@ def fit(
                     val_dataloader=val_dataloader,
                     eval=eval,
                     batch_transform=batch_transform,
-                    generate_example_kwargs=generate_example_kwargs,
                     log_metrics=False,
                     fabric=fabric,
                 )
-                val_loss = metrics[eval_metric_name]
+                val_metrics_str = string_for_val_metrics(metrics, evaluator)
                 fabric.log_dict(metrics, step=state["iter_num"])
                 print_with_rank_and_timestamp(
                     "Finished validation evaluations.",
@@ -1622,7 +1570,7 @@ def fit(
                 )
                 print_message(
                     f"Epoch {train_iterator.epoch} | iter {state['iter_num']:3d}          | "
-                    + string_for_val_metrics(metrics, evaluator)
+                    + val_metrics_str
                     + f" | val_time: {metrics['val_time']:.3f} s",
                     fabric,
                 )
@@ -1675,7 +1623,6 @@ def validate_and_all_reduce(
     val_dataloader: MyDataLoader,
     eval: EvalArgs,
     batch_transform: BatchTransform,
-    generate_example_kwargs: Optional[Dict[str, Any]] = None,
     log_metrics: bool = True,
     fabric: Optional[L.Fabric] = None,
 ) -> Dict[str, float]:
@@ -1683,47 +1630,33 @@ def validate_and_all_reduce(
     with torch.no_grad():
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
         time_start = time.perf_counter()
-        # If `evaluator` is given, `avg_loss` is the average metric value
-        # over all cases, and `num_entries` the number of cases.
-        # If `evaluator` is not given, `avg_loss` is the average loss value
-        # over all non-masked tokens, and `num_entries` the number of such
-        # tokens. The reduction over devices is the same.
-        if evaluator is None:
-            avg_loss, num_entries = validate(
-                model,
-                val_dataloader,
-                eval,
-                batch_transform,
-            )
-        else:
-            avg_loss, num_entries = validate_sample_metric(
-                model,
-                evaluator,
-                val_dataloader,
-                eval,
-                batch_transform,
-            )
-        if generate_example_kwargs is not None:
-            generate_example(
-                fabric=fabric,
-                model=model,
-                eval=eval,
-                **generate_example_kwargs,
-            )
+        metric_vals = validate(
+            model,
+            val_dataloader,
+            eval,
+            batch_transform,
+            evaluator,
+        )
         val_time = time.perf_counter() - time_start
         # Validation can have larger batch size than training. Deallocate
         # buffers not to waste memory
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
 
     if fabric is not None:
-        sum_num_entries_tensor = torch.tensor(
-            num_entries,
+        names = list(metric_vals.keys())
+        vals, nums = zip(*(metric_vals[name] for name in names))
+        sum_nums_tensor = torch.tensor(
+            nums,
             device=fabric.device,
             dtype=torch.int64,
         )
-        fabric.all_reduce(sum_num_entries_tensor, reduce_op="sum")
-        weight = num_entries / sum_num_entries_tensor.item()
-        val_loss_tensor = (avg_loss.clone() * weight).to(fabric.device)
+        val_loss_tensor = torch.tensor(
+            [a * b for a, b in zip(vals, nums)],
+            device=fabric.device,
+            dtype=torch.float32,
+        )
+        fabric.all_reduce(sum_nums_tensor, reduce_op="sum")
+        val_loss_tensor /= sum_nums_tensor
         fabric.all_reduce(val_loss_tensor, reduce_op="sum")
         val_time_tensor = torch.tensor(
             val_time,
@@ -1732,20 +1665,10 @@ def validate_and_all_reduce(
         )
         fabric.all_reduce(val_time_tensor, reduce_op="mean")
         val_time = val_time_tensor.item()
+        metrics = dict(zip(names, val_loss_tensor.tolist()))
     else:
-        val_loss_tensor = avg_loss.clone()
-    avg_loss = val_loss_tensor.item()
-    if evaluator is None:
-        metrics = {
-            "val_loss": avg_loss,
-            "val_ppl": math.exp(avg_loss),
-            "val_time": val_time,
-        }
-    else:
-        metrics = {
-            evaluator.metrics[0]: avg_loss,
-            "val_time": val_time,
-        }
+        metrics = {k: v[0] for k, v in metric_vals.items()}
+    metrics["val_time"] = val_time
     if fabric is not None and log_metrics:
         fabric.log_dict(metrics)
     return metrics
@@ -1758,108 +1681,65 @@ def validate(
     val_dataloader: MyDataLoader,
     eval: EvalArgs,
     batch_transform: BatchTransform,
-) -> Tuple[torch.Tensor, int]:
+    evaluator: Optional[SampleBasedMetricsEvaluator],
+) -> Dict[str, Tuple[float, int]]:
     model.eval()
-    losses = torch.zeros(min(len(val_dataloader), eval.max_iters))
+    sum_loss = 0.0
     num_target_tokens = 0
-    for k, batch in enumerate(val_dataloader):
-        if k >= eval.max_iters:
-            break
-        batch = batch_transform(batch)
-        targets = batch["targets"]
-        num_tokens_this_batch = model.head_model.num_target_entries(targets)
-        num_target_tokens += num_tokens_this_batch
-        losses[k] = model(batch[INPUT_IDS_NAME], targets).mean() * num_tokens_this_batch
-    val_loss = losses.sum() / num_target_tokens
-    model.train()
-    return val_loss, num_target_tokens
-
-
-@torch.no_grad()
-def validate_sample_metric(
-    model: GPTAndHeadModel,
-    evaluator: SampleBasedMetricsEvaluator,
-    val_dataloader: MyDataLoader,
-    eval: EvalArgs,
-    batch_transform: BatchTransform,
-) -> Tuple[torch.Tensor, int]:
-    model.eval()
+    sum_metric_values = 0.0
     num_cases = 0
-    sum_metric_values = None
+    if evaluator is not None:
+        gen_wrapper = ModelForTokenGeneration(model.gpt_model)
+        metric_name = evaluator.metrics[0]
+    else:
+        gen_wrapper = None
+        metric_name = None
     for k, batch in enumerate(val_dataloader):
         if k >= eval.max_iters:
             break
         batch = batch_transform(batch)
         input_ids = batch[INPUT_IDS_NAME]
-        targets = batch[TARGETS_STRINGS_NAME]
-        num_cases += len(targets)
-        prompt_len = input_ids.shape[1] - batch["targets"].shape[1] + 1
-        prompts = input_ids[:, :prompt_len]
-        metric_vals = evaluator(model, prompts, targets)
-        sum_vals = metric_vals[evaluator.metrics[0]].sum()
-        if sum_metric_values is None:
-            sum_metric_values = sum_vals
+        targets = batch["targets"]
+        num_tokens_this_batch = model.head_model.num_target_entries(targets)
+        num_target_tokens += num_tokens_this_batch
+        if evaluator is None:
+            val_loss = model(input_ids, targets).mean().item() * num_tokens_this_batch
         else:
+            # We first compute the sample-based metric, then the loss. The
+            # prompt is processed once only.
+            logits = model(input_ids, targets, mode="inputs")
+            gen_wrapper.switch_status(True)
+            raw_targets = batch[TARGETS_STRINGS_NAME]
+            num_cases += len(raw_targets)
+            metric_vals = evaluator(
+                model=model,
+                prompts_or_logits=logits,
+                targets=raw_targets,
+            )
+            sum_vals = metric_vals[metric_name].sum().item()
             sum_metric_values += sum_vals
-    avg_metric_values = sum_metric_values / num_cases
+            gen_wrapper.switch_status(False)
+            val_loss = (
+                model(input_ids, targets, mode="targets").mean().item()
+                * num_tokens_this_batch
+            )
+        sum_loss += val_loss
+
+    result = {"val_loss": (sum_loss / num_target_tokens, num_target_tokens)}
+    if evaluator is not None:
+        result[metric_name] = (sum_metric_values / num_cases, num_cases)
     model.train()
-    return avg_metric_values, num_cases
+    return result
 
 
 def string_for_val_metrics(
     metrics: Dict[str, float],
     evaluator: Optional[SampleBasedMetricsEvaluator],
 ) -> str:
-    if evaluator is None:
-        return f"val_loss: {metrics['val_loss']:.3f}"
-    else:
-        name = evaluator.metrics[0]
-        return f"{name}: {metrics[name]:.3f}"
-
-
-@torch.no_grad()
-def generate_example(
-    fabric: L.Fabric,
-    model: GPTAndHeadModel,
-    tokenizer: Tokenizer,
-    eval: EvalArgs,
-    data: DataModule,
-):
-    instruction = select_sft_generate_example(eval, data)
-    print_message("\n[Instruction]:", fabric)
-    print_but_limit_size(fabric, instruction)
-    if hasattr(data, "prompt_style"):
-        prompt = data.prompt_style.apply(instruction)
-    else:
-        prompt = instruction
-    encoded = tokenizer.encode(prompt, device=fabric.device)
-    gpt_model = model.gpt_model
-    if not gpt_model.are_kv_caches_assigned():
-        raise IndexError("model.gpt_model must have KV caches assigned")
-    model.eval()
-
-    max_returned_tokens = len(encoded) + eval.max_new_tokens
-
-    if max_returned_tokens < gpt_model.max_seq_length:
-        output = generate(
-            model=model,
-            prompt=encoded,
-            max_returned_tokens=max_returned_tokens,
-            temperature=0.8,
-            include_prompt=False,
-            eos_id=tokenizer.eos_id,
-        )
-        model.train()
-        output = tokenizer.decode(output)
-        print_message("\n[Generated Output (without prompt)]:", fabric)
-        print_but_limit_size(fabric, output)
-    else:
-        print_message(
-            f"Length of encoded instruction ({len(encoded)}) and eval.max_new_tokens ({eval.max_new_tokens}) "
-            f"exceeds model.max_seq_length ({gpt_model.max_seq_length}) used for training. Skipping example generation for efficiency. "
-            f"The model's supported context size (post-training) is {gpt_model.config.block_size}.",
-            fabric,
-        )
+    names = ("val_loss",)
+    if evaluator is not None:
+        names += (evaluator.metrics[0],)
+    return " | ".join(f"{name}: {metrics[name]:.3f}" for name in names)
 
 
 def do_save(step: int, train: TrainArgs, intermed: bool) -> bool:
