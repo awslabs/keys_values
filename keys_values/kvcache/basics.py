@@ -37,6 +37,68 @@ from keys_values.utils import index_to_3d, bits_for_torch_dtype, bitsize_of
 NOT_NEEDED_ARGS = ("max_batch_size", "cache_length", "dtype")
 
 
+class KVCacheWithBuffersState:
+    """
+    Represents state of a :class:`KVCacheWithBuffers` cache, except the
+    buffers.
+
+    Part of the state is not variable. This is used for validation, to
+    avoid that :meth:`KVCacheWithBuffers.switch_buffers` introduces mistakes.
+
+    The remaining fields are variable, overwriting state variables when calling
+    :meth:`KVCacheWithBuffers.switch_buffers`.
+    """
+
+    def __init__(
+        self,
+        n_head: int,
+        n_query_groups: int,
+        head_size: int,
+        max_batch_size: int,
+        cache_length: int,
+        block_idx: int,
+        dtype: Optional[torch.dtype],
+        device: Optional[torch.device],
+        input_pos: int,
+    ):
+        self.n_head = n_head
+        self.n_query_groups = n_query_groups
+        self.head_size = head_size
+        self.max_batch_size = max_batch_size
+        self.cache_length = cache_length
+        self.block_idx = block_idx
+        self.dtype = dtype
+        self.device = device
+        self.input_pos = input_pos
+
+    def is_compatible(self, state: "KVCacheWithBuffersState") -> Optional[str]:
+        """
+        Checks whether `self` and `state` are the same in all non-variable
+        fields.
+
+        Args:
+            state: State to compare with
+
+        Returns:
+            Name of field with different values, or `None` if all values are
+            the same.
+
+        """
+        for name in (
+            "n_head",
+            "n_query_groups",
+            "head_size",
+            "max_batch_size",
+            "cache_length",
+            "block_idx",
+            "dtype",
+            "device",
+        ):
+            if getattr(self, name) != getattr(state, name):
+                return name
+        return None
+
+
 class KVCacheWithBuffers(DefaultKVCache):
     """
     Base class of all KV caches supported by KV cache buffers of type
@@ -66,6 +128,20 @@ class KVCacheWithBuffers(DefaultKVCache):
     for training and validation), without having to allocate buffers
     for `max_batch_size`.
 
+    Switching buffers, cache state:
+
+    The cache can be switched to different buffers with :meth:`switch_buffers`.
+    This includes (optionally) a cache state, containing variables determining
+    the current cache state other than the buffers.
+
+    An important use case for buffer switching is if several token sequences
+    are to be generated for the same prompt, or if both a sample-based metric
+    and a loss function are to be computed for the same (long) prompt. In
+    this case, we want to process the prompt only once. Moreover, techniques
+    like KV cache offloading make sense for prompt processing, but are too
+    slow for token generation. We can use buffers with offloading for the
+    prompt processing, then switch to in-GPU-memory buffers for the token
+    generation.
     """
 
     def __init__(
@@ -219,6 +295,41 @@ class KVCacheWithBuffers(DefaultKVCache):
 
     def get_keys_values(self) -> Optional[KeysAndValues]:
         return self.kv_buffers.get_keys_values()
+
+    def switch_buffers(
+        self,
+        new_buffers: KVCacheBuffers,
+        cache_state: Optional[KVCacheWithBuffersState] = None,
+    ):
+        """
+        Switches cache buffers to `new_buffers`. If `cache_state` is given,
+        the state variables of the cache are also changed, otherwise they
+        remain the same. The new buffers `new_buffers` must be compatible with
+        `cache_state` or the current state.
+
+        The content of the current buffers is NOT copied to `new_buffers`. If
+        this is intended, it must be done before.
+
+        Args:
+            new_buffers: Buffers to be used from now on
+            cache_state: If given, the current cache state is overwritten by
+                this one
+
+        """
+        raise NotImplementedError
+
+    def get_state(self) -> KVCacheWithBuffersState:
+        return KVCacheWithBuffersState(
+            n_head=self.n_head,
+            n_query_groups=self.n_query_groups,
+            head_size=self.head_size,
+            max_batch_size=self.max_batch_size,
+            cache_length=self.cache_length,
+            block_idx=self.block_idx,
+            dtype=self.dtype,
+            device=self.device,
+            input_pos=self.input_pos,
+        )
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
         """

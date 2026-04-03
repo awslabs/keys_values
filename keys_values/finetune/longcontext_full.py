@@ -1224,7 +1224,7 @@ def fit(
             )
             record_gpu_memory_snapshots.start_recording()
 
-        val_loss = "n/a"
+        val_loss_str = "n/a"
         if do_cpu_offloading:
             valid_model = model.copy_model_for_evaluation()
         else:
@@ -1259,7 +1259,7 @@ def fit(
                 generate_example_kwargs=generate_example_kwargs,
                 fabric=fabric,
             )
-            val_loss = metrics[eval_metric_name]
+            val_loss_str = f"{metrics[eval_metric_name]:.3f}"
             print_message(
                 f"Initial evaluation | "
                 + string_for_val_metrics(metrics, evaluator)
@@ -1574,12 +1574,10 @@ def fit(
                     "learning_rate": learning_rate,
                     **log_memory_all_devices(),
                 }
-                if not isinstance(val_loss, str):
-                    val_loss = f"{val_loss:.3f}"
                 print_message(
                     f"\nEpoch {metrics['epoch']} | iter {metrics['iter']:3d} step {metrics['step']:3d} |"
                     f" loss train: {metrics['loss']:.3f},"
-                    f" {eval_metric_name} valid: {val_loss} |"
+                    f" {eval_metric_name} valid: {val_loss_str} |"
                     f" iter time: {metrics['iter_time']:.3f} s"
                     f"{' (step)' if not is_accumulating else ''}",
                     fabric,
@@ -1616,7 +1614,7 @@ def fit(
                     log_metrics=False,
                     fabric=fabric,
                 )
-                val_loss = metrics[eval_metric_name]
+                val_loss_str = f"{metrics[eval_metric_name]:.3f}"
                 fabric.log_dict(metrics, step=state["iter_num"])
                 print_with_rank_and_timestamp(
                     "Finished validation evaluations.",
