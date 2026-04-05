@@ -11,18 +11,82 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Tuple, Dict, List, Any
+from typing import Optional, Tuple, Dict, List, Any, Union
 
 import torch
 from torch.linalg import vector_norm
 
 from keys_values.config import Config
 
-from keys_values.kvcache.attn_weights import AttnWeightsKVCache
+from keys_values.kvcache.attn_weights import (
+    AttnWeightsKVCache,
+    AttnWeightsKVCacheState,
+)
 from keys_values.kvcache.base import KVCacheParams, KVCache
-from keys_values.kvcache.basics import KVCacheWithBuffers
+from keys_values.kvcache.basics import (
+    KVCacheWithBuffers,
+    KVCacheWithBuffersState,
+)
 from keys_values.kvcache.buffers import KVCacheBuffers
 from keys_values.utils import bits_for_torch_dtype, bitsize_of
+
+
+class H2OKVCacheState(AttnWeightsKVCacheState):
+    def __init__(
+        self,
+        n_head: int,
+        n_query_groups: int,
+        head_size: int,
+        max_batch_size: int,
+        cache_length: int,
+        block_idx: int,
+        dtype: Optional[torch.dtype],
+        device: Optional[torch.device],
+        input_pos: int,
+        grace_period: int,
+        replay_log_blocksize: int,
+        keep_initial_fraction: float,
+        next_grace_pos: Optional[int],
+        prefill_length: Optional[int],
+        token_pos: torch.Tensor,
+        next_positions: Optional[torch.Tensor],
+        normalize_scores: bool,
+        scores: torch.Tensor,
+    ):
+        super().__init__(
+            n_head,
+            n_query_groups,
+            head_size,
+            max_batch_size,
+            cache_length,
+            block_idx,
+            dtype,
+            device,
+            input_pos,
+            grace_period,
+            replay_log_blocksize,
+            keep_initial_fraction,
+            next_grace_pos,
+            prefill_length,
+            token_pos,
+            next_positions,
+        )
+        self.normalize_scores = normalize_scores
+        self.scores = scores.clone()
+
+    def is_compatible(
+        self,
+        state_or_buffers: Union["KVCacheWithBuffersState", KVCacheBuffers],
+    ) -> Optional[str]:
+        return self._is_compatible(
+            state_or_buffers,
+            (
+                "grace_period",
+                "replay_log_blocksize",
+                "keep_initial_fraction",
+                "normalize_scores",
+            ),
+        )
 
 
 class H2OKVCache(AttnWeightsKVCache):
@@ -48,7 +112,6 @@ class H2OKVCache(AttnWeightsKVCache):
 
     The original H2O method as published is provided in
     :class:`H2OOriginalKVCache` (for comparison only; not recommended).
-
     """
 
     def __init__(
@@ -262,6 +325,39 @@ class H2OKVCache(AttnWeightsKVCache):
         base_kwargs["normalize_scores"] = self.normalize_scores
         return base_kwargs
 
+    def get_state(self) -> KVCacheWithBuffersState:
+        return H2OKVCacheState(
+            n_head=self.n_head,
+            n_query_groups=self.n_query_groups,
+            head_size=self.head_size,
+            max_batch_size=self.max_batch_size,
+            cache_length=self.cache_length,
+            block_idx=self.block_idx,
+            dtype=self.dtype,
+            device=self.device,
+            input_pos=self.input_pos,
+            grace_period=self.grace_period,
+            replay_log_blocksize=self.replay_log_blocksize,
+            keep_initial_fraction=self.keep_initial_fraction,
+            next_grace_pos=self.next_grace_pos,
+            prefill_length=self.prefill_length,
+            token_pos=self.token_pos,
+            next_positions=self._next_positions,
+            normalize_scores=self.normalize_scores,
+            scores=self.scores,
+        )
+
+    def switch_buffers(
+        self,
+        new_buffers: KVCacheBuffers,
+        cache_state: Optional[KVCacheWithBuffersState] = None,
+    ):
+        super().switch_buffers(new_buffers, cache_state)
+        if cache_state is not None:
+            if not isinstance(cache_state, H2OKVCacheState):
+                raise TypeError(f"type(cache_state) = {type(cache_state)}, must be H2OKVCacheState")
+            self.scores.copy_(cache_state.scores)
+
 
 class VLengthInstantScoreMixin:
     """
@@ -277,10 +373,6 @@ class VLengthInstantScoreMixin:
             `(batch_size, n_query_heads, current_length)`, dtype`torch.float32`.
 
         """
-        raise NotImplementedError()
-
-    @classmethod
-    def get_name_v_norm(cls) -> str:
         raise NotImplementedError()
 
     def get_kv_buffers(self) -> KVCacheBuffers:
@@ -320,7 +412,7 @@ class VLengthInstantScoreMixin:
         value: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         return {
-            self.get_name_v_norm(): vector_norm(
+            "v_norm": vector_norm(
                 value[: self.batch_size],
                 dim=-1,
                 dtype=torch.float32,
@@ -339,6 +431,52 @@ class VLengthInstantScoreMixin:
             dtype=torch.float32,
             out=v_norm_buffer,
         )
+
+
+class VLengthH2OKVCacheState(H2OKVCacheState):
+    def __init__(
+        self,
+        n_head: int,
+        n_query_groups: int,
+        head_size: int,
+        max_batch_size: int,
+        cache_length: int,
+        block_idx: int,
+        dtype: Optional[torch.dtype],
+        device: Optional[torch.device],
+        input_pos: int,
+        grace_period: int,
+        replay_log_blocksize: int,
+        keep_initial_fraction: float,
+        next_grace_pos: Optional[int],
+        prefill_length: Optional[int],
+        token_pos: torch.Tensor,
+        next_positions: Optional[torch.Tensor],
+        normalize_scores: bool,
+        scores: torch.Tensor,
+        v_norm: torch.Tensor,
+    ):
+        super().__init__(
+            n_head,
+            n_query_groups,
+            head_size,
+            max_batch_size,
+            cache_length,
+            block_idx,
+            dtype,
+            device,
+            input_pos,
+            grace_period,
+            replay_log_blocksize,
+            keep_initial_fraction,
+            next_grace_pos,
+            prefill_length,
+            token_pos,
+            next_positions,
+            normalize_scores,
+            scores,
+        )
+        self.v_norm = v_norm.clone()
 
 
 class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
@@ -389,7 +527,7 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         shape = (buffers.max_batch_size, self.n_query_groups, buffers.cache_length)
         device = self._default_device_for_new_params()
         self.register_buffer(
-            self.get_name_v_norm(),
+            "v_norm",
             torch.zeros(shape, device=device, dtype=torch.float32),
             persistent=False,
         )
@@ -432,16 +570,12 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
             **base_kwargs,
         )
 
-    @classmethod
-    def get_name_v_norm(cls) -> str:
-        return "v_norm"
-
     def _score_buffers(self) -> List[Tuple[torch.Tensor, str]]:
-        return super()._score_buffers() + [(self.v_norm, self.get_name_v_norm())]
+        return super()._score_buffers() + [(self.v_norm, "v_norm")]
 
     @classmethod
     def _score_buffer_names(cls) -> List[str]:
-        return super()._score_buffer_names() + [cls.get_name_v_norm()]
+        return super()._score_buffer_names() + ["v_norm"]
 
     def fix_dtype_of_score_buffers(self):
         super().fix_dtype_of_score_buffers()
@@ -450,7 +584,7 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
 
     @classmethod
     def _parameter_names(cls) -> List[str]:
-        return super()._parameter_names() + [cls.get_name_v_norm()]
+        return super()._parameter_names() + ["v_norm"]
 
     def _instantaneous_score(
         self,
@@ -487,6 +621,40 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
     def clone(self) -> KVCache:
         return VLengthH2OKVCache(**self._base_kwargs_for_clone())
 
+    def get_state(self) -> KVCacheWithBuffersState:
+        return VLengthH2OKVCacheState(
+            n_head=self.n_head,
+            n_query_groups=self.n_query_groups,
+            head_size=self.head_size,
+            max_batch_size=self.max_batch_size,
+            cache_length=self.cache_length,
+            block_idx=self.block_idx,
+            dtype=self.dtype,
+            device=self.device,
+            input_pos=self.input_pos,
+            grace_period=self.grace_period,
+            replay_log_blocksize=self.replay_log_blocksize,
+            keep_initial_fraction=self._keep_initial_fraction,
+            next_grace_pos=self.next_grace_pos,
+            prefill_length=self.prefill_length,
+            token_pos=self.token_pos,
+            next_positions=self._next_positions,
+            normalize_scores=self.normalize_scores,
+            scores=self.scores,
+            v_norm=self.v_norm,
+        )
+
+    def switch_buffers(
+        self,
+        new_buffers: KVCacheBuffers,
+        cache_state: Optional[KVCacheWithBuffersState] = None,
+    ):
+        super().switch_buffers(new_buffers, cache_state)
+        if cache_state is not None:
+            if not isinstance(cache_state, VLengthH2OKVCacheState):
+                raise TypeError(f"type(cache_state) = {type(cache_state)}, must be VLengthH2OKVCacheState")
+            self.v_norm.copy_(cache_state.v_norm)
+
 
 REMOVE_ARG_NAMES = (
     "grace_period",
@@ -495,6 +663,48 @@ REMOVE_ARG_NAMES = (
     "keep_initial_fraction",
     "max_chunk_size",
 )
+
+
+class H2OOriginalKVCacheState(AttnWeightsKVCacheState):
+    def __init__(
+        self,
+        n_head: int,
+        n_query_groups: int,
+        head_size: int,
+        max_batch_size: int,
+        cache_length: int,
+        block_idx: int,
+        dtype: Optional[torch.dtype],
+        device: Optional[torch.device],
+        input_pos: int,
+        grace_period: int,
+        replay_log_blocksize: int,
+        keep_initial_fraction: float,
+        next_grace_pos: Optional[int],
+        prefill_length: Optional[int],
+        token_pos: torch.Tensor,
+        next_positions: Optional[torch.Tensor],
+        scores: torch.Tensor,
+    ):
+        super().__init__(
+            n_head,
+            n_query_groups,
+            head_size,
+            max_batch_size,
+            cache_length,
+            block_idx,
+            dtype,
+            device,
+            input_pos,
+            grace_period,
+            replay_log_blocksize,
+            keep_initial_fraction,
+            next_grace_pos,
+            prefill_length,
+            token_pos,
+            next_positions,
+        )
+        self.scores = scores.clone()
 
 
 class H2OOriginalKVCache(AttnWeightsKVCache):
@@ -625,3 +835,35 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
             for k, v in super()._base_kwargs_for_clone().items()
             if k not in REMOVE_ARG_NAMES
         }
+
+    def get_state(self) -> KVCacheWithBuffersState:
+        return H2OOriginalKVCacheState(
+            n_head=self.n_head,
+            n_query_groups=self.n_query_groups,
+            head_size=self.head_size,
+            max_batch_size=self.max_batch_size,
+            cache_length=self.cache_length,
+            block_idx=self.block_idx,
+            dtype=self.dtype,
+            device=self.device,
+            input_pos=self.input_pos,
+            grace_period=self.grace_period,
+            replay_log_blocksize=self.replay_log_blocksize,
+            keep_initial_fraction=self._keep_initial_fraction,
+            next_grace_pos=self.next_grace_pos,
+            prefill_length=self.prefill_length,
+            token_pos=self.token_pos,
+            next_positions=self._next_positions,
+            scores=self.scores,
+        )
+
+    def switch_buffers(
+        self,
+        new_buffers: KVCacheBuffers,
+        cache_state: Optional[KVCacheWithBuffersState] = None,
+    ):
+        super().switch_buffers(new_buffers, cache_state)
+        if cache_state is not None:
+            if not isinstance(cache_state, H2OOriginalKVCacheState):
+                raise TypeError(f"type(cache_state) = {type(cache_state)}, must be H2OOriginalKVCacheState")
+            self.scores.copy_(cache_state.scores)
