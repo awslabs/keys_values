@@ -13,7 +13,7 @@
 # limitations under the License.
 from dataclasses import dataclass, replace
 from itertools import accumulate
-from typing import Optional, Any, Mapping, List, Set, Tuple
+from typing import Optional, Any, Mapping, List, Set, Tuple, Literal
 
 import torch
 
@@ -46,6 +46,7 @@ def create_chunk_sizes(
     seq_length: int,
     chunk_size: int,
     randomize_chunk_sizes: bool,
+    num_output_tokens: int,
 ) -> List[int]:
     """
     Creates list of chunk sizes which are compatible with the KV caches
@@ -66,22 +67,34 @@ def create_chunk_sizes(
     This is done to limit the number of different chunk sizes, which has
     advantages for `flex_attention` SDPA.
 
+    If `num_output_tokens > 0`, we ensure that a chunk boundary lies at
+    `seq_length - num_output_tokens`.
+
     """
+    if num_output_tokens > 0:
+        assert num_output_tokens < seq_length
     mpl = min(c.max_prefill_length for c in gpt_model.get_kv_caches())
     if seq_length <= mpl:
         # Does not need anything special, but should still work. Maybe one
         # of the batches is short
-        chunk_sizes = [seq_length]
+        if num_output_tokens == 0:
+            chunk_sizes = [seq_length]
+        else:
+            chunk_sizes = [seq_length - num_output_tokens, num_output_tokens]
     else:
-        points_to_cover = list(
-            set(
-                cache.cache_length
-                for cache in gpt_model.get_kv_caches()
-                if cache.cache_length <= seq_length
-            )
+        points_to_cover = set(
+            cache.cache_length
+            for cache in gpt_model.get_kv_caches()
+            if cache.cache_length <= seq_length
         )
-        chunk_sizes = [mpl]  # First chunk (prefill)
-        num_done = mpl
+        if num_output_tokens > 0:
+            points_to_cover.add(seq_length - num_output_tokens)
+        points_to_cover = list(points_to_cover)
+        fcs = mpl
+        if num_output_tokens > 0 and fcs > points_to_cover[0]:
+            fcs = points_to_cover.pop(0)
+        chunk_sizes = [fcs]  # First chunk (prefill)
+        num_done = fcs
         step = chunk_size // 2
         min_val = max(chunk_size - step, 1)
         max_val = min(chunk_size + step, points_to_cover[0])
@@ -413,6 +426,9 @@ class GPTAndHeadModel(torch.nn.Module):
         )
 
 
+ForwardModeType = Literal["both", "inputs", "targets"]
+
+
 class LongContextInferenceModel(GPTAndHeadModel):
     """
     Wraps a `GPT` and `HeadModel` model (latter optional), provides inference
@@ -616,19 +632,42 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float = 1.0,
+        mode: ForwardModeType = "both",
         **kwargs,
     ) -> torch.Tensor:
         """
         Different to `GPT.forward`, this is processing a batch of full
-        sequences. Depending on whether `targets` are provided or not,
-        this method does different things:
+        sequences. Depending on whether `targets` are provided or not, and
+        on `mode`, this method does different things:
 
-        * `targets` given: Process `input_ids`, compute loss function given
-            by `head_model` (must be given). The loss value is returned.
-            The KV caches are reset, their buffers are deallocated.
-        * `targets` not given: Process `input_ids`. Return logits for the
-            final chunk being processed. The KV caches are not reset, as the
-            model is to be used for token generations.
+        * `mode == "both"`, `targets` given: Reset KV caches, then process
+            `input_ids`, compute loss function given by `head_model` (must be
+            given). The loss value is returned. The KV caches are reset, their
+            buffers are deallocated.
+        * `mode == "both"`, `targets` not given: Reset KV caches, then process
+            `input_ids`. Return logits for the final chunk being processed. The
+            KV caches are not reset, as the model is to be used for token
+            generations.
+        * `mode == "inputs"`, `targets` given: Reset KV caches, then process
+            `input_ids[:, :(-num_output_tokens), :]`, where
+            `num_output_tokens = targets.shape[1]`. Return logits for the final
+            chunk being processed. The KV caches are not reset, as the model is
+            to be used for token generations. Generated tokens are then
+            compared with `targets` in a sample-based metric.
+        * `mode == "targets"`, `targets` given: Do not reset KV caches, as they
+            have been computed before, by a call with `mode = "inputs"`.
+            Process `input_ids[:, (-num_output_tokens):, :]`, compute loss
+            function given by `head_model` (must be given). The loss value is
+            returned. The KV caches are reset, their buffers are deallocated.
+
+        Use `mode != "both"` to evaluate sample-based metric(s) and loss
+        function, as follows:
+
+        * Call with `mode = "inputs"`
+        * Switch KV cache buffers (retain original buffers)
+        * Compute sample-based metric
+        * Switch back to original buffers
+        * Call with `mode = "targets"` to evaluate loss function
 
         Args:
             input_ids: Batch of full input token sequences
@@ -636,10 +675,11 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 if `head_model` is given. If `head_model` is given and
                 `targets=None`, we return logits as well
             scale_factor: Loss is multiplied by this factor. Defaults to 1.
+            mode: Mode for computation, see above. Defaults to "both".
 
         Returns:
-            Loss values, shape `(batch_size,)`. If `targets` are not given,
-            we return the logits for the final chunk, shape
+            Loss values, shape `(batch_size,)`. If `targets` are not given, or
+            `mode == "inputs"`, we return the logits for the final chunk, shape
             `(batch_size, chunk_size, config.padded_vocab_size)`.
 
         """
@@ -650,14 +690,19 @@ class LongContextInferenceModel(GPTAndHeadModel):
             raise ValueError(
                 f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention"
             )
+        if mode not in ("both", "inputs", "targets"):
+            raise ValueError(f"mode = {mode}, must be one of ['both', 'inputs', 'targets']")
         device = self.gpt_model.transformer.wte.weight.device
         input_ids = input_ids.to(device)
         if targets is not None:
             targets = targets.to(device)
-        self._init_members_from_tokens(input_ids, targets)
-        # Reset all KV caches
-        self.gpt_model.reset()
-        return self._forward_only(input_ids, targets, scale_factor)
+        elif mode != "both":
+            raise ValueError(f"mode = {mode}, targets must be given")
+        self._init_members_from_tokens(input_ids, targets, mode)
+        if mode != "targets":
+            # Reset all KV caches
+            self.gpt_model.reset()
+        return self._forward_only(input_ids, targets, scale_factor, mode)
 
     def set_record_gpu_memory(
         self,
@@ -682,6 +727,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self,
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
+        mode: ForwardModeType,
     ):
         """
         Initialize members required for processing the current batch.
@@ -719,14 +765,32 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 # encoding
                 self.gpt_model.max_seq_length = seq_length
         else:
+            if mode != "both":
+                raise ValueError(f"mode = {mode}: targets must be given")
             num_output_tokens = 0
         # Select chunk sizes and chunks per cell
-        self._select_chunks_and_cells(num_output_tokens, seq_length)
+        self._select_chunks_and_cells(
+            num_output_tokens, seq_length, mode != "both",
+        )
+
+    def _num_target_chunks(self, num_output_tokens: int) -> int:
+        sum_cs = 0
+        num_target_chunks = 0
+        for cs in reversed(self.chunk_sizes):
+            sum_cs += cs
+            num_target_chunks += 1
+            if sum_cs == num_output_tokens:
+                break
+            elif sum_cs > num_output_tokens:
+                raise ValueError(
+                    f"chunk_sizes = {self.chunk_sizes}, num_output_tokens = {num_output_tokens}: Does not work!")
+        return num_target_chunks
 
     def _select_chunks_and_cells(
         self,
         num_output_tokens: int,
         seq_length: int,
+        inputs_targets_boundary: bool = False,
     ):
         # Select chunk sizes
         if self.single_tokens_for_targets:
@@ -736,6 +800,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
             seq_length=seq_length,
             chunk_size=self.chunk_size,
             randomize_chunk_sizes=self.randomize_chunk_sizes,
+            num_output_tokens=0 if self.single_tokens_for_targets or not inputs_targets_boundary else num_output_tokens,
         )
         assert all(
             x > 0 for x in chunk_sizes
@@ -743,13 +808,21 @@ class LongContextInferenceModel(GPTAndHeadModel):
         if self.single_tokens_for_targets:
             chunk_sizes += [1] * num_output_tokens
         self.chunk_sizes = chunk_sizes
+
         # Select chunks per cell. If `chunks_per_cell_multiplier == 1`, the
         # maximum chunk length is chosen so that the size of embeddings of
-        # this length are equal to the maximum cache buffer size,
+        # this length are equal to the maximum cache buffer size.
+        if not inputs_targets_boundary:
+            num_target_chunks = 0
+        else:
+            num_target_chunks = self._num_target_chunks(num_output_tokens)
         if self._debug_single_cell_per_row:
             # This is used for unit testing only: Force single cell per row.
             # Do not use!
-            chunks_per_cell = [len(chunk_sizes)]
+            if not inputs_targets_boundary:
+                chunks_per_cell = [len(chunk_sizes)]
+            else:
+                chunks_per_cell = [len(chunk_sizes) - num_target_chunks, num_target_chunks]
         else:
             factor = (
                 2
@@ -764,22 +837,28 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 factor * max_cache_length * self.chunks_per_cell_multiplier
             )
             chunks_per_cell = []
-            cell_length = 0
-            num_chunks = 0
-            for chunk_size in chunk_sizes:
-                new_length = cell_length + chunk_size
-                # If a single chunk is longer than `max_cell_length` (for
-                # example, the first one -- prefill), we need to make an
-                # exception to have a cell longer than `max_cell_length`:
-                if new_length > max_cell_length and num_chunks > 0:
-                    chunks_per_cell.append(num_chunks)
-                    cell_length = chunk_size
-                    num_chunks = 1
-                else:
-                    cell_length = new_length
-                    num_chunks += 1
-            chunks_per_cell.append(num_chunks)
-            assert sum(chunks_per_cell) == len(chunk_sizes)
+            if not inputs_targets_boundary:
+                parts = [chunk_sizes]
+            else:
+                sz1 = len(chunk_sizes) - num_target_chunks
+                parts = [chunk_sizes[:sz1], chunk_sizes[sz1:]]
+            for cs_part in parts:
+                cell_length = 0
+                num_chunks = 0
+                for chunk_size in cs_part:
+                    new_length = cell_length + chunk_size
+                    # If a single chunk is longer than `max_cell_length` (for
+                    # example, the first one -- prefill), we need to make an
+                    # exception to have a cell longer than `max_cell_length`:
+                    if new_length > max_cell_length and num_chunks > 0:
+                        chunks_per_cell.append(num_chunks)
+                        cell_length = chunk_size
+                        num_chunks = 1
+                    else:
+                        cell_length = new_length
+                        num_chunks += 1
+                chunks_per_cell.append(num_chunks)
+                assert sum(chunks_per_cell) == len(cs_part)
         self.chunks_per_cell = chunks_per_cell
 
     def _checkpoint_layer_input(
@@ -812,6 +891,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float,
+        mode: ForwardModeType,
     ) -> torch.Tensor:
         """
         Wrapper around :meth:`_forward_internal_no_check`. If
@@ -825,6 +905,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 input_ids,
                 targets,
                 scale_factor,
+                mode,
             )
         else:
             result = None
@@ -835,6 +916,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         input_ids,
                         targets,
                         scale_factor,
+                        mode,
                     )
                 except RuntimeError as ex:
                     oom_exception_action(ex, self._tmp_array_limit_gb)
@@ -853,6 +935,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float,
+        mode: ForwardModeType,
     ) -> torch.Tensor:
         """
         We run a nested loop with 3 levels. Over cells, then over layers, then
@@ -861,9 +944,10 @@ class LongContextInferenceModel(GPTAndHeadModel):
         innermost loop over chunks.
 
         """
-        compute_loss = targets is not None
+        compute_loss = targets is not None and mode != "inputs"
         assert not compute_loss or self.head_model is not None
         loss_full = 0
+        # HIER: Make this depend on `mode` !!
         num_input_tokens = input_ids.shape[-1]
         if compute_loss:
             weight_per_chunk = chunk_weights_for_loss(
@@ -1049,6 +1133,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float,
+        mode: ForwardModeType,
     ) -> torch.Tensor:
         # Ensure that all KV caches do not record replay logs
         for cache in self.gpt_model.get_kv_caches():
@@ -1057,7 +1142,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
             print(
                 f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode)"
             )
-        loss_full = self._forward_internal(input_ids, targets, scale_factor)
-        if not (targets is None or self._debug_no_deallocate_buffers):
+        loss_full = self._forward_internal(
+            input_ids, targets, scale_factor, mode,
+        )
+        if not (targets is None or mode == "inputs" or self._debug_no_deallocate_buffers):
             self.clear()
         return loss_full
