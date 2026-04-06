@@ -510,6 +510,10 @@ are:
   the time (in token positions) some entry is in the cache already. This may
   favor earlier tokens. Scores are normalized by the age of the entry if
   `normalize_scores=True`.
+* `cpu_offload`: If `True`, KV cache buffers are offloaded to CPU during the
+  forward pass. To be precise, we iterate over cells, then layers, then chunks
+  of cell, keeping KV cache buffers for the current layer in GPU memory only.
+  This saves GPU memory, but can run quite a bit slower (see comments below).
 
 An important property of a KV cache policy is whether its evaluation requires
 attention weights (summed over the query axis) returned by SDPA or not. For
@@ -527,6 +531,11 @@ alongside SDPA with a second `flex_attention` call. Given we observe robust and
 significant improvements with `h2o` over `lastrec`, an important direction for
 future work is to extend SotA SDPA implementations to return summed attention
 weights at small extra cost.
+
+> At present, CPU offloading is implemented in a suboptimal manner, in that
+> memory transfers between CPU and GPU do not run in parallel with GPU computations.
+> We are working on a remedy (see https://github.com/awslabs/keys_values/issues/62).
+> However, at present, our recommendation is to avoid CPU offloading if possible.
 
 ### Cache Length and Chunk Size
 
