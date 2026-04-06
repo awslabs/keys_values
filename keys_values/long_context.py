@@ -891,7 +891,6 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float,
-        mode: ForwardModeType,
     ) -> torch.Tensor:
         """
         Wrapper around :meth:`_forward_internal_no_check`. If
@@ -935,7 +934,6 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float,
-        mode: ForwardModeType,
     ) -> torch.Tensor:
         """
         We run a nested loop with 3 levels. Over cells, then over layers, then
@@ -944,10 +942,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
         innermost loop over chunks.
 
         """
-        compute_loss = targets is not None and mode != "inputs"
+        compute_loss = targets is not None
         assert not compute_loss or self.head_model is not None
         loss_full = 0
-        # HIER: Make this depend on `mode` !!
         num_input_tokens = input_ids.shape[-1]
         if compute_loss:
             weight_per_chunk = chunk_weights_for_loss(
@@ -1133,7 +1130,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float,
-        mode: ForwardModeType,
+        mode: ForwardModeType = "both",
     ) -> torch.Tensor:
         # Ensure that all KV caches do not record replay logs
         for cache in self.gpt_model.get_kv_caches():
@@ -1142,9 +1139,42 @@ class LongContextInferenceModel(GPTAndHeadModel):
             print(
                 f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode)"
             )
-        loss_full = self._forward_internal(
-            input_ids, targets, scale_factor, mode,
-        )
-        if not (targets is None or mode == "inputs" or self._debug_no_deallocate_buffers):
-            self.clear()
+        chunks_per_cell_copy = None
+        chunk_sizes_copy = None
+        if mode != "both":
+            chunks_per_cell_copy = self.chunks_per_cell
+            chunk_sizes_copy = self.chunk_sizes
+            num_output_tokens = targets.shape[-1]
+            num_target_chunks = self._num_target_chunks(num_output_tokens)
+            num_input_chunks = len(self.chunk_sizes) - num_target_chunks
+            num_target_cells = 0
+            sum_chunks = 0
+            for num_ch in reversed(chunks_per_cell_copy):
+                sum_chunks += num_ch
+                num_target_cells += 1
+                if sum_chunks == num_target_chunks:
+                    break
+                elif sum_chunks > num_target_chunks:
+                    raise IndexError(f"Internal error")
+            num_input_cells = len(chunks_per_cell_copy) - num_target_cells
+            if mode == "inputs":
+                self.chunk_sizes = chunk_sizes_copy[:num_input_chunks]
+                self.chunks_per_cell = chunks_per_cell_copy[:num_input_cells]
+                input_ids = input_ids[:, :(-num_output_tokens), :]
+                targets = None
+            else:
+                assert mode == "targets"
+                self.chunk_sizes = chunk_sizes_copy[num_input_chunks:]
+                self.chunks_per_cell = chunks_per_cell_copy[num_input_cells:]
+                input_ids = input_ids[:, (-num_output_tokens):, :]
+
+        try:
+            loss_full = self._forward_internal(input_ids, targets, scale_factor)
+            if not (targets is None or self._debug_no_deallocate_buffers):
+                self.clear()
+        finally:
+            if mode != "both":
+                self.chunk_sizes = chunk_sizes_copy
+                self.chunks_per_cell = chunks_per_cell_copy
+
         return loss_full
