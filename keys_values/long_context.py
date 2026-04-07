@@ -1147,16 +1147,15 @@ class LongContextInferenceModel(GPTAndHeadModel):
             num_output_tokens = targets.shape[-1]
             num_target_chunks = self._num_target_chunks(num_output_tokens)
             num_input_chunks = len(self.chunk_sizes) - num_target_chunks
-            num_target_cells = 0
+            num_input_cells = len(chunks_per_cell_copy)
             sum_chunks = 0
             for num_ch in reversed(chunks_per_cell_copy):
                 sum_chunks += num_ch
-                num_target_cells += 1
+                num_input_cells -= 1
                 if sum_chunks == num_target_chunks:
                     break
                 elif sum_chunks > num_target_chunks:
                     raise IndexError(f"Internal error")
-            num_input_cells = len(chunks_per_cell_copy) - num_target_cells
             if mode == "inputs":
                 self.chunk_sizes = chunk_sizes_copy[:num_input_chunks]
                 self.chunks_per_cell = chunks_per_cell_copy[:num_input_cells]

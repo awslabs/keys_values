@@ -51,6 +51,7 @@ from keys_values.long_context import (
     LongContextInferenceModel,
     GPTAndHeadModel,
     oom_exception_action,
+    ForwardModeType,
 )
 from keys_values.model import GPT
 from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
@@ -457,6 +458,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float = 1.0,
+        mode: ForwardModeType = "both",
         **kwargs,
     ) -> Union[LossValue, torch.Tensor]:
         """
@@ -470,6 +472,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 this is `None`, we return logits for the final chunk (only
                 if `self.training == False`)
             scale_factor: Loss is multiplied by this factor. Defaults to 1.
+            mode: Mode for computation, only in inference mode.
 
         Returns:
             Loss value(s). In training mode, this is of type :class:`LossValue`,
@@ -481,6 +484,10 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         """
         self._check_status("init")
+        if mode not in ("both", "inputs", "targets"):
+            raise ValueError(f"mode = {mode}, must be one of ['both', 'inputs', 'targets']")
+        if self.training and mode != "both":
+            raise ValueError(f"mode = {mode}: must be 'both' in training mode")
         if self.training and self.offload_device is not None:
             self._work_device = self.offload_device
         else:
@@ -489,8 +496,9 @@ class LongContextGradientModel(LongContextInferenceModel):
         if targets is not None:
             targets = targets.to(self._work_device)
         self._init_members_from_tokens(input_ids, targets)
-        # Reset KV caches
-        self.gpt_model.reset()
+        if mode != "targets":
+            # Reset KV caches
+            self.gpt_model.reset()
         if not isinstance(self.gpt_model.mha, MultiHeadSelfAttention):
             raise ValueError(
                 f"type(self.gpt_model.mha) = {type(self.gpt_model.mha)}, must be MultiHeadSelfAttention"
@@ -518,6 +526,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 input_ids,
                 targets,
                 scale_factor,
+                mode,
             )
         return loss_value
 

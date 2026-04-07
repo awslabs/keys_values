@@ -59,7 +59,6 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
     Note that :meth:`deallocate` only deallocates `quantizer_k`, `quantizer_v`,
     but not `dequant_buffers`. This is because typically, several KV caches
     share the same `dequant_buffers`. It remains allocated.
-
     """
 
     def __init__(
