@@ -104,6 +104,28 @@ SDPA_IMPL_FLEXATTENTION = 4
 
 SDPA_IMPL_FLEXATT_ATTN_WEIGHTS = 5
 
+SDPA_IMPL_FLASHINFER = 6
+
+# Lazy singleton for FlashInfer wrapper
+_flashinfer_sdpa = None
+_flashinfer_checked = False
+
+
+def _get_flashinfer_sdpa():
+    """Lazily initialize and return the FlashInfer SDPA wrapper, or None."""
+    global _flashinfer_sdpa, _flashinfer_checked
+    if not _flashinfer_checked:
+        _flashinfer_checked = True
+        try:
+            from keys_values.flashinfer_wrapper import FlashInferSDPA
+
+            wrapper = FlashInferSDPA()
+            if wrapper.available:
+                _flashinfer_sdpa = wrapper
+        except Exception:
+            pass
+    return _flashinfer_sdpa
+
 
 UseEagerPredicate = Callable[[int, int], bool]
 
@@ -379,6 +401,10 @@ class MultiHeadSelfAttention:
 
         """
         must_eager = return_attn_weights or self.use_eager_sdpa_always
+        # Use FlashInfer when attention weights are needed and it's available
+        if return_attn_weights and not self.use_eager_sdpa_always:
+            if _get_flashinfer_sdpa() is not None:
+                return SDPA_IMPL_FLASHINFER
         sws_given = sliding_window_size is not None
         use_flex_att = (
             self.flexatt_args is not None and not must_eager and not sws_given
@@ -438,7 +464,19 @@ class MultiHeadSelfAttention:
                 kv_len=k_and_v.keys().shape[2],
                 sliding_window_size=sliding_window_size,
             )
-        if sdpa_mode == SDPA_IMPL_QPADDED_PYTORCH:
+        if sdpa_mode == SDPA_IMPL_FLASHINFER:
+            flashinfer = _get_flashinfer_sdpa()
+            attn_outputs, attn_weights = flashinfer.scaled_dot_product_attention(
+                query=query,
+                key=k_and_v.keys(),
+                value=k_and_v.values(),
+                scale_factor=scale_factor,
+                return_attn_weights=return_attn_weights,
+                token_positions=token_positions,
+                input_pos=input_pos,
+                sliding_window_size=sliding_window_size,
+            )
+        elif sdpa_mode == SDPA_IMPL_QPADDED_PYTORCH:
             attn_outputs, filtered_kernels = scaled_dot_product_attention_zeropad(
                 query=query,
                 key=k_and_v.keys(),
