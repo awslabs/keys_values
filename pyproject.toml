@@ -26,6 +26,9 @@ dependencies = [
     "flake8",
 ]
 
+[project.optional-dependencies]
+cuda = ["flashinfer-python"]
+
 [tool.setuptools.packages.find]
 include = [
     "keys_values",
