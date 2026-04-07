@@ -390,7 +390,6 @@ class DequantizedKVCacheBuffers:
     just not have any. In our case, `self._quantized_cache` is not even set
     in :meth:``__init__`, but only in :meth:`set_quantized_cache`, but even
     this leads to registration and infinite loops.
-
     """
 
     def __init__(
@@ -406,7 +405,6 @@ class DequantizedKVCacheBuffers:
         self.cache_length = cache_length
         self.head_size = params.head_size
         self.dtype = params.dtype
-        self.current_length = None
         self.k_buff = None
         self.v_buff = None
         self._quantized_cache = None
@@ -450,7 +448,6 @@ class DequantizedKVCacheBuffers:
             self.v_buff = torch.zeros(shape, device=device, dtype=self.dtype)
 
     def reset(self):
-        self.current_length = 0
         self._needs_write_back = False
 
     def deallocate(self):
@@ -537,22 +534,16 @@ class DequantizedKVCacheBuffers:
             )
 
     @property
+    def current_length(self) -> Optional[int]:
+        return None if self._quantized_cache is None else self._quantized_cache.current_length
+
+    @property
     def eff_cache_length(self) -> int:
-        cache = self._quantized_cache
-        return self.cache_length if cache is None else cache.cache_length
+        return self.cache_length if self._quantized_cache is None else self._quantized_cache.cache_length
 
     @property
     def batch_size(self) -> Optional[int]:
-        """
-        Returns:
-            Current effective batch size of the associated quantized
-            cache buffer
-
-        """
-        if self._quantized_cache is not None:
-            return self._quantized_cache.batch_size
-        else:
-            return None
+        return None if self._quantized_cache is None else self._quantized_cache.batch_size
 
     # Copied from `DefaultKVCacheBuffers.get_slots`
     def get_slots(
@@ -632,33 +623,17 @@ class DequantizedKVCacheBuffers:
         key: torch.Tensor,
         value: torch.Tensor,
     ) -> KeysAndValues:
-        num = key.shape[2]
-        self.current_length = min(self.eff_cache_length, self.current_length + num)
-        return self._forward(positions, key, value)
-
-    def _forward(
-        self,
-        positions: PositionsType,
-        key: torch.Tensor,
-        value: torch.Tensor,
-    ) -> KeysAndValues:
-        # check_for_nan(key, "DequantizedKVCacheBuffers._forward", "key")
-        # check_for_nan(value, "DequantizedKVCacheBuffers._forward", "value")
         self.set_slots(positions, key, value)
         return DequantizedBufferKeysAndValues(self)
 
     def get_keys_values(self) -> Optional[KeysAndValues]:
-        if self.batch_size is None or self.current_length is None:
-            return None
-        else:
-            return DequantizedBufferKeysAndValues(self)
+        return None if self._quantized_cache is None else DequantizedBufferKeysAndValues(self)
 
     # Copied from `KVCacheBuffers.prefill`:
     def prefill(self, key: torch.Tensor, value: torch.Tensor):
         # Ensure that buffers are allocated:
         self._allocate_buffers(key.device, key.dtype)
         self._check_quantized_cache()
-        self.current_length = self._check_prefill(key, value)
         self._prefill(key, value)
 
     # Copied from `KVCacheBuffers._check_prefill`:
@@ -824,7 +799,7 @@ class DequantizedBufferKeysAndValues(KeysAndValues):
                 "buffers must have associated cache. Use 'set_quantized_cache' first"
             )
 
-    def keys(self) -> torch.Tensor:
+    def _check(self) -> Tuple[int, int]:
         if not (self._assoc_quant_buffers is self._buffers._quantized_cache):
             raise IndexError("buffers has been associated with different cache")
         current_length = self._buffers.current_length
@@ -833,17 +808,14 @@ class DequantizedBufferKeysAndValues(KeysAndValues):
             raise IndexError("Associated buffer still has undefined batch size")
         if not self._buffers.buffers_are_allocated:
             raise IndexError("Associated buffer is not allocated")
+        return current_length, batch_size
+
+    def keys(self) -> torch.Tensor:
+        current_length, batch_size = self._check()
         return self._buffers.k_buff[:batch_size, :, :current_length, :]
 
     def values(self) -> torch.Tensor:
-        if not (self._assoc_quant_buffers is self._buffers._quantized_cache):
-            raise IndexError("buffers has been associated with different cache")
-        current_length = self._buffers.current_length
-        batch_size = self._buffers.batch_size
-        if batch_size is None:
-            raise IndexError("Associated buffer still has undefined batch size")
-        if not self._buffers.buffers_are_allocated:
-            raise IndexError("Associated buffer is not allocated")
+        current_length, batch_size = self._check()
         return self._buffers.v_buff[:batch_size, :, :current_length, :]
 
 

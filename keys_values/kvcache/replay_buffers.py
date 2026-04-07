@@ -26,23 +26,31 @@ from keys_values.kvcache.quant_buffers import (
     QuantizedKVCacheBuffers,
     DequantizedKVCacheBuffers,
 )
-from keys_values.utils import expand_index, is_index_1d, index_to_3d
+from keys_values.utils import expand_index, is_index_1d
 
 
 @dataclass(frozen=True)
 class ScatterInformation:
-    index: torch.Tensor
+    index: PositionsType
     key: torch.Tensor
     value: torch.Tensor
 
     def __post_init__(self):
-        for name, ndim in (("index", 3), ("key", 4), ("value", 4)):
+        setups = (("key", 4), ("value", 4))
+        is_tuple = isinstance(self.index, tuple)
+        if is_tuple:
+            start, end = self.index
+            if not(0 <= start < end):
+                raise ValueError(f"{self.index}: Must be start < end")
+        else:
+            setups += (("index", 3),)
+        for name, ndim in setups:
             if getattr(self, name).ndim != ndim:
                 raise ValueError(f"{name} must have {ndim} dimensions")
-        if self.key.shape[:-1] != self.index.shape:
+        if not is_tuple and self.key.shape[:-1] != self.index.shape:
             raise ValueError(f"index.shape = {self.index.shape}, key.shape = {self.key.shape}: Not compatible")
         if self.value.shape != self.key.shape:
-            raise ValueError(f"index.shape = {self.index.shape}, value.shape = {self.value.shape}: Not compatible")
+            raise ValueError(f"key.shape = {self.key.shape}, value.shape = {self.value.shape}: Must be the same")
 
     @property
     def head_size(self) -> int:
@@ -60,20 +68,20 @@ class ScatterInformation:
             raise ValueError(f"keys.shape = {keys.shape}, key.shape = {self.key.shape}: Not compatible")
         if values.shape != keys.shape:
             raise ValueError(f"values.shape = {values.shape}, key.shape = {self.key.shape}: Not compatible")
-        index = self._get_index()
-        if is_index_1d(self.index):
-            keys[:, :, index, :] = self.key
-            values[:, :, index, :] = self.value
+        if isinstance(self.index, tuple):
+            start, end = self.index
+            keys[:, :, start:end, :] = self.key
+            values[:, :, start:end, :] = self.value
         else:
-            keys.scatter_(2, index, self.key)
-            values.scatter_(2, index, self.value)
+            index = self._get_index()
+            if is_index_1d(self.index):
+                keys[:, :, index, :] = self.key
+                values[:, :, index, :] = self.value
+            else:
+                keys.scatter_(2, index, self.key)
+                values.scatter_(2, index, self.value)
 
 
-# TODO:
-# - What about dequant_buffers._needs_write_back? [OK]
-#   We don't call set_slots or _forward: Remains False.
-# - What about dequant_buffers.current_length?
-# - Implement updating the quant buffers (and remove replay entries)
 class ReplayKVCacheBuffers(KVCacheBuffers):
     """
     Wrapper around :class:`QuantizedKVCacheBuffers`, drives efficient token
@@ -126,15 +134,6 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
             raise ValueError("quant_buffers must have allocated buffers")
         return True
 
-    def reset(self):
-        raise NotImplementedError("Cannot call 'reset' for replay buffers")
-
-    def _allocate_buffers(
-        self,
-        device: Optional[torch.device] = None,
-    ):
-        raise NotImplementedError("Cannot call '_allocate_buffers' for replay buffers")
-
     def _replay_updates(self):
         if not self.dequant_buffers.buffers_are_allocated:
             raise ValueError("dequant_buffers must have allocated buffers")
@@ -145,9 +144,7 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
         self._last_recent_replay_len = len(self._updates)
 
     def _need_to_replay(self) -> bool:
-        if not self.dequant_buffers._quantized_cache is self:
-            return True
-        return len(self._updates) != self._last_recent_replay_len
+        return (not self.dequant_buffers._quantized_cache is self) or (len(self._updates) != self._last_recent_replay_len)
 
     def get_slots(
         self,
@@ -159,14 +156,6 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
             self._replay_updates()
         return self.dequant_buffers.get_slots(positions)
 
-    def set_slots(
-        self,
-        positions: PositionsType,
-        key: torch.Tensor,
-        value: torch.Tensor,
-    ):
-        raise NotImplementedError("Cannot call 'set_slots' for replay buffers")
-
     def _forward(
         self,
         positions: PositionsType,
@@ -177,13 +166,6 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
         if self._need_to_replay():
             self.dequant_buffers.set_quantized_cache(self)
             self._replay_updates()
-        if isinstance(positions, tuple):
-            start, end = positions
-            positions = index_to_3d(
-                torch.arange(start, end, dtype=torch.int32, device=key.device),
-                key.shape[0],
-                key.shape[1],
-            )
         scat_info = ScatterInformation(
             index=positions,
             key=key,
@@ -193,34 +175,71 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
             self.dequant_buffers.k_buff, self.dequant_buffers.v_buff,
         )
         self._updates.append(scat_info)
-        # We don't call `dequant_buffers.forward`, so have to adjust
-        # `dequant_buffers.current_length` here:
-        num = key.shape[2]
-        new_current_length = min(
-            self.dequant_buffers.eff_cache_length,
-            self.dequant_buffers.current_length + num,
-        )
-        self.dequant_buffers.current_length = new_current_length
         return self.dequant_buffers.get_keys_values()
-
-    def write_back(self):
-        raise NotImplementedError("Cannot call 'set_slots' for replay buffers")
 
     def drop_association(self):
         self.dequant_buffers.set_quantized_cache(None)
 
+    def update_base_buffers(self):
+        """
+        Updates base buffers `quant_buffers` by scatter updates in
+        `_updates`. The latter list is emptied.
+
+        """
+        for scat_info in self._updates:
+            self.quant_buffers.set_slots(
+                scat_info.index,
+                scat_info.key,
+                scat_info.value,
+            )
+        self.quant_buffers.write_back()
+        self._updates = []
+
+    @staticmethod
+    def _raise_error(name: str):
+        raise NotImplementedError(f"Cannot call '{name}' for replay buffers")
+
+    def reset(self):
+        self._raise_error("reset")
+
+    def _allocate_buffers(
+        self,
+        device: Optional[torch.device] = None,
+    ):
+        self._raise_error("_allocate_buffers")
+
+    def set_slots(
+        self,
+        positions: PositionsType,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ):
+        self._raise_error("set_slots")
+
+    def write_back(self):
+        self._raise_error("write_back")
+
     def get_keys_values(self) -> Optional[KeysAndValues]:
-        raise NotImplementedError("Cannot call 'get_keys_values' for replay buffers")
+        self._raise_error("get_keys_values")
 
     def _prefill(self, key: torch.Tensor, value: torch.Tensor):
-        raise NotImplementedError("Cannot call '_prefill' for replay buffers")
+        self._raise_error("_prefill")
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
-        raise NotImplementedError("Cannot call 'size_estimate' for replay buffers")
+        self._raise_error("size_estimate")
 
     @staticmethod
     def size_estimate_apriori(
         params: KVCacheBuffersParams,
         **kwargs,
     ) -> Tuple[int, Dict[str, int]]:
-        raise NotImplementedError("Cannot call 'size_estimate_apriori' for replay buffers")
+        ReplayKVCacheBuffers._raise_error("size_estimate_apriori")
+
+
+def create_replay_kv_buffers(
+    quant_buffers_list: List[QuantizedKVCacheBuffers]
+) -> List[ReplayKVCacheBuffers]:
+    return [
+        ReplayKVCacheBuffers(quant_buffers)
+        for quant_buffers in quant_buffers_list
+    ]
