@@ -17,6 +17,7 @@ from typing import List, Optional, Tuple, Dict
 import torch
 
 from keys_values.attention import KeysAndValues
+from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.kvcache.buffers import (
     KVCacheBuffers,
     PositionsType,
@@ -26,6 +27,7 @@ from keys_values.kvcache.quant_buffers import (
     QuantizedKVCacheBuffers,
     DequantizedKVCacheBuffers,
 )
+from keys_values.model import GPT
 from keys_values.utils import expand_index, is_index_1d
 
 
@@ -119,6 +121,11 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
         self.quant_buffers = quant_buffers
         self._updates: List[ScatterInformation] = []
         self._last_recent_replay_len = -1
+        self._base_has_been_updated = False
+
+    @property
+    def base_has_been_updated(self) -> bool:
+        return self._base_has_been_updated
 
     @property
     def dequant_buffers(self) -> DequantizedKVCacheBuffers:
@@ -194,13 +201,14 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
             )
         self.quant_buffers.write_back()
         self._updates = []
+        self._base_has_been_updated = True
+
+    def _deallocate(self):
+        self._updates = []
 
     @staticmethod
     def _raise_error(name: str):
         raise NotImplementedError(f"Cannot call '{name}' for replay buffers")
-
-    def reset(self):
-        self._raise_error("reset")
 
     def _allocate_buffers(
         self,
@@ -236,10 +244,76 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
         ReplayKVCacheBuffers._raise_error("size_estimate_apriori")
 
 
-def create_replay_kv_buffers(
-    quant_buffers_list: List[QuantizedKVCacheBuffers]
-) -> List[ReplayKVCacheBuffers]:
-    return [
-        ReplayKVCacheBuffers(quant_buffers)
-        for quant_buffers in quant_buffers_list
-    ]
+class ModelForTokenGeneration:
+    """
+    Wraps a model to be used for token generation at some point. The cache
+    updates during token generation are temporary and dealt with by
+    :class:`ReplayKVCacheBuffers`.
+
+    Say you want to generate tokens, in order to compute a sample-based
+    metric, and compute a loss function afterwards, but process the inputs
+    only once:
+
+    ```
+        # Model must be in eval mode for mode parameter to work
+        model.eval()
+        # Process prompt part of input_ids, excluding the postfix aligned
+        # with targets.
+        logits = model(input_ids, targets, mode="inputs")
+        gen_wrapper = ModelForTokenGeneration(model.gpt_model)
+        # Switch into token generation mode, switching in replay buffers which
+        # use the original quantized buffers as base, to be restored below.
+        gen_wrapper.switch_status(True)
+
+        # Call keys_values.generate.base.batched_generate_fn for token
+        # generation, passing prompts_or_logits=logits,
+        # include_prompt=False, deallocate_cache_buffers=False, and
+        # max_returned_tokens the max number of tokens to be generated
+        # (excluding the prompt).
+
+        # Switch back to standard mode. Original buffers are put back in, and
+        # the cache states are restored.
+        gen_wrapper.switch_status(False)
+        # Process the remainder of input_ids and targets (aligned part) and
+        # compute the loss value.
+        loss_value = model(input_ids, targets, mode="targets")
+    ```
+
+    You can generate different token sequences extending the inputs, by calling
+    `gen_wrapper.switch_status(False)` and `gen_wrapper.switch_status(True)`
+    several times.
+    """
+
+    def __init__(self, gpt_model: GPT):
+        if not gpt_model.are_kv_caches_assigned():
+            raise ValueError("gpt_model must have assigned kv_caches")
+        for layer_idx, cache in enumerate(gpt_model.get_kv_caches()):
+            if not isinstance(cache, KVCacheWithBuffers):
+                raise ValueError(f"Cache for layer {layer_idx} is not a KVCacheWithBuffers")
+            if not isinstance(cache.kv_buffers, QuantizedKVCacheBuffers):
+                raise ValueError(f"Cache for layer {layer_idx} does not have buffers of type QuantizedKVCacheBuffers")
+        self.gpt_model = gpt_model
+        self.is_token_generating = False
+        self._cache_states = None
+
+    def switch_status(self, token_generating: bool):
+        if token_generating == self.is_token_generating:
+            return
+        if token_generating:
+            self._cache_states = []
+            for cache in self.gpt_model.get_kv_caches():
+                self._cache_states.append(cache.get_state())
+                cache.switch_buffers(ReplayKVCacheBuffers(cache.kv_buffers))
+        else:
+            assert self._cache_states is not None and len(self._cache_states) == self.gpt_model.config.n_layer
+            if any(c.kv_buffers.base_has_been_updated for c in self.gpt_model.get_kv_caches()):
+                raise IndexError(
+                    "At least one of the base KV cache buffers have been "
+                    "updated. Cannot switch status back."
+                )
+            for cache, state in zip(self.gpt_model.get_kv_caches(), self._cache_states):
+                cache.switch_buffers(
+                    new_buffers=cache.kv_buffers.quant_buffers,
+                    cache_state=state,
+                )
+        self.is_token_generating = token_generating
