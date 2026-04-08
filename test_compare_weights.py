@@ -278,5 +278,94 @@ def run_comparison():
         print(f"\nFlexAttention failed on non-contiguous: {e}")
 
 
+def run_large_scale_comparison():
+    """Larger-scale test to check if eviction decisions diverge at realistic sizes."""
+    torch.manual_seed(42)
+    device = 'cuda'
+
+    # Qwen3-4B config
+    n_head = 32
+    n_kv_heads = 8
+    hd = 128
+    group_size = n_head // n_kv_heads
+    scale = 1.0 / math.sqrt(hd)
+    batch = 1
+
+    configs = [
+        # (q_len, kv_len, input_pos, keep_ratio, description)
+        (16, 256, 240, 0.5, "kv_len=256, keep 50%"),
+        (16, 512, 496, 0.5, "kv_len=512, keep 50%"),
+        (16, 1024, 1008, 0.5, "kv_len=1024, keep 50%"),
+        (16, 2048, 2032, 0.5, "kv_len=2048, keep 50%"),
+        (16, 1024, 1008, 0.25, "kv_len=1024, keep 25% (aggressive eviction)"),
+        (16, 1024, 1008, 0.75, "kv_len=1024, keep 75% (mild eviction)"),
+    ]
+
+    print("=" * 70)
+    print("LARGE SCALE: Do eviction decisions diverge?")
+    print("=" * 70)
+    print(f"Config: n_head={n_head}, n_kv={n_kv_heads}, hd={hd}")
+    print()
+
+    for q_len, kv_len, input_pos, keep_ratio, desc in configs:
+        torch.manual_seed(42 + kv_len)  # different seed per config
+
+        token_positions = torch.arange(kv_len, device=device, dtype=torch.int32)
+        token_positions = token_positions.unsqueeze(0).unsqueeze(0).expand(batch, n_kv_heads, -1).contiguous()
+
+        Q = torch.randn(batch, q_len, n_head, hd, device=device, dtype=torch.bfloat16)
+        K = torch.randn(batch, kv_len, n_kv_heads, hd, device=device, dtype=torch.bfloat16)
+        V = torch.randn(batch, kv_len, n_kv_heads, hd, device=device, dtype=torch.bfloat16)
+
+        with torch.no_grad():
+            W_ref = pytorch_reference_weights(Q, K, scale, input_pos, token_positions, n_kv_heads, group_size)
+            W_triton = triton_weights(Q, K, scale, input_pos, token_positions, n_kv_heads, group_size)
+
+        try:
+            with torch.no_grad():
+                W_flex = flexatt_weights(Q, K, V, scale, input_pos, token_positions, n_kv_heads, group_size)
+            has_flex = True
+        except Exception as e:
+            print(f"  [{desc}] FlexAttention failed: {e}")
+            has_flex = False
+
+        keep_k = int(kv_len * keep_ratio)
+
+        # Check all kv heads, not just head 0
+        triton_evict_mismatches = 0
+        flex_evict_mismatches = 0
+        total_heads = 0
+
+        for b in range(batch):
+            for h in range(n_kv_heads):
+                total_heads += 1
+                topk_ref = set(W_ref[b, h].topk(keep_k).indices.tolist())
+                topk_triton = set(W_triton[b, h].topk(keep_k).indices.tolist())
+                if topk_ref != topk_triton:
+                    triton_evict_mismatches += 1
+                if has_flex:
+                    topk_flex = set(W_flex[b, h].topk(keep_k).indices.tolist())
+                    if topk_ref != topk_flex:
+                        flex_evict_mismatches += 1
+
+        triton_diff = (W_triton - W_ref).abs()
+        status_triton = f"triton evict mismatch: {triton_evict_mismatches}/{total_heads} heads"
+        if has_flex:
+            flex_diff = (W_flex - W_ref).abs()
+            # Check if flex is just a constant factor
+            ratio = (W_ref / (W_flex + 1e-10)).mean().item()
+            status_flex = f"flex evict mismatch: {flex_evict_mismatches}/{total_heads} heads, mean ratio ref/flex: {ratio:.3f}"
+        else:
+            status_flex = "flex: N/A"
+
+        print(f"  [{desc}]")
+        print(f"    Triton max abs diff: {triton_diff.max().item():.6f}, {status_triton}")
+        if has_flex:
+            print(f"    Flex   max abs diff: {flex_diff.max().item():.6f}, {status_flex}")
+        print()
+
+
 if __name__ == "__main__":
     run_comparison()
+    print("\n")
+    run_large_scale_comparison()
