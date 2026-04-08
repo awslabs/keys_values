@@ -250,6 +250,12 @@ class ModelForTokenGeneration:
     updates during token generation are temporary and dealt with by
     :class:`ReplayKVCacheBuffers`.
 
+    Main use cases:
+
+    * Compute sample-based metric and loss function, without having to
+      process the prompt several times
+    * Generate several token sequences completing the same prompt
+
     Say you want to generate tokens, in order to compute a sample-based
     metric, and compute a loss function afterwards, but process the inputs
     only once:
@@ -316,4 +322,5 @@ class ModelForTokenGeneration:
                     new_buffers=cache.kv_buffers.quant_buffers,
                     cache_state=state,
                 )
+            self._cache_states = None
         self.is_token_generating = token_generating

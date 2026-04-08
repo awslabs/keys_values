@@ -526,9 +526,10 @@ class EvalArgs(_EvalArgs):
     Args:
         micro_batch_size: If given, this overrides `train.micro_batch_size`
             for evaluation
-        use_sample_metric: If `True`, evaluation is done with a sample based
-            metric (determined by the dataset), not with the loss used for
-            training
+        use_sample_metric: If `True`, we evaluate a sample based metric
+            (determined by the dataset) along with the loss used for training.
+            This is done in a way which requires the prompt to be processed
+            once only
         sample_metric_max_generated_tokens: Maximum number of tokens
             generated for sample based metric evaluation
         sample_metric_kwargs: Keyword arguments for token sampling (params
@@ -536,7 +537,7 @@ class EvalArgs(_EvalArgs):
     """
 
     micro_batch_size: Optional[int] = None
-    use_sample_metric: bool = False
+    use_sample_metric: bool = True
     sample_metric_max_generated_tokens: int = 10
     sample_metric_kwargs: Optional[Dict[str, Any]] = None
 
