@@ -660,14 +660,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
             function given by `head_model` (must be given). The loss value is
             returned. The KV caches are reset, their buffers are deallocated.
 
-        Use `mode != "both"` to evaluate sample-based metric(s) and loss
-        function, as follows:
-
-        * Call with `mode = "inputs"`
-        * Switch KV cache buffers (retain original buffers)
-        * Compute sample-based metric
-        * Switch back to original buffers
-        * Call with `mode = "targets"` to evaluate loss function
+        See :class:`keys_values.kvcache.replay_buffers.ModelForTokenGeneration`
+        for how to evaluate sample-based metric(s) and loss function.
 
         Args:
             input_ids: Batch of full input token sequences
@@ -698,7 +692,11 @@ class LongContextInferenceModel(GPTAndHeadModel):
             targets = targets.to(device)
         elif mode != "both":
             raise ValueError(f"mode = {mode}, targets must be given")
-        self._init_members_from_tokens(input_ids, targets, mode)
+        # Only for unit testing:
+        inputs_targets_boundary = kwargs.get("inputs_targets_boundary", False)
+        self._init_members_from_tokens(
+            input_ids, targets, mode, inputs_targets_boundary,
+        )
         if mode != "targets":
             # Reset all KV caches
             self.gpt_model.reset()
@@ -728,6 +726,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         mode: ForwardModeType,
+        inputs_targets_boundary: bool = False,
     ):
         """
         Initialize members required for processing the current batch.
@@ -770,7 +769,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
             num_output_tokens = 0
         # Select chunk sizes and chunks per cell
         self._select_chunks_and_cells(
-            num_output_tokens, seq_length, mode != "both",
+            num_output_tokens,
+            seq_length,
+            inputs_targets_boundary=inputs_targets_boundary or mode != "both",
         )
 
     def _num_target_chunks(self, num_output_tokens: int) -> int:
@@ -790,7 +791,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self,
         num_output_tokens: int,
         seq_length: int,
-        inputs_targets_boundary: bool = False,
+        inputs_targets_boundary: bool,
     ):
         # Select chunk sizes
         if self.single_tokens_for_targets:

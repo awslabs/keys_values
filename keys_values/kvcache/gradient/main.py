@@ -495,7 +495,11 @@ class LongContextGradientModel(LongContextInferenceModel):
         input_ids = input_ids.to(self._work_device)
         if targets is not None:
             targets = targets.to(self._work_device)
-        self._init_members_from_tokens(input_ids, targets)
+        # Only for unit testing:
+        inputs_targets_boundary = kwargs.get("inputs_targets_boundary", False)
+        self._init_members_from_tokens(
+            input_ids, targets, mode, inputs_targets_boundary,
+        )
         if mode != "targets":
             # Reset KV caches
             self.gpt_model.reset()
@@ -637,12 +641,16 @@ class LongContextGradientModel(LongContextInferenceModel):
         self,
         input_ids: torch.Tensor,
         targets: torch.Tensor,
+        mode: ForwardModeType,
+        inputs_targets_boundary: bool = False,
     ):
         """
         Initialize members required for processing the current batch.
 
         """
-        super()._init_members_from_tokens(input_ids, targets)
+        super()._init_members_from_tokens(
+            input_ids, targets, mode, inputs_targets_boundary,
+        )
         if self.training:
             # Create checkpointing members
             self._create_layer_checkpointers()
