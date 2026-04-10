@@ -65,7 +65,7 @@ from keys_values.finetune.args import (
     KVCacheArgs,
     OptimizerArgs,
     SDPAArgs,
-    LoRAARgs,
+    LoRAArgs,
 )
 from keys_values.finetune.batch_transform import (
     BatchTransformFactory,
@@ -360,7 +360,7 @@ def setup_internal(
     resume: Union[bool, Literal["auto"], Path],
     data: Optional[DataModule],
     train: TrainArgs,
-    lora: Optional[LoRAARgs],
+    lora: Optional[LoRAArgs],
     eval: EvalArgs,
     optimizer: Optional[OptimizerArgs],
     logger_name: Literal["wandb", "tensorboard", "csv", "mlflow"],

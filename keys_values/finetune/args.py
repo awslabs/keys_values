@@ -352,8 +352,15 @@ class OptimizerArgs:
 
 
 @dataclass
-class LoRAARgs:
+class LoRAArgs:
     """Command line arguments for LoRA fine-tuning
+
+    The defaults here are more expensive than those in `LitGPT`. We follow
+    recommendations given in
+
+    Huang and Balestriero
+    ALLoRA: Adaptive Learning Rate Mitigates LoRA Fatal Flaws
+    https://arxiv.org/abs/2410.09692
 
     With `kind`, a number of variants of LoRA can be chosen:
 
@@ -380,15 +387,15 @@ class LoRAARgs:
         kind: See above. Defaults to "default".
     """
 
-    r: int = 8
+    r: int = 16
     alpha: int = 16
     dropout: float = 0
     query: bool = True
-    key: bool = False
+    key: bool = True
     value: bool = True
-    projection: bool = False
-    mlp: bool = False
-    head: bool = False
+    projection: bool = True
+    mlp: bool = True
+    head: bool = True
     kind: Literal["default", "rms_norm", "dora"] = "default"
 
 
