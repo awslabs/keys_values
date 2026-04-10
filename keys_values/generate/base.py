@@ -153,10 +153,13 @@ def generate_fn(
     # Prompt processing. This is dealt with by the long context inference
     # model. Processing is done in chunks, the first one being as long as
     # KV caches permit, subsequent ones (if any) chosen by the model.
-    # We need the logits for the final chunk in order to generate the
-    # first token below. Chunk size does not matter, just must be nonzero.
+    # We need the logits for the final position in order to generate the
+    # first token below.
     gpt_model = model.gpt_model
-    logits_final_chunk = model(prompt.unsqueeze(0), targets=None)
+    logits_final_position = model(prompt.unsqueeze(0), targets=None)
+    assert logits_final_position.ndim == 3 and logits_final_position.shape[1] == 1, (
+        logits_final_position.shape,
+    )
 
     # Generation loop: One token per iteration
     tokens = []
@@ -168,8 +171,8 @@ def generate_fn(
         if token is None:
             # First token sampled from the final logits output for prompt
             # processing
-            token = sample(logits_final_chunk, **sample_kwargs).to(dtype=torch.int64)
-            logits_final_chunk = None
+            token = sample(logits_final_position, **sample_kwargs).to(dtype=torch.int64)
+            logits_final_position = None
         else:
             token = next_token(
                 gpt_model=gpt_model,
@@ -277,7 +280,10 @@ def batched_generate_fn(
     # We need the logits for the final chunk in order to generate the
     # first token below. Chunk size does not matter, just must be nonzero.
     gpt_model = model.gpt_model
-    logits_final_chunk = model(prompts, targets=None)
+    logits_final_position = model(prompts, targets=None)
+    assert logits_final_position.ndim == 3 and logits_final_position.shape[1] == 1, (
+        logits_final_position.shape,
+    )
 
     stop_progresses = [
         [0] * len(stop_tokens) for _ in range(batch_size)
@@ -290,8 +296,8 @@ def batched_generate_fn(
     tokens = None
     for current_idx in range(max_returned_tokens - max_prompt_size):
         if current_idx == 0:
-            tokens = batched_sample(logits_final_chunk[:, -1:], kwargs=sample_args)
-            logits_final_chunk = None
+            tokens = batched_sample(logits_final_position, kwargs=sample_args)
+            logits_final_position = None
         else:
             tokens = batched_next_token(
                 gpt_model=gpt_model,
