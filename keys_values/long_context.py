@@ -627,8 +627,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
             by `head_model` (must be given). The loss value is returned.
             The KV caches are reset, their buffers are deallocated.
         * `targets` not given: Process `input_ids`. Return logits for the
-            final chunk being processed. The KV caches are not reset, as the
-            model is to be used for token generations.
+            final token position being processed. The KV caches are not reset,
+            as the model is to be used for token generations.
 
         Args:
             input_ids: Batch of full input token sequences
@@ -639,8 +639,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
 
         Returns:
             Loss values, shape `(batch_size,)`. If `targets` are not given,
-            we return the logits for the final chunk, shape
-            `(batch_size, chunk_size, config.padded_vocab_size)`.
+            we return the logits for the final token position, shape
+            `(batch_size, 1, config.padded_vocab_size)`.
 
         """
         if self.head_model is None and targets is not None:
@@ -874,7 +874,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
             )
         else:
             weight_per_chunk = None
-        logits_final_chunk = None  # Only if no loss is computed
+        logits_final_position = None  # Only if no loss is computed
         # Need grouping of chunks into cells, for outermost loop
         chunks_for_cells = get_chunks_for_cells(
             self.chunks_per_cell,
@@ -954,7 +954,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         new_embed_parts.append(y)
                         if not compute_loss:
                             # We need the final layer output for the last chunk
-                            logits_final_chunk = y.detach()
+                            logits_final_position = y[:, -1:, :].detach()
                     if self._do_checkpoint_layer_input() and torch.cuda.is_available():
                         # `_checkpoint_layer_input` called above transfers
                         # `embeddings` to CPU. For this not to lead to
@@ -1023,9 +1023,11 @@ class LongContextInferenceModel(GPTAndHeadModel):
                                 rel_end,
                             )
                 else:
-                    # `logits_final_chunk` has final layer outputs for last
-                    # chunk. Map to logits
-                    logits_final_chunk = self.gpt_model.lm_head(logits_final_chunk)
+                    # `logits_final_position` has final layer outputs for last
+                    # position. Map to logits
+                    logits_final_position = self.gpt_model.lm_head(
+                        logits_final_position
+                    )
                 if self._do_checkpoint_layer_input() and torch.cuda.is_available():
                     # `_checkpoint_layer_input` called above transfers
                     # `embeddings` to CPU. For this not to lead to
@@ -1042,7 +1044,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
             if self.verbose is not VerbosityLevels.NONE:
                 print("\nDeallocate KV cache buffers")
             deallocate_kv_cache_buffers_of_model(self.gpt_model)
-        return loss_full if compute_loss else logits_final_chunk
+        return loss_full if compute_loss else logits_final_position
 
     def _forward_only(
         self,
@@ -1057,7 +1059,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
             print(
                 f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode)"
             )
-        loss_full = self._forward_internal(input_ids, targets, scale_factor)
+        result = self._forward_internal(input_ids, targets, scale_factor)
         if not (targets is None or self._debug_no_deallocate_buffers):
             self.clear()
-        return loss_full
+        return result

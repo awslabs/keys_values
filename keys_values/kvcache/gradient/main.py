@@ -476,8 +476,8 @@ class LongContextGradientModel(LongContextInferenceModel):
             for which :meth:`backward` is overwritten, and of shape `(1,)`.
             In evaluation mode, we return loss values for batch dimension,
             shape `(batch_size,)`, or if `targets is None`, we return logits
-            for the final chunk, shape `(batch_size, chunk_size,
-            config.padded_vocab_size)`.
+            for the final token position, shape
+            `(batch_size, 1, config.padded_vocab_size)`.
 
         """
         self._check_status("init")
