@@ -17,6 +17,8 @@ import math
 import torch
 import pytest
 
+from litgpt.utils import _RunIf
+
 from keys_values.attention import (
     scaled_dot_product_attention_in_blocks,
     DefaultKeysAndValues,
@@ -110,6 +112,7 @@ def eager_weights(query, key, scale, input_pos, token_positions):
     return attn_weights
 
 
+@_RunIf(min_cuda_gpus=1)
 @torch.inference_mode()
 def test_small_comparison():
     torch.manual_seed(42)
@@ -178,6 +181,7 @@ def test_small_comparison():
             assert num_match == keep_k
 
 
+@_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
     "q_len, kv_len, input_pos, keep_ratio, description",
     [
