@@ -22,7 +22,7 @@ from keys_values.finetune.args import (
     EvalArgs,
     GradientArgs,
     KVCacheArgs,
-    LoRAARgs,
+    LoRAArgs,
     OptimizerArgs,
     SDPAArgs,
 )
@@ -51,7 +51,7 @@ def setup(
         intermed_save_interval=None,
         intermed_save_num=None,
     ),
-    lora: LoRAARgs = LoRAARgs(
+    lora: LoRAArgs = LoRAArgs(
         r=8,
         alpha=16,
         dropout=0,

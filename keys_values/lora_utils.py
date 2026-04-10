@@ -184,7 +184,7 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
         lora_dropout: float = 0.0,
         enable_lora: Union[bool, Tuple[bool, bool, bool]] = False,
         use_rms_norm: bool = False,
-        **kwargs: Any,
+        **kwargs,
     ):
         """LoRA wrapper around linear class that is used for calculation of q, k and v matrices.
 
@@ -314,21 +314,23 @@ class LoRAQKVLinear(BaseLoRAQKVLinear):
 
     @property
     def lora_ind(self) -> torch.Tensor:
-        """
-        Created with each call. If we buffer this, then use the same model first
-        for inference, then for training, we get this error:
+        """Lazily compute and cache LoRA indices as a non-persistent buffer for FSDP meta-device compatibility.
 
-        RuntimeError: Inference tensors cannot be saved for backward. Please do not use Tensors created in inference mode in computation tracked by autograd. To work around this, you can make a clone to get a normal tensor and use it in autograd, or use `torch.no_grad()` instead of `torch.inference_mode()`.
+        Returns a clone so that inference-mode tensors are never passed into autograd.
         """
         # Indices are needed to properly pad weight updates with zeros.
-        off = 0
-        lora_ind = []
-        for enable, size in zip(self.enable_lora, self._all_qkv_shapes):
-            if enable:
-                lora_ind.extend(range(off, off + size))
-            off += size
-        assert len(lora_ind) == sum(self.qkv_shapes)  # Sanity check
-        return torch.tensor(lora_ind, device=self.linear.weight.device)
+        if not hasattr(self, "_lora_ind"):
+            off = 0
+            kwargs = dict(device=self.linear.weight.device, dtype=torch.int64)
+            parts = []
+            for enable, size in zip(self.enable_lora, self._all_qkv_shapes):
+                if enable:
+                    parts.append(torch.arange(off, off + size, **kwargs))
+                off += size
+            lora_ind = torch.cat(parts)
+            assert lora_ind.numel() == sum(self.qkv_shapes)  # Sanity check
+            self.register_buffer("_lora_ind", lora_ind, persistent=False)
+        return self._lora_ind.clone()
 
     def reset_parameters(self):
         super().reset_parameters()
