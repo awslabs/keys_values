@@ -96,6 +96,7 @@ class FlexAttnManager:
         self,
         kv_len: int,
         device: torch.device,
+        dtype: torch.dtype,
         requires_grad: bool,
         sliding_window_size: Optional[int],
         als_signature: Optional[int],
@@ -122,6 +123,7 @@ class FlexAttnManager:
         self,
         kv_len: int,
         device: torch.device,
+        dtype: torch.dtype,
         requires_grad: bool,
         sliding_window_size: Optional[int],
         attention_logit_softcapping: Optional[float],
@@ -133,6 +135,7 @@ class FlexAttnManager:
         args = self._get_args(
             kv_len,
             device,
+            dtype,
             requires_grad,
             sliding_window_size,
             als_signature,
@@ -196,23 +199,40 @@ class FlexAttnForPrefillManager(FlexAttnManager):
         self,
         kv_len: int,
         device: torch.device,
+        dtype: torch.dtype,
         requires_grad: bool,
         sliding_window_size: Optional[int],
         als_signature: Optional[int],
         **kwargs,
     ) -> tuple:
-        return kv_len, device, requires_grad, sliding_window_size, als_signature
+        return kv_len, device, dtype, requires_grad, sliding_window_size, als_signature
+
+    _ARGS_NAMES = dict(
+        kv_len=0,
+        device=1,
+        dtype=2,
+        requires_grad=3,
+        sliding_window_size=4,
+        als_signature=5,
+    )
+
+    @staticmethod
+    def _from_args(args: tuple, name: str) -> Any:
+        return args[FlexAttnForPrefillManager._ARGS_NAMES[name]]
 
     def _args_to_str(self, *args) -> str:
         parts = [
-            f"kv_len:{args[0]:5d}",
-            f"requires_grad:{int(args[2]):1d}",
-            f"device:{args[1]}",
+            f"kv_len:{self._from_args(args, 'kv_len'):5d}",
+            f"requires_grad:{int(self._from_args(args, 'requires_grad')):1d}",
+            f"device:{self._from_args(args, 'device')}",
+            f"dtype:{self._from_args(args, 'dtype')}",
         ]
-        if args[3] is not None:
-            parts.append(f"sliding_window_size:{args[3]:3d}")
-        if args[4] is not None:
-            parts.append(f"als_signature:{args[4]}")
+        val = self._from_args(args, "sliding_window_size")
+        if val is not None:
+            parts.append(f"sliding_window_size:{val:3d}")
+        val = self._from_args(args, "als_signature")
+        if val is not None:
+            parts.append(f"als_signature:{val}")
         return ",".join(parts)
 
     def _create_block_mask(
@@ -335,6 +355,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
         self,
         kv_len: int,
         device: torch.device,
+        dtype: torch.dtype,
         requires_grad: bool,
         sliding_window_size: Optional[int],
         als_signature: Optional[int],
@@ -353,26 +374,47 @@ class FlexAttnForChunkManager(FlexAttnManager):
             batch_size,
             n_head,
             device,
+            dtype,
             requires_grad,
             sliding_window_size,
             als_signature,
             reverse,
         )
 
+    _ARGS_NAMES = dict(
+        q_len=0,
+        kv_len=1,
+        batch_size=2,
+        n_head=3,
+        device=4,
+        dtype=5,
+        requires_grad=6,
+        sliding_window_size=7,
+        als_signature=8,
+        reverse=9,
+    )
+
+    @staticmethod
+    def _from_args(args: tuple, name: str) -> Any:
+        return args[FlexAttnForChunkManager._ARGS_NAMES[name]]
+
     def _args_to_str(self, *args) -> str:
         parts = [
-            f"q_len:{args[0]:5d}",
-            f"kv_len:{args[1]:5d}",
-            f"batch_size:{args[2]:3d}",
-            f"n_head:{args[3]:3d}",
-            f"requires_grad:{int(args[5]):1d}",
-            f"device:{args[4]}",
+            f"q_len:{self._from_args(args, 'q_len'):5d}",
+            f"kv_len:{self._from_args(args, 'kv_len'):5d}",
+            f"batch_size:{self._from_args(args, 'batch_size'):3d}",
+            f"n_head:{self._from_args(args, 'n_head'):3d}",
+            f"requires_grad:{int(self._from_args(args, 'requires_grad')):1d}",
+            f"device:{self._from_args(args, 'device')}",
+            f"dtype:{self._from_args(args, 'dtype')}",
         ]
-        if args[6] is not None:
-            parts.append(f"sliding_window_size:{args[6]:3d}")
-        if args[7] is not None:
-            parts.append(f"als_signature:{args[7]}")
-        parts.append(f"reverse:{int(args[8]):1d}")
+        val = self._from_args(args, "sliding_window_size")
+        if val is not None:
+            parts.append(f"sliding_window_size:{val:3d}")
+        val = self._from_args(args, "als_signature")
+        if val is not None:
+            parts.append(f"als_signature:{val}")
+        parts.append(f"reverse:{int(self._from_args(args, 'reverse')):1d}")
         return ",".join(parts)
 
     def _create_block_mask(
@@ -414,7 +456,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
         )
 
     def _extra_flex_attention_kwargs(self, args: tuple) -> Dict[str, Any]:
-        requires_grad = args[5]
+        requires_grad = self._from_args(args, "requires_grad")
         if self.forward_return_lse and not requires_grad:
             return {"return_aux": AuxRequest(lse=True)}
         else:
@@ -463,6 +505,7 @@ class FlexAttentionArgs:
         batch_size: int,
         n_head: int,
         device: torch.device,
+        dtype: torch.dtype,
         requires_grad: bool,
         sliding_window_size: Optional[int],
         attention_logit_softcapping: Optional[float],
@@ -481,6 +524,7 @@ class FlexAttentionArgs:
                 self.attn_prefill_manager(
                     kv_len=kv_len,
                     device=device,
+                    dtype=dtype,
                     requires_grad=requires_grad,
                     sliding_window_size=sliding_window_size,
                     attention_logit_softcapping=attention_logit_softcapping,
@@ -493,6 +537,7 @@ class FlexAttentionArgs:
             _attn_fn, extend_kv = self.attn_chunk_manager(
                 kv_len=kv_len,
                 device=device,
+                dtype=dtype,
                 requires_grad=requires_grad,
                 sliding_window_size=sliding_window_size,
                 attention_logit_softcapping=attention_logit_softcapping,
@@ -614,6 +659,7 @@ def scaled_dot_product_attention_flexatt(
         batch_size=batch_size,
         n_head=n_head,
         device=query.device,
+        dtype=query.dtype,
         requires_grad=requires_grad,
         sliding_window_size=sliding_window_size,
         attention_logit_softcapping=attention_logit_softcapping,
@@ -718,6 +764,10 @@ def sdpa_flexatt_with_attn_weights(
     `sliding_window_size` and `attention_logit_softcapping` are not supported.
     And we must have `flexatt_args.forward_return_lse == True`.
 
+    Arguments `query, key, value` are cast to `float32` for the reverse call,
+    since otherwise numerical errors arise which do not happen for other
+    SDPA variants.
+
     Args:
         flexatt_args: Arguments for `flex_attention`. Must have
             `forward_return_lse == True`.
@@ -744,6 +794,7 @@ def sdpa_flexatt_with_attn_weights(
         key,
         value,
     )
+    dtype = query.dtype
     if query.requires_grad or key.requires_grad or value.requires_grad:
         raise ValueError("Cannot be used with autograd")
     if input_pos <= 0:
@@ -780,6 +831,7 @@ def sdpa_flexatt_with_attn_weights(
     attn_fn, extend_kv = flexatt_args.attn_fn(
         q_len=q_len,
         kv_len=kv_len,
+        dtype=dtype,
         reverse=False,
         **attn_kwargs,
     )
@@ -819,12 +871,13 @@ def sdpa_flexatt_with_attn_weights(
     attn_fn, _ = flexatt_args.attn_fn(
         q_len=kv_len,
         kv_len=q_len,
+        dtype=torch.float32,
         reverse=True,
         **attn_kwargs,
     )
     # Multiply by a factor `exp(mean_lse)` here, divide by the same below
     mean_lse = aux.lse.mean(dim=-1, keepdim=True)
-    vtil_vec = torch.exp(-(aux.lse - mean_lse)).to(dtype=query.dtype)
+    vtil_vec = torch.exp(-(aux.lse - mean_lse))
     if q_len_tr > q_len:
         vtil_vec[:, :, : (q_len_tr - q_len)] = 0.0
     value_tilde = torch.cat(
@@ -832,12 +885,15 @@ def sdpa_flexatt_with_attn_weights(
             vtil_vec.unsqueeze(-1),
             torch.zeros(
                 (1, 1, 1, 1),
-                dtype=query.dtype,
+                dtype=torch.float32,
                 device=query.device,
             ).expand(batch_size, n_head, q_len_tr, MIN_HEAD_DIM - 1),
         ),
         dim=-1,
     )
+    # Cast for better accuracy
+    query = query.to(dtype=torch.float32)
+    key = key.to(dtype=torch.float32)
     output2, aux = attn_fn(
         query=key,
         key=query,
@@ -845,9 +901,7 @@ def sdpa_flexatt_with_attn_weights(
         scale=None,
         enable_gqa=False,
     )
-    attn_weights = output2[:, :, :, 0].to(dtype=torch.float32) * torch.exp(
-        aux.lse - mean_lse
-    )
+    attn_weights = output2[:, :, :, 0] * torch.exp(aux.lse - mean_lse)
     if n_query_groups < n_head:
         # Undo `repeat_interleave`
         attn_weights = torch.mean(
