@@ -1069,13 +1069,19 @@ def test_zero_pad_cpu_and_mocked_mps():
     result_cpu = model.zero_pad(x)
 
     with mock.patch("torch.backends.mps.is_available", return_value=True):
-        with mock.patch("torch.Tensor.device", new_callable=mock.PropertyMock) as mock_device:
+        with mock.patch(
+            "torch.Tensor.device", new_callable=mock.PropertyMock
+        ) as mock_device:
             mock_device.return_value = torch.device("mps")
 
             result_mps = model.zero_pad(x)
 
-            assert result_cpu.shape == result_mps.shape, "Shape mismatch between CPU and MPS"
-            assert torch.allclose(result_cpu, result_mps), "Tensor values mismatch between CPU and MPS"
+            assert (
+                result_cpu.shape == result_mps.shape
+            ), "Shape mismatch between CPU and MPS"
+            assert torch.allclose(
+                result_cpu, result_mps
+            ), "Tensor values mismatch between CPU and MPS"
 
 
 def test_load_legacy_state_dict():
