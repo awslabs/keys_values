@@ -27,6 +27,7 @@ from keys_values.kvcache.quant_buffers import (
     QuantizedKVCacheBuffers,
     DequantizedKVCacheBuffers,
 )
+from keys_values.kvcache.quantize.quantization import Quantizer
 from keys_values.model import GPT
 from keys_values.utils import expand_index, is_index_1d
 
@@ -122,6 +123,9 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
         self._updates: List[ScatterInformation] = []
         self._last_recent_replay_len = -1
         self._base_has_been_updated = False
+        self.batch_size = quant_buffers.batch_size
+        self.current_length = quant_buffers.current_length
+        self.cache_length = quant_buffers.cache_length
 
     @property
     def base_has_been_updated(self) -> bool:
@@ -141,11 +145,27 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
             raise ValueError("quant_buffers must have allocated buffers")
         return True
 
+    @property
+    def quantizer_k(self) -> Quantizer:
+        return self.quant_buffers.quantizer_k
+
+    @property
+    def quantizer_v(self) -> Quantizer:
+        return self.quant_buffers.quantizer_v
+
+    @property
+    def block_idx(self) -> int:
+        return self.quant_buffers.block_idx
+
+    @property
+    def debug_label(self) -> str:
+        return self.quant_buffers.debug_label
+
     def _replay_updates(self):
         if not self.dequant_buffers.buffers_are_allocated:
             raise ValueError("dequant_buffers must have allocated buffers")
-        keys = self.dequant_buffers.k_buff
-        values = self.dequant_buffers.v_buff
+        keys = self.dequant_buffers.k_buff[:self.batch_size, ...]
+        values = self.dequant_buffers.v_buff[:self.batch_size, ...]
         for scat_info in self._updates:
             scat_info.apply(keys, values)
         self._last_recent_replay_len = len(self._updates)
@@ -169,18 +189,18 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
         key: torch.Tensor,
         value: torch.Tensor,
     ) -> KeysAndValues:
-        self._assert_buffers_allocated()
+        self.quant_buffers._assert_buffers_allocated()
         if self._need_to_replay():
             self.dequant_buffers.set_quantized_cache(self)
             self._replay_updates()
+        keys = self.dequant_buffers.k_buff[:self.batch_size, ...]
+        values = self.dequant_buffers.v_buff[:self.batch_size, ...]
         scat_info = ScatterInformation(
             index=positions,
             key=key,
             value=value,
         )
-        scat_info.apply(
-            self.dequant_buffers.k_buff, self.dequant_buffers.v_buff,
-        )
+        scat_info.apply(keys, values)
         self._updates.append(scat_info)
         return self.dequant_buffers.get_keys_values()
 
@@ -200,11 +220,13 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
                 scat_info.value,
             )
         self.quant_buffers.write_back()
+        self.current_length = self.quant_buffers.current_length
         self._updates = []
         self._base_has_been_updated = True
 
     def _deallocate(self):
         self._updates = []
+        self.current_length = self.quant_buffers.current_length
 
     @staticmethod
     def _raise_error(name: str):

@@ -89,7 +89,7 @@ def create_chunk_sizes(
         )
         if num_output_tokens > 0:
             points_to_cover.add(seq_length - num_output_tokens)
-        points_to_cover = list(points_to_cover)
+        points_to_cover = sorted(list(points_to_cover))
         fcs = mpl
         if num_output_tokens > 0 and fcs > points_to_cover[0]:
             fcs = points_to_cover.pop(0)
@@ -119,7 +119,7 @@ def create_chunk_sizes(
             if c_size > 0:
                 chunk_sizes.append(c_size)
             num_done += c_size
-    assert sum(chunk_sizes) == seq_length  # Sanity check
+    assert sum(chunk_sizes) == seq_length, (sum(chunk_sizes), seq_length, chunk_sizes)  # Sanity check
     _assert_chunk_sizes(
         chunk_sizes,
         gpt_model,
@@ -844,6 +844,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 sz1 = len(chunk_sizes) - num_target_chunks
                 parts = [chunk_sizes[:sz1], chunk_sizes[sz1:]]
             for cs_part in parts:
+                this_chunks_per_cell = []
                 cell_length = 0
                 num_chunks = 0
                 for chunk_size in cs_part:
@@ -852,14 +853,16 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     # example, the first one -- prefill), we need to make an
                     # exception to have a cell longer than `max_cell_length`:
                     if new_length > max_cell_length and num_chunks > 0:
-                        chunks_per_cell.append(num_chunks)
+                        this_chunks_per_cell.append(num_chunks)
                         cell_length = chunk_size
                         num_chunks = 1
                     else:
                         cell_length = new_length
                         num_chunks += 1
-                chunks_per_cell.append(num_chunks)
-                assert sum(chunks_per_cell) == len(cs_part)
+                this_chunks_per_cell.append(num_chunks)
+                assert sum(this_chunks_per_cell) == len(cs_part), (sum(this_chunks_per_cell), len(cs_part), this_chunks_per_cell)
+                chunks_per_cell.extend(this_chunks_per_cell)
+            assert sum(chunks_per_cell) == len(chunk_sizes), (sum(chunks_per_cell), len(chunk_sizes), chunks_per_cell)
         self.chunks_per_cell = chunks_per_cell
 
     def _checkpoint_layer_input(
@@ -905,7 +908,6 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 input_ids,
                 targets,
                 scale_factor,
-                mode,
             )
         else:
             result = None
@@ -916,7 +918,6 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         input_ids,
                         targets,
                         scale_factor,
-                        mode,
                     )
                 except RuntimeError as ex:
                     oom_exception_action(ex, self._tmp_array_limit_gb)
@@ -1139,8 +1140,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
         for cache in self.gpt_model.get_kv_caches():
             cache.switch_replay_logging(False)
         if self.verbose is not VerbosityLevels.NONE:
+            extra = ": " + mode if mode != "both" else ""
             print(
-                f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode)"
+                f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode{extra})"
             )
         chunks_per_cell_copy = None
         chunk_sizes_copy = None
@@ -1162,13 +1164,13 @@ class LongContextInferenceModel(GPTAndHeadModel):
             if mode == "inputs":
                 self.chunk_sizes = chunk_sizes_copy[:num_input_chunks]
                 self.chunks_per_cell = chunks_per_cell_copy[:num_input_cells]
-                input_ids = input_ids[:, :(-num_output_tokens), :]
+                input_ids = input_ids[:, :(-num_output_tokens)]
                 targets = None
             else:
                 assert mode == "targets"
                 self.chunk_sizes = chunk_sizes_copy[num_input_chunks:]
                 self.chunks_per_cell = chunks_per_cell_copy[num_input_cells:]
-                input_ids = input_ids[:, (-num_output_tokens):, :]
+                input_ids = input_ids[:, (-num_output_tokens):]
 
         try:
             loss_full = self._forward_internal(input_ids, targets, scale_factor)

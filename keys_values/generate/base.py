@@ -263,7 +263,7 @@ def batched_generate_fn(
     """
     is_logits = prompts_or_logits.ndim == 3
     gpt_model = model.gpt_model
-    input_pos = gpt_model.input_pos
+    input_pos = gpt_model.kv_cache_input_pos()
     if input_pos is None:
         raise AssertionError("model must have KV caches assigned")
     if not is_logits:
