@@ -161,7 +161,7 @@ class CrossEntropyOnLogits(HeadModel):
 
     This class also supports instruction data with more general masking, such
     as several switches between prompt and desired targets. To this end, just
-    use `ignore_token` in `targets` for outputs to be masked out in the loss
+    use `ignore_index` in `targets` for outputs to be masked out in the loss
     function. For example, teaching a model to use tools, we can use data cases
     coming from trajectories with several tool calls. Apart from the initial
     prompt, we also mask out the tool outputs in `targets`.
