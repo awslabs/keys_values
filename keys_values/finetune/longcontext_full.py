@@ -1812,7 +1812,7 @@ def string_for_val_metrics(
 ) -> str:
     if evaluator is None:
         return (
-            f"val loss: {metrics['val_loss']:.3f} | val ppl: {metrics['val_ppl']:.3f}"
+            f"val_loss: {metrics['val_loss']:.3f}"
         )
     else:
         name = evaluator.metrics[0]
