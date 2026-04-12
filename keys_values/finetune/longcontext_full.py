@@ -893,7 +893,7 @@ def main(
         )
         fabric.log_dict(metrics, step=state["iter_num"])
         print_message(
-            f"Final evaluation | "
+            f"Final evaluation            | "
             + string_for_val_metrics(metrics, evaluator)
             + f" | val_time: {metrics['val_time']:.3f} s",
             fabric,
@@ -1811,9 +1811,7 @@ def string_for_val_metrics(
     evaluator: Optional[SampleBasedMetricsEvaluator],
 ) -> str:
     if evaluator is None:
-        return (
-            f"val_loss: {metrics['val_loss']:.3f}"
-        )
+        return f"val_loss: {metrics['val_loss']:.3f}"
     else:
         name = evaluator.metrics[0]
         return f"{name}: {metrics[name]:.3f}"

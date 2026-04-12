@@ -78,6 +78,9 @@ class SampleBasedMetricsEvaluator:
     Evaluates metrics which depend on generating a maximum number of
     tokens.
 
+    Up to `max_generated_tokens` tokens are generated for each batch
+    position. In each batch position, generation is stopped once
+    `tokenizer.eos_id` is drawn.
     """
 
     def __init__(
@@ -145,18 +148,8 @@ class SampleBasedMetricsEvaluator:
             entry in the batch.
 
         """
-
-        def right_pad(elem: List[Union[torch.Tensor, None]]) -> List[torch.Tensor]:
-            lens = [0 if s is None else s.shape[0] for s in elem]
-            max_len = max(lens)
-            assert max_len > 0, (elem,)
-            x = next(s for s in elem if s is not None)
-            kwargs = dict(fill_value=self._eos_id, dtype=x.dtype, device=x.device)
-            pads = [torch.full((max_len - l,), **kwargs) for l in lens]
-            return [p if s is None else torch.cat((s, p)) for s, p in zip(elem, pads)]
-
         assert prompts.ndim == 2
-        batch_size, prompt_len = prompts.shape
+        batch_size = prompts.shape[0]
         if len(targets) != batch_size:
             raise ValueError(
                 f"len(targets) = {len(targets)} != {batch_size} = batch_size"
@@ -166,18 +159,22 @@ class SampleBasedMetricsEvaluator:
                 validate_targets(target, metric)
 
         # Generate tokens
-        parts = [
-            right_pad(elem)
-            for elem in batched_generate_fn(
-                model=model,
-                prompts=prompts,
-                max_returned_tokens=self.max_generated_tokens + prompt_len,
-                sample_args=self.sample_kwargs,
-                stop_tokens=([self._eos_id],),
-                include_prompt=False,
-            )
+        generated_tokens = torch.cat(
+            list(
+                batched_generate_fn(
+                    model=model,
+                    prompts=prompts,
+                    max_returned_tokens=self.max_generated_tokens,
+                    ignore_index=self._eos_id,
+                    sample_args=self.sample_kwargs,
+                    stop_tokens=([self._eos_id],),
+                )
+            ),
+            dim=-1,
+        )
+        outputs = [
+            self.tokenizer.decode(seq[seq != self._eos_id]) for seq in generated_tokens
         ]
-        outputs = [self.tokenizer.decode(torch.cat(elems)) for elems in zip(*parts)]
         assert len(outputs) == batch_size, (outputs, batch_size)
         return {
             metric: torch.tensor(

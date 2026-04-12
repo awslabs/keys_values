@@ -216,63 +216,63 @@ def generate_fn(
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
 
 
-# TODO: Make include_eos work.
-# TODO: Rewrite unbatched generate_fn to use batched_generate_fn.
 @torch.inference_mode()
 def batched_generate_fn(
     model: LongContextInferenceModel,
     prompts: torch.Tensor,
     max_returned_tokens: int,
     *,
+    ignore_index: int = -100,
     sample_args: Union[list[dict], dict],
     stop_tokens: Tuple[List[int], ...] = (),
-    include_prompt: bool,
     deallocate_cache_buffers: bool = True,
-) -> Iterator[list[Union[torch.Tensor, None]]]:
+) -> Iterator[torch.Tensor]:
     """
     Generates tokens for a batch of prompts.
+
+    Note: Semantics have changed from `LitGPT` code!
 
     Args:
         model: The model to use. Must be :class:`LongContextInferenceModel`,
             defining the chunking to be used.
-        prompts: A 2D tensor of shape [batch_size, prompt_length]. Note that
-            all prompts need to have the same length (TODO: Relax this)
-        max_returned_tokens: The maximum number of tokens to return, including
-            the prompt tokens.
+        prompts: A 2D tensor of shape `(batch_size, prompt_len)`. Note that
+            all prompts need to have the same length; use left padding.
+            Prompt tokens are not returned.
+        max_returned_tokens: The maximum number of tokens returned
+        ignore_index: Token index returned for batch dimensions where generation
+            has stopped already
         sample_args: The dictionary of kwargs to pass to sample() for each
             token for each index in the batch.
         stop_tokens: A tuple of stop sequences. If any of the sequences are
             generated, the generation stops early before max_returned_tokens.
-        include_prompt: Whether to output the prompt tokens.
+            Note that tokens which are part of stop sequences, are still
+            returned. They'll be followed by `ignore_index`.
         deallocate_cache_buffers: Whether to deallocate KV cache buffers at
             the end.
 
     Yields:
-        A list of tokens for each prompt in the batch, or None if a stop sequence has already been encountered for that index in the batch.
+        Tensors of shape `(batch_size, num)`, where `num >= 1`. Usually,
+        `num == 1` (single tokens). The entries for batch dimensions where
+        generation has stopped, are set to `ignore_index`.
 
     """
     if prompts.ndim == 1:
         prompts = prompts.unsqueeze(0)
     assert prompts.ndim == 2, "Prompts must be a 2D tensor."
+    if max_returned_tokens <= 0:
+        raise ValueError("max_returned_tokens must be > 0")
 
-    batch_size, max_prompt_size = prompts.shape
-
+    batch_size, prompt_len = prompts.shape
     if isinstance(sample_args, dict):
         sample_args = [sample_args] * batch_size
     else:
         assert (
             len(sample_args) == batch_size
         ), "sample_args must have the length as the batch size."
-
-    assert (
-        max_returned_tokens > max_prompt_size
-    ), f"Not enough space for {max_prompt_size} prompt tokens in a context length of {max_returned_tokens}."
-    model.gpt_model.max_seq_length = max_returned_tokens
-
-    # Yield the prompts if include_prompt is True
-    if include_prompt:
-        for i in range(max_prompt_size):
-            yield [prompt[i].view(-1) for prompt in prompts]
+    if any(len(x) == 0 for x in stop_tokens):
+        raise ValueError(
+            "None of the sequences in stop_tokens must be empty:\n" + str(stop_tokens)
+        )
 
     # Prompt processing. This is dealt with by the long context inference
     # model. Processing is done in chunks, the first one being as long as
@@ -280,21 +280,31 @@ def batched_generate_fn(
     # We need the logits for the final chunk in order to generate the
     # first token below. Chunk size does not matter, just must be nonzero.
     gpt_model = model.gpt_model
+    gpt_model.max_seq_length = prompt_len + max_returned_tokens
     logits_final_position = model(prompts, targets=None)
     assert logits_final_position.ndim == 3 and logits_final_position.shape[1] == 1, (
         logits_final_position.shape,
     )
 
-    stop_progresses = [
-        [0] * len(stop_tokens) for _ in range(batch_size)
-    ]  # [batch_size, ~len(stop_tokens)]
-    stop_idxes = [-1] * batch_size
-    yielded_idx = 0
+    # If `stop_progresses[b][si] > 0`, the past `k = stop_progresses[b][si]`
+    # batch dim `b` tokens are equal to the first `k` entries of
+    # `stop_tokens[si]`
+    stop_progresses = [[0] * len(stop_tokens) for _ in range(batch_size)]
+    has_stopped = [False] * batch_size
+    stopped_mask = torch.tensor(
+        has_stopped,
+        dtype=torch.bool,
+        device=logits_final_position.device,
+    )
+    ignore_ind_vec = torch.tensor(
+        ignore_index,
+        dtype=prompts.dtype,
+        device=logits_final_position.device,
+    )
 
     # Generation loop: One token per iteration
-    token_lists = [[] for _ in range(batch_size)]
     tokens = None
-    for current_idx in range(max_returned_tokens - max_prompt_size):
+    for current_idx in range(max_returned_tokens):
         if current_idx == 0:
             tokens = batched_sample(logits_final_position, kwargs=sample_args)
             logits_final_position = None
@@ -304,68 +314,34 @@ def batched_generate_fn(
                 x=tokens,
                 kwargs=sample_args,
             )
-        for i in range(batch_size):
-            token_lists[i].append(tokens[i])
         int_tokens = [token.item() for token in tokens]
 
         # Check for stop sequences
-        # For each stop sequence, we keep a running total of how many are matched in stop_progress.
-        # If the current token matches the next token in the stop sequence, we increment the
-        # running total and hold off on yielding the token.
+        stop_dims = []
         for batch_idx, int_token in enumerate(int_tokens):
-            if stop_idxes[batch_idx] != -1:
+            if has_stopped[batch_idx]:
                 continue
-            for seq_idx, seq in enumerate(stop_tokens):
-                seq_pos = stop_progresses[batch_idx][seq_idx]
-                if seq_pos >= len(seq):
-                    continue
+            for seq_idx, (seq, seq_pos) in enumerate(
+                zip(stop_tokens, stop_progresses[batch_idx])
+            ):
+                assert seq_pos < len(seq)  # Sanity check
                 if int_token == seq[seq_pos]:
-                    stop_progresses[batch_idx][seq_idx] += 1
-                    if stop_progresses[batch_idx][seq_idx] == len(seq):
-                        stop_idxes[batch_idx] = current_idx
+                    seq_pos += 1
+                    if seq_pos >= len(seq):
+                        # Full stop sequence matched
+                        stop_dims.append(batch_idx)
+                        break
                 else:
-                    stop_progresses[batch_idx][seq_idx] = 0
+                    # Reset
+                    seq_pos = int(seq_pos > 0 and int_token == seq[0])
+                stop_progresses[batch_idx][seq_idx] = seq_pos
 
-        # Yield tokens that are not part of a stop sequence in progress.
-        # If there are no stop sequences, then that's all of them.
-        if len(stop_tokens) != 0:
-            safe_idxes = [
-                len(token_lists[i]) - max(stop_progresses[i]) for i in range(batch_size)
-            ]
-        else:
-            safe_idxes = [current_idx + 1]  # include the token just generated
-        safe_idx = min(safe_idxes)
-
-        if yielded_idx < safe_idx:
-            for idx in range(yielded_idx, safe_idx):
-                y_tokens = [
-                    (
-                        token_lists[i][idx]
-                        if (stop_idxes[i] == -1 or idx < stop_idxes[i])
-                        else None
-                    )
-                    for i in range(batch_size)
-                ]
-                if all(y is None for y in y_tokens):
-                    return
-                yield y_tokens
-            yielded_idx = safe_idx
-
-    # Yield any remaining tokens
-    max_token_lists = max(len(l) for l in token_lists)
-    if yielded_idx < max_token_lists:
-        for idx in range(yielded_idx, max_token_lists):
-            y_tokens = [
-                (
-                    token_lists[i][idx]
-                    if (stop_idxes[i] == -1 or idx < stop_idxes[i])
-                    else None
-                )
-                for i in range(batch_size)
-            ]
-            if all(y is None for y in y_tokens):
-                return
-            yield y_tokens
+        yield torch.where(stopped_mask, ignore_ind_vec, tokens.flatten()).view(-1, 1)
+        for batch_idx in stop_dims:
+            has_stopped[batch_idx] = True
+            stopped_mask[batch_idx] = True
+        if all(has_stopped):
+            break
 
     if deallocate_cache_buffers:
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
