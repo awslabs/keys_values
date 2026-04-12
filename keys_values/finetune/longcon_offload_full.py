@@ -58,7 +58,6 @@ def setup(
         final_validation=True,
         micro_batch_size=None,
         use_sample_metric=False,
-        sample_metric_max_generated_tokens=10,
         sample_metric_kwargs=None,
     ),
     optimizer: Optional[OptimizerArgs] = None,

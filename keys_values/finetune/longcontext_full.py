@@ -163,8 +163,6 @@ def setup(
         final_validation=True,
         micro_batch_size=None,
         use_sample_metric=False,
-        sample_metric_max_generated_tokens=10,
-        sample_metric_kwargs=None,
     ),
     optimizer: Optional[OptimizerArgs] = None,
     logger_name: Literal["wandb", "tensorboard", "csv", "mlflow"] = "csv",
@@ -1261,7 +1259,7 @@ def fit(
             )
             val_loss = metrics[eval_metric_name]
             print_message(
-                f"Initial evaluation | "
+                f"Initial evaluation          | "
                 + string_for_val_metrics(metrics, evaluator)
                 + f" | val_time: {metrics['val_time']:.3f} s",
                 fabric,

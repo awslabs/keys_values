@@ -544,7 +544,7 @@ class EvalArgs(_EvalArgs):
 
     micro_batch_size: Optional[int] = None
     use_sample_metric: bool = False
-    sample_metric_max_generated_tokens: int = 10
+    sample_metric_max_generated_tokens: int = 20
     sample_metric_kwargs: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
