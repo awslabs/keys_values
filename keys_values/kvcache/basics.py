@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
-from typing import Optional, Tuple, Dict, Callable, List, Any, Union
+from typing import Optional, Tuple, Dict, Callable, List, Any
 
 import torch
 
@@ -35,84 +35,6 @@ from keys_values.kvcache.buffers import (
 from keys_values.utils import index_to_3d, bits_for_torch_dtype, bitsize_of
 
 NOT_NEEDED_ARGS = ("max_batch_size", "cache_length", "dtype")
-
-
-class KVCacheWithBuffersState:
-    """
-    Represents state of a :class:`KVCacheWithBuffers` cache, except the
-    buffers.
-
-    Part of the state is not variable. This is used for validation, to
-    avoid that :meth:`KVCacheWithBuffers.switch_buffers` introduces mistakes.
-
-    The remaining fields are variable, overwriting state variables when calling
-    :meth:`KVCacheWithBuffers.switch_buffers`.
-    """
-
-    def __init__(
-        self,
-        n_head: int,
-        n_query_groups: int,
-        head_size: int,
-        max_batch_size: int,
-        cache_length: int,
-        block_idx: int,
-        dtype: Optional[torch.dtype],
-        device: Optional[torch.device],
-        input_pos: int,
-    ):
-        self.n_head = n_head
-        self.n_query_groups = n_query_groups
-        self.head_size = head_size
-        self.max_batch_size = max_batch_size
-        self.cache_length = cache_length
-        self.block_idx = block_idx
-        self.dtype = dtype
-        self.device = device
-        self.input_pos = input_pos
-
-    def _is_compatible(
-        self,
-        state_or_buffers: Union["KVCacheWithBuffersState", KVCacheBuffers],
-        extra_names: Optional[Tuple[str, ...]] = None,
-    ) -> Optional[str]:
-        """
-        Checks whether `self` and `state` are the same in all non-variable
-        fields.
-
-        Args:
-            state_or_buffers: State or buffers to compare with
-
-        Returns:
-            Name of field with different values, or `None` if all values are
-            the same.
-
-        """
-        names = (
-            "n_query_groups",
-            "head_size",
-            "max_batch_size",
-            "cache_length",
-            "dtype",
-        )
-        if not isinstance(state_or_buffers, KVCacheBuffers):
-            names += (
-                "n_head",
-                "block_idx",
-                "device",
-            )
-            if extra_names is not None:
-                names += extra_names
-        for name in names:
-            if getattr(self, name) != getattr(state_or_buffers, name):
-                return name
-        return None
-
-    def is_compatible(
-        self,
-        state_or_buffers: Union["KVCacheWithBuffersState", KVCacheBuffers],
-    ) -> Optional[str]:
-        return self._is_compatible(state_or_buffers)
 
 
 class KVCacheWithBuffers(DefaultKVCache):
@@ -144,20 +66,6 @@ class KVCacheWithBuffers(DefaultKVCache):
     for training and validation), without having to allocate buffers
     for `max_batch_size`.
 
-    Switching buffers, cache state:
-
-    The cache can be switched to different buffers with :meth:`switch_buffers`.
-    This includes (optionally) a cache state, containing variables determining
-    the current cache state other than the buffers.
-
-    An important use case for buffer switching is if several token sequences
-    are to be generated for the same prompt, or if both a sample-based metric
-    and a loss function are to be computed for the same (long) prompt. In
-    this case, we want to process the prompt only once. Moreover, techniques
-    like KV cache offloading make sense for prompt processing, but are too
-    slow for token generation. We can use buffers with offloading for the
-    prompt processing, then switch to in-GPU-memory buffers for the token
-    generation.
     """
 
     def __init__(
@@ -311,50 +219,6 @@ class KVCacheWithBuffers(DefaultKVCache):
 
     def get_keys_values(self) -> Optional[KeysAndValues]:
         return self.kv_buffers.get_keys_values()
-
-    def switch_buffers(
-        self,
-        new_buffers: KVCacheBuffers,
-        cache_state: Optional[KVCacheWithBuffersState] = None,
-    ):
-        """
-        Switches cache buffers to `new_buffers`. If `cache_state` is given,
-        the state variables of the cache are also changed, otherwise they
-        remain the same. The new buffers `new_buffers` must be compatible with
-        `cache_state` or the current state.
-
-        The content of the current buffers is NOT copied to `new_buffers`. If
-        this is intended, it must be done before.
-
-        Args:
-            new_buffers: Buffers to be used from now on
-            cache_state: If given, the current cache state is overwritten by
-                this one
-
-        """
-        self_state = self.get_state()
-        name = self_state.is_compatible(new_buffers)
-        if name is not None:
-            raise ValueError(f"new_buffers not compatible: {name}")
-        if cache_state is not None:
-            name = self_state.is_compatible(cache_state)
-            if name is not None:
-                raise ValueError(f"cache_state not compatible: {name}")
-            self._input_pos = cache_state.input_pos
-        self.kv_buffers = new_buffers
-
-    def get_state(self) -> KVCacheWithBuffersState:
-        return KVCacheWithBuffersState(
-            n_head=self.n_head,
-            n_query_groups=self.n_query_groups,
-            head_size=self.head_size,
-            max_batch_size=self.max_batch_size,
-            cache_length=self.cache_length,
-            block_idx=self.block_idx,
-            dtype=self.dtype,
-            device=self.device,
-            input_pos=self.input_pos,
-        )
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
         """
@@ -571,14 +435,6 @@ class DenseKVCache(KVCacheWithBuffers):
     def clone(self) -> KVCache:
         return DenseKVCache(**self._base_kwargs_for_clone())
 
-    def switch_buffers(
-        self,
-        new_buffers: KVCacheBuffers,
-        cache_state: Optional[KVCacheWithBuffersState] = None,
-    ):
-        super().switch_buffers(new_buffers, cache_state)
-        self._replay_log = None
-
 
 class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
     """
@@ -638,42 +494,6 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
         return result
 
 
-class LastRecentlyInsertedKVCacheState(KVCacheWithBuffersState):
-    def __init__(
-        self,
-        n_head: int,
-        n_query_groups: int,
-        head_size: int,
-        max_batch_size: int,
-        cache_length: int,
-        block_idx: int,
-        dtype: Optional[torch.dtype],
-        device: Optional[torch.device],
-        input_pos: int,
-        init_grace_tokens: int,
-        next_position: int,
-    ):
-        super().__init__(
-            n_head,
-            n_query_groups,
-            head_size,
-            max_batch_size,
-            cache_length,
-            block_idx,
-            dtype,
-            device,
-            input_pos,
-        )
-        self.init_grace_tokens = init_grace_tokens
-        self.next_position = next_position
-
-    def is_compatible(
-        self,
-        state_or_buffers: Union["KVCacheWithBuffersState", KVCacheBuffers],
-    ) -> Optional[str]:
-        return self._is_compatible(state_or_buffers, ("init_grace_tokens",))
-
-
 class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     """
     Baseline key-value cache which stores the last recently inserted
@@ -684,6 +504,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     If `init_grace_tokens > 0`, this number of initial keys and values are kept
     in the cache indefinitely. Use this in order to cater for initial prompt
     tokens which may be important.
+
     """
 
     def __init__(
@@ -885,52 +706,3 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
 
     def clone(self) -> KVCache:
         return LastRecentlyInsertedKVCache(**self._base_kwargs_for_clone())
-
-    def get_state(self) -> KVCacheWithBuffersState:
-        return LastRecentlyInsertedKVCacheState(
-            n_head=self.n_head,
-            n_query_groups=self.n_query_groups,
-            head_size=self.head_size,
-            max_batch_size=self.max_batch_size,
-            cache_length=self.cache_length,
-            block_idx=self.block_idx,
-            dtype=self.dtype,
-            device=self.device,
-            input_pos=self.input_pos,
-            init_grace_tokens=self.init_grace_tokens,
-            next_position=self.next_position,
-        )
-
-    def _create_token_pos(self):
-        kwargs = dict(dtype=self.token_pos.dtype, device=self.token_pos.device)
-        igt = self.init_grace_tokens
-        cl = self.cache_length
-        ip = self.input_pos
-        np = self.next_position
-        if ip <= cl:
-            self.token_pos[:ip] = torch.arange(ip, **kwargs)
-        else:
-            if igt > 0:
-                self.token_pos[:igt] = torch.arange(igt, **kwargs)
-            cl2 = cl - igt
-            entries = torch.arange(ip - cl2, ip, **kwargs)
-            sz = cl - np
-            self.token_pos[np:] = entries[:sz]
-            rsz = cl2 - sz
-            if rsz > 0:
-                self.token_pos[igt : (igt + rsz)] = entries[sz:]
-
-    def switch_buffers(
-        self,
-        new_buffers: KVCacheBuffers,
-        cache_state: Optional[KVCacheWithBuffersState] = None,
-    ):
-        super().switch_buffers(new_buffers, cache_state)
-        if cache_state is not None:
-            if not isinstance(cache_state, LastRecentlyInsertedKVCacheState):
-                raise TypeError(
-                    f"type(cache_state) = {type(cache_state)}, must be LastRecentlyInsertedKVCacheState"
-                )
-            self.next_position = cache_state.next_position
-            self._create_token_pos()
-        self._replay_log = None

@@ -124,19 +124,17 @@ class SampleBasedMetricsEvaluator:
     def __call__(
         self,
         model: LongContextInferenceModel,
-        prompts_or_logits: torch.Tensor,
+        prompts: torch.Tensor,
         targets: List[TargetType],
     ) -> Dict[str, torch.Tensor]:
         """
-        Computes metric values for data case.
+        Computes metric values for data case `(input_ids, targets)`. The
+        metrics to be computed are in `metrics`.
 
         Args:
             model: LongContextInferenceModel
-            prompts_or_logits: Either prompts, shape `(batch_size,
-                prompt_length)`, or logits of final chunk, shape
-                `(batch_size, num, padded_vocab_size)`, where `num >= 1`. In
-                the latter case, we skip prompt processing, assuming the KV
-                caches have been prepared appropriately.
+            prompts: Prompts, `(batch_size, prompt_len)`. Aligned on the
+                right (if there is padding, it is on the left)
             targets: List of targets of length `batch_size`. Each entry is a
                 string or list of strings. Some metrics allow for lists of
                 strings, others require a single string
@@ -157,8 +155,8 @@ class SampleBasedMetricsEvaluator:
             pads = [torch.full((max_len - l,), **kwargs) for l in lens]
             return [p if s is None else torch.cat((s, p)) for s, p in zip(elem, pads)]
 
-        assert 2 <= prompts_or_logits.ndim == 3
-        batch_size = prompts_or_logits.shape[0]
+        assert prompts.ndim == 2
+        batch_size, prompt_len = prompts.shape
         if len(targets) != batch_size:
             raise ValueError(
                 f"len(targets) = {len(targets)} != {batch_size} = batch_size"
@@ -168,17 +166,15 @@ class SampleBasedMetricsEvaluator:
                 validate_targets(target, metric)
 
         # Generate tokens
-        prompt_len = 0 if prompts_or_logits.ndim == 3 else prompts_or_logits.shape[1]
         parts = [
             right_pad(elem)
             for elem in batched_generate_fn(
                 model=model,
-                prompts_or_logits=prompts_or_logits,
+                prompts=prompts,
                 max_returned_tokens=self.max_generated_tokens + prompt_len,
                 sample_args=self.sample_kwargs,
                 stop_tokens=([self._eos_id],),
                 include_prompt=False,
-                deallocate_cache_buffers=False,
             )
         ]
         outputs = [self.tokenizer.decode(torch.cat(elems)) for elems in zip(*parts)]
@@ -190,7 +186,7 @@ class SampleBasedMetricsEvaluator:
                     for output, target in zip(outputs, targets)
                 ],
                 dtype=torch.float32,
-                device=prompts_or_logits.device,
+                device=prompts.device,
             )
             for metric in self.metrics
         }
