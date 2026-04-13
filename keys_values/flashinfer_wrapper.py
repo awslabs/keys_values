@@ -552,6 +552,21 @@ class FlashInferSDPA:
                 sliding_window_size,
                 chunk_size,
             )
+        elif q_len == kv_len and input_pos_val == 0:
+            # Square prefill (first chunk): PyTorch native SDPA is faster
+            # than FlashInfer for this case, and attention weights are not
+            # needed during prefill.
+            return self._fallback_sdpa(
+                query,
+                key,
+                value,
+                scale_factor,
+                return_attn_weights,
+                token_positions,
+                input_pos,
+                sliding_window_size,
+                chunk_size,
+            )
         elif chunk_size is not None and q_len > chunk_size:
             # Chunk queries via prefill kernel for memory management (no weights)
             return self._flashinfer_sdpa_long_sequence_chunking(
@@ -566,7 +581,7 @@ class FlashInferSDPA:
                 chunk_size,
             )
         else:
-            # Standard FlashInfer prefill kernel (no weights needed)
+            # Non-square case without weights: use FlashInfer prefill kernel
             return self._flashinfer_sdpa_standard(
                 query,
                 key,
