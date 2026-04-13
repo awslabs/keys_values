@@ -117,6 +117,7 @@ def setup(
     seed: int = 1337,
     access_token: Optional[str] = None,
     batch_size: Optional[int] = None,
+    tasks: Optional[str] = None,
     kv_cache: Optional[KVCacheArgs] = None,
     sdpa: Optional[SDPAArgs] = None,
     verbose: Optional[str] = None,
@@ -147,6 +148,9 @@ def setup(
     * Checkpoints are loaded starting from `out_dir`. We look for
         subdirectories "step-[0-9]{6}" and "final". If "final" is present,
         this becomes the first task. A task is represented by its path.
+        If `tasks` is given, it is a comma-separated list of tasks (as string),
+        for example "final,step-000010,step-000020". In this case, only the tasks
+        provided there worked on.
     * The test dataset is provided in the configuration (each checkpoint must
         have the same configuration). Batches of size `batch_size` are formed,
         by sorting sequences by tokenized length and starting from the
@@ -165,6 +169,10 @@ def setup(
         access_token: Optional API token to access models with restrictions.
         batch_size: Size for test set batches. Only if you like to overwrite
             the configuration stored with the checkpoints
+        tasks: Comma-separated list of tasks (as string) for which to run
+            evaluation, for example "final,step-000010,step-000020". If given,
+            only these tasks (checkpoints) are evaluated for. Otherwise, we
+            run over all tasks found under `out_dir`, starting with "final".
         kv_cache: Configuration for the KV caches. Only if you like to overwrite
             the configuration stored with the checkpoints
         sdpa: Configuration for SDPA kernel. Only if you like to overwrite the
@@ -196,7 +204,9 @@ def setup(
     if sample_metric_kwargs is None:
         sample_metric_kwargs = dict()
     # Collect evaluation tasks
-    eval = EvaluationTasks(out_dir, model_type)
+    if tasks is not None:
+        tasks = [name.strip() for name in tasks.split(",")]
+    eval = EvaluationTasks(out_dir, model_type, tasks)
     if not eval.tasks:
         raise ValueError(
             f"No completed model checkpoints detected at {out_dir}. Are you "
