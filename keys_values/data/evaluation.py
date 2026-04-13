@@ -56,27 +56,40 @@ class EvaluationTasks:
 
     """
 
-    def __init__(self, out_dir: Path, model_type: str):
+    def __init__(
+        self,
+        out_dir: Path,
+        model_type: str,
+        tasks: Optional[List[str]] = None,
+    ):
         self.model_type = model_type
-        self._tasks = None
+        self._tasks = tasks.copy() if tasks is not None else None
         self._init_task_names(out_dir)
 
     def _init_task_names(self, out_dir: Path):
-        self._tasks = []
-        include_final = False
-        for child in out_dir.iterdir():
-            if child.is_dir() and REGEX_TASKNAME.match(child.name):
-                if self.check_complete(child, self.model_type):
-                    if child.name != "final":
-                        self._tasks.append(child.name)
-                    else:
-                        include_final = True
-        # Sort to obtain unique ordering
-        self._tasks = sorted(self._tasks)
-        # If "final" is present, it should come first, so we get the final
-        # eval results before others
-        if include_final:
-            self._tasks.insert(0, "final")
+        if self._tasks is None:
+            self._tasks = []
+            include_final = False
+            for child in out_dir.iterdir():
+                if child.is_dir() and REGEX_TASKNAME.match(child.name):
+                    if self.check_complete(child, self.model_type):
+                        if child.name != "final":
+                            self._tasks.append(child.name)
+                        else:
+                            include_final = True
+            # Sort to obtain unique ordering
+            self._tasks = sorted(self._tasks)
+            # If "final" is present, it should come first, so we get the final
+            # eval results before others
+            if include_final:
+                self._tasks.insert(0, "final")
+        else:
+            for name in self._tasks:
+                path = out_dir / name
+                if not path.exists() or not path.is_dir():
+                    raise ValueError(f"{path} does not exist. tasks = {self._tasks} invalid")
+                if not self.check_complete(path, self.model_type):
+                    raise ValueError(f"{path} is incomplete. tasks = {self._tasks} invalid")
 
     @property
     def tasks(self) -> List[str]:
