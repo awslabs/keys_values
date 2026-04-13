@@ -69,6 +69,31 @@ cd ${KEYS_VALUES_PATH}
 pytest test/
 ```
 
+### FlashInfer CUDA Extension
+
+The library uses vendored FlashInfer CUDA kernels combined with a Triton
+score-sum kernel for attention weight computation during H2O KV cache eviction.
+This must be built after installing the package.
+
+**Prerequisites:**
+* NVIDIA GPU with compute capability >= 8.0 (A100, H100, etc.)
+* CUDA toolkit
+* PyTorch with CUDA support (Triton is bundled with PyTorch)
+
+**Build steps** (run after `pip install -e .`):
+
+```bash
+cd ${KEYS_VALUES_PATH}
+pip install flashinfer-python
+python build_ext.py build_ext --inplace
+```
+
+To verify the build worked:
+
+```bash
+pytest test/test_flashinfer_wrapper.py
+```
+
 
 ## Example: Long Context Fine-tuning on LongBench V2
 

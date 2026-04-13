@@ -21,9 +21,7 @@ Usage (FlashInfer + Triton on our branch):
   benchmark_forward_only.py
 """
 
-import time
 import torch
-import gc
 
 
 def patch_backward():
@@ -56,6 +54,7 @@ def main():
     print("=" * 60)
 
     import keys_values
+
     print(f"keys_values: {keys_values.__file__}")
     print(f"PyTorch: {torch.__version__}")
     if torch.cuda.is_available():
@@ -63,6 +62,7 @@ def main():
 
     try:
         from keys_values.flashinfer_wrapper import FlashInferSDPA
+
         wrapper = FlashInferSDPA()
         print(f"FlashInfer available: {wrapper.available}")
         backend = "FlashInfer + Triton"
@@ -86,31 +86,52 @@ def main():
         "benchmark_forward_only.py",
         "finetune_long_lora",
         "Qwen/Qwen3-4B-Instruct-2507",
-        "--out_dir", out_dir,
-        "--precision", "bf16-true",
-        "--verbose", "some",
-        "--data", "Helmet",
-        "--data.dataset_key", "nq",
-        "--data.max_length", "64k",
-        "--data.trainloader_longest_first", "True",
-        "--train.save_interval", "100",
-        "--train.micro_batch_size", "2",
-        "--train.global_batch_size", "2",
-        "--train.max_steps", "6",
-        "--eval.interval", "100",
-        "--eval.initial_validation", "False",
-        "--eval.final_validation", "False",
-        "--attention_forward_temp_size_gb", "2",
-        "--kv_cache.cache_length", "32768",
-        "--kv_cache.chunk_size", "2048",
-        "--kv_cache.name", "h2o-torch-quantized8",
-        "--kv_cache.cpu_offload", "True",
-        "--grad.layers_per_cell", "1",
+        "--out_dir",
+        out_dir,
+        "--precision",
+        "bf16-true",
+        "--verbose",
+        "some",
+        "--data",
+        "Helmet",
+        "--data.dataset_key",
+        "nq",
+        "--data.max_length",
+        "64k",
+        "--data.trainloader_longest_first",
+        "True",
+        "--train.save_interval",
+        "100",
+        "--train.micro_batch_size",
+        "2",
+        "--train.global_batch_size",
+        "2",
+        "--train.max_steps",
+        "6",
+        "--eval.interval",
+        "100",
+        "--eval.initial_validation",
+        "False",
+        "--eval.final_validation",
+        "False",
+        "--attention_forward_temp_size_gb",
+        "2",
+        "--kv_cache.cache_length",
+        "32768",
+        "--kv_cache.chunk_size",
+        "2048",
+        "--kv_cache.name",
+        "h2o-torch-quantized8",
+        "--kv_cache.cpu_offload",
+        "True",
+        "--grad.layers_per_cell",
+        "1",
     ]
 
     # Run through the normal CLI - with backward patched out,
     # the reported iter times will be forward-only
     from keys_values.__main__ import main as cli_main
+
     cli_main()
 
 

@@ -31,6 +31,7 @@ _triton_available = False
 try:
     import triton
     import triton.language as tl
+
     _triton_available = True
 except ImportError:
     pass
@@ -47,14 +48,24 @@ except ImportError:
 # reverse attention call.
 # ============================================================================
 if _triton_available:
+
     @triton.jit
     def _score_sum_kernel(
-        Q_ptr, K_ptr, LSE_ptr, W_ptr,
+        Q_ptr,
+        K_ptr,
+        LSE_ptr,
+        W_ptr,
         TP_ptr,
-        total_q, kv_len,
-        Q_stride_bh, Q_stride_q, Q_stride_d,
-        K_stride_bh, K_stride_k, K_stride_d,
-        LSE_stride_bh, LSE_stride_q,
+        total_q,
+        kv_len,
+        Q_stride_bh,
+        Q_stride_q,
+        Q_stride_d,
+        K_stride_bh,
+        K_stride_k,
+        K_stride_d,
+        LSE_stride_bh,
+        LSE_stride_q,
         W_stride_bh,
         TP_stride_bh,
         sm_scale_log2,
@@ -180,9 +191,7 @@ def triton_score_sum(
 
     # Reshape K → contiguous [batch*n_kv_heads, kv_len, head_dim]
     K_flat = (
-        K.permute(0, 2, 1, 3)
-        .reshape(batch * n_kv_heads, kv_len, head_dim)
-        .contiguous()
+        K.permute(0, 2, 1, 3).reshape(batch * n_kv_heads, kv_len, head_dim).contiguous()
     )
 
     # Reshape LSE → contiguous [batch*n_kv_heads, q_len*group_size]
@@ -221,12 +230,21 @@ def triton_score_sum(
 
     grid = (triton.cdiv(kv_len, BLOCK_KV), batch * n_kv_heads)
     _score_sum_kernel[grid](
-        Q_grouped, K_flat, LSE_grouped, W,
+        Q_grouped,
+        K_flat,
+        LSE_grouped,
+        W,
         TP_flat,
-        total_q, kv_len,
-        Q_grouped.stride(0), Q_grouped.stride(1), Q_grouped.stride(2),
-        K_flat.stride(0), K_flat.stride(1), K_flat.stride(2),
-        LSE_grouped.stride(0), LSE_grouped.stride(1),
+        total_q,
+        kv_len,
+        Q_grouped.stride(0),
+        Q_grouped.stride(1),
+        Q_grouped.stride(2),
+        K_flat.stride(0),
+        K_flat.stride(1),
+        K_flat.stride(2),
+        LSE_grouped.stride(0),
+        LSE_grouped.stride(1),
         W.stride(0),
         TP_flat.stride(0) if has_causal else 0,
         sm_scale_log2,
@@ -240,13 +258,17 @@ def triton_score_sum(
         num_stages=NUM_STAGES,
     )
 
-    return W.reshape(batch, n_kv_heads, kv_len)
+    # Mean over GQA group (divide by group_size) to match codebase convention
+    W = W.reshape(batch, n_kv_heads, kv_len)
+    if group_size > 1:
+        W = W / group_size
+    return W
 
 
 class FlashInferSDPA:
     """
     Wrapper for FlashInfer CUDA kernels with fallback support.
-    
+
     This class encapsulates FlashInfer's optimized attention kernels and provides
     a unified interface compatible with existing keys_values code. It gracefully
     falls back to eager implementations when FlashInfer is not available or when
@@ -265,21 +287,28 @@ class FlashInferSDPA:
         self.available = self._check_vendored_kernels_available()
         self.use_fused_prefill = use_fused_prefill
         if self.available:
-            logger.info("Vendored FlashInfer kernels are available and will be used for SDPA computation")
+            logger.info(
+                "Vendored FlashInfer kernels are available and will be used for SDPA computation"
+            )
             if use_fused_prefill:
-                logger.info("Using fused prefill kernel for attention weight accumulation")
+                logger.info(
+                    "Using fused prefill kernel for attention weight accumulation"
+                )
         else:
-            logger.debug("Vendored FlashInfer kernels are not available, will use eager SDPA implementation")
+            logger.debug(
+                "Vendored FlashInfer kernels are not available, will use eager SDPA implementation"
+            )
 
     def _check_vendored_kernels_available(self) -> bool:
         """
         Check if vendored FlashInfer kernels are available.
-        
+
         Returns:
             True if vendored kernels are available and compatible, False otherwise
         """
         try:
             from keys_values import flashinfer_ops
+
             available = flashinfer_ops.is_available()
             if available:
                 logger.debug("Vendored FlashInfer kernels loaded successfully")
@@ -331,7 +360,7 @@ class FlashInferSDPA:
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Compute SDPA using FlashInfer kernels with fallback.
-        
+
         Args:
             query: Query tensor, shape (batch_size, n_head, q_len, head_size)
             key: Key tensor, shape (batch_size, n_query_groups, kv_len, head_size)
@@ -344,7 +373,7 @@ class FlashInferSDPA:
             chunk_size: Optional chunk size for processing long sequences. When provided
                 and query length exceeds chunk_size, the query is split into chunks
                 and processed sequentially to manage GPU memory.
-        
+
         Returns:
             Tuple of (attention_output, attention_weights)
             - attention_output: shape (batch_size, n_head, q_len, head_size)
@@ -352,20 +381,43 @@ class FlashInferSDPA:
         """
         if not self.available:
             return self._fallback_sdpa(
-                query, key, value, scale_factor, return_attn_weights,
-                token_positions, input_pos, sliding_window_size, chunk_size
+                query,
+                key,
+                value,
+                scale_factor,
+                return_attn_weights,
+                token_positions,
+                input_pos,
+                sliding_window_size,
+                chunk_size,
             )
-        
+
         try:
             return self._flashinfer_sdpa(
-                query, key, value, scale_factor, return_attn_weights,
-                token_positions, input_pos, sliding_window_size, chunk_size
+                query,
+                key,
+                value,
+                scale_factor,
+                return_attn_weights,
+                token_positions,
+                input_pos,
+                sliding_window_size,
+                chunk_size,
             )
         except Exception as e:
-            logger.warning(f"FlashInfer SDPA failed with error: {e}. Falling back to eager implementation.")
+            logger.warning(
+                f"FlashInfer SDPA failed with error: {e}. Falling back to eager implementation."
+            )
             return self._fallback_sdpa(
-                query, key, value, scale_factor, return_attn_weights,
-                token_positions, input_pos, sliding_window_size, chunk_size
+                query,
+                key,
+                value,
+                scale_factor,
+                return_attn_weights,
+                token_positions,
+                input_pos,
+                sliding_window_size,
+                chunk_size,
             )
 
     def _flashinfer_sdpa(
@@ -382,10 +434,10 @@ class FlashInferSDPA:
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Call vendored FlashInfer kernels.
-        
+
         This method translates parameters from keys_values format to vendored kernel format
         and calls the appropriate kernels.
-        
+
         Args:
             query: Query tensor, shape (batch_size, n_head, q_len, head_size)
             key: Key tensor, shape (batch_size, n_query_groups, kv_len, head_size)
@@ -396,21 +448,23 @@ class FlashInferSDPA:
             input_pos: Position in input sequence
             sliding_window_size: Size of sliding window for attention masking
             chunk_size: Optional chunk size for processing long sequences
-        
+
         Returns:
             Tuple of (attention_output, attention_weights)
         """
-        from keys_values import flashinfer_ops
-        
         batch_size, n_head, q_len, head_size = query.shape
         _, n_query_groups, kv_len, _ = key.shape
-        
+
         # Validate input shapes
         assert query.shape[0] == key.shape[0] == value.shape[0], "Batch size mismatch"
         assert query.shape[3] == key.shape[3] == value.shape[3], "Head size mismatch"
-        assert key.shape[1] == value.shape[1], "Key and value must have same number of heads"
-        assert n_head % n_query_groups == 0, "n_head must be divisible by n_query_groups"
-        
+        assert (
+            key.shape[1] == value.shape[1]
+        ), "Key and value must have same number of heads"
+        assert (
+            n_head % n_query_groups == 0
+        ), "n_head must be divisible by n_query_groups"
+
         # Routing:
         # 1. q_len == 1 (single-token decode): use optimized decode kernel
         #    (has efficient logits caching for attention weights)
@@ -433,8 +487,14 @@ class FlashInferSDPA:
         # Requires: fp16/bf16 (for tensor-core tl.dot), supported head_dim,
         # and input_pos > 0 (at input_pos=0 it's a prefill where
         # token_positions is None, which we need for causal masking).
-        input_pos_val = input_pos if isinstance(input_pos, int) else (
-            input_pos[0].item() if hasattr(input_pos, 'item') or isinstance(input_pos, torch.Tensor) else 0
+        input_pos_val = (
+            input_pos
+            if isinstance(input_pos, int)
+            else (
+                input_pos[0].item()
+                if hasattr(input_pos, "item") or isinstance(input_pos, torch.Tensor)
+                else 0
+            )
         )
         can_use_fused_prefill = (
             self.use_fused_prefill
@@ -447,38 +507,75 @@ class FlashInferSDPA:
         if use_decode_kernel:
             # Single-token decode: use optimized decode kernel
             return self._flashinfer_sdpa_chunk_processing(
-                query, key, value, scale_factor, return_attn_weights,
-                token_positions, input_pos, sliding_window_size
+                query,
+                key,
+                value,
+                scale_factor,
+                return_attn_weights,
+                token_positions,
+                input_pos,
+                sliding_window_size,
             )
         elif q_len > 1 and return_attn_weights and can_use_fused_prefill:
             # FlashInfer forward + Triton score-sum (no large intermediate, tensor cores)
             return self._flashinfer_sdpa_fused_prefill(
-                query, key, value, scale_factor,
-                token_positions, input_pos, sliding_window_size
+                query,
+                key,
+                value,
+                scale_factor,
+                token_positions,
+                input_pos,
+                sliding_window_size,
             )
         elif q_len > 1 and return_attn_weights and can_use_flashinfer_fast:
             # Old two-phase: FlashInfer prefill for O+LSE, then compute weights from LSE
             return self._flashinfer_sdpa_two_phase_weights(
-                query, key, value, scale_factor,
-                token_positions, input_pos, sliding_window_size, chunk_size
+                query,
+                key,
+                value,
+                scale_factor,
+                token_positions,
+                input_pos,
+                sliding_window_size,
+                chunk_size,
             )
         elif q_len > 1 and return_attn_weights:
             # Fallback for cases FlashInfer can't handle (token_positions, float32, etc.)
             return self._fallback_sdpa(
-                query, key, value, scale_factor, return_attn_weights,
-                token_positions, input_pos, sliding_window_size, chunk_size
+                query,
+                key,
+                value,
+                scale_factor,
+                return_attn_weights,
+                token_positions,
+                input_pos,
+                sliding_window_size,
+                chunk_size,
             )
         elif chunk_size is not None and q_len > chunk_size:
             # Chunk queries via prefill kernel for memory management (no weights)
             return self._flashinfer_sdpa_long_sequence_chunking(
-                query, key, value, scale_factor, return_attn_weights,
-                token_positions, input_pos, sliding_window_size, chunk_size
+                query,
+                key,
+                value,
+                scale_factor,
+                return_attn_weights,
+                token_positions,
+                input_pos,
+                sliding_window_size,
+                chunk_size,
             )
         else:
             # Standard FlashInfer prefill kernel (no weights needed)
             return self._flashinfer_sdpa_standard(
-                query, key, value, scale_factor, return_attn_weights,
-                token_positions, input_pos, sliding_window_size
+                query,
+                key,
+                value,
+                scale_factor,
+                return_attn_weights,
+                token_positions,
+                input_pos,
+                sliding_window_size,
             )
 
     def _flashinfer_sdpa_standard(
@@ -498,7 +595,7 @@ class FlashInferSDPA:
         Handles both square (q_len == kv_len) and non-square (q_len != kv_len)
         attention. For non-square cases where q_len < kv_len, the kernel uses
         input_pos to correctly offset causal masking.
-        
+
         Args:
             query: Query tensor, shape (batch_size, n_head, q_len, head_size)
             key: Key tensor, shape (batch_size, n_query_groups, kv_len, head_size)
@@ -508,33 +605,39 @@ class FlashInferSDPA:
             token_positions: Token positions in KV cache, shape (batch_size, n_query_groups, kv_len)
             input_pos: Position in input sequence
             sliding_window_size: Size of sliding window for attention masking
-        
+
         Returns:
             Tuple of (attention_output, attention_weights)
         """
         from keys_values import flashinfer_ops
-        
+
         batch_size, n_head, q_len, head_size = query.shape
         _, n_query_groups, kv_len, _ = key.shape
-        
+
         # Transform tensors to vendored kernel format
         # Vendored kernel expects:
         # - query: [batch_size, q_len, num_qo_heads, head_dim]
         # - key: [batch_size, kv_len, num_kv_heads, head_dim]
         # - value: [batch_size, kv_len, num_kv_heads, head_dim]
-        
+
         # Transpose query from (batch_size, n_head, q_len, head_size) to (batch_size, q_len, n_head, head_size)
         query_transformed = query.transpose(1, 2).contiguous()
-        
+
         # Transpose key and value from (batch_size, n_query_groups, kv_len, head_size) to (batch_size, kv_len, n_query_groups, head_size)
         key_transformed = key.transpose(1, 2).contiguous()
         value_transformed = value.transpose(1, 2).contiguous()
-        
+
         # Prepare input_pos as tensor if it's an integer
         if isinstance(input_pos, int):
-            input_pos_tensor = torch.tensor([input_pos] * batch_size, device=query.device, dtype=torch.int32)
+            input_pos_tensor = torch.tensor(
+                [input_pos] * batch_size, device=query.device, dtype=torch.int32
+            )
         else:
-            input_pos_tensor = input_pos.to(dtype=torch.int32) if input_pos.dtype != torch.int32 else input_pos
+            input_pos_tensor = (
+                input_pos.to(dtype=torch.int32)
+                if input_pos.dtype != torch.int32
+                else input_pos
+            )
 
         # Prepare token_positions if provided
         # FlashInfer sdpa_prefill expects 2D: [batch_size, kv_len]
@@ -543,9 +646,13 @@ class FlashInferSDPA:
         token_positions_transformed = None
         if token_positions is not None:
             if token_positions.ndim == 3:
-                token_positions_transformed = token_positions[:, 0, :].to(dtype=torch.int32).contiguous()
+                token_positions_transformed = (
+                    token_positions[:, 0, :].to(dtype=torch.int32).contiguous()
+                )
             else:
-                token_positions_transformed = token_positions.to(dtype=torch.int32).contiguous()
+                token_positions_transformed = token_positions.to(
+                    dtype=torch.int32
+                ).contiguous()
 
         # Prepare sliding window size
         window_size = sliding_window_size if sliding_window_size is not None else -1
@@ -562,21 +669,21 @@ class FlashInferSDPA:
             causal=True,
             return_weights=return_attn_weights,
         )
-        
+
         # Transform output back to keys_values format
         # From (batch_size, q_len, n_head, head_size) to (batch_size, n_head, q_len, head_size)
         output = output_transformed.transpose(1, 2).contiguous()
-        
+
         # Transform weights if returned
         # Vendored kernel returns: (batch_size, num_kv_heads, kv_len)
         # We need: (batch_size, n_query_groups, kv_len)
         # These should already match since num_kv_heads == n_query_groups
         weights = weights_transformed
-        
+
         # Ensure weights are float32 if returned
         if weights is not None:
             weights = weights.float()
-        
+
         return output, weights
 
     def _flashinfer_sdpa_fused_prefill(
@@ -619,16 +726,20 @@ class FlashInferSDPA:
         group_size = n_head // n_kv_heads
 
         # Transform to kernel format: (batch, seq, heads, dim)
-        q_t = query.transpose(1, 2).contiguous()    # [bs, q_len, n_head, head_size]
-        k_t = key.transpose(1, 2).contiguous()      # [bs, kv_len, n_kv_heads, head_size]
-        v_t = value.transpose(1, 2).contiguous()    # [bs, kv_len, n_kv_heads, head_size]
+        q_t = query.transpose(1, 2).contiguous()  # [bs, q_len, n_head, head_size]
+        k_t = key.transpose(1, 2).contiguous()  # [bs, kv_len, n_kv_heads, head_size]
+        v_t = value.transpose(1, 2).contiguous()  # [bs, kv_len, n_kv_heads, head_size]
 
         if isinstance(input_pos, int):
             input_pos_tensor = torch.tensor(
                 [input_pos] * batch_size, device=query.device, dtype=torch.int32
             )
         else:
-            input_pos_tensor = input_pos.to(dtype=torch.int32) if input_pos.dtype != torch.int32 else input_pos
+            input_pos_tensor = (
+                input_pos.to(dtype=torch.int32)
+                if input_pos.dtype != torch.int32
+                else input_pos
+            )
 
         window_size = sliding_window_size if sliding_window_size is not None else -1
 
@@ -670,17 +781,15 @@ class FlashInferSDPA:
         input_pos_val = input_pos if isinstance(input_pos, int) else input_pos[0].item()
 
         weights = triton_score_sum(
-            Q=q_t,           # [bs, q_len, n_head, head_size]
-            K=k_t,           # [bs, kv_len, n_kv_heads, head_size]
-            LSE=lse.float(), # [bs, q_len, n_head] (log2 scale)
+            Q=q_t,  # [bs, q_len, n_head, head_size]
+            K=k_t,  # [bs, kv_len, n_kv_heads, head_size]
+            LSE=lse.float(),  # [bs, q_len, n_head] (log2 scale)
             scale=scale_factor,
             n_kv_heads=n_kv_heads,
             group_size=group_size,
             token_positions=token_positions,  # [bs, n_kv_heads, kv_len]
             input_pos=input_pos_val,
         )
-
-
 
         return output, weights
 
@@ -735,7 +844,11 @@ class FlashInferSDPA:
                 [input_pos] * batch_size, device=query.device, dtype=torch.int32
             )
         else:
-            input_pos_tensor = input_pos.to(dtype=torch.int32) if input_pos.dtype != torch.int32 else input_pos
+            input_pos_tensor = (
+                input_pos.to(dtype=torch.int32)
+                if input_pos.dtype != torch.int32
+                else input_pos
+            )
 
         window_size = sliding_window_size if sliding_window_size is not None else -1
 
@@ -757,8 +870,7 @@ class FlashInferSDPA:
 
         # Phase 2: Compute accumulated weights from Q, K, LSE
         weights = self._compute_weights_from_lse(
-            query, key, scale_factor, lse, input_pos,
-            sliding_window_size, chunk_size
+            query, key, scale_factor, lse, input_pos, sliding_window_size, chunk_size
         )
 
         return output, weights
@@ -800,6 +912,7 @@ class FlashInferSDPA:
         if _triton_available and query.is_cuda:
             try:
                 from keys_values.triton_kernels import compute_weights_from_lse_triton
+
                 return compute_weights_from_lse_triton(
                     query, key, lse, scale_factor, input_pos, sliding_window_size
                 )
@@ -824,7 +937,9 @@ class FlashInferSDPA:
         else:
             target_bytes = 2 * 1024 * 1024 * 1024  # 2 GB
             bytes_per_q = batch_size * n_kv_heads * q_per_kv * kv_len * 6
-            chunk_q = max(1, int(target_bytes / bytes_per_q)) if bytes_per_q > 0 else q_len
+            chunk_q = (
+                max(1, int(target_bytes / bytes_per_q)) if bytes_per_q > 0 else q_len
+            )
             chunk_q = min(chunk_q, q_len)
 
         # Pre-scale Q in native dtype (fp16/bf16) for TensorCore matmul
@@ -835,11 +950,12 @@ class FlashInferSDPA:
 
         # Reshape K for bmm (no GQA expansion needed):
         # [batch, n_kv_heads, kv_len, D] -> [batch * n_kv_heads, D, kv_len]
-        key_T = key.reshape(batch_size * n_kv_heads, kv_len, head_size).transpose(-2, -1)
+        key_T = key.reshape(batch_size * n_kv_heads, kv_len, head_size).transpose(
+            -2, -1
+        )
 
         weights = torch.zeros(
-            batch_size, n_kv_heads, kv_len,
-            device=query.device, dtype=torch.float32
+            batch_size, n_kv_heads, kv_len, device=query.device, dtype=torch.float32
         )
 
         kv_indices = torch.arange(kv_len, device=query.device)
@@ -852,7 +968,9 @@ class FlashInferSDPA:
             q_chunk = query_scaled[:, :, :, q_start:q_end, :]
 
             # Flatten for bmm: [batch * n_kv_heads, q_per_kv * chunk_q, D]
-            q_flat = q_chunk.reshape(batch_size * n_kv_heads, q_per_kv * actual_chunk, head_size)
+            q_flat = q_chunk.reshape(
+                batch_size * n_kv_heads, q_per_kv * actual_chunk, head_size
+            )
 
             # fp16/bf16 TensorCore matmul: [batch * n_kv_heads, q_per_kv * chunk_q, kv_len]
             scores_native = torch.bmm(q_flat, key_T)
@@ -868,18 +986,22 @@ class FlashInferSDPA:
             causal_mask = kv_indices[None, :] <= (input_pos + q_positions[:, None])
 
             if sliding_window_size is not None and sliding_window_size > 0:
-                window_mask = (input_pos + q_positions[:, None]) - kv_indices[None, :] < sliding_window_size
+                window_mask = (input_pos + q_positions[:, None]) - kv_indices[
+                    None, :
+                ] < sliding_window_size
                 causal_mask = causal_mask & window_mask
 
             # Broadcast: [1, 1, 1, chunk_q, kv_len]
             causal_mask = causal_mask[None, None, None, :, :]
-            scores.masked_fill_(~causal_mask, float('-inf'))
+            scores.masked_fill_(~causal_mask, float("-inf"))
 
             # LSE chunk: [batch, chunk_q, n_head] -> [batch, n_kv_heads, q_per_kv, chunk_q, 1]
             lse_chunk = lse[:, q_start:q_end, :]
-            lse_expanded = lse_chunk.view(
-                batch_size, actual_chunk, n_kv_heads, q_per_kv
-            ).permute(0, 2, 3, 1).unsqueeze(-1)
+            lse_expanded = (
+                lse_chunk.view(batch_size, actual_chunk, n_kv_heads, q_per_kv)
+                .permute(0, 2, 3, 1)
+                .unsqueeze(-1)
+            )
 
             # Normalized weights: exp2(scores - LSE)
             norm_weights = torch.exp2(scores - lse_expanded)
@@ -906,7 +1028,7 @@ class FlashInferSDPA:
         Uses the vendored sdpa_decode kernel for single-token attention.
         For multi-token non-square attention (q_len > 1, q_len < kv_len),
         use _flashinfer_sdpa_standard or _flashinfer_sdpa_long_sequence_chunking instead.
-        
+
         Args:
             query: Query tensor, shape (batch_size, n_head, q_len, head_size)
             key: Key tensor, shape (batch_size, n_query_groups, kv_len, head_size)
@@ -916,15 +1038,15 @@ class FlashInferSDPA:
             token_positions: Token positions in KV cache, shape (batch_size, n_query_groups, kv_len)
             input_pos: Position in input sequence
             sliding_window_size: Size of sliding window for attention masking
-        
+
         Returns:
             Tuple of (attention_output, attention_weights)
         """
         from keys_values import flashinfer_ops
-        
+
         batch_size, n_head, q_len, head_size = query.shape
         _, n_query_groups, kv_len, _ = key.shape
-        
+
         # Transform key and value to vendored kernel format
         # From (batch_size, n_query_groups, kv_len, head_size) to (batch_size, kv_len, n_query_groups, head_size)
         key_transformed = key.transpose(1, 2).contiguous()
@@ -936,28 +1058,34 @@ class FlashInferSDPA:
         token_positions_transformed = None
         if token_positions is not None:
             if token_positions.ndim == 3:
-                token_positions_transformed = token_positions[:, 0, :].to(dtype=torch.int32).contiguous()
+                token_positions_transformed = (
+                    token_positions[:, 0, :].to(dtype=torch.int32).contiguous()
+                )
             else:
-                token_positions_transformed = token_positions.to(dtype=torch.int32).contiguous()
-        
+                token_positions_transformed = token_positions.to(
+                    dtype=torch.int32
+                ).contiguous()
+
         # Prepare sliding window size
         window_size = sliding_window_size if sliding_window_size is not None else -1
-        
+
         # Process each query token separately
         output_list = []
         weights_list = []
-        
+
         for q_idx in range(q_len):
             # Get single query token: (batch_size, n_head, head_size)
             query_token = query[:, :, q_idx, :].contiguous()
-            
+
             # Prepare input_pos for this query token
             current_pos = input_pos + q_idx
             if isinstance(current_pos, int):
-                input_pos_tensor = torch.tensor([current_pos] * batch_size, device=query.device, dtype=torch.int32)
+                input_pos_tensor = torch.tensor(
+                    [current_pos] * batch_size, device=query.device, dtype=torch.int32
+                )
             else:
                 input_pos_tensor = current_pos
-            
+
             # Call vendored decode kernel
             # Expected query shape: [batch_size, num_qo_heads, head_dim]
             output_token, weights_token = flashinfer_ops.sdpa_decode(
@@ -971,19 +1099,19 @@ class FlashInferSDPA:
                 causal=True,
                 return_weights=return_attn_weights,
             )
-            
+
             # output_token shape: (batch_size, n_head, head_size)
             # Add q_len dimension back
             output_list.append(output_token.unsqueeze(2))
-            
+
             if return_attn_weights and weights_token is not None:
                 # weights_token shape: (batch_size, n_query_groups, kv_len)
                 weights_list.append(weights_token)
-        
+
         # Concatenate outputs along q_len dimension
         # From list of (batch_size, n_head, 1, head_size) to (batch_size, n_head, q_len, head_size)
         output = torch.cat(output_list, dim=2)
-        
+
         # Accumulate weights if requested
         weights = None
         if return_attn_weights and weights_list:
@@ -991,10 +1119,10 @@ class FlashInferSDPA:
             # Each weights_token: (batch_size, n_query_groups, kv_len)
             # Result: (batch_size, n_query_groups, kv_len)
             weights = torch.stack(weights_list, dim=0).sum(dim=0)
-            
+
             # Ensure weights are float32
             weights = weights.float()
-        
+
         return output, weights
 
     def _flashinfer_sdpa_long_sequence_chunking(
@@ -1011,15 +1139,15 @@ class FlashInferSDPA:
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Process long query sequences in chunks for memory management.
-        
+
         This method splits a long query sequence into smaller chunks and processes
         each chunk sequentially using the vendored prefill kernel. This enables
         processing of sequences that would otherwise exceed GPU memory limits.
-        
+
         Each chunk correctly applies causal masking based on its position in the
         original sequence, ensuring that queries only attend to appropriate key
         positions.
-        
+
         Args:
             query: Query tensor, shape (batch_size, n_head, q_len, head_size)
             key: Key tensor, shape (batch_size, n_query_groups, kv_len, head_size)
@@ -1030,7 +1158,7 @@ class FlashInferSDPA:
             input_pos: Position in input sequence
             sliding_window_size: Size of sliding window for attention masking
             chunk_size: Size of each chunk for processing
-        
+
         Returns:
             Tuple of (attention_output, attention_weights)
             - attention_output: shape (batch_size, n_head, q_len, head_size)
@@ -1038,54 +1166,54 @@ class FlashInferSDPA:
               The weights are accumulated (summed) across all chunks.
         """
         from keys_values import flashinfer_ops
-        
+
         batch_size, n_head, q_len, head_size = query.shape
         _, n_query_groups, kv_len, _ = key.shape
-        
+
         # Calculate number of chunks needed
         num_chunks = (q_len + chunk_size - 1) // chunk_size
-        
+
         # Transform key and value to vendored kernel format once (shared across chunks)
         # From (batch_size, n_query_groups, kv_len, head_size) to (batch_size, kv_len, n_query_groups, head_size)
         key_transformed = key.transpose(1, 2).contiguous()
         value_transformed = value.transpose(1, 2).contiguous()
-        
+
         # Prepare token_positions if provided
         token_positions_transformed = None
         if token_positions is not None:
             # Ensure int32 dtype as required by the kernel
-            token_positions_transformed = token_positions.to(dtype=torch.int32).contiguous()
-        
+            token_positions_transformed = token_positions.to(
+                dtype=torch.int32
+            ).contiguous()
+
         # Prepare sliding window size
         window_size = sliding_window_size if sliding_window_size is not None else -1
-        
+
         # Process each chunk
         output_chunks = []
         weights_chunks = []
-        
+
         for chunk_idx in range(num_chunks):
             # Calculate chunk boundaries
             chunk_start = chunk_idx * chunk_size
             chunk_end = min((chunk_idx + 1) * chunk_size, q_len)
             current_chunk_size = chunk_end - chunk_start
-            
+
             # Extract query chunk
             # From (batch_size, n_head, q_len, head_size) to (batch_size, n_head, chunk_size, head_size)
             query_chunk = query[:, :, chunk_start:chunk_end, :].contiguous()
-            
+
             # Transform query chunk to vendored kernel format
             # From (batch_size, n_head, chunk_size, head_size) to (batch_size, chunk_size, n_head, head_size)
             query_chunk_transformed = query_chunk.transpose(1, 2).contiguous()
-            
+
             # Calculate input_pos for this chunk
             # Each chunk's queries have positions starting at input_pos + chunk_start
             chunk_input_pos = input_pos + chunk_start
             input_pos_tensor = torch.tensor(
-                [chunk_input_pos] * batch_size, 
-                device=query.device, 
-                dtype=torch.int32
+                [chunk_input_pos] * batch_size, device=query.device, dtype=torch.int32
             )
-            
+
             # Call vendored prefill kernel for this chunk
             output_chunk_transformed, weights_chunk, _ = flashinfer_ops.sdpa_prefill(
                 query=query_chunk_transformed,
@@ -1098,20 +1226,20 @@ class FlashInferSDPA:
                 causal=True,
                 return_weights=return_attn_weights,
             )
-            
+
             # Transform output chunk back to keys_values format
             # From (batch_size, chunk_size, n_head, head_size) to (batch_size, n_head, chunk_size, head_size)
             output_chunk = output_chunk_transformed.transpose(1, 2).contiguous()
             output_chunks.append(output_chunk)
-            
+
             # Collect weights if requested
             if return_attn_weights and weights_chunk is not None:
                 weights_chunks.append(weights_chunk)
-        
+
         # Concatenate output chunks along the query length dimension
         # Result: (batch_size, n_head, q_len, head_size)
         output = torch.cat(output_chunks, dim=2)
-        
+
         # Accumulate weights across chunks if requested
         weights = None
         if return_attn_weights and weights_chunks:
@@ -1119,10 +1247,10 @@ class FlashInferSDPA:
             # Each weights_chunk: (batch_size, n_query_groups, kv_len)
             # Result: (batch_size, n_query_groups, kv_len)
             weights = torch.stack(weights_chunks, dim=0).sum(dim=0)
-            
+
             # Ensure weights are float32
             weights = weights.float()
-        
+
         return output, weights
 
     def _fallback_sdpa(
@@ -1139,10 +1267,10 @@ class FlashInferSDPA:
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Fall back to eager implementation using attention_utils.
-        
+
         This method uses the existing eager SDPA implementations from attention_utils
         to compute attention when FlashInfer is not available or not applicable.
-        
+
         Args:
             query: Query tensor, shape (batch_size, n_head, q_len, head_size)
             key: Key tensor, shape (batch_size, n_query_groups, kv_len, head_size)
@@ -1154,21 +1282,20 @@ class FlashInferSDPA:
             sliding_window_size: Size of sliding window for attention masking
             chunk_size: Optional chunk size for processing long sequences. If provided,
                 overrides the automatic chunking based on memory limits.
-        
+
         Returns:
             Tuple of (attention_output, attention_weights)
         """
         from keys_values.attention_utils import (
-            attention_compute_scores,
             attention_compute_weighted_values,
             sdpa_attention_weights,
             create_temp_array,
             slice_as_flat,
         )
-        
+
         batch_size, n_head, q_len, head_size = query.shape
         _, n_query_groups, kv_len, _ = key.shape
-        
+
         # Determine chunking parameters
         # If chunk_size is provided, use it; otherwise use automatic memory-based chunking
         if chunk_size is not None and q_len > chunk_size:
@@ -1187,24 +1314,24 @@ class FlashInferSDPA:
                 kv_len=kv_len,
                 device=query.device,
             )
-        
+
         # Convert tmp_array to match query dtype for intermediate computations
         tmp_array = tmp_array.to(dtype=query.dtype)
-        
+
         # Compute attention weights using eager implementation
         if return_attn_weights:
             # Compute attention weights in chunks if necessary
             attn_weights_list = []
             attn_output_list = []
-            
+
             for split_idx in range(num_splits):
                 start_idx = split_idx * tmp_len
                 end_idx = min((split_idx + 1) * tmp_len, q_len)
                 chunk_len = end_idx - start_idx
-                
+
                 # Get query chunk
                 query_chunk = query[:, :, start_idx:end_idx, :]
-                
+
                 # Compute attention weights for this chunk
                 tmp_array_chunk = slice_as_flat(tmp_array, chunk_len)
                 attn_weights_chunk = sdpa_attention_weights(
@@ -1217,22 +1344,22 @@ class FlashInferSDPA:
                     sliding_window_size=sliding_window_size,
                 )
                 attn_weights_list.append(attn_weights_chunk)
-                
+
                 # Compute attention output for this chunk
                 attn_output_chunk = attention_compute_weighted_values(
                     scores=attn_weights_chunk,
                     value=value,
                 )
                 attn_output_list.append(attn_output_chunk)
-            
+
             # Concatenate chunks
             attn_output = torch.cat(attn_output_list, dim=2)
             attn_weights = torch.cat(attn_weights_list, dim=2)
-            
+
             # Sum attention weights over query axis to get (batch_size, n_query_groups, kv_len)
             # attn_weights shape: (batch_size, n_head, q_len, kv_len)
             # We need to sum over query axis (dim=2) and aggregate heads to n_query_groups
-            
+
             if n_head > n_query_groups:
                 # Handle GQA: n_head > n_query_groups
                 q_per_kv = n_head // n_query_groups
@@ -1240,30 +1367,30 @@ class FlashInferSDPA:
                 attn_weights = attn_weights.view(
                     batch_size, n_query_groups, q_per_kv, q_len, kv_len
                 )
-                # Sum over query axis (dim=3) and query heads (dim=2)
+                # Mean over GQA group heads (dim=2), sum over queries (dim=3)
                 # Result: (batch_size, n_query_groups, kv_len)
-                attn_weights = attn_weights.sum(dim=(2, 3))
+                attn_weights = attn_weights.sum(dim=(2, 3)) / q_per_kv
             else:
                 # No GQA: n_head == n_query_groups
                 # Sum over query axis: (batch_size, n_head, q_len, kv_len) -> (batch_size, n_head, kv_len)
                 attn_weights = attn_weights.sum(dim=2)
-            
+
             # Convert to float32 for numerical stability
             attn_weights = attn_weights.float()
-            
+
             return attn_output, attn_weights
         else:
             # Compute attention without weights
             attn_output_list = []
-            
+
             for split_idx in range(num_splits):
                 start_idx = split_idx * tmp_len
                 end_idx = min((split_idx + 1) * tmp_len, q_len)
                 chunk_len = end_idx - start_idx
-                
+
                 # Get query chunk
                 query_chunk = query[:, :, start_idx:end_idx, :]
-                
+
                 # Compute attention weights for this chunk
                 tmp_array_chunk = slice_as_flat(tmp_array, chunk_len)
                 attn_weights_chunk = sdpa_attention_weights(
@@ -1275,17 +1402,17 @@ class FlashInferSDPA:
                     scale_factor=scale_factor,
                     sliding_window_size=sliding_window_size,
                 )
-                
+
                 # Compute attention output for this chunk
                 attn_output_chunk = attention_compute_weighted_values(
                     scores=attn_weights_chunk,
                     value=value,
                 )
                 attn_output_list.append(attn_output_chunk)
-            
+
             # Concatenate chunks
             attn_output = torch.cat(attn_output_list, dim=2)
-            
+
             return attn_output, None
 
 
@@ -1296,7 +1423,7 @@ _flashinfer_sdpa_instance: Optional[FlashInferSDPA] = None
 def get_flashinfer_sdpa() -> FlashInferSDPA:
     """
     Get the global FlashInferSDPA instance.
-    
+
     Returns:
         FlashInferSDPA instance
     """
@@ -1310,14 +1437,15 @@ def get_flashinfer_sdpa() -> FlashInferSDPA:
 # Backend Equivalence Verification Utilities
 # =============================================================================
 
+
 class BackendEquivalenceResult:
     """
     Result of backend equivalence verification.
-    
+
     This class holds the results of comparing vendored kernel outputs
     against eager implementation outputs.
     """
-    
+
     def __init__(
         self,
         is_equivalent: bool,
@@ -1331,7 +1459,7 @@ class BackendEquivalenceResult:
     ):
         """
         Initialize equivalence result.
-        
+
         Args:
             is_equivalent: Whether outputs are numerically equivalent
             output_max_diff: Maximum absolute difference in attention outputs
@@ -1350,10 +1478,18 @@ class BackendEquivalenceResult:
         self.rtol = rtol
         self.atol = atol
         self.message = message
-    
+
     def __repr__(self) -> str:
-        weights_max_str = f"{self.weights_max_diff:.2e}" if self.weights_max_diff is not None else "None"
-        weights_mean_str = f"{self.weights_mean_diff:.2e}" if self.weights_mean_diff is not None else "None"
+        weights_max_str = (
+            f"{self.weights_max_diff:.2e}"
+            if self.weights_max_diff is not None
+            else "None"
+        )
+        weights_mean_str = (
+            f"{self.weights_mean_diff:.2e}"
+            if self.weights_mean_diff is not None
+            else "None"
+        )
         return (
             f"BackendEquivalenceResult("
             f"is_equivalent={self.is_equivalent}, "
@@ -1362,7 +1498,7 @@ class BackendEquivalenceResult:
             f"weights_max_diff={weights_max_str}, "
             f"weights_mean_diff={weights_mean_str})"
         )
-    
+
     def __bool__(self) -> bool:
         """Allow using result in boolean context."""
         return self.is_equivalent
@@ -1376,31 +1512,29 @@ def check_numerical_equivalence(
 ) -> Tuple[bool, float, float]:
     """
     Check if two tensors are numerically equivalent within tolerance.
-    
+
     Args:
         tensor_a: First tensor
         tensor_b: Second tensor
         rtol: Relative tolerance
         atol: Absolute tolerance
-    
+
     Returns:
         Tuple of (is_equivalent, max_diff, mean_diff)
     """
     if tensor_a.shape != tensor_b.shape:
-        raise ValueError(
-            f"Shape mismatch: {tensor_a.shape} vs {tensor_b.shape}"
-        )
-    
+        raise ValueError(f"Shape mismatch: {tensor_a.shape} vs {tensor_b.shape}")
+
     # Compute differences
     diff = torch.abs(tensor_a.float() - tensor_b.float())
     max_diff = diff.max().item()
     mean_diff = diff.mean().item()
-    
+
     # Check equivalence using torch.allclose logic
     is_equivalent = torch.allclose(
         tensor_a.float(), tensor_b.float(), rtol=rtol, atol=atol
     )
-    
+
     return is_equivalent, max_diff, mean_diff
 
 
@@ -1420,11 +1554,11 @@ def verify_backend_equivalence(
 ) -> BackendEquivalenceResult:
     """
     Verify that vendored kernels produce equivalent results to eager implementation.
-    
+
     This function computes SDPA using both the vendored FlashInfer kernels and
     the eager fallback implementation, then compares the results to verify
     numerical equivalence within the specified tolerance.
-    
+
     Args:
         query: Query tensor, shape (batch_size, n_head, q_len, head_size)
         key: Key tensor, shape (batch_size, n_query_groups, kv_len, head_size)
@@ -1438,13 +1572,13 @@ def verify_backend_equivalence(
         rtol: Relative tolerance for numerical comparison
         atol: Absolute tolerance for numerical comparison
         log_results: Whether to log verification results
-    
+
     Returns:
         BackendEquivalenceResult containing comparison metrics and equivalence status
-    
+
     Raises:
         RuntimeError: If vendored kernels are not available
-    
+
     Example:
         >>> wrapper = FlashInferSDPA()
         >>> query = torch.randn(2, 4, 8, 64, device='cuda')
@@ -1460,18 +1594,25 @@ def verify_backend_equivalence(
         ...     print(f"Backends differ: {result.message}")
     """
     wrapper = get_flashinfer_sdpa()
-    
+
     if not wrapper.available:
         raise RuntimeError(
             "Cannot verify backend equivalence: vendored kernels are not available. "
             "Ensure CUDA is available and the extension is compiled."
         )
-    
+
     # Compute using vendored kernels
     try:
         vendored_output, vendored_weights = wrapper._flashinfer_sdpa(
-            query, key, value, scale_factor, return_attn_weights,
-            token_positions, input_pos, sliding_window_size, chunk_size
+            query,
+            key,
+            value,
+            scale_factor,
+            return_attn_weights,
+            token_positions,
+            input_pos,
+            sliding_window_size,
+            chunk_size,
         )
     except Exception as e:
         message = f"Vendored kernel computation failed: {e}"
@@ -1479,37 +1620,50 @@ def verify_backend_equivalence(
             logger.error(message)
         return BackendEquivalenceResult(
             is_equivalent=False,
-            output_max_diff=float('inf'),
-            output_mean_diff=float('inf'),
+            output_max_diff=float("inf"),
+            output_mean_diff=float("inf"),
             rtol=rtol,
             atol=atol,
             message=message,
         )
-    
+
     # Compute using eager fallback
     eager_output, eager_weights = wrapper._fallback_sdpa(
-        query, key, value, scale_factor, return_attn_weights,
-        token_positions, input_pos, sliding_window_size, chunk_size
+        query,
+        key,
+        value,
+        scale_factor,
+        return_attn_weights,
+        token_positions,
+        input_pos,
+        sliding_window_size,
+        chunk_size,
     )
-    
+
     # Compare outputs
     output_equivalent, output_max_diff, output_mean_diff = check_numerical_equivalence(
         vendored_output, eager_output, rtol=rtol, atol=atol
     )
-    
+
     # Compare weights if requested
     weights_max_diff = None
     weights_mean_diff = None
     weights_equivalent = True
-    
-    if return_attn_weights and vendored_weights is not None and eager_weights is not None:
-        weights_equivalent, weights_max_diff, weights_mean_diff = check_numerical_equivalence(
-            vendored_weights, eager_weights, rtol=rtol, atol=atol
+
+    if (
+        return_attn_weights
+        and vendored_weights is not None
+        and eager_weights is not None
+    ):
+        weights_equivalent, weights_max_diff, weights_mean_diff = (
+            check_numerical_equivalence(
+                vendored_weights, eager_weights, rtol=rtol, atol=atol
+            )
         )
-    
+
     # Determine overall equivalence
     is_equivalent = output_equivalent and weights_equivalent
-    
+
     # Build message
     if is_equivalent:
         message = (
@@ -1531,14 +1685,14 @@ def verify_backend_equivalence(
                 f"weights differ (max_diff={weights_max_diff:.2e}, "
                 f"mean_diff={weights_mean_diff:.2e})"
             )
-    
+
     # Log results
     if log_results:
         if is_equivalent:
             logger.debug(message)
         else:
             logger.warning(message)
-    
+
     return BackendEquivalenceResult(
         is_equivalent=is_equivalent,
         output_max_diff=output_max_diff,
@@ -1560,7 +1714,7 @@ def verify_backend_equivalence_batch(
 ) -> Tuple[int, int, list]:
     """
     Verify backend equivalence for multiple test cases.
-    
+
     Args:
         test_cases: List of dictionaries containing test parameters.
             Each dictionary should have keys: query, key, value, scale_factor,
@@ -1570,10 +1724,10 @@ def verify_backend_equivalence_batch(
         atol: Absolute tolerance for numerical comparison
         log_results: Whether to log verification results
         stop_on_failure: Whether to stop on first failure
-    
+
     Returns:
         Tuple of (passed_count, failed_count, results_list)
-    
+
     Example:
         >>> test_cases = [
         ...     {
@@ -1591,26 +1745,26 @@ def verify_backend_equivalence_batch(
     passed_count = 0
     failed_count = 0
     results = []
-    
+
     for i, test_case in enumerate(test_cases):
         try:
             result = verify_backend_equivalence(
-                query=test_case['query'],
-                key=test_case['key'],
-                value=test_case['value'],
-                scale_factor=test_case['scale_factor'],
-                return_attn_weights=test_case.get('return_attn_weights', False),
-                token_positions=test_case.get('token_positions'),
-                input_pos=test_case.get('input_pos', 0),
-                sliding_window_size=test_case.get('sliding_window_size'),
-                chunk_size=test_case.get('chunk_size'),
+                query=test_case["query"],
+                key=test_case["key"],
+                value=test_case["value"],
+                scale_factor=test_case["scale_factor"],
+                return_attn_weights=test_case.get("return_attn_weights", False),
+                token_positions=test_case.get("token_positions"),
+                input_pos=test_case.get("input_pos", 0),
+                sliding_window_size=test_case.get("sliding_window_size"),
+                chunk_size=test_case.get("chunk_size"),
                 rtol=rtol,
                 atol=atol,
                 log_results=log_results,
             )
-            
+
             results.append(result)
-            
+
             if result.is_equivalent:
                 passed_count += 1
             else:
@@ -1619,29 +1773,29 @@ def verify_backend_equivalence_batch(
                     if log_results:
                         logger.warning(f"Stopping at test case {i} due to failure")
                     break
-                    
+
         except Exception as e:
             failed_count += 1
             error_result = BackendEquivalenceResult(
                 is_equivalent=False,
-                output_max_diff=float('inf'),
-                output_mean_diff=float('inf'),
+                output_max_diff=float("inf"),
+                output_mean_diff=float("inf"),
                 rtol=rtol,
                 atol=atol,
                 message=f"Test case {i} raised exception: {e}",
             )
             results.append(error_result)
-            
+
             if log_results:
                 logger.error(f"Test case {i} failed with exception: {e}")
-            
+
             if stop_on_failure:
                 break
-    
+
     if log_results:
         logger.info(
             f"Backend equivalence verification complete: "
             f"{passed_count} passed, {failed_count} failed out of {len(test_cases)} test cases"
         )
-    
+
     return passed_count, failed_count, results
