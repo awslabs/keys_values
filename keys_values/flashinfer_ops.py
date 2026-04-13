@@ -38,31 +38,31 @@ _load_error: Optional[str] = None
 def _load_ops():
     """
     Attempt to load the compiled CUDA extension.
-    
+
     This function tries to import the _flashinfer_ops extension module
     that was compiled from the vendored CUDA kernels. If the import fails,
     it logs the error and sets _available to False.
-    
+
     The function is called automatically on module import and caches the result.
     """
     global _ops, _available, _load_attempted, _load_error
-    
+
     if _load_attempted:
         return
-    
+
     _load_attempted = True
-    
+
     try:
         # Try to import the compiled extension
         from keys_values import _flashinfer_ops
-        
+
         # Verify CUDA is available through the extension
         if not _flashinfer_ops.is_available():
             _load_error = "CUDA is not available on this system"
             logger.debug(_load_error)
             _available = False
             return
-        
+
         # Check device count
         device_count = _flashinfer_ops.get_device_count()
         if device_count == 0:
@@ -70,17 +70,19 @@ def _load_ops():
             logger.debug(_load_error)
             _available = False
             return
-        
+
         # Success - extension is loaded and CUDA is available
         _ops = _flashinfer_ops
         _available = True
-        
+
         # Log device information
-        logger.info(f"Vendored FlashInfer kernels loaded successfully with {device_count} CUDA device(s)")
+        logger.info(
+            f"Vendored FlashInfer kernels loaded successfully with {device_count} CUDA device(s)"
+        )
         for device_id in range(device_count):
             device_info = _ops.get_device_info(device_id)
             logger.debug(f"  {device_info}")
-            
+
     except ImportError as e:
         _load_error = f"Failed to import _flashinfer_ops extension: {e}"
         logger.debug(_load_error)
@@ -90,7 +92,7 @@ def _load_ops():
             "Falling back to eager SDPA implementation. "
             f"Error: {e}",
             RuntimeWarning,
-            stacklevel=2
+            stacklevel=2,
         )
         _available = False
     except Exception as e:
@@ -100,7 +102,7 @@ def _load_ops():
             f"Unexpected error loading vendored FlashInfer kernels: {e}. "
             "Falling back to eager SDPA implementation.",
             RuntimeWarning,
-            stacklevel=2
+            stacklevel=2,
         )
         _available = False
 
@@ -112,11 +114,11 @@ _load_ops()
 def is_available() -> bool:
     """
     Check if vendored FlashInfer CUDA kernels are available.
-    
+
     Returns:
         True if the compiled extension is loaded and CUDA is available,
         False otherwise.
-    
+
     Example:
         >>> import keys_values.flashinfer_ops as ops
         >>> if ops.is_available():
@@ -132,11 +134,11 @@ def is_available() -> bool:
 def get_load_error() -> Optional[str]:
     """
     Get the error message from the last load attempt, if any.
-    
+
     Returns:
         Error message string if loading failed, None if loading succeeded
         or has not been attempted yet.
-    
+
     Example:
         >>> import keys_values.flashinfer_ops as ops
         >>> if not ops.is_available():
@@ -148,17 +150,16 @@ def get_load_error() -> Optional[str]:
 def get_device_count() -> int:
     """
     Get the number of available CUDA devices.
-    
+
     Returns:
         Number of CUDA devices if extension is available, 0 otherwise.
-    
+
     Raises:
         RuntimeError: If vendored kernels are not available.
     """
     if not _available:
         raise RuntimeError(
-            "Vendored FlashInfer kernels are not available. "
-            f"Error: {_load_error}"
+            "Vendored FlashInfer kernels are not available. " f"Error: {_load_error}"
         )
     return _ops.get_device_count()
 
@@ -166,16 +167,16 @@ def get_device_count() -> int:
 def get_device_info(device_id: int = 0) -> str:
     """
     Get CUDA device properties as a string.
-    
+
     Args:
         device_id: CUDA device ID (default: 0)
-    
+
     Returns:
         String with device properties (name, compute capability, memory)
-    
+
     Raises:
         RuntimeError: If vendored kernels are not available.
-    
+
     Example:
         >>> import keys_values.flashinfer_ops as ops
         >>> if ops.is_available():
@@ -184,8 +185,7 @@ def get_device_info(device_id: int = 0) -> str:
     """
     if not _available:
         raise RuntimeError(
-            "Vendored FlashInfer kernels are not available. "
-            f"Error: {_load_error}"
+            "Vendored FlashInfer kernels are not available. " f"Error: {_load_error}"
         )
     return _ops.get_device_info(device_id)
 
@@ -203,11 +203,11 @@ def sdpa_decode(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
     Scaled Dot Product Attention for decode phase (single query token).
-    
+
     This function calls the vendored CUDA kernel for efficient decode-phase
     attention computation. It supports causal masking, sliding window attention,
     and optional attention weight return.
-    
+
     Args:
         query: Query tensor with shape:
             - Batched: [batch_size, num_qo_heads, head_dim]
@@ -230,7 +230,7 @@ def sdpa_decode(
         sliding_window_size: Sliding window size (-1 for no window)
         causal: Whether to apply causal masking (default: True)
         return_weights: Whether to return attention weights (default: False)
-    
+
     Returns:
         Tuple of (output, attention_weights):
         - output: Attention output with same shape as query
@@ -238,21 +238,21 @@ def sdpa_decode(
             - Batched: [batch_size, num_kv_heads, kv_len]
             - Non-batched: [num_kv_heads, kv_len]
           If return_weights=False, None
-    
+
     Raises:
         RuntimeError: If vendored kernels are not available.
-    
+
     Example:
         >>> import torch
         >>> import keys_values.flashinfer_ops as ops
-        >>> 
+        >>>
         >>> # Batched decode with per-head token positions
         >>> query = torch.randn(2, 32, 128, device='cuda', dtype=torch.float16)
         >>> key = torch.randn(2, 1024, 8, 128, device='cuda', dtype=torch.float16)
         >>> value = torch.randn(2, 1024, 8, 128, device='cuda', dtype=torch.float16)
         >>> token_positions = torch.randint(0, 1024, (2, 8, 1024), device='cuda', dtype=torch.int32)
         >>> scale = 1.0 / (128 ** 0.5)
-        >>> 
+        >>>
         >>> output, weights = ops.sdpa_decode(
         ...     query, key, value, scale,
         ...     token_positions=token_positions,
@@ -263,10 +263,9 @@ def sdpa_decode(
     """
     if not _available:
         raise RuntimeError(
-            "Vendored FlashInfer kernels are not available. "
-            f"Error: {_load_error}"
+            "Vendored FlashInfer kernels are not available. " f"Error: {_load_error}"
         )
-    
+
     return _ops.sdpa_decode(
         query,
         key,
@@ -355,8 +354,7 @@ def sdpa_prefill(
     """
     if not _available:
         raise RuntimeError(
-            "Vendored FlashInfer kernels are not available. "
-            f"Error: {_load_error}"
+            "Vendored FlashInfer kernels are not available. " f"Error: {_load_error}"
         )
 
     return _ops.sdpa_prefill(
@@ -402,8 +400,7 @@ def sdpa_prefill_fused_v2(
     """
     if not _available:
         raise RuntimeError(
-            "Vendored FlashInfer kernels are not available. "
-            f"Error: {_load_error}"
+            "Vendored FlashInfer kernels are not available. " f"Error: {_load_error}"
         )
 
     return _ops.sdpa_prefill_fused_v2(
@@ -450,8 +447,7 @@ def sdpa_prefill_fused(
     """
     if not _available:
         raise RuntimeError(
-            "Vendored FlashInfer kernels are not available. "
-            f"Error: {_load_error}"
+            "Vendored FlashInfer kernels are not available. " f"Error: {_load_error}"
         )
 
     return _ops.sdpa_prefill_fused(
