@@ -294,15 +294,16 @@ class TestFlashInferKernelWrapping:
                 mock_chunk.assert_called_once()
 
     def test_flashinfer_sdpa_routes_to_standard(self):
-        """Test that _flashinfer_sdpa routes to standard for prefill phase."""
+        """Test that square prefill (q_len == kv_len, input_pos=0) routes to
+        fallback (PyTorch native SDPA is faster for this case)."""
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
             with patch.object(
                 FlashInferSDPA,
-                "_flashinfer_sdpa_standard",
+                "_fallback_sdpa",
                 return_value=(torch.tensor([]), None),
-            ) as mock_standard:
+            ) as mock_fallback:
                 wrapper = FlashInferSDPA()
                 wrapper.available = True
 
@@ -316,7 +317,7 @@ class TestFlashInferKernelWrapping:
                 scale_factor = 1.0 / (head_size**0.5)
 
                 wrapper._flashinfer_sdpa(query, key, value, scale_factor)
-                mock_standard.assert_called_once()
+                mock_fallback.assert_called_once()
 
     def test_chunk_processing_detection_non_square_prefill(self):
         """Test that chunk processing is NOT used for non-square prefill (q_len > 1, q_len < kv_len)."""

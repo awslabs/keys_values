@@ -3,22 +3,11 @@
 Runs the same training setup but patches loss.backward() to be a no-op,
 so iter time ≈ forward pass time only.
 
-Usage (baseline - double FlexAttention on main branch):
-  cd /fsx/pvihang/flash_infer_integration/keys_values_main
-  PYTHONPATH=/fsx/pvihang/flash_infer_integration/keys_values_main \
-  BNB_CUDA_VERSION=126 CUDA_VISIBLE_DEVICES="0" \
-  PYTORCH_ALLOC_CONF=expandable_segments:True \
-  KEYSVALS_LOG_DIR=/tmp/bench_baseline/logs \
-  /fsx/pvihang/flash_infer_integration/keys_values/venvs/baseline_venv/bin/python \
-  /fsx/pvihang/flash_infer_integration/keys_values/benchmark_forward_only.py
-
-Usage (FlashInfer + Triton on our branch):
-  cd /fsx/pvihang/flash_infer_integration/keys_values
+Usage:
+  cd ${KEYS_VALUES_PATH}
   CUDA_VISIBLE_DEVICES="0" \
   PYTORCH_ALLOC_CONF=expandable_segments:True \
-  KEYSVALS_LOG_DIR=/tmp/bench_flashinfer/logs \
-  /fsx/pvihang/flash_infer_integration/keys_values/venvs/v2_venv/bin/python \
-  benchmark_forward_only.py
+  python scripts/benchmark_forward_only.py
 """
 
 import torch

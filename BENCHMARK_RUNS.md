@@ -192,3 +192,24 @@ hence identical top-K decisions in our test. However, during real H2O training a
 and leads to the large loss difference (val 18.1 vs 3.7).
 
 Triton score-sum matches the PyTorch reference to ~1e-6 precision.
+
+### Investigation 3: Square prefill — FlashInfer vs PyTorch SDPA
+
+For the square prefill case (`q_len == kv_len`, no attention weights needed),
+PyTorch native SDPA is faster than vendored FlashInfer kernels.
+
+**Setup:** Qwen3-4B config (batch=1, n_head=32, n_kv=8, hd=128, bfloat16, A100-40GB).
+20 repeats after 5 warmup iterations.
+
+| Config | PyTorch SDPA | FlashInfer | Speedup |
+|--------|-------------|-----------|---------|
+| q=kv=1k | 0.09 ms | 0.18 ms | 0.52x |
+| q=kv=2k | 0.26 ms | 0.38 ms | 0.68x |
+| q=kv=4k | 0.80 ms | 1.00 ms | 0.79x |
+| q=kv=8k | 2.88 ms | 3.20 ms | 0.90x |
+| q=kv=16k | 11.14 ms | 11.32 ms | 0.98x |
+| q=kv=32k | 44.12 ms | 43.04 ms | 1.03x |
+
+**Conclusion:** PyTorch native SDPA is faster for square prefill (up to 2x at
+small sizes, converges at 16k+). Since prefill doesn't need attention weights,
+FlashInfer should not be used for this case.
