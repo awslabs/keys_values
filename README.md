@@ -85,7 +85,7 @@ This must be built after installing the package.
 ```bash
 cd ${KEYS_VALUES_PATH}
 pip install flashinfer-python
-python build_ext.py build_ext --inplace
+python build_ext.py
 ```
 
 To verify the build worked:
