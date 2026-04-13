@@ -82,8 +82,6 @@ Relevant docs:
 
 This is a bit harder than normal because we use an Ubuntu AMI.
 
-FUCKED UP!!!
-
 ### Step 1: Install the EFS Mount Helper on the EC2 Instance
 
 SSH into your instance and run:
@@ -106,7 +104,7 @@ sudo mkdir -p /mnt/efs
 
 Replace `fs-0123456789abcdef0` with your file system ID.
 
-Using EFS Mount Helper (Recommended, supports encryption in transit):
+Using EFS Mount Helper:
 ```bash
 sudo mount -t efs -o tls fs-0123456789abcdef0:/ /mnt/efs
 ```
@@ -144,11 +142,51 @@ Set Permissions (Optional)
 sudo chown -R ubuntu:ubuntu /mnt/efs
 ```
 
+Setup directories:
+```bash
+cd /mnt/efs
+mkdir -p out/finetune
+cd out/finetune
+mkdir data
+mkdir neurips_exp
+cd /home/ubuntu
+mkdir -p out/finetune
+cd out/finetune
+ln -s /mnt/efs/out/finetune/data data
+ln -s /mnt/efs/out/finetune/neurips_exp neurips_exp
+```
 
-## Copy Files, Clone Repository
+## Clone Repository, Install Virtual Environment
 
+Copied from [README.md](./README.md):
+```bash
+cd /home/ubuntu
+mkdir git
+mkdir virtenvs
+cd git
+git clone https://github.com/awslabs/keys_values.git
+cd ../virtenvs
+python3 -m venv keys_values
+. keys_values/bin/activate
+pip install --upgrade pip
+pip install 'litgpt[all,test,extra]'
+cd ../git/keys_values
+pip install -e .
+```
 
-## Install Virtual Environment
+Run tests:
+```bash
+pytest test/
+```
 
+May get this error:
+```text
+E   RuntimeError: The NVIDIA driver on your system is too old (found version 12080). Please update your GPU driver by downloading and installing a new version from the URL: http://www.nvidia.com/Download/index.aspx Alternatively, go to: https://pytorch.org to install a PyTorch version that has been compiled with your version of the CUDA driver.
+```
 
-## Run Test
+This is because recent `LitGPT` installs `PyTorch 2.11`, which natively does not
+work with `CUDA 12.8` on the instance. See also: https://pytorch.org/. This does the job:
+```bash
+pip uninstall torch torchvision
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+```

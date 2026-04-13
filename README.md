@@ -21,7 +21,7 @@ to do, you can:
 It is best to create a virtual environment:
 
 ```bash
-git clone git@github.com:awslabs/keys_values.git
+git clone https://github.com/awslabs/keys_values.git
 python3 -m venv keyval_venv
 . keyval_venv/bin/activate
 pip install --upgrade pip
@@ -41,7 +41,7 @@ pytest test/
 First, install `LitGPT` from source:
 
 ```bash
-git clone git@github.com:Lightning-AI/litgpt.git
+git clone https://github.com/Lightning-AI/litgpt.git
 cd litgpt
 git checkout main
 ```
