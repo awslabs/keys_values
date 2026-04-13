@@ -123,7 +123,7 @@ def setup(
     attention_forward_temp_size_gb: Optional[float] = None,
     lora_dropout: Optional[float] = None,
     use_sample_metric: bool = True,
-    sample_metric_max_generated_tokens: int = 10,
+    sample_metric_max_generated_tokens: int = 20,
     sample_metric_kwargs: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Evaluate a range of model checkpoints on a test set
@@ -369,6 +369,7 @@ def main(
             sdpa,
             yarn_rope,
             fabric,
+            devices,
         )
         dtype = fabric_precision_to_dtype(fabric._precision.precision)
         torch.set_default_dtype(dtype)
