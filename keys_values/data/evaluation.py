@@ -87,9 +87,13 @@ class EvaluationTasks:
             for name in self._tasks:
                 path = out_dir / name
                 if not path.exists() or not path.is_dir():
-                    raise ValueError(f"{path} does not exist. tasks = {self._tasks} invalid")
+                    raise ValueError(
+                        f"{path} does not exist. tasks = {self._tasks} invalid"
+                    )
                 if not self.check_complete(path, self.model_type):
-                    raise ValueError(f"{path} is incomplete. tasks = {self._tasks} invalid")
+                    raise ValueError(
+                        f"{path} is incomplete. tasks = {self._tasks} invalid"
+                    )
 
     @property
     def tasks(self) -> List[str]:
