@@ -73,7 +73,7 @@ def scaled_dot_product_attention(
     sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
     do_filter_kernels: bool = False,
     annotation_callback: Optional[ReorderAnnotationCallback] = None,
-    sort_if_3d: bool = False,
+    sort_if_3d: bool = True,
 ) -> Tuple[torch.Tensor, Optional[List[SDPBackend]]]:
     """
     Wraps `F.scaled_dot_product_attention` in a way which supports
@@ -334,7 +334,7 @@ def reorder_key_value(
     token_positions: torch.Tensor,
     input_pos: int,
     q_len: int,
-    sort_if_3d: bool = False,
+    sort_if_3d: bool = True,
     check_token_pos: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
     """

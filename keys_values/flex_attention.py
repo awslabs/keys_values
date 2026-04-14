@@ -581,7 +581,7 @@ def scaled_dot_product_attention_flexatt(
     input_pos: int,
     token_positions: Optional[torch.Tensor],
     annotation_callback: Optional[ReorderAnnotationCallback] = None,
-    sort_if_3d: bool = False,
+    sort_if_3d: bool = True,
 ) -> torch.Tensor:
     """
     Computes scaled dot product attention (SDPA) using PyTorch
