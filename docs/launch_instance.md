@@ -184,7 +184,7 @@ pytest test/
 
 FUCK!! Still get segmentation fault.
 
-Next: Use exactly these versions:
+Next: Use exactly these versions (like on older instance):
 ```text
 torch==2.10.0
 torchmetrics==1.8.2

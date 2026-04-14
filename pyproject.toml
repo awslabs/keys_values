@@ -24,6 +24,7 @@ dependencies = [
     "filelock",
     "black>=26.3.1",
     "flake8",
+    "hypothesis",
 ]
 
 [project.optional-dependencies]

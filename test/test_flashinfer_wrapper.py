@@ -11,19 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""
-Unit tests for FlashInfer wrapper module initialization and availability detection.
-"""
+from hypothesis import given, settings, strategies as st, HealthCheck
+from unittest.mock import patch
 
 import pytest
 import torch
-from unittest.mock import patch
-from hypothesis import given, settings, strategies as st, HealthCheck
+
+from litgpt.utils import _RunIf
 
 from keys_values.flashinfer_wrapper import FlashInferSDPA, get_flashinfer_sdpa
 
 
+@_RunIf(min_cuda_gpus=1)
 class TestFlashInferSDPAInitialization:
     """Test FlashInferSDPA class initialization."""
 
@@ -97,6 +96,7 @@ class TestFlashInferSDPAInitialization:
         assert isinstance(instance, FlashInferSDPA)
 
 
+@_RunIf(min_cuda_gpus=1)
 class TestFlashInferSDPAInterface:
     """Test FlashInferSDPA interface and method signatures."""
 
@@ -168,6 +168,7 @@ class TestFlashInferSDPAInterface:
             pass
 
 
+@_RunIf(min_cuda_gpus=1)
 class TestFlashInferSDPAFallback:
     """Test FlashInferSDPA fallback behavior."""
 
@@ -239,6 +240,7 @@ class TestFlashInferSDPAFallback:
                 assert attn_weights is None
 
 
+@_RunIf(min_cuda_gpus=1)
 class TestFlashInferKernelWrapping:
     """Test FlashInfer kernel wrapping interface."""
 
@@ -464,6 +466,7 @@ class TestFlashInferKernelWrapping:
                 wrapper._flashinfer_sdpa(query, key, value, scale_factor)
 
 
+@_RunIf(min_cuda_gpus=1)
 class TestFallbackSDPA:
     """Test fallback SDPA implementation."""
 
@@ -593,6 +596,7 @@ class TestFallbackSDPA:
         assert attn_weights.shape == (batch_size, n_query_groups, kv_len)
 
 
+@_RunIf(min_cuda_gpus=1)
 class TestAttentionWeightsReturn:
     """Test attention weights return functionality."""
 
@@ -765,6 +769,7 @@ class TestAttentionWeightsReturn:
         assert attn_output.shape == (batch_size, n_head, q_len, head_size)
 
 
+@_RunIf(min_cuda_gpus=1)
 class TestAttentionWeightsProperties:
     """Property-based tests for attention weights functionality."""
 
@@ -891,6 +896,7 @@ class TestAttentionWeightsProperties:
         assert torch.all(attn_weights >= 0), "Attention weights should be non-negative"
 
 
+@_RunIf(min_cuda_gpus=1)
 class TestChunkProcessingForLongSequences:
     """Test chunk processing for long sequences (Requirement 4.1, 4.2)."""
 
@@ -1168,6 +1174,7 @@ class TestChunkProcessingForLongSequences:
         assert weights is None
 
 
+@_RunIf(min_cuda_gpus=1)
 class TestBackendEquivalenceVerification:
     """Test backend equivalence verification utilities (Requirement 1.3)."""
 
@@ -1378,6 +1385,7 @@ class TestBackendEquivalenceVerification:
         assert results[0].is_equivalent is False
 
 
+@_RunIf(min_cuda_gpus=1)
 class TestBackendEquivalenceVerificationIntegration:
     """Integration tests for backend equivalence verification."""
 
@@ -1462,6 +1470,7 @@ class TestBackendEquivalenceVerificationIntegration:
         assert "verified" in result_pass.message
 
 
+@_RunIf(min_cuda_gpus=1)
 class TestTwoPhaseWeightAccumulation:
     """Tests for two-phase attention weight accumulation (FlashInfer O+LSE, then PyTorch weights)."""
 
@@ -1743,7 +1752,7 @@ class TestTwoPhaseWeightAccumulation:
             )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_RunIf(min_cuda_gpus=1)
 class TestCausalMaskingCorrectness:
     """Verify causal masking in fused prefill matches eager fallback.
 
@@ -1950,7 +1959,7 @@ def _torch_attention_weights(query, key, scale, input_pos, token_positions):
     return W.float()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_RunIf(min_cuda_gpus=1)
 class TestTritonScoreSumKernel:
     """Test the Triton score-sum kernel directly."""
 
@@ -2142,7 +2151,7 @@ class TestTritonScoreSumKernel:
             )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@_RunIf(min_cuda_gpus=1)
 class TestFusedPrefillEndToEnd:
     """End-to-end tests: fused prefill path vs eager fallback."""
 

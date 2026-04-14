@@ -16,14 +16,16 @@
 FlashInfer wrapper module for optimized CUDA kernels.
 
 This module provides a clean abstraction layer for FlashInfer's optimized
-attention kernels with graceful fallback to eager implementations when
-FlashInfer is not available or not applicable.
+attention kernels.
 """
 
 import logging
 from typing import Optional, Tuple
 
 import torch
+
+from keys_values.sdpa_wrapper import sdpa_check_args
+
 
 logger = logging.getLogger(__name__)
 
@@ -267,12 +269,10 @@ def triton_score_sum(
 
 class FlashInferSDPA:
     """
-    Wrapper for FlashInfer CUDA kernels with fallback support.
+    Wrapper for FlashInfer CUDA kernels.
 
     This class encapsulates FlashInfer's optimized attention kernels and provides
-    a unified interface compatible with existing keys_values code. It gracefully
-    falls back to eager implementations when FlashInfer is not available or when
-    a configuration is not supported.
+    a unified interface compatible with existing keys_values code.
     """
 
     def __init__(self, use_fused_prefill: bool = True):
@@ -284,19 +284,16 @@ class FlashInferSDPA:
                 use the old two-phase approach (FlashInfer for O+LSE, then Q@K matmul).
                 Set to False for A/B comparison.
         """
-        self.available = self._check_vendored_kernels_available()
-        self.use_fused_prefill = use_fused_prefill
-        if self.available:
-            logger.info(
-                "Vendored FlashInfer kernels are available and will be used for SDPA computation"
+        if not self._check_vendored_kernels_available():
+            raise AssertionError(
+                "FlashInfer kernels are not available. Installation (at repository root):\n"
+                "$ pip install flashinfer-python\n"
+                "$ python build_ext.py"
             )
-            if use_fused_prefill:
-                logger.info(
-                    "Using fused prefill kernel for attention weight accumulation"
-                )
-        else:
-            logger.debug(
-                "Vendored FlashInfer kernels are not available, will use eager SDPA implementation"
+        self.use_fused_prefill = use_fused_prefill
+        if use_fused_prefill:
+            logger.info(
+                "Using fused prefill kernel for attention weight accumulation"
             )
 
     def _check_vendored_kernels_available(self) -> bool:
@@ -346,124 +343,61 @@ class FlashInferSDPA:
         kv_len = key.shape[2]
         return q_len == 1 and kv_len > 1
 
+    # TODO:
+    # - Remove fallback
+    # - Remove sliding_window_size (unless really supported)
+    # - Deal with token_positions as in FlexAttn
+    # - return_attn_weights only if input_pos > 0
+    # - chunk_sizes ??
     def scaled_dot_product_attention(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         scale_factor: float,
+        sliding_window_size: Optional[int],
+        input_pos: int,
+        token_positions: Optional[torch.Tensor],
         return_attn_weights: bool = False,
-        token_positions: Optional[torch.Tensor] = None,
-        input_pos: int = 0,
-        sliding_window_size: Optional[int] = None,
         chunk_size: Optional[int] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Compute SDPA using FlashInfer kernels with fallback.
 
         Args:
-            query: Query tensor, shape (batch_size, n_head, q_len, head_size)
-            key: Key tensor, shape (batch_size, n_query_groups, kv_len, head_size)
-            value: Value tensor, shape (batch_size, n_query_groups, kv_len, head_size)
+            query: Query tensor, shape `(batch_size, n_head, q_len, head_size)`
+            key: Key tensor, shape `(batch_size, n_query_groups, kv_len, head_size)`
+            value: Value tensor, shape `(batch_size, n_query_groups, kv_len, head_size)`
             scale_factor: Scale factor for attention scores
-            return_attn_weights: Whether to return attention weights
-            token_positions: Token positions in KV cache, shape (batch_size, n_query_groups, kv_len)
-            input_pos: Position in input sequence
             sliding_window_size: Size of sliding window for attention masking
+            input_pos: Position in input sequence, must be > 0. For square prefill,
+                the native PyTorch SDPA is faster anyway
+            token_positions: Contains token positions in KV cache, shape
+                `(batch_size, n_query_groups, kv_len)`. If not given, it is
+                equivalent to `arange(kv_len)`.
+            return_attn_weights: Whether to return attention weights
             chunk_size: Optional chunk size for processing long sequences. When provided
                 and query length exceeds chunk_size, the query is split into chunks
                 and processed sequentially to manage GPU memory.
 
         Returns:
-            Tuple of (attention_output, attention_weights)
-            - attention_output: shape (batch_size, n_head, q_len, head_size)
-            - attention_weights: shape (batch_size, n_query_groups, kv_len) if return_attn_weights=True, else None
+            Tuple `(attn_outputs, attn_weights)`, where `attn_outputs` has shape
+            `(batch_size, n_head, q_len, head_size)`. `attn_weights` has shape
+            `(batch_size, n_query_groups, kv_len)` and `dtype == float32` if
+            `return_attn_weights == True`. Otherwise, `None` is returned.
+
         """
-        if not self.available:
-            return self._fallback_sdpa(
-                query,
-                key,
-                value,
-                scale_factor,
-                return_attn_weights,
-                token_positions,
-                input_pos,
-                sliding_window_size,
-                chunk_size,
+        if input_pos <= 0:
+            raise ValueError(f"input_pos must be positive. Don't use for square prefill")
+        batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(
+            query,
+            key,
+            value,
+        )
+        if token_positions is not None and token_positions.shape != key.shape[:-1]:
+            raise ValueError(
+                f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
             )
-
-        try:
-            return self._flashinfer_sdpa(
-                query,
-                key,
-                value,
-                scale_factor,
-                return_attn_weights,
-                token_positions,
-                input_pos,
-                sliding_window_size,
-                chunk_size,
-            )
-        except Exception as e:
-            logger.warning(
-                f"FlashInfer SDPA failed with error: {e}. Falling back to eager implementation."
-            )
-            return self._fallback_sdpa(
-                query,
-                key,
-                value,
-                scale_factor,
-                return_attn_weights,
-                token_positions,
-                input_pos,
-                sliding_window_size,
-                chunk_size,
-            )
-
-    def _flashinfer_sdpa(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        scale_factor: float,
-        return_attn_weights: bool = False,
-        token_positions: Optional[torch.Tensor] = None,
-        input_pos: int = 0,
-        sliding_window_size: Optional[int] = None,
-        chunk_size: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Call vendored FlashInfer kernels.
-
-        This method translates parameters from keys_values format to vendored kernel format
-        and calls the appropriate kernels.
-
-        Args:
-            query: Query tensor, shape (batch_size, n_head, q_len, head_size)
-            key: Key tensor, shape (batch_size, n_query_groups, kv_len, head_size)
-            value: Value tensor, shape (batch_size, n_query_groups, kv_len, head_size)
-            scale_factor: Scale factor for attention scores
-            return_attn_weights: Whether to return attention weights
-            token_positions: Token positions in KV cache
-            input_pos: Position in input sequence
-            sliding_window_size: Size of sliding window for attention masking
-            chunk_size: Optional chunk size for processing long sequences
-
-        Returns:
-            Tuple of (attention_output, attention_weights)
-        """
-        batch_size, n_head, q_len, head_size = query.shape
-        _, n_query_groups, kv_len, _ = key.shape
-
-        # Validate input shapes
-        assert query.shape[0] == key.shape[0] == value.shape[0], "Batch size mismatch"
-        assert query.shape[3] == key.shape[3] == value.shape[3], "Head size mismatch"
-        assert (
-            key.shape[1] == value.shape[1]
-        ), "Key and value must have same number of heads"
-        assert (
-            n_head % n_query_groups == 0
-        ), "n_head must be divisible by n_query_groups"
 
         # Routing:
         # 1. q_len == 1 (single-token decode): use optimized decode kernel
@@ -1267,168 +1201,6 @@ class FlashInferSDPA:
             weights = weights.float()
 
         return output, weights
-
-    def _fallback_sdpa(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        scale_factor: float,
-        return_attn_weights: bool = False,
-        token_positions: Optional[torch.Tensor] = None,
-        input_pos: int = 0,
-        sliding_window_size: Optional[int] = None,
-        chunk_size: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Fall back to eager implementation using attention_utils.
-
-        This method uses the existing eager SDPA implementations from attention_utils
-        to compute attention when FlashInfer is not available or not applicable.
-
-        Args:
-            query: Query tensor, shape (batch_size, n_head, q_len, head_size)
-            key: Key tensor, shape (batch_size, n_query_groups, kv_len, head_size)
-            value: Value tensor, shape (batch_size, n_query_groups, kv_len, head_size)
-            scale_factor: Scale factor for attention scores
-            return_attn_weights: Whether to return attention weights
-            token_positions: Token positions in KV cache
-            input_pos: Position in input sequence
-            sliding_window_size: Size of sliding window for attention masking
-            chunk_size: Optional chunk size for processing long sequences. If provided,
-                overrides the automatic chunking based on memory limits.
-
-        Returns:
-            Tuple of (attention_output, attention_weights)
-        """
-        from keys_values.attention_utils import (
-            attention_compute_weighted_values,
-            sdpa_attention_weights,
-            create_temp_array,
-            slice_as_flat,
-        )
-
-        batch_size, n_head, q_len, head_size = query.shape
-        _, n_query_groups, kv_len, _ = key.shape
-
-        # Determine chunking parameters
-        # If chunk_size is provided, use it; otherwise use automatic memory-based chunking
-        if chunk_size is not None and q_len > chunk_size:
-            # Use provided chunk_size
-            tmp_len = chunk_size
-            num_splits = (q_len + chunk_size - 1) // chunk_size
-            # Create temp array with the specified chunk size
-            shape = (batch_size, n_head, tmp_len, kv_len)
-            tmp_array = torch.empty(shape, device=query.device, dtype=torch.float32)
-        else:
-            # Use automatic memory-based chunking
-            tmp_array, num_splits, tmp_len = create_temp_array(
-                batch_size=batch_size,
-                n_head=n_head,
-                q_len=q_len,
-                kv_len=kv_len,
-                device=query.device,
-            )
-
-        # Convert tmp_array to match query dtype for intermediate computations
-        tmp_array = tmp_array.to(dtype=query.dtype)
-
-        # Compute attention weights using eager implementation
-        if return_attn_weights:
-            # Compute attention weights in chunks if necessary
-            attn_weights_list = []
-            attn_output_list = []
-
-            for split_idx in range(num_splits):
-                start_idx = split_idx * tmp_len
-                end_idx = min((split_idx + 1) * tmp_len, q_len)
-                chunk_len = end_idx - start_idx
-
-                # Get query chunk
-                query_chunk = query[:, :, start_idx:end_idx, :]
-
-                # Compute attention weights for this chunk
-                tmp_array_chunk = slice_as_flat(tmp_array, chunk_len)
-                attn_weights_chunk = sdpa_attention_weights(
-                    query=query_chunk,
-                    key=key,
-                    tmp_array=tmp_array_chunk,
-                    token_positions=token_positions,
-                    input_pos=input_pos + start_idx,
-                    scale_factor=scale_factor,
-                    sliding_window_size=sliding_window_size,
-                )
-                attn_weights_list.append(attn_weights_chunk)
-
-                # Compute attention output for this chunk
-                attn_output_chunk = attention_compute_weighted_values(
-                    scores=attn_weights_chunk,
-                    value=value,
-                )
-                attn_output_list.append(attn_output_chunk)
-
-            # Concatenate chunks
-            attn_output = torch.cat(attn_output_list, dim=2)
-            attn_weights = torch.cat(attn_weights_list, dim=2)
-
-            # Sum attention weights over query axis to get (batch_size, n_query_groups, kv_len)
-            # attn_weights shape: (batch_size, n_head, q_len, kv_len)
-            # We need to sum over query axis (dim=2) and aggregate heads to n_query_groups
-
-            if n_head > n_query_groups:
-                # Handle GQA: n_head > n_query_groups
-                q_per_kv = n_head // n_query_groups
-                # Reshape to (batch_size, n_query_groups, q_per_kv, q_len, kv_len)
-                attn_weights = attn_weights.view(
-                    batch_size, n_query_groups, q_per_kv, q_len, kv_len
-                )
-                # Mean over GQA group heads (dim=2), sum over queries (dim=3)
-                # Result: (batch_size, n_query_groups, kv_len)
-                attn_weights = attn_weights.sum(dim=(2, 3)) / q_per_kv
-            else:
-                # No GQA: n_head == n_query_groups
-                # Sum over query axis: (batch_size, n_head, q_len, kv_len) -> (batch_size, n_head, kv_len)
-                attn_weights = attn_weights.sum(dim=2)
-
-            # Convert to float32 for numerical stability
-            attn_weights = attn_weights.float()
-
-            return attn_output, attn_weights
-        else:
-            # Compute attention without weights
-            attn_output_list = []
-
-            for split_idx in range(num_splits):
-                start_idx = split_idx * tmp_len
-                end_idx = min((split_idx + 1) * tmp_len, q_len)
-                chunk_len = end_idx - start_idx
-
-                # Get query chunk
-                query_chunk = query[:, :, start_idx:end_idx, :]
-
-                # Compute attention weights for this chunk
-                tmp_array_chunk = slice_as_flat(tmp_array, chunk_len)
-                attn_weights_chunk = sdpa_attention_weights(
-                    query=query_chunk,
-                    key=key,
-                    tmp_array=tmp_array_chunk,
-                    token_positions=token_positions,
-                    input_pos=input_pos + start_idx,
-                    scale_factor=scale_factor,
-                    sliding_window_size=sliding_window_size,
-                )
-
-                # Compute attention output for this chunk
-                attn_output_chunk = attention_compute_weighted_values(
-                    scores=attn_weights_chunk,
-                    value=value,
-                )
-                attn_output_list.append(attn_output_chunk)
-
-            # Concatenate chunks
-            attn_output = torch.cat(attn_output_list, dim=2)
-
-            return attn_output, None
 
 
 # Global instance of FlashInferSDPA wrapper
