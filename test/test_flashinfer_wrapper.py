@@ -213,7 +213,7 @@ class TestFlashInferSDPAFallback:
         ):
             with patch.object(
                 FlashInferSDPA,
-                "_flashinfer_sdpa",
+                "scaled_dot_product_attention",
                 side_effect=RuntimeError("FlashInfer error"),
             ):
                 wrapper = FlashInferSDPA()
@@ -275,7 +275,7 @@ class TestFlashInferKernelWrapping:
         assert wrapper._should_use_chunk_processing(query, key) is False
 
     def test_flashinfer_sdpa_routes_to_chunk_processing(self):
-        """Test that _flashinfer_sdpa routes to chunk processing for decode phase."""
+        """Test that scaled_dot_product_attention routes to chunk processing for decode phase."""
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
@@ -296,7 +296,7 @@ class TestFlashInferKernelWrapping:
                 value = torch.randn(batch_size, n_query_groups, kv_len, head_size)
                 scale_factor = 1.0 / (head_size**0.5)
 
-                wrapper._flashinfer_sdpa(query, key, value, scale_factor)
+                wrapper.scaled_dot_product_attention(query, key, value, scale_factor)
                 mock_chunk.assert_called_once()
 
     def test_flashinfer_sdpa_routes_to_standard(self):
@@ -322,7 +322,7 @@ class TestFlashInferKernelWrapping:
                 value = torch.randn(batch_size, n_query_groups, kv_len, head_size)
                 scale_factor = 1.0 / (head_size**0.5)
 
-                wrapper._flashinfer_sdpa(query, key, value, scale_factor)
+                wrapper.scaled_dot_product_attention(query, key, value, scale_factor)
                 mock_fallback.assert_called_once()
 
     def test_chunk_processing_detection_non_square_prefill(self):
@@ -362,7 +362,7 @@ class TestFlashInferKernelWrapping:
                 scale_factor = 1.0 / (head_size**0.5)
 
                 # No return_attn_weights -> FlashInfer prefill (fast)
-                wrapper._flashinfer_sdpa(query, key, value, scale_factor)
+                wrapper.scaled_dot_product_attention(query, key, value, scale_factor)
                 mock_standard.assert_called_once()
 
     def test_flashinfer_sdpa_routes_nonsquare_with_weights_to_fallback(self):
@@ -386,7 +386,7 @@ class TestFlashInferKernelWrapping:
                 scale_factor = 1.0 / (head_size**0.5)
 
                 # return_attn_weights=True -> eager fallback (cuBLAS, fast)
-                wrapper._flashinfer_sdpa(
+                wrapper.scaled_dot_product_attention(
                     query,
                     key,
                     value,
@@ -416,7 +416,7 @@ class TestFlashInferKernelWrapping:
                 scale_factor = 1.0 / (head_size**0.5)
 
                 # return_attn_weights=True with chunk_size -> eager fallback with chunking
-                wrapper._flashinfer_sdpa(
+                wrapper.scaled_dot_product_attention(
                     query,
                     key,
                     value,
@@ -446,7 +446,7 @@ class TestFlashInferKernelWrapping:
 
             # Should raise AssertionError due to head size mismatch
             with pytest.raises(AssertionError):
-                wrapper._flashinfer_sdpa(query, key, value, scale_factor)
+                wrapper.scaled_dot_product_attention(query, key, value, scale_factor)
 
     def test_parameter_translation_validates_gqa_divisibility(self):
         """Test that parameter translation validates GQA divisibility."""
@@ -467,7 +467,7 @@ class TestFlashInferKernelWrapping:
 
             # Should raise AssertionError due to n_head not divisible by n_query_groups
             with pytest.raises(AssertionError):
-                wrapper._flashinfer_sdpa(query, key, value, scale_factor)
+                wrapper.scaled_dot_product_attention(query, key, value, scale_factor)
 
 
 @_RunIf(min_cuda_gpus=1)
@@ -1189,7 +1189,7 @@ class TestBackendEquivalenceVerification:
 
     def test_backend_equivalence_result_initialization(self):
         """Test BackendEquivalenceResult initialization."""
-        from keys_values.flashinfer_wrapper import BackendEquivalenceResult
+        from keys_values.flashinfer_verification import BackendEquivalenceResult
 
         result = BackendEquivalenceResult(
             is_equivalent=True,
@@ -1213,7 +1213,7 @@ class TestBackendEquivalenceVerification:
 
     def test_backend_equivalence_result_bool_conversion(self):
         """Test BackendEquivalenceResult boolean conversion."""
-        from keys_values.flashinfer_wrapper import BackendEquivalenceResult
+        from keys_values.flashinfer_verification import BackendEquivalenceResult
 
         # Equivalent result should be truthy
         result_true = BackendEquivalenceResult(
@@ -1233,7 +1233,7 @@ class TestBackendEquivalenceVerification:
 
     def test_backend_equivalence_result_repr(self):
         """Test BackendEquivalenceResult string representation."""
-        from keys_values.flashinfer_wrapper import BackendEquivalenceResult
+        from keys_values.flashinfer_verification import BackendEquivalenceResult
 
         result = BackendEquivalenceResult(
             is_equivalent=True,
@@ -1250,7 +1250,7 @@ class TestBackendEquivalenceVerification:
 
     def test_check_numerical_equivalence_identical_tensors(self):
         """Test check_numerical_equivalence with identical tensors."""
-        from keys_values.flashinfer_wrapper import check_numerical_equivalence
+        from keys_values.flashinfer_verification import check_numerical_equivalence
 
         tensor = torch.randn(2, 4, 8, 64)
         is_equiv, max_diff, mean_diff = check_numerical_equivalence(tensor, tensor)
@@ -1261,7 +1261,7 @@ class TestBackendEquivalenceVerification:
 
     def test_check_numerical_equivalence_within_tolerance(self):
         """Test check_numerical_equivalence with tensors within tolerance."""
-        from keys_values.flashinfer_wrapper import check_numerical_equivalence
+        from keys_values.flashinfer_verification import check_numerical_equivalence
 
         tensor_a = torch.randn(2, 4, 8, 64)
         # Add small noise within tolerance
@@ -1277,7 +1277,7 @@ class TestBackendEquivalenceVerification:
 
     def test_check_numerical_equivalence_outside_tolerance(self):
         """Test check_numerical_equivalence with tensors outside tolerance."""
-        from keys_values.flashinfer_wrapper import check_numerical_equivalence
+        from keys_values.flashinfer_verification import check_numerical_equivalence
 
         tensor_a = torch.randn(2, 4, 8, 64)
         # Add large noise outside tolerance
@@ -1293,7 +1293,7 @@ class TestBackendEquivalenceVerification:
 
     def test_check_numerical_equivalence_shape_mismatch(self):
         """Test check_numerical_equivalence raises error on shape mismatch."""
-        from keys_values.flashinfer_wrapper import check_numerical_equivalence
+        from keys_values.flashinfer_verification import check_numerical_equivalence
 
         tensor_a = torch.randn(2, 4, 8, 64)
         tensor_b = torch.randn(2, 4, 16, 64)  # Different shape
@@ -1303,7 +1303,7 @@ class TestBackendEquivalenceVerification:
 
     def test_verify_backend_equivalence_raises_when_unavailable(self):
         """Test verify_backend_equivalence raises error when kernels unavailable."""
-        from keys_values.flashinfer_wrapper import verify_backend_equivalence
+        from keys_values.flashinfer_verification import verify_backend_equivalence
 
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=False
@@ -1327,14 +1327,14 @@ class TestBackendEquivalenceVerification:
 
     def test_verify_backend_equivalence_handles_kernel_error(self):
         """Test verify_backend_equivalence handles kernel computation errors."""
-        from keys_values.flashinfer_wrapper import verify_backend_equivalence
+        from keys_values.flashinfer_verification import verify_backend_equivalence
 
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
             with patch.object(
                 FlashInferSDPA,
-                "_flashinfer_sdpa",
+                "scaled_dot_product_attention",
                 side_effect=RuntimeError("Kernel error"),
             ):
                 # Reset the global instance
@@ -1361,7 +1361,7 @@ class TestBackendEquivalenceVerification:
 
     def test_verify_backend_equivalence_batch_empty_list(self):
         """Test verify_backend_equivalence_batch with empty list."""
-        from keys_values.flashinfer_wrapper import verify_backend_equivalence_batch
+        from keys_values.flashinfer_verification import verify_backend_equivalence_batch
 
         passed, failed, results = verify_backend_equivalence_batch(
             [], log_results=False
@@ -1373,7 +1373,7 @@ class TestBackendEquivalenceVerification:
 
     def test_verify_backend_equivalence_batch_handles_exceptions(self):
         """Test verify_backend_equivalence_batch handles exceptions in test cases."""
-        from keys_values.flashinfer_wrapper import verify_backend_equivalence_batch
+        from keys_values.flashinfer_verification import verify_backend_equivalence_batch
 
         # Test case with missing required key
         test_cases = [
@@ -1428,7 +1428,7 @@ class TestBackendEquivalenceVerificationIntegration:
 
     def test_numerical_tolerance_checking_with_different_tolerances(self):
         """Test numerical tolerance checking with various tolerance levels."""
-        from keys_values.flashinfer_wrapper import check_numerical_equivalence
+        from keys_values.flashinfer_verification import check_numerical_equivalence
 
         tensor_a = torch.randn(2, 4, 8, 64)
         # Add noise of known magnitude
@@ -1452,7 +1452,7 @@ class TestBackendEquivalenceVerificationIntegration:
 
     def test_equivalence_result_message_contains_useful_info(self):
         """Test that equivalence result message contains useful debugging info."""
-        from keys_values.flashinfer_wrapper import BackendEquivalenceResult
+        from keys_values.flashinfer_verification import BackendEquivalenceResult
 
         # Test failure message
         result_fail = BackendEquivalenceResult(
@@ -1514,7 +1514,7 @@ class TestTwoPhaseWeightAccumulation:
                 )
                 scale_factor = 1.0 / (head_size**0.5)
 
-                wrapper._flashinfer_sdpa(
+                wrapper.scaled_dot_product_attention(
                     query,
                     key,
                     value,
@@ -1552,7 +1552,7 @@ class TestTwoPhaseWeightAccumulation:
                 )
                 scale_factor = 1.0 / (head_size**0.5)
 
-                wrapper._flashinfer_sdpa(
+                wrapper.scaled_dot_product_attention(
                     query,
                     key,
                     value,
@@ -1591,7 +1591,7 @@ class TestTwoPhaseWeightAccumulation:
                 scale_factor = 1.0 / (head_size**0.5)
 
                 # input_pos=0 -> fused prefill can't be used (needs non-causal) -> two-phase
-                wrapper._flashinfer_sdpa(
+                wrapper.scaled_dot_product_attention(
                     query,
                     key,
                     value,
@@ -1628,7 +1628,7 @@ class TestTwoPhaseWeightAccumulation:
                 )
                 scale_factor = 1.0 / (head_size**0.5)
 
-                wrapper._flashinfer_sdpa(
+                wrapper.scaled_dot_product_attention(
                     query,
                     key,
                     value,
