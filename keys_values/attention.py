@@ -30,6 +30,7 @@ from keys_values.attention_utils import (
     pytorch_scaled_dot_product_attention,
 )
 from keys_values.config import Config
+from keys_values.flashinfer_wrapper import can_do_flashinfer
 from keys_values.flex_attention import (
     scaled_dot_product_attention_flexatt,
     FlexAttentionArgs,
@@ -166,6 +167,9 @@ class MultiHeadSelfAttention:
         Note: Currently, `flex_attention` cannot be used if a sliding window
         size is used. This is because our current mechanism to support
         `token_positions` is not compatible with a sliding window size.
+    - :const:`SDPA_IMPL_FLASHINFER`: Modification of `FlashInfer` SDPA kernel
+        which returns attention weights. Best choice if
+        `return_attn_weights == True`, but comes with some conditions.
     - :const:`SDPA_IMPL_QPADDED_PYTORCH: Variant of PyTorch kernel, where
         `query` is zero-padded. This is implemented in
         :func:`sdpa_wrapper.scaled_dot_product_attention`. Cannot be used
@@ -325,6 +329,7 @@ class MultiHeadSelfAttention:
             q_len=query.shape[2],
             kv_len=k_and_v.keys().shape[2],
             sliding_window_size=sliding_window_size,
+            dtype=query.dtype,
         )
         if sdpa_mode in (SDPA_IMPL_PYTORCH, SDPA_IMPL_EAGER_NO_BLOCKS):
             sdpa_is_eager = sdpa_mode == SDPA_IMPL_EAGER_NO_BLOCKS
@@ -385,6 +390,7 @@ class MultiHeadSelfAttention:
         q_len: int,
         kv_len: int,
         sliding_window_size: Optional[int],
+        dtype: torch.dtype,
     ) -> int:
         """
         Decides on what SDPA implementation can be used, depending on
@@ -395,37 +401,52 @@ class MultiHeadSelfAttention:
             is_causal: Causal case (queries, keys over same tokens)?
             q_len: Length of queries
             kv_len: Length of keys, values
+            sliding_window_size: Sliding window size
+            dtype: Data type of inputs
 
         Returns:
             Type of SDPA implementation: See `SDPA_IMPL_*` constants
 
         """
         must_eager = return_attn_weights or self.use_eager_sdpa_always
-        # Use FlashInfer when attention weights are needed and it's available
-        if return_attn_weights and not self.use_eager_sdpa_always:
-            if _get_flashinfer_sdpa() is not None:
-                return SDPA_IMPL_FLASHINFER
+        has_flashinfer = can_do_flashinfer(
+            head_size=self.config.head_size,
+            dtype=dtype,
+            return_attn_weights=return_attn_weights,
+        )
         sws_given = sliding_window_size is not None
         use_flex_att = (
             self.flexatt_args is not None and not must_eager and not sws_given
         )
-        if (
-            return_attn_weights
-            and self.flexatt_args is not None
-            and self.flexatt_args.forward_return_lse
-            and not sws_given
-        ):
-            return SDPA_IMPL_FLEXATT_ATTN_WEIGHTS
-        if self.config.attention_logit_softcapping is not None:
+        if return_attn_weights:
+            # Returning attention weights (return_attn_weights == True):
+            # - First choice is FlashInfer
+            # - Second choice is FlexAttn baseline
+            if not self.use_eager_sdpa_always:
+                if has_flashinfer:
+                    return SDPA_IMPL_FLASHINFER
+                elif (
+                    self.flexatt_args is not None
+                    and self.flexatt_args.forward_return_lse
+                    and not sws_given
+                ):
+                    return SDPA_IMPL_FLEXATT_ATTN_WEIGHTS
+            else:
+                return SDPA_IMPL_EAGER_BLOCKS
+        else:
+            if self.config.attention_logit_softcapping is not None:
+                if use_flex_att:
+                    return SDPA_IMPL_FLEXATTENTION
+                else:
+                    return SDPA_IMPL_EAGER_NO_BLOCKS
+            if is_causal and not must_eager:
+                # For prefill, native PyTorch SDPA is fastest
+                return SDPA_IMPL_PYTORCH
             if use_flex_att:
                 return SDPA_IMPL_FLEXATTENTION
-            else:
-                return SDPA_IMPL_EAGER_NO_BLOCKS
-        if is_causal and not must_eager:
-            # For prefill, native PyTorch SDPA is fastest
-            return SDPA_IMPL_PYTORCH
-        if use_flex_att:
-            return SDPA_IMPL_FLEXATTENTION
+            if has_flashinfer:
+                return SDPA_IMPL_FLASHINFER
+        # At this point, neither FlexAttn nor FlashInfer apply
         if must_eager or sws_given or self._use_eager_kernel(kv_len, q_len):
             return SDPA_IMPL_EAGER_BLOCKS
         else:
@@ -463,18 +484,21 @@ class MultiHeadSelfAttention:
                 q_len=query.shape[2],
                 kv_len=k_and_v.keys().shape[2],
                 sliding_window_size=sliding_window_size,
+                dtype=query.dtype,
             )
         if sdpa_mode == SDPA_IMPL_FLASHINFER:
+            assert sliding_window_size is None
             flashinfer = _get_flashinfer_sdpa()
             attn_outputs, attn_weights = flashinfer.scaled_dot_product_attention(
                 query=query,
                 key=k_and_v.keys(),
                 value=k_and_v.values(),
                 scale_factor=scale_factor,
-                return_attn_weights=return_attn_weights,
-                token_positions=token_positions,
                 input_pos=input_pos,
-                sliding_window_size=sliding_window_size,
+                token_positions=token_positions,
+                return_attn_weights=return_attn_weights,
+                sort_if_3d=self._sort_if_3d,
+                output_transposed=transpose_result,
             )
         elif sdpa_mode == SDPA_IMPL_QPADDED_PYTORCH:
             attn_outputs, filtered_kernels = scaled_dot_product_attention_zeropad(
@@ -556,7 +580,8 @@ class MultiHeadSelfAttention:
                 attention_logit_softcapping=self.config.attention_logit_softcapping,
                 tmp_array_limit_gb=self.tmp_array_limit_gb_value(),
             )
-        if transpose_result:
+
+        if transpose_result and sdpa_mode != SDPA_IMPL_FLASHINFER:
             attn_outputs = attn_outputs.transpose(1, 2)
         return attn_outputs, attn_weights
 

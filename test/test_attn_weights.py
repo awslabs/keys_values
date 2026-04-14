@@ -30,6 +30,27 @@ from keys_values.flex_attention import (
 from keys_values.utils import repeat_interleave, index_to_3d
 
 
+# Lazy singleton for FlashInfer wrapper
+_flashinfer_sdpa = None
+_flashinfer_checked = False
+
+
+def _get_flashinfer_sdpa():
+    """Lazily initialize and return the FlashInfer SDPA wrapper, or None."""
+    global _flashinfer_sdpa, _flashinfer_checked
+    if not _flashinfer_checked:
+        _flashinfer_checked = True
+        try:
+            from keys_values.flashinfer_wrapper import FlashInferSDPA
+
+            wrapper = FlashInferSDPA()
+            if wrapper.available:
+                _flashinfer_sdpa = wrapper
+        except Exception:
+            pass
+    return _flashinfer_sdpa
+
+
 def pytorch_reference_weights(
     query,
     key,
@@ -99,6 +120,20 @@ def flexatt_weights(query, key, scale, input_pos, token_positions):
     return attn_weights
 
 
+def flashinfer_weights(query, key, scale, input_pos, token_positions):
+    flashinfer = _get_flashinfer_sdpa()
+    _, attn_weights = flashinfer.scaled_dot_product_attention(
+        query=query,
+        key=key,
+        value=key,  # does not matter
+        scale_factor=scale,
+        input_pos=input_pos,
+        token_positions=token_positions,
+        return_attn_weights=True,
+    )
+    return attn_weights
+
+
 def eager_weights(query, key, scale, input_pos, token_positions):
     _, attn_weights = scaled_dot_product_attention_in_blocks(
         query=query,
@@ -112,12 +147,26 @@ def eager_weights(query, key, scale, input_pos, token_positions):
     return attn_weights
 
 
+def get_variants():
+    variants = (pytorch_reference_weights, eager_weights, flexatt_weights)
+    ind_and_names = (
+        (0, "PyTorch reference"),
+        (1, "eager"),
+        (2, "FlexAttention"),
+    )
+    if _get_flashinfer_sdpa() is not None:
+        variants += (flashinfer_weights,)
+        ind_and_names += ((3, "FlashInfer"),)
+    return variants, ind_and_names
+
+
 @_RunIf(min_cuda_gpus=1)
 @torch.inference_mode()
 def test_small_comparison():
     torch.manual_seed(42)
     device = "cuda"
     dtype = torch.bfloat16
+    variants, ind_and_names = get_variants()
 
     # Qwen3-4B config
     batch_size = 1
@@ -160,13 +209,14 @@ def test_small_comparison():
         # Different variants
         attn_weights = [
             func(query, key, scale, input_pos, token_positions)
-            for func in (pytorch_reference_weights, eager_weights, flexatt_weights)
+            for func in variants
         ]
 
         # Compare attn weights
+        ref_name = ind_and_names[0][1]
         print("Comparing summed attention weights:")
-        for ind, name in ((1, "eager"), (2, "FlexAttention")):
-            print(f"PyTorch reference vs {name}:")
+        for ind, name in ind_and_names[1:]:
+            print(f"{ref_name} vs {name}:")
             torch.testing.assert_close(attn_weights[0], attn_weights[ind])
 
         # Check eviction decisions: which top-K entries differ?
@@ -174,10 +224,10 @@ def test_small_comparison():
         keep_k = int(kv_len2 * keep_ratio)
         print(f"Comparing eviction decisions: Keep {keep_k} of {kv_len2}:")
         topk_ref = attn_weights[0][0, 0, :].topk(keep_k).indices.sort().values
-        for ind, name in ((1, "eager"), (2, "FlexAttention")):
+        for ind, name in ind_and_names[1:]:
             topk_comp = attn_weights[ind][0, 0, :].topk(keep_k).indices.sort().values
             num_match = sum(topk_comp == topk_ref).item()
-            print(f"PyTorch reference vs {name}: {num_match} matches")
+            print(f"{ref_name} vs {name}: {num_match} matches")
             assert num_match == keep_k
 
 
@@ -198,6 +248,7 @@ def test_larger_comparison(q_len, kv_len, input_pos, keep_ratio, description):
     torch.manual_seed(42 + kv_len)
     device = "cuda"
     dtype = torch.bfloat16
+    variants, ind_and_names = get_variants()
 
     # Qwen3-4B config
     n_head = 32
@@ -218,13 +269,14 @@ def test_larger_comparison(q_len, kv_len, input_pos, keep_ratio, description):
     # Different variants
     attn_weights = [
         func(query, key, scale, input_pos, token_positions)
-        for func in (pytorch_reference_weights, eager_weights, flexatt_weights)
+        for func in variants
     ]
 
     # Compare attn weights
+    ref_name = ind_and_names[0][1]
     print(f"\n{description}\nComparing summed attention weights:")
-    for ind, name in ((1, "eager"), (2, "FlexAttention")):
-        print(f"PyTorch reference vs {name}:")
+    for ind, name in ind_and_names[1:]:
+        print(f"{ref_name} vs {name}:")
         torch.testing.assert_close(attn_weights[0], attn_weights[ind])
 
     # Check eviction decisions: which top-K entries differ?
@@ -235,10 +287,10 @@ def test_larger_comparison(q_len, kv_len, input_pos, keep_ratio, description):
     for b in range(batch_size):
         for h in range(n_kv_heads):
             topk_ref = set(attn_weights[0][b, h].topk(keep_k).indices.tolist())
-            for ind in range(1, 3):
+            for ind in range(1, len(ind_and_names)):
                 topk_comp = set(attn_weights[ind][b, h].topk(keep_k).indices.tolist())
                 if topk_ref != topk_comp:
                     mismatches[ind - 1] += 1
-    for name, num_mis in zip(("eager", "FlexAttention"), mismatches):
-        print(f"PyTorch reference vs {name}: {num_mis} mismatches")
+    for (_, name), num_mis in zip(ind_and_names[1:], mismatches):
+        print(f"{ref_name} vs {name}: {num_mis} mismatches")
     assert sum(mismatches) == 0

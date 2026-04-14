@@ -295,6 +295,18 @@ def pad_head_size(
     return query, key, value, diff
 
 
+def can_do_flashinfer(
+    head_size: int,
+    dtype: torch.dtype,
+    return_attn_weights: bool
+) -> bool:
+    return (
+        dtype in (torch.float16, torch.bfloat16)
+        and head_size <= ALLOWED_HEAD_SIZES[-1]
+        and (not return_attn_weights or _triton_available)
+    )
+
+
 class FlashInferSDPA:
     """
     Wrapper for FlashInfer CUDA kernels.
@@ -374,6 +386,7 @@ class FlashInferSDPA:
         token_positions: Optional[torch.Tensor],
         return_attn_weights: bool = False,
         sort_if_3d: bool = True,
+        output_transposed: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Compute SDPA using FlashInfer kernels.
@@ -390,12 +403,16 @@ class FlashInferSDPA:
                 equivalent to `arange(kv_len)`.
             return_attn_weights: Whether to return attention weights
             sort_if_3d: See :func:`reorder_key_value`.
+            output_transposed: If `True`, dims 1 and 2 of `attn_outputs` are
+                transposed (compared to `query`).
 
         Returns:
             Tuple `(attn_outputs, attn_weights)`, where `attn_outputs` has shape
-            `(batch_size, n_head, q_len, head_size)`. `attn_weights` has shape
-            `(batch_size, n_query_groups, kv_len)` and `dtype == float32` if
-            `return_attn_weights == True`. Otherwise, `None` is returned.
+            `(batch_size, n_head, q_len, head_size)` if
+            `output_transposed == False, shape
+            `(batch_size, q_len, n_head, head_size)` otherwise. `attn_weights`
+            has shape `(batch_size, n_query_groups, kv_len)` and `dtype == float32`
+            if `return_attn_weights == True`. Otherwise, `None` is returned.
 
         """
         if not isinstance(input_pos, int):
@@ -411,18 +428,15 @@ class FlashInferSDPA:
             )
 
         # Check if FlashInfer fast prefill can be used
-        if not (
-            query.dtype in (torch.float16, torch.bfloat16)
-            and head_size <= ALLOWED_HEAD_SIZES[-1]
-        ):
+        if return_attn_weights and not _triton_available:
+            raise NotImplementedError(
+                "Triton is required for return_attn_weights=True"
+            )
+        if not can_do_flashinfer(head_size, query.dtype, return_attn_weights):
             raise NotImplementedError(
                 "FlashInfer SDPA needs these conditions:\n"
                 f"- head_size <= {ALLOWED_HEAD_SIZES[-1]}, but is {head_size}\n"
                 f"- query.dtype in (torch.float16, torch.bfloat16), but is {query.dtype}"
-            )
-        if return_attn_weights and not _triton_available:
-            raise NotImplementedError(
-                "Triton is required for return_attn_weights=True"
             )
 
         # Routing:
@@ -497,6 +511,8 @@ class FlashInferSDPA:
 
         if head_size_diff is not None:
             attn_outputs = attn_outputs[..., :head_size]
+        if not output_transposed:
+            attn_outputs = attn_outputs.transpose(1, 2).contiguous()
         return attn_outputs, attn_weights
 
     def _flashinfer_sdpa_standard(
@@ -516,7 +532,7 @@ class FlashInferSDPA:
             scale_factor: Scale factor for attention scores
 
         Returns:
-            Attention outputs, shape `(batch_size, n_head, q_len, head_size)`
+            Attention outputs, shape `(batch_size, q_len, n_head, head_size)`
 
         """
         from keys_values import flashinfer_ops
@@ -540,11 +556,7 @@ class FlashInferSDPA:
             return_weights=False,
         )
 
-        # Transform output back to keys_values format
-        # From (batch_size, q_len, n_head, head_size) to (batch_size, n_head, q_len, head_size)
-        output = output_transformed.transpose(1, 2).contiguous()
-
-        return output
+        return output_transformed
 
     def _flashinfer_sdpa_fused_prefill(
         self,
@@ -594,7 +606,7 @@ class FlashInferSDPA:
         # causal=True + input_pos uses the fast kernel and is correct for
         # contiguous positions [0..kv_len-1].
         # ================================================================
-        o_t, _, lse = flashinfer_ops.sdpa_prefill(
+        output, _, lse = flashinfer_ops.sdpa_prefill(
             query=q_t,
             key=k_t,
             value=v_t,
@@ -602,10 +614,8 @@ class FlashInferSDPA:
             return_weights=False,
             return_lse=True,
         )
-        # o_t: [bs, q_len, n_head, head_size]
+        # output: [bs, q_len, n_head, head_size]
         # lse: [bs, q_len, n_head] (log2 scale)
-
-        output = o_t.transpose(1, 2).contiguous()  # [bs, n_head, q_len, head_size]
 
         # ================================================================
         # Phase 2: Compute attention weight sums using Triton score-sum kernel
@@ -672,7 +682,7 @@ class FlashInferSDPA:
             scale=scale_factor,
             return_weights=return_attn_weights,
         )
-        attn_outputs = output_token.unsqueeze(2)
+        attn_outputs = output_token.unsqueeze(1)
         if return_attn_weights:
             attn_weights = attn_weights.to(dtype=torch.float32)
 
