@@ -195,18 +195,14 @@ def sdpa_decode(
     key: torch.Tensor,
     value: torch.Tensor,
     scale: float,
-    token_positions: Optional[torch.Tensor] = None,
-    input_pos: Optional[torch.Tensor] = None,
-    sliding_window_size: int = -1,
-    causal: bool = True,
     return_weights: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
     Scaled Dot Product Attention for decode phase (single query token).
 
     This function calls the vendored CUDA kernel for efficient decode-phase
-    attention computation. It supports causal masking, sliding window attention,
-    and optional attention weight return.
+    attention computation. It supports causal masking and optional attention
+    weight return.
 
     Args:
         query: Query tensor with shape:
@@ -217,18 +213,6 @@ def sdpa_decode(
             - Non-batched: [kv_len, num_kv_heads, head_dim]
         value: Value tensor, same shape as key
         scale: Softmax scale factor (typically 1/sqrt(head_dim))
-        token_positions: Optional token positions for causal masking. Supports:
-            - Shared across heads:
-              - Batched: [batch_size, kv_len]
-              - Non-batched: [kv_len]
-            - Per-head (heterogeneous orderings):
-              - Batched: [batch_size, num_kv_heads, kv_len]
-              - Non-batched: [num_kv_heads, kv_len]
-        input_pos: Current query position(s):
-            - Batched: [batch_size] tensor
-            - Non-batched: scalar tensor
-        sliding_window_size: Sliding window size (-1 for no window)
-        causal: Whether to apply causal masking (default: True)
         return_weights: Whether to return attention weights (default: False)
 
     Returns:
@@ -250,13 +234,10 @@ def sdpa_decode(
         >>> query = torch.randn(2, 32, 128, device='cuda', dtype=torch.float16)
         >>> key = torch.randn(2, 1024, 8, 128, device='cuda', dtype=torch.float16)
         >>> value = torch.randn(2, 1024, 8, 128, device='cuda', dtype=torch.float16)
-        >>> token_positions = torch.randint(0, 1024, (2, 8, 1024), device='cuda', dtype=torch.int32)
         >>> scale = 1.0 / (128 ** 0.5)
         >>>
         >>> output, weights = ops.sdpa_decode(
-        ...     query, key, value, scale,
-        ...     token_positions=token_positions,
-        ...     return_weights=True
+        ...     query, key, value, scale, return_weights=True
         ... )
         >>> print(output.shape)  # [2, 32, 128]
         >>> print(weights.shape)  # [2, 8, 1024]
@@ -271,10 +252,10 @@ def sdpa_decode(
         key,
         value,
         scale,
-        token_positions,
-        input_pos,
-        sliding_window_size,
-        causal,
+        None,  # token_positions
+        None,  # input_pos
+        -1,  # sliding_window_size
+        True,  # causal
         return_weights,
     )
 
@@ -284,10 +265,6 @@ def sdpa_prefill(
     key: torch.Tensor,
     value: torch.Tensor,
     scale: float,
-    token_positions: Optional[torch.Tensor] = None,
-    input_pos: Optional[torch.Tensor] = None,
-    sliding_window_size: int = -1,
-    causal: bool = True,
     return_weights: bool = False,
     return_lse: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
@@ -295,8 +272,8 @@ def sdpa_prefill(
     Scaled Dot Product Attention for prefill phase (multiple query tokens).
 
     This function calls the vendored CUDA kernel for efficient prefill-phase
-    attention computation. It supports causal masking, sliding window attention,
-    and optional attention weight return summed over the query axis.
+    attention computation. It supports causal masking and optional attention
+    weight return summed over the query axis.
 
     Args:
         query: Query tensor with shape:
@@ -307,14 +284,6 @@ def sdpa_prefill(
             - Non-batched: [kv_len, num_kv_heads, head_dim]
         value: Value tensor, same shape as key
         scale: Softmax scale factor (typically 1/sqrt(head_dim))
-        token_positions: Optional token positions for causal masking with shape:
-            - Batched: [batch_size, kv_len]
-            - Non-batched: [kv_len]
-        input_pos: Starting query position(s):
-            - Batched: [batch_size] tensor
-            - Non-batched: scalar tensor
-        sliding_window_size: Sliding window size (-1 for no window)
-        causal: Whether to apply causal masking (default: True)
         return_weights: Whether to return attention weights summed over query axis (default: False)
         return_lse: Whether to return log-sum-exp values per query position (default: False).
             When True, uses the fast FlashInfer kernel and returns LSE instead of computing
@@ -346,8 +315,7 @@ def sdpa_prefill(
         >>> scale = 1.0 / (128 ** 0.5)
         >>>
         >>> output, _, lse = ops.sdpa_prefill(
-        ...     query, key, value, scale,
-        ...     return_lse=True
+        ...     query, key, value, scale, return_lse=True,
         ... )
         >>> print(output.shape)  # [2, 512, 32, 128]
         >>> print(lse.shape)  # [2, 512, 32]
@@ -362,10 +330,10 @@ def sdpa_prefill(
         key,
         value,
         scale,
-        token_positions,
-        input_pos,
-        sliding_window_size,
-        causal,
+        None,  # token_positions
+        None,  # input_pos
+        -1,  # sliding_window_size
+        True,  # causal
         return_weights,
         return_lse,
     )
@@ -376,10 +344,6 @@ def sdpa_prefill_fused_v2(
     key: torch.Tensor,
     value: torch.Tensor,
     scale: float,
-    token_positions: Optional[torch.Tensor] = None,
-    input_pos: Optional[torch.Tensor] = None,
-    sliding_window_size: int = -1,
-    causal: bool = True,
     return_weights: bool = False,
     return_lse: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
@@ -393,10 +357,10 @@ def sdpa_prefill_fused_v2(
     When return_weights=False or return_lse=True, delegates to sdpa_prefill.
 
     Args:
-        Same as sdpa_prefill.
+        Same as :func:`sdpa_prefill`.
 
     Returns:
-        Same as sdpa_prefill.
+        Same as :func:`sdpa_prefill`.
     """
     if not _available:
         raise RuntimeError(
@@ -408,10 +372,10 @@ def sdpa_prefill_fused_v2(
         key,
         value,
         scale,
-        token_positions,
-        input_pos,
-        sliding_window_size,
-        causal,
+        None,  # token_positions
+        None,  # input_pos
+        -1,  # sliding_window_size
+        True,  # causal
         return_weights,
         return_lse,
     )
@@ -422,10 +386,6 @@ def sdpa_prefill_fused(
     key: torch.Tensor,
     value: torch.Tensor,
     scale: float,
-    token_positions: Optional[torch.Tensor] = None,
-    input_pos: Optional[torch.Tensor] = None,
-    sliding_window_size: int = -1,
-    causal: bool = True,
     return_weights: bool = False,
     return_lse: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
@@ -440,10 +400,10 @@ def sdpa_prefill_fused(
     When return_weights=False or return_lse=True, delegates to sdpa_prefill.
 
     Args:
-        Same as sdpa_prefill.
+        Same as :func:`sdpa_prefill`.
 
     Returns:
-        Same as sdpa_prefill.
+        Same as :func:`sdpa_prefill`.
     """
     if not _available:
         raise RuntimeError(
@@ -455,10 +415,10 @@ def sdpa_prefill_fused(
         key,
         value,
         scale,
-        token_positions,
-        input_pos,
-        sliding_window_size,
-        causal,
+        None,  # token_positions
+        None,  # input_pos
+        -1,  # sliding_window_size
+        True,  # causal
         return_weights,
         return_lse,
     )

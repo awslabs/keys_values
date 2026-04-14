@@ -73,7 +73,7 @@ def scaled_dot_product_attention(
     sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
     do_filter_kernels: bool = False,
     annotation_callback: Optional[ReorderAnnotationCallback] = None,
-    sort_if_3d: bool = False,
+    sort_if_3d: bool = True,
 ) -> Tuple[torch.Tensor, Optional[List[SDPBackend]]]:
     """
     Wraps `F.scaled_dot_product_attention` in a way which supports
@@ -144,14 +144,17 @@ def scaled_dot_product_attention(
             raise ValueError(
                 f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
             )
-        key, value, extra_info = reorder_key_value(
-            key,
-            value,
-            token_positions.detach(),
-            input_pos,
-            q_len,
-            sort_if_3d,
-        )
+        if q_len > 1:
+            key, value, extra_info = reorder_key_value(
+                key,
+                value,
+                token_positions.detach(),
+                input_pos,
+                q_len,
+                sort_if_3d,
+            )
+        else:
+            extra_info = dict()
 
     # At this point, the new entries in `key`, `value`, corresponding to the
     # `query` tokens, are on the right end. Causal masking works if `query`
@@ -331,7 +334,7 @@ def reorder_key_value(
     token_positions: torch.Tensor,
     input_pos: int,
     q_len: int,
-    sort_if_3d: bool = False,
+    sort_if_3d: bool = True,
     check_token_pos: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
     """

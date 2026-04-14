@@ -15,7 +15,6 @@ results/
 logs/
 out/
 checkpoints/
-docs/
 test_fused_v2.py
 test_fused_v2b.py
 benchmark_long_context.py

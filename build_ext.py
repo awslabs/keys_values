@@ -25,7 +25,6 @@ Prerequisites:
     - CUDA toolkit
 """
 
-import os
 import sys
 from pathlib import Path
 

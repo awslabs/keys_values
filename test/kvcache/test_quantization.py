@@ -185,6 +185,7 @@ def test_concatenation(dtype, blocks_over_heads, name, device):
         params,
         num=cache_length,
         vocab_size=vocab_size,
+        device=device,
     )
     kv_cache._prefill(data["key"], data["value"], data["token_idx"])
     positions = random_index(params, 0, cache_length, num=7)
@@ -219,6 +220,7 @@ def test_quantizer_states(dtype, blocks_over_heads, name, device):
         params,
         num=cache_length,
         vocab_size=vocab_size,
+        device=device,
     )
     kv_cache._prefill(data["key"], data["value"], data["token_idx"])
     kv_buffers = kv_cache.kv_buffers
@@ -596,6 +598,7 @@ def test_quantized_buffers_write_back(dtype, name, device):
             params,
             num=num_prefill,
             vocab_size=config.vocab_size,
+            device=device,
         )
         c_comm(**data)
         c_sep(**data)
@@ -618,6 +621,7 @@ def test_quantized_buffers_write_back(dtype, name, device):
                 params,
                 num=q_len,
                 vocab_size=config.vocab_size,
+                device=device,
             )
             c_comm(**data)
             c_sep(**data)
