@@ -144,14 +144,17 @@ def scaled_dot_product_attention(
             raise ValueError(
                 f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
             )
-        key, value, extra_info = reorder_key_value(
-            key,
-            value,
-            token_positions.detach(),
-            input_pos,
-            q_len,
-            sort_if_3d,
-        )
+        if q_len > 1:
+            key, value, extra_info = reorder_key_value(
+                key,
+                value,
+                token_positions.detach(),
+                input_pos,
+                q_len,
+                sort_if_3d,
+            )
+        else:
+            extra_info = dict()
 
     # At this point, the new entries in `key`, `value`, corresponding to the
     # `query` tokens, are on the right end. Causal masking works if `query`

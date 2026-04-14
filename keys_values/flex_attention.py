@@ -640,7 +640,7 @@ def scaled_dot_product_attention_flexatt(
             raise ValueError(
                 f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
             )
-    if token_positions is not None:
+    if token_positions is not None and q_len > 1:
         key, value, extra_info = reorder_key_value(
             key,
             value,
@@ -805,7 +805,8 @@ def sdpa_flexatt_with_attn_weights(
         raise ValueError(
             f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
         )
-    if token_positions is not None:
+    do_reorder = token_positions is not None and q_len > 1
+    if do_reorder:
         key, value, extra_info = reorder_key_value(
             key,
             value,
@@ -913,7 +914,7 @@ def sdpa_flexatt_with_attn_weights(
             ),
             dim=2,
         )
-    if token_positions is not None:
+    if do_reorder:
         # Undo reordering
         attn_weights = reorder_inverse(attn_weights, **extra_info)
 

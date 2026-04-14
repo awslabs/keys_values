@@ -362,7 +362,7 @@ class FlashInferSDPA:
         chunk_size: Optional[int] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Compute SDPA using FlashInfer kernels with fallback.
+        Compute SDPA using FlashInfer kernels.
 
         Args:
             query: Query tensor, shape `(batch_size, n_head, q_len, head_size)`
@@ -387,6 +387,8 @@ class FlashInferSDPA:
             `return_attn_weights == True`. Otherwise, `None` is returned.
 
         """
+        if not isinstance(input_pos, int):
+            raise ValueError("input_pos must be int scalar")
         if input_pos <= 0:
             raise ValueError(f"input_pos must be positive. Don't use for square prefill")
         batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(
@@ -400,42 +402,35 @@ class FlashInferSDPA:
             )
 
         # Routing:
-        # 1. q_len == 1 (single-token decode): use optimized decode kernel
-        #    (has efficient logits caching for attention weights)
-        # 2. q_len > 1 with return_attn_weights + FlashInfer eligible: two-phase approach
+        # 1. q_len == 1 (single-token decode):
+        #    Use optimized decode kernel (has efficient logits caching for
+        #    attention weights)
+        # 2. q_len > 1, return_attn_weights, Triton available:
+        #    FlashInfer forward + Triton score-sum (no large intermediate,
+        #    tensor cores)
+        # 3. q_len > 1, return_attn_weights, FlashInfer eligible:
+        #    Two phase approach:
         #    Phase 1: FlashInfer prefill for O + LSE (fast, no large intermediates)
         #    Phase 2: Compute weights from Q, K, LSE via chunked matmuls
-        # 3. q_len > 1 with return_attn_weights but FlashInfer not eligible: eager fallback
-        # 4. q_len > 1 without weights: use FlashInfer prefill kernel (fastest)
-        #    With chunk_size: chunk queries for memory management
-        use_decode_kernel = q_len == 1 and kv_len > 1
+        # 4. q_len > 1, no return_attn_weights:
+        #    Use FlashInfer prefill kernel (fastest)
+        use_decode_kernel = q_len == 1
+        if use_decode_kernel and kv_len == 1:
+            raise NotImplementedError("Don't use for q_len=1, kv_len=1")
 
-        # Check if FlashInfer fast prefill can be used (no token_positions, supported dtype/head_dim)
+        # Check if FlashInfer fast prefill can be used
         can_use_flashinfer_fast = (
-            token_positions is None
-            and query.dtype in (torch.float16, torch.bfloat16)
+            query.dtype in (torch.float16, torch.bfloat16)
             and head_size in (64, 128, 256)
         )
-
         # Check if Triton score-sum kernel can be used for weight accumulation.
         # Requires: fp16/bf16 (for tensor-core tl.dot), supported head_dim,
         # and input_pos > 0 (at input_pos=0 it's a prefill where
         # token_positions is None, which we need for causal masking).
-        input_pos_val = (
-            input_pos
-            if isinstance(input_pos, int)
-            else (
-                input_pos[0].item()
-                if hasattr(input_pos, "item") or isinstance(input_pos, torch.Tensor)
-                else 0
-            )
-        )
         can_use_fused_prefill = (
             self.use_fused_prefill
             and _triton_available
-            and query.dtype in (torch.float16, torch.bfloat16)
-            and head_size in (64, 128, 256)
-            and input_pos_val > 0
+            and can_use_flashinfer_fast
         )
 
         if use_decode_kernel:
@@ -450,58 +445,41 @@ class FlashInferSDPA:
                 input_pos,
                 sliding_window_size,
             )
-        elif q_len > 1 and return_attn_weights and can_use_fused_prefill:
-            # FlashInfer forward + Triton score-sum (no large intermediate, tensor cores)
-            return self._flashinfer_sdpa_fused_prefill(
-                query,
-                key,
-                value,
-                scale_factor,
-                token_positions,
-                input_pos,
-                sliding_window_size,
-            )
-        elif q_len > 1 and return_attn_weights and can_use_flashinfer_fast:
-            # Old two-phase: FlashInfer prefill for O+LSE, then compute weights from LSE
-            return self._flashinfer_sdpa_two_phase_weights(
-                query,
-                key,
-                value,
-                scale_factor,
-                token_positions,
-                input_pos,
-                sliding_window_size,
-                chunk_size,
-            )
-        elif q_len > 1 and return_attn_weights:
-            # Fallback for cases FlashInfer can't handle (token_positions, float32, etc.)
-            return self._fallback_sdpa(
-                query,
-                key,
-                value,
-                scale_factor,
-                return_attn_weights,
-                token_positions,
-                input_pos,
-                sliding_window_size,
-                chunk_size,
-            )
-        elif q_len == kv_len and input_pos_val == 0:
-            # Square prefill (first chunk): PyTorch native SDPA is faster
-            # than FlashInfer for this case, and attention weights are not
-            # needed during prefill.
-            return self._fallback_sdpa(
-                query,
-                key,
-                value,
-                scale_factor,
-                return_attn_weights,
-                token_positions,
-                input_pos,
-                sliding_window_size,
-                chunk_size,
-            )
+        elif return_attn_weights:
+            if can_use_fused_prefill:
+                # FlashInfer forward + Triton score-sum (no large intermediate, tensor cores)
+                return self._flashinfer_sdpa_fused_prefill(
+                    query,
+                    key,
+                    value,
+                    scale_factor,
+                    token_positions,
+                    input_pos,
+                    sliding_window_size,
+                )
+            elif can_use_flashinfer_fast:
+                if token_positions is not None:
+                    # HIER: Reorder things!
+                    raise NotImplementedError()
+                # Old two-phase: FlashInfer prefill for O+LSE, then compute weights from LSE
+                return self._flashinfer_sdpa_two_phase_weights(
+                    query,
+                    key,
+                    value,
+                    scale_factor,
+                    token_positions,
+                    input_pos,
+                    sliding_window_size,
+                    chunk_size,
+                )
+            else:
+                raise NotImplementedError(
+                    "Case q_len > 1, return_attn_weights == True: Need these conditions:\n"
+                    f"- head_size in (64, 128, 256), but is {head_size}\n"
+                    f"- query.dtype in (torch.float16, torch.bfloat16), but is {query.dtype}"
+                )
         elif chunk_size is not None and q_len > chunk_size:
+            # HIER: Do we need this??
             # Chunk queries via prefill kernel for memory management (no weights)
             return self._flashinfer_sdpa_long_sequence_chunking(
                 query,
@@ -515,7 +493,8 @@ class FlashInferSDPA:
                 chunk_size,
             )
         else:
-            # Non-square case without weights: use FlashInfer prefill kernel
+            # q_len > 1, return_attn_weights == False:
+            # Use FlashInfer prefill kernel
             return self._flashinfer_sdpa_standard(
                 query,
                 key,
@@ -533,10 +512,10 @@ class FlashInferSDPA:
         key: torch.Tensor,
         value: torch.Tensor,
         scale_factor: float,
-        return_attn_weights: bool = False,
-        token_positions: Optional[torch.Tensor] = None,
-        input_pos: int = 0,
-        sliding_window_size: Optional[int] = None,
+        return_attn_weights: bool,
+        token_positions: Optional[torch.Tensor],
+        input_pos: int,
+        sliding_window_size: Optional[int],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Standard vendored kernel SDPA using the prefill kernel.
@@ -641,9 +620,9 @@ class FlashInferSDPA:
         key: torch.Tensor,
         value: torch.Tensor,
         scale_factor: float,
-        token_positions: Optional[torch.Tensor] = None,
-        input_pos: int = 0,
-        sliding_window_size: Optional[int] = None,
+        token_positions: Optional[torch.Tensor],
+        input_pos: int,
+        sliding_window_size: Optional[int],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         FlashInfer forward + Triton score-sum for O + attention weights.
@@ -748,10 +727,10 @@ class FlashInferSDPA:
         key: torch.Tensor,
         value: torch.Tensor,
         scale_factor: float,
-        token_positions: Optional[torch.Tensor] = None,
-        input_pos: int = 0,
-        sliding_window_size: Optional[int] = None,
-        chunk_size: Optional[int] = None,
+        token_positions: Optional[torch.Tensor],
+        input_pos: int,
+        sliding_window_size: Optional[int],
+        chunk_size: Optional[int],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Two-phase attention: FlashInfer prefill for O+LSE, then weight accumulation.
@@ -831,8 +810,8 @@ class FlashInferSDPA:
         scale_factor: float,
         lse: torch.Tensor,
         input_pos: int,
-        sliding_window_size: Optional[int] = None,
-        chunk_size: Optional[int] = None,
+        sliding_window_size: Optional[int],
+        chunk_size: Optional[int],
     ) -> torch.Tensor:
         """
         Compute accumulated attention weights from LSE values.
@@ -966,10 +945,10 @@ class FlashInferSDPA:
         key: torch.Tensor,
         value: torch.Tensor,
         scale_factor: float,
-        return_attn_weights: bool = False,
-        token_positions: Optional[torch.Tensor] = None,
-        input_pos: int = 0,
-        sliding_window_size: Optional[int] = None,
+        return_attn_weights: bool,
+        token_positions: Optional[torch.Tensor],
+        input_pos: int,
+        sliding_window_size: Optional[int],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Decode-kernel variant for single-token decode (q_len == 1).
@@ -1080,11 +1059,11 @@ class FlashInferSDPA:
         key: torch.Tensor,
         value: torch.Tensor,
         scale_factor: float,
-        return_attn_weights: bool = False,
-        token_positions: Optional[torch.Tensor] = None,
-        input_pos: int = 0,
-        sliding_window_size: Optional[int] = None,
-        chunk_size: int = 1024,
+        return_attn_weights: bool,
+        token_positions: Optional[torch.Tensor],
+        input_pos: int ,
+        sliding_window_size: Optional[int],
+        chunk_size: int,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Process long query sequences in chunks for memory management.
