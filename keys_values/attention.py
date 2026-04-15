@@ -328,6 +328,7 @@ class MultiHeadSelfAttention:
             kv_len=k_and_v.keys().shape[2],
             sliding_window_size=sliding_window_size,
             dtype=query.dtype,
+            device=query.device,
         )
         if sdpa_mode in (SDPA_IMPL_PYTORCH, SDPA_IMPL_EAGER_NO_BLOCKS):
             sdpa_is_eager = sdpa_mode == SDPA_IMPL_EAGER_NO_BLOCKS
@@ -389,6 +390,7 @@ class MultiHeadSelfAttention:
         kv_len: int,
         sliding_window_size: Optional[int],
         dtype: torch.dtype,
+        device: torch.device,
     ) -> int:
         """
         Decides on what SDPA implementation can be used, depending on
@@ -406,16 +408,16 @@ class MultiHeadSelfAttention:
             Type of SDPA implementation: See `SDPA_IMPL_*` constants
 
         """
+        device_cuda = device.type == "cuda"
         must_eager = return_attn_weights or self.use_eager_sdpa_always
         has_flashinfer = can_do_flashinfer(
             head_size=self.config.head_size,
             dtype=dtype,
             return_attn_weights=return_attn_weights,
-        ) and _get_flashinfer_sdpa() is not None
+        ) and _get_flashinfer_sdpa() is not None and device_cuda
         sws_given = sliding_window_size is not None
-        use_flex_att = (
-            self.flexatt_args is not None and not must_eager and not sws_given
-        )
+        has_flexatt = self.flexatt_args is not None and device_cuda and not sws_given
+        use_flex_att = has_flexatt and not must_eager
         if return_attn_weights:
             # Returning attention weights (return_attn_weights == True):
             # - First choice is FlashInfer
@@ -423,11 +425,7 @@ class MultiHeadSelfAttention:
             if not self.use_eager_sdpa_always:
                 if has_flashinfer:
                     return SDPA_IMPL_FLASHINFER
-                elif (
-                    self.flexatt_args is not None
-                    and self.flexatt_args.forward_return_lse
-                    and not sws_given
-                ):
+                elif has_flexatt and self.flexatt_args.forward_return_lse:
                     return SDPA_IMPL_FLEXATT_ATTN_WEIGHTS
             if self.config.attention_logit_softcapping is not None:
                 return SDPA_IMPL_EAGER_NO_BLOCKS
@@ -485,6 +483,7 @@ class MultiHeadSelfAttention:
                 kv_len=k_and_v.keys().shape[2],
                 sliding_window_size=sliding_window_size,
                 dtype=query.dtype,
+                device=query.device,
             )
         if sdpa_mode == SDPA_IMPL_FLASHINFER:
             assert sliding_window_size is None

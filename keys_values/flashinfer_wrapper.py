@@ -301,7 +301,8 @@ def can_do_flashinfer(
     return_attn_weights: bool
 ) -> bool:
     return (
-        dtype in (torch.float16, torch.bfloat16)
+        torch.cuda.is_available()
+        and dtype in (torch.float16, torch.bfloat16)
         and head_size <= ALLOWED_HEAD_SIZES[-1]
         and (not return_attn_weights or _triton_available)
     )
@@ -670,6 +671,7 @@ class FlashInferSDPA:
 
         # Transform key and value to vendored kernel format
         # From (batch_size, n_query_groups, kv_len, head_size) to (batch_size, kv_len, n_query_groups, head_size)
+        query=query.contiguous()
         key_transformed = key.transpose(1, 2).contiguous()
         value_transformed = value.transpose(1, 2).contiguous()
 

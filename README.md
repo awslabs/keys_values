@@ -96,8 +96,8 @@ pytest test/test_flashinfer_wrapper.py
 
 ### Installatiop with CUDA 12.8
 
-The following installation works if you are bound to use CUDA 12.8. Note this
-includes the FlashInfer extension.
+The following installation works if you are bound to use CUDA 12.8. Note that
+this includes the FlashInfer extension.
 
 ```bash
 git clone https://github.com/awslabs/keys_values.git
@@ -105,9 +105,16 @@ python3 -m venv keyval_venv
 . keyval_venv/bin/activate
 pip install --upgrade pip
 pip install torch==2.10.0 torchmetrics==1.8.2 torchvision==0.25.0
+echo "torch==2.10.0" >constraints.txt
+pip install flashinfer-python==0.6.7 -c constraints.txt
 pip install 'litgpt[all,test,extra]'
 cd keys_values
 pip install -e .
+```
+
+Then:
+```bash
+python build_ext.py
 ```
 
 

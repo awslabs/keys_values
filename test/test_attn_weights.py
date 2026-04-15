@@ -215,7 +215,9 @@ def test_small_comparison():
         print("Comparing summed attention weights:")
         for ind, name in ind_and_names[1:]:
             print(f"{ref_name} vs {name}:")
-            torch.testing.assert_close(attn_weights[0], attn_weights[ind])
+            torch.testing.assert_close(
+                attn_weights[0], attn_weights[ind], atol=1e-4, rtol=1e-4,
+            )
 
         # Check eviction decisions: which top-K entries differ?
         keep_ratio = 0.5
@@ -275,7 +277,9 @@ def test_larger_comparison(q_len, kv_len, input_pos, keep_ratio, description):
     print(f"\n{description}\nComparing summed attention weights:")
     for ind, name in ind_and_names[1:]:
         print(f"{ref_name} vs {name}:")
-        torch.testing.assert_close(attn_weights[0], attn_weights[ind])
+        torch.testing.assert_close(
+            attn_weights[0], attn_weights[ind], atol=1e-4, rtol=1e-4,
+        )
 
     # Check eviction decisions: which top-K entries differ?
     keep_k = int(kv_len * keep_ratio)

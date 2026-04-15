@@ -216,6 +216,7 @@ def test_wrapper_with_lastrec_cache(device, dtype, tol_kwargs):
         params,
         num=seq_length,
         vocab_size=vocab_size,
+        device=device,
     )
 
     outputs = []
