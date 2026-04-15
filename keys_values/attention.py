@@ -429,6 +429,8 @@ class MultiHeadSelfAttention:
                     and not sws_given
                 ):
                     return SDPA_IMPL_FLEXATT_ATTN_WEIGHTS
+            if self.config.attention_logit_softcapping is not None:
+                return SDPA_IMPL_EAGER_NO_BLOCKS
             else:
                 return SDPA_IMPL_EAGER_BLOCKS
         else:
