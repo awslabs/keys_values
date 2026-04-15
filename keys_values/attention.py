@@ -120,9 +120,7 @@ def _get_flashinfer_sdpa():
         try:
             from keys_values.flashinfer_wrapper import FlashInferSDPA
 
-            wrapper = FlashInferSDPA()
-            if wrapper.available:
-                _flashinfer_sdpa = wrapper
+            _flashinfer_sdpa = FlashInferSDPA()
         except Exception:
             pass
     return _flashinfer_sdpa
@@ -413,7 +411,7 @@ class MultiHeadSelfAttention:
             head_size=self.config.head_size,
             dtype=dtype,
             return_attn_weights=return_attn_weights,
-        )
+        ) and _get_flashinfer_sdpa() is not None
         sws_given = sliding_window_size is not None
         use_flex_att = (
             self.flexatt_args is not None and not must_eager and not sws_given

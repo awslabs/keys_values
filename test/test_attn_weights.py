@@ -43,9 +43,7 @@ def _get_flashinfer_sdpa():
         try:
             from keys_values.flashinfer_wrapper import FlashInferSDPA
 
-            wrapper = FlashInferSDPA()
-            if wrapper.available:
-                _flashinfer_sdpa = wrapper
+            _flashinfer_sdpa = FlashInferSDPA()
         except Exception:
             pass
     return _flashinfer_sdpa

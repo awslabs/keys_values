@@ -21,7 +21,7 @@ to do, you can:
 It is best to create a virtual environment:
 
 ```bash
-git clone git@github.com:awslabs/keys_values.git
+git clone https://github.com/awslabs/keys_values.git
 python3 -m venv keyval_venv
 . keyval_venv/bin/activate
 pip install --upgrade pip
@@ -94,6 +94,22 @@ To verify the build worked:
 pytest test/test_flashinfer_wrapper.py
 ```
 
+### Installatiop with CUDA 12.8
+
+The following installation works if you are bound to use CUDA 12.8. Note this
+includes the FlashInfer extension.
+
+```bash
+git clone https://github.com/awslabs/keys_values.git
+python3 -m venv keyval_venv
+. keyval_venv/bin/activate
+pip install --upgrade pip
+pip install torch==2.10.0 torchmetrics==1.8.2 torchvision==0.25.0
+pip install 'litgpt[all,test,extra]'
+cd keys_values
+pip install -e .
+```
+
 
 ## Example: Long Context Fine-tuning on LongBench V2
 
@@ -101,7 +117,7 @@ This example runs on a single `Nvidia A 100` GPU with 40 GB of RAM.
 
 ```bash
 cd ${KEYS_VALUES_PATH}
-python3 keys_values/__main__.py finetune_long_lora Qwen/Qwen2.5-0.5B --out_dir /home/ubuntu/out/finetune/longcontext_lora --data LongBenchV2 --data.max_seq_length 100000 --data.metadata_dir /home/ubuntu/out/finetune/longcontext_lora/data --head_model seq_classification_on_logits --precision bf16-true --verbose some --kv_cache.name h2o-default --kv_cache.cache_length 16384 --kv_cache.chunk_size 1024 --train.save_interval 10 --train.micro_batch_size 4 --eval.interval 10
+python3 keys_values/__main__.py finetune_long_lora Qwen/Qwen2.5-0.5B --out_dir /home/ubuntu/out/finetune/longcontext_lora --data LongBenchV2 --data.max_seq_length 100000 --data.metadata_dir /home/ubuntu/out/finetune/longcontext_lora/data --head_model seq_classification_on_logits --precision bf16-true --verbose some --kv_cache.name h2o-torch-quantized8 --kv_cache.cache_length 16384 --kv_cache.chunk_size 1024 --train.save_interval 10 --train.micro_batch_size 4 --eval.interval 10
 ```
 
 What is happening here?
@@ -146,10 +162,14 @@ to 32, the per-device batch size to 4, and asks to use 8 devices.
   the [largest impact on speed and accuracy](#cache-length-and-chunk-size).
 * Play around with different [cache policies](#kv-cache-policy-and-configuration),
   or try to use buffer quantization (both by `kv_cache.name`).
-* Try using `finetune_offload_lora` instead of `finetune_long_lora`, this will
-  free up more memory for the backward pass, allowing you to explore options
-  like `grad.layers_per_cell` and `grad.chunks_per_cell_multiplier`. Larger
-  values speed up computations, but require more GPU memory. Or try
+* Play round with different datasets. `--data Helmet` gives access to datasets
+  from the Helmet benchmark.
+* Try using `finetune_offload_lora` instead of `finetune_long_lora`, and
+  `--kv_cache.cpu_offload True`. This uses CPU offloading to free up memory
+  during forward and backward pass, allowing you to explore options like
+  `grad.layers_per_cell` and `grad.chunks_per_cell_multiplier`. Beware that at
+  present, CPU offloading does not run as fast as it could, we are working on
+  it (https://github.com/awslabs/keys_values/issues/62). Or try
   `finetune_offload_full` to fine-tune all model parameters.
 * Your KV cache policy is not supported? Why not implement and
   [contribute it back](#implementing-new-kv-cache-policies) to the community?
@@ -669,9 +689,9 @@ be stored before encoding.
 Scaled dot product attention (SDPA) is represented by
 [MultiHeadSelfAttention.__call__](./keys_values/attention.py#L209). Ideally, its
 implementations are via fast kernels, such as
-[torch.nn.functional.scaled_dot_product_attention](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) or
-[torch.nn.attention.flex_attention.flex_attention](https://docs.pytorch.org/docs/stable/nn.attention.flex_attention.html#torch.nn.attention.flex_attention.FlexKernelOptions).
-However, we have some special requirements:
+[torch.nn.functional.scaled_dot_product_attention](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html),
+[torch.nn.attention.flex_attention.flex_attention](https://docs.pytorch.org/docs/stable/nn.attention.flex_attention.html#torch.nn.attention.flex_attention.FlexKernelOptions),
+or FlashInfer. However, we have some special requirements:
 
 * Some KV cache policies require attention weights on top of attention outputs
   returned by SDPA. The full attention weights would be a tensor of shape
@@ -679,13 +699,12 @@ However, we have some special requirements:
   `kv_len = key.shape[2]`, which is much too big to maintain in memory. We
   ask for attention weights summed over the query axis, shape
   `(batch_size, n_head, kv_len)`, with `return_attn_weights=True`. This is
-  sufficient to compute H2O and other scores.
+  sufficient to compute H2O and other scores. As our
+  [FlashInfer integration](./keys_values/flashinfer_wrapper.py) shows, this
+  is rather easy to add to existing kernels.
 * We need the "rectangular" case, where `1 << q_len << kv_len`, not just the
   "training" (or prefill) case, `q_len == kv_len`, which many SDPA kernel
   developers focus on almost exclusively.
-* We need implicit causal attention masking even if `key`, `value` are
-  reordered, as expressed by `kv_cache.token_positions`. This is the least
-  important requirements, since `key`, `value` can cheaply be reordered.
 
 We are currently working actively to improve the SDPA kernel situation for this
 library (and would be very happy for help, see
@@ -698,7 +717,15 @@ library (and would be very happy for help, see
   with them, but not (currently) `config.sliding_window_size`. We also reorder
   `key`, `query` so that the new entries (corresponding to `query`) are on the
   right end. Cannot return attention weights.
-  
+* `FlashInfer` SDPA returning summed attention weights: We adapt
+  [FlashInfer](https://github.com/flashinfer-ai/flashinfer) so that summed
+  attention weights are returned, see
+  [keys_values/flashinfer_wrapper.py](./keys_values/flashinfer_wrapper.py)
+  for details. These kernels are the default if attention weights are needed,
+  e.g. to use H2O cache strategies (`h2o`, `qh2o`). They are used in the
+  default rectangular case if `flex_attention` is not asked for. We also
+  reorder `key`, `query` so that the new entries (corresponding to `query`)
+  are on the right end.
 * Query-padded PyTorch SDPA: We use
   `torch.nn.functional.scaled_dot_product_attention`, but pad `query` with
   zeroes on the left to obtain the square "training" case. We also reorder
