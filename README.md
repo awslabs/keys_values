@@ -163,13 +163,22 @@ to 32, the per-device batch size to 4, and asks to use 8 devices.
 The library supports inference in the same rudimentary way than `LitGPT`, but
 for contexts of essentially arbitrary length. The code in `generate/base` can
 be used in the same way as the original `LitGPT` code. We integrate with
-PyTorch `flex_attention` for fast scaled dot product attention (SDPA).
+PyTorch `flex_attention` and with [FlashInfer](https://github.com/flashinfer-ai/flashinfer)
+for fast scaled dot product attention (SDPA).
 
 Having said that, we are aware that this is not competitive with leading
 inference libraries, such as [vLLM](https://github.com/vllm-project/vllm) or
 [SGLang](https://github.com/sgl-project/sglang). Our library lacks support
 for multi-device strategies (context parallelism in particular) as well as
 many crucial optimizations.
+
+We are providing a better support of advanced KV cache strategies like
+[Heavy Hitter Oracle](https://arxiv.org/abs/2306.14048) than vLLM. One reason
+why sparse attention techniques like H2O are used less often than they deserve,
+is that they run slowly due to poor support of low-level SDPA kernels. We provide
+a modification of the [FlashInfer](https://github.com/flashinfer-ai/flashinfer)
+kernels with which H2O becomes competitive. Stay tuned for more efforts in this
+direction.
 
 We are actively working towards supporting multi-device fine-tuning in a better
 way than what we currently have. As for inference, neither vLLM nor SGLang
@@ -180,10 +189,10 @@ abstractions and basic implementations there, but rely on their advanced scaled
 dot product attention (SDPA) kernels and multi-device low level code.
 
 If you are motivated to work on such an integration, please do get in touch
-(see [CONTRIBUTING.md](./CONTRIBUTING.md))! We would love to support users
+(see [CONTRIBUTING.md](./CONTRIBUTING.md)). We would love to support users
 being able to run inference with long contexts without having to spend a lot
 of money on many GPUs, and we think that advanced selective KV cache policies
-are an important factor for achieving this goal.
+are an important direction towards this goal.
 
 A script for evaluating fine-tuned models on long context test data is provided
 in [finetune/longcontext_eval.py](./keys_values/finetune/longcontext_eval.py).
@@ -205,7 +214,8 @@ advanced selective KV caching during inference (such as H2O), maybe on a single
 device only, it may not be a good idea to use context parallelism for fine-tuning,
 because this is not aware of the cache restrictions put in place during
 inference. In contrast, the techniques provided here compute gradients with your
-KV cache policy in place, which allows the model to adapt to it.
+KV cache policy in place. The model can adapt to the precisely the restrictions
+introduced by the policy.
 
 The following fine-tuning modes are currently provided:
 
