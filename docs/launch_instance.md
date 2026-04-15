@@ -1,5 +1,33 @@
 # Launch P4 Instance for Experimentation
 
+
+## Current Instances and Volumes
+
+### Instance `P4Research`
+
+* Instance ID: `i-01be7aa867826a644`
+* File system ID: `fs-0016c9964fcfc99f7`
+* VPC: `vpc-0619b17e`
+* Subnet ID: `subnet-65fffa1c`
+* AZ: `us-west-2b`
+
+```bash
+ssh -i "matthis_deeplearning_uswest2.pem" ubuntu@ec2-35-85-224-176.us-west-2.compute.amazonaws.com
+```
+
+### Instance `P4Research2`
+
+* Instance ID: `??`
+* File system ID: `fs-0186b686e7dffc35b`
+* VPC: `vpc-0619b17e`
+* Subnet ID: `subnet-124f5848`
+* AZ: `us-west-2c`
+
+```bash
+ssh -i "matthis_deeplearning_uswest2.pem" ubuntu@ec2-34-209-209-37.us-west-2.compute.amazonaws.com
+```
+
+
 ## Launch and start instance
 
 * Type: `p4d.24xlarge`
@@ -56,20 +84,6 @@ Add an **outbound rule** (usually already open):
 
 * Security group of EFS: `sg-01a150984c1045fbf (launch-wizard-11)`
 * Security group of EC2: `sg-0b00b6174eab4d62b (launch-wizard-16)`
-
-### Volume for `P4Research`
-
-* File system ID: `fs-0016c9964fcfc99f7`
-* VPC: `vpc-0619b17e`
-* Subnet ID: `subnet-65fffa1c`
-* AZ: `us-west-2b`
-
-### Volume for `P4Research2`
-
-* File system ID: `fs-0186b686e7dffc35b`
-* VPC: `vpc-0619b17e`
-* Subnet ID: `subnet-124f5848`
-* AZ: `us-west-2c`
 
 
 ## Mount EFS volume
@@ -171,7 +185,7 @@ cd ../virtenvs
 python3 -m venv keys_values
 . keys_values/bin/activate
 pip install --upgrade pip
-pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+pip3 install torch==2.10.0 torchmetrics==1.8.2 torchvision==0.25.0
 pip install 'litgpt[all,test,extra]'
 cd ../git/keys_values
 pip install -e .
@@ -180,13 +194,4 @@ pip install -e .
 Run tests:
 ```bash
 pytest test/
-```
-
-FUCK!! Still get segmentation fault.
-
-Next: Use exactly these versions:
-```text
-torch==2.10.0
-torchmetrics==1.8.2
-torchvision==0.25.0
 ```

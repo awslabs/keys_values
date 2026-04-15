@@ -44,14 +44,12 @@ from keys_values.data.base import (
     INPUT_IDS_NAME,
     TARGETS_STRINGS_NAME,
 )
-from keys_values.data.evaluation import (
-    TASK_NAME,
-    ORIG_IDX_NAME,
+from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
+from keys_values.evaluation.tasks import (
     EvaluationTasks,
     EvaluationWithTasksHelper,
-    EvaluationDataLoader,
 )
-from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
+from keys_values.data.evaluation import EvaluationDataLoader, ORIG_IDX_NAME, TASK_NAME
 from keys_values.finetune.args import KVCacheArgs, SDPAArgs
 from keys_values.finetune.batch_transform import BatchTransformFactory
 from keys_values.finetune.longcontext_full import (

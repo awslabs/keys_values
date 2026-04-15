@@ -22,11 +22,8 @@ from litgpt.tokenizer import Tokenizer
 
 from keys_values.data.base import pad_dataset
 from keys_values.data.dataloader import MyDataLoader
-from keys_values.data.evaluation import (
-    SimilarSequenceLengthWithTasksSampler,
-    EvaluationDataLoader,
-)
 from keys_values.data.iterators import SimilarSequenceLengthSampler
+from keys_values.data.evaluation import SimilarSequenceLengthWithTasksSampler, EvaluationDataLoader
 
 METADATA_SEQ_LENGTHS_KEY = "sequence_lengths"
 
