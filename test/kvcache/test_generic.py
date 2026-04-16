@@ -75,7 +75,10 @@ def test_store_retrieve(device, name, kwargs):
     )
 
     data = random_args_cache_forward(
-        params, num_insert, vocab_size, device=device,
+        params,
+        num_insert,
+        vocab_size,
+        device=device,
     )
     kv_cache(**range_from_args(data, 0, num_prefill))
     for pos in range(num_prefill, num_insert):
@@ -130,7 +133,10 @@ def test_prefill(name, device):
     kv_cache = create_kv_cache(name, params)
 
     data = random_args_cache_forward(
-        params, cache_length, vocab_size, device=device,
+        params,
+        cache_length,
+        vocab_size,
+        device=device,
     )
     keys_cached = []
     values_cached = []
@@ -261,7 +267,10 @@ def test_size_estimate(
 
         # Need to prefill caches so that `size_estimate` works
         data = random_args_cache_forward(
-            params, cache_length, vocab_size, device=device,
+            params,
+            cache_length,
+            vocab_size,
+            device=device,
         )
         max_prefill_length = kv_caches[0].max_prefill_length
         for kv_cache in kv_caches:

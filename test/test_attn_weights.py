@@ -29,7 +29,6 @@ from keys_values.flex_attention import (
 )
 from keys_values.utils import repeat_interleave, index_to_3d
 
-
 # Lazy singleton for FlashInfer wrapper
 _flashinfer_sdpa = None
 _flashinfer_checked = False
@@ -206,8 +205,7 @@ def test_small_comparison():
 
         # Different variants
         attn_weights = [
-            func(query, key, scale, input_pos, token_positions)
-            for func in variants
+            func(query, key, scale, input_pos, token_positions) for func in variants
         ]
 
         # Compare attn weights
@@ -216,7 +214,10 @@ def test_small_comparison():
         for ind, name in ind_and_names[1:]:
             print(f"{ref_name} vs {name}:")
             torch.testing.assert_close(
-                attn_weights[0], attn_weights[ind], atol=1e-4, rtol=1e-4,
+                attn_weights[0],
+                attn_weights[ind],
+                atol=1e-4,
+                rtol=1e-4,
             )
 
         # Check eviction decisions: which top-K entries differ?
@@ -268,8 +269,7 @@ def test_larger_comparison(q_len, kv_len, input_pos, keep_ratio, description):
 
     # Different variants
     attn_weights = [
-        func(query, key, scale, input_pos, token_positions)
-        for func in variants
+        func(query, key, scale, input_pos, token_positions) for func in variants
     ]
 
     # Compare attn weights
@@ -278,7 +278,10 @@ def test_larger_comparison(q_len, kv_len, input_pos, keep_ratio, description):
     for ind, name in ind_and_names[1:]:
         print(f"{ref_name} vs {name}:")
         torch.testing.assert_close(
-            attn_weights[0], attn_weights[ind], atol=1e-4, rtol=1e-4,
+            attn_weights[0],
+            attn_weights[ind],
+            atol=1e-4,
+            rtol=1e-4,
         )
 
     # Check eviction decisions: which top-K entries differ?

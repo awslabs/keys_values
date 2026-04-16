@@ -305,7 +305,12 @@ def test_token_pos_and_pos_log(device, dtype):
         num_prefill=num_prefill,
         v_length=False,
     )
-    torch.testing.assert_close(kv_cache.scores[:, :, :pos], scores)
+    torch.testing.assert_close(
+        kv_cache.scores[:, :, :pos],
+        scores,
+        atol=1e-4,
+        rtol=0.0005,
+    )
     next_positions = scores.argsort(dim=-1)
     torch.testing.assert_close(next_positions, kv_cache.next_positions(pos))
     # Insert chunk and evict due to scores

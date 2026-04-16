@@ -18,6 +18,7 @@ from typing import List, Optional
 
 from keys_values.evaluation.tasks import EvaluationTasks
 
+
 def main(
     out_dir: Path,
     model_type: str,
@@ -26,7 +27,10 @@ def main(
     # Collect results from all files across all tasks
     print(f"\nLoading evaluation result files from {out_dir}")
     eval_tasks = EvaluationTasks(
-        out_dir, model_type, tasks, collect_results=True,
+        out_dir,
+        model_type,
+        tasks,
+        collect_results=True,
     )
     all_data = []
     column_names = None
@@ -70,6 +74,8 @@ if __name__ == "__main__":
     ]
     model_type = "lora"
     for dataset, case in product(datasets, cases):
-        out_dir = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b" / dataset / case
+        out_dir = (
+            Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b" / dataset / case
+        )
         if out_dir.exists():
             main(out_dir, model_type)

@@ -23,7 +23,6 @@ from keys_values.sdpa_wrapper import (
     reorder_inverse,
 )
 
-
 logger = logging.getLogger(__name__)
 
 _triton_available = False
@@ -191,7 +190,9 @@ def triton_score_sum(
 
     # Reshape K → contiguous [batch*n_kv_heads, kv_len, head_size]
     K_flat = (
-        K.permute(0, 2, 1, 3).reshape(batch_size * n_kv_heads, kv_len, head_size).contiguous()
+        K.permute(0, 2, 1, 3)
+        .reshape(batch_size * n_kv_heads, kv_len, head_size)
+        .contiguous()
     )
 
     # Reshape LSE → contiguous [batch*n_kv_heads, q_len*group_size]
@@ -204,13 +205,21 @@ def triton_score_sum(
 
     # Create `TP_flat`, `input_pos` to make default causal attention masking
     # work
-    TP_flat = torch.arange(
-        kv_len, dtype=torch.int32, device=Q.device,
-    )[None, :].expand(batch_size * n_kv_heads, kv_len).contiguous()
+    TP_flat = (
+        torch.arange(
+            kv_len,
+            dtype=torch.int32,
+            device=Q.device,
+        )[None, :]
+        .expand(batch_size * n_kv_heads, kv_len)
+        .contiguous()
+    )
     input_pos = kv_len - q_len
 
     total_q = q_len * group_size
-    W = torch.zeros(batch_size * n_kv_heads, kv_len, device=Q.device, dtype=torch.float32)
+    W = torch.zeros(
+        batch_size * n_kv_heads, kv_len, device=Q.device, dtype=torch.float32
+    )
 
     # Block sizes tuned for A100 + head_size=128
     BLOCK_KV = 128
@@ -296,9 +305,7 @@ def pad_head_size(
 
 
 def can_do_flashinfer(
-    head_size: int,
-    dtype: torch.dtype,
-    return_attn_weights: bool
+    head_size: int, dtype: torch.dtype, return_attn_weights: bool
 ) -> bool:
     return (
         torch.cuda.is_available()
@@ -419,9 +426,13 @@ class FlashInferSDPA:
         if not isinstance(input_pos, int):
             raise ValueError("input_pos must be int scalar")
         if input_pos <= 0:
-            raise ValueError(f"input_pos must be positive. Don't use for square prefill")
+            raise ValueError(
+                f"input_pos must be positive. Don't use for square prefill"
+            )
         batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(
-            query, key, value,
+            query,
+            key,
+            value,
         )
         if token_positions is not None and token_positions.shape != key.shape[:-1]:
             raise ValueError(
@@ -430,9 +441,7 @@ class FlashInferSDPA:
 
         # Check if FlashInfer fast prefill can be used
         if return_attn_weights and not _triton_available:
-            raise NotImplementedError(
-                "Triton is required for return_attn_weights=True"
-            )
+            raise NotImplementedError("Triton is required for return_attn_weights=True")
         if not can_do_flashinfer(head_size, query.dtype, return_attn_weights):
             raise NotImplementedError(
                 "FlashInfer SDPA needs these conditions:\n"
@@ -472,7 +481,9 @@ class FlashInferSDPA:
         else:
             extra_info = dict()
         query, key, value, head_size_diff = pad_head_size(
-            query, key, value,
+            query,
+            key,
+            value,
         )
 
         if use_decode_kernel:
@@ -671,7 +682,7 @@ class FlashInferSDPA:
 
         # Transform key and value to vendored kernel format
         # From (batch_size, n_query_groups, kv_len, head_size) to (batch_size, kv_len, n_query_groups, head_size)
-        query=query.contiguous()
+        query = query.contiguous()
         key_transformed = key.transpose(1, 2).contiguous()
         value_transformed = value.transpose(1, 2).contiguous()
 

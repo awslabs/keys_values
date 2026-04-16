@@ -58,7 +58,10 @@ def test_last_recent(device, name):
         num_prefill = max_prefill_length
 
     data = random_args_cache_forward(
-        params, num_insert, vocab_size, device=device,
+        params,
+        num_insert,
+        vocab_size,
+        device=device,
     )
     kv_cache(**range_from_args(data, 0, num_prefill))
     for pos in range(num_prefill, num_insert):

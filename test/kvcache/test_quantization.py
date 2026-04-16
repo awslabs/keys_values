@@ -188,7 +188,13 @@ def test_concatenation(dtype, blocks_over_heads, name, device):
         device=device,
     )
     kv_cache._prefill(data["key"], data["value"], data["token_idx"])
-    positions = random_index(params, 0, cache_length, num=7)
+    positions = random_index(
+        params,
+        0,
+        cache_length,
+        num=7,
+        device=device,
+    )
     keys_1, values_1 = kv_cache.kv_buffers.get_slots(positions)
     kv_cache.kv_buffers.set_slots(positions, keys_1, values_1)
     keys_2, values_2 = kv_cache.kv_buffers.get_slots(positions)

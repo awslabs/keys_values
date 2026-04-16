@@ -98,9 +98,7 @@ class EvaluationTasks:
                             f"{path} is incomplete. tasks = {self._tasks} invalid"
                         )
                 elif self._num_result_files(path) == 0:
-                    raise ValueError(
-                        f"{path} contains no evaluation result files"
-                    )
+                    raise ValueError(f"{path} contains no evaluation result files")
 
     @staticmethod
     def _num_result_files(path: Path) -> int:
@@ -222,5 +220,3 @@ class EvaluationWithTasksHelper:
             if lock_path.exists():
                 lock_path.unlink()
             return file_path
-
-

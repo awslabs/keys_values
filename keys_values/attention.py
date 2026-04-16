@@ -410,12 +410,17 @@ class MultiHeadSelfAttention:
         """
         device_cuda = device.type == "cuda"
         must_eager = return_attn_weights or self.use_eager_sdpa_always
-        has_flashinfer = can_do_flashinfer(
-            head_size=self.config.head_size,
-            dtype=dtype,
-            return_attn_weights=return_attn_weights,
-        ) and _get_flashinfer_sdpa() is not None and device_cuda
         sws_given = sliding_window_size is not None
+        has_flashinfer = (
+            can_do_flashinfer(
+                head_size=self.config.head_size,
+                dtype=dtype,
+                return_attn_weights=return_attn_weights,
+            )
+            and _get_flashinfer_sdpa() is not None
+            and device_cuda
+            and not sws_given
+        )
         has_flexatt = self.flexatt_args is not None and device_cuda and not sws_given
         use_flex_att = has_flexatt and not must_eager
         if return_attn_weights:
