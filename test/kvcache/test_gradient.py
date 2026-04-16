@@ -25,7 +25,7 @@ from keys_values.finetune.utils import (
     may_match_twice_flex_attention_sdpa,
     may_match_twice_fused_eager_sdpa,
 )
-from keys_values.flex_attention import FlexAttentionArgs
+from keys_values.attention.flex_attention import FlexAttentionArgs
 from keys_values.kvcache.gradient.accumulate import GradientAccumulator
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.cell import GetInputSlice, WriteOutputsSlice

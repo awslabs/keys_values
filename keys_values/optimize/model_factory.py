@@ -32,7 +32,7 @@ from keys_values.optimize.module_wrapper import (
     AccessWeightsGradients,
     FlatVectors,
 )
-from keys_values.use_eager_kernel import transform_mha_kwargs
+from keys_values.attention.use_eager_kernel import transform_mha_kwargs
 
 
 class BlockComponentName:

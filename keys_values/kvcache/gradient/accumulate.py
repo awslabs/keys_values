@@ -21,7 +21,7 @@ import torch
 
 from keys_values.config import Config
 
-from keys_values.attention import do_softcapping
+from keys_values.attention.base import do_softcapping
 from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.base import (

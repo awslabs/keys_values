@@ -17,7 +17,7 @@ from typing import List, Optional, Union, Tuple, Callable, Dict, Any
 import torch
 from torch.nn.attention import SDPBackend
 
-from keys_values.attention_utils import pytorch_scaled_dot_product_attention
+from keys_values.attention.attention_utils import pytorch_scaled_dot_product_attention
 from keys_values.utils import expand_index, is_index_1d, index_to_3d
 
 

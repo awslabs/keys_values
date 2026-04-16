@@ -21,7 +21,7 @@ from scipy.spatial import KDTree
 
 from keys_values.config import Config
 
-from keys_values.attention import UseEagerPredicate
+from keys_values.attention.base import UseEagerPredicate
 
 
 def linear_interpolation(
@@ -53,7 +53,7 @@ DATA_KV_LEN = [4096, 6144, 8192, 12288, 16384, 24576, 32768]
 
 
 def load_q_len_thresh_data() -> Tuple[np.ndarray, List[List[int]]]:
-    path = Path(__file__).parent / "scripts" / "zero_padded_qlen_thresholds.csv"
+    path = Path(__file__).parent / "zero_padded_qlen_thresholds.csv"
     inputs = []
     q_len_thresh = []
     with path.open("r") as fp:

@@ -19,7 +19,7 @@ from torch.nn import functional as F
 from torch.nn.attention import SDPBackend
 
 from keys_values.array_limit import TemporaryArrayLimit
-from keys_values.attention_utils import (
+from keys_values.attention.attention_utils import (
     attention_compute_scores,
     attention_compute_weighted_values,
     build_mask_cache,
@@ -29,18 +29,18 @@ from keys_values.attention_utils import (
     slice_as_flat,
     pytorch_scaled_dot_product_attention,
 )
-from keys_values.config import Config
-from keys_values.flashinfer_wrapper import can_do_flashinfer
-from keys_values.flex_attention import (
+from keys_values.attention.flashinfer_wrapper import can_do_flashinfer
+from keys_values.attention.flex_attention import (
     scaled_dot_product_attention_flexatt,
     FlexAttentionArgs,
     sdpa_flexatt_with_attn_weights,
 )
-from keys_values.pos_encoding import position_encoding_factory, PositionEncoding
-from keys_values.sdpa_wrapper import (
+from keys_values.attention.sdpa_wrapper import (
     scaled_dot_product_attention as scaled_dot_product_attention_zeropad,
     ReorderAnnotationCallback,
 )
+from keys_values.config import Config
+from keys_values.pos_encoding import position_encoding_factory, PositionEncoding
 
 
 class KeysAndValues:
@@ -118,7 +118,7 @@ def _get_flashinfer_sdpa():
     if not _flashinfer_checked:
         _flashinfer_checked = True
         try:
-            from keys_values.flashinfer_wrapper import FlashInferSDPA
+            from keys_values.attention.flashinfer_wrapper import FlashInferSDPA
 
             _flashinfer_sdpa = FlashInferSDPA()
         except Exception:
@@ -208,6 +208,10 @@ class MultiHeadSelfAttention:
     `flexatt_args.forward_return_lse == True`, and neither sliding window
     size nor attention logit softcapping is used. If any of these do not
     hold, our eager implementation is used (which is quite a bit slower).
+
+    FlashInfer based SDPA kernels:
+    :const:`SDPA_IMPL_FLASHINFER`. Best choice if `return_attn_weights == True`.
+    Is used if `use_flashinfer == True` and the kernel is available.
     """
 
     def __init__(
@@ -221,6 +225,7 @@ class MultiHeadSelfAttention:
         filter_sdpa_kernels: bool = True,
         flexatt_args: Optional[FlexAttentionArgs] = None,
         sort_if_3d: bool = True,
+        use_flashinfer: bool = True,
     ) -> None:
         self.config = config
         if pos_encoding is None:
@@ -254,6 +259,7 @@ class MultiHeadSelfAttention:
         self._use_eager_kernel = use_eager_kernel
         self.flexatt_args = flexatt_args
         self._sort_if_3d = sort_if_3d
+        self._use_flashinfer = use_flashinfer
 
     @property
     def sdpa_kernels(self) -> Union[SDPBackend, List[SDPBackend]]:
@@ -417,6 +423,7 @@ class MultiHeadSelfAttention:
                 dtype=dtype,
                 return_attn_weights=return_attn_weights,
             )
+            and self._use_flashinfer
             and _get_flashinfer_sdpa() is not None
             and device_cuda
             and not sws_given

@@ -16,14 +16,14 @@ from typing import Optional, Tuple, Dict
 import torch
 from torch.autograd import Function
 
-from keys_values.attention import (
-    DefaultKeysAndValues,
-    MultiHeadSelfAttention,
-)
-from keys_values.attention_utils import (
+from keys_values.attention.attention_utils import (
     create_temp_array,
     sdpa_attention_weights,
     slice_as_flat,
+)
+from keys_values.attention.base import (
+    DefaultKeysAndValues,
+    MultiHeadSelfAttention,
 )
 from keys_values.utils import expand_index
 

@@ -48,7 +48,7 @@ from litgpt.utils import (
 )
 
 from keys_values.array_limit import TemporaryArrayLimit
-from keys_values.attention_utils import (
+from keys_values.attention.attention_utils import (
     DEFAULT_TMP_ARRAY_LIMIT_GB,
     SDPA_KERNELS_BEST_ORDERING,
 )
@@ -56,7 +56,8 @@ from keys_values.config import Config as ConfigFull
 from keys_values.data import Helmet, LongBenchV2, MyDataLoader
 from keys_values.data.base import INPUT_IDS_NAME, TARGETS_STRINGS_NAME
 from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
-from keys_values.flex_attention import FlexAttentionArgs, choose_q_lens
+from keys_values.attention.flashinfer_wrapper import get_flashinfer_sdpa
+from keys_values.attention.flex_attention import FlexAttentionArgs, choose_q_lens
 from keys_values.finetune.args import (
     TrainArgs,
     EvalArgs,
@@ -953,6 +954,7 @@ def get_mha_and_cache_kwargs(
     mha_kwargs: Dict[str, Any] = dict(
         tmp_array_limit_gb=tmp_array_limit_forward,
         pos_encoding=position_encoding_factory(config, do_yarn=yarn_rope),
+        use_flashinfer=sdpa.flashinfer_attention,
     )
     if "sdpa_kernels" in cache_kwargs:
         mha_kwargs["sdpa_kernels"] = cache_kwargs["sdpa_kernels"]
@@ -987,7 +989,9 @@ def get_mha_and_cache_kwargs(
             q_lens=q_lens,
         )
         if kv_cache.needs_attn_weights():
-            if sdpa.use_flex_for_attn_weights:
+            if sdpa.flashinfer_attention and get_flashinfer_sdpa() is not None:
+                print("KV cache needs attention weights: Using FlashInfer kernel")
+            elif sdpa.use_flex_for_attn_weights:
                 fa_kwargs["forward_return_lse"] = True
                 print(
                     "KV cache needs attention weights: Using 2x FlexAttention baseline"

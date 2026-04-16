@@ -36,7 +36,7 @@ from keys_values.model import (
     Block as BaseBlock,
     CausalSelfAttention as BaseCausalSelfAttention,
 )
-from keys_values.use_eager_kernel import transform_mha_kwargs
+from keys_values.attention.use_eager_kernel import transform_mha_kwargs
 
 
 @dataclass

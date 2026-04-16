@@ -19,7 +19,7 @@ import pytest
 
 from keys_values.config import Config
 
-from keys_values.flex_attention import FlexAttentionArgs
+from keys_values.attention.flex_attention import FlexAttentionArgs
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.factory import KVCacheFactory
