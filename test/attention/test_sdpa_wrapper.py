@@ -19,21 +19,21 @@ import torch
 
 from keys_values.config import Config
 
-from keys_values.attention import (
+from keys_values.attention.attention_utils import SDPA_KERNELS_BEST_ORDERING
+from keys_values.attention.base import (
     DefaultKeysAndValues,
     scaled_dot_product_attention_in_blocks,
 )
-from keys_values.attention_utils import SDPA_KERNELS_BEST_ORDERING
+from keys_values.attention.sdpa_wrapper import (
+    scaled_dot_product_attention as wrapper_sdpa,
+    reorder_key_value,
+)
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.test_utils import (
     product_with_devices,
     random_args_cache_forward,
     range_from_args,
-)
-from keys_values.sdpa_wrapper import (
-    scaled_dot_product_attention as wrapper_sdpa,
-    reorder_key_value,
 )
 from keys_values.utils import randint_torch, index_to_3d
 

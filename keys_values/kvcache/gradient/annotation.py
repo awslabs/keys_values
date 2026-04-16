@@ -16,7 +16,7 @@ from typing import Tuple, Optional, Dict, Any, Set, List
 
 import torch
 
-from keys_values.sdpa_wrapper import reorder_buffer_given_extra_info
+from keys_values.attention.sdpa_wrapper import reorder_buffer_given_extra_info
 from keys_values.utils import (
     shape_to_tuple,
     expand_index,

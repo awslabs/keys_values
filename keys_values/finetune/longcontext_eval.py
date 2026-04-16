@@ -33,7 +33,7 @@ from litgpt.utils import (
     load_checkpoint,
 )
 
-from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
+from keys_values.attention.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.config import Config as ConfigFull
 from keys_values.data import LongBenchV2, Helmet
 from keys_values.data.base import (

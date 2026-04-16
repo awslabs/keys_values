@@ -20,13 +20,13 @@ import torch
 
 from litgpt.utils import _RunIf
 
-from keys_values.attention import MultiHeadSelfAttention, DefaultKeysAndValues
-from keys_values.attention_utils import sample_token_positions
-from keys_values.config import Config
-from keys_values.flex_attention import (
+from keys_values.attention.attention_utils import sample_token_positions
+from keys_values.attention.base import MultiHeadSelfAttention, DefaultKeysAndValues
+from keys_values.attention.flex_attention import (
     FlexAttentionArgs,
     scaled_dot_product_attention_flexatt,
 )
+from keys_values.config import Config
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.test_utils import random_args_cache_forward
 from keys_values.utils import index_to_3d

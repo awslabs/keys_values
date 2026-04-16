@@ -21,7 +21,7 @@ from torch.nn.attention.flex_attention import (
     BlockMask,
 )
 
-from keys_values.sdpa_wrapper import (
+from keys_values.attention.sdpa_wrapper import (
     sdpa_check_args,
     reorder_key_value,
     ReorderAnnotationCallback,

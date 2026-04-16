@@ -41,7 +41,7 @@ from keys_values.adapter import (
 from keys_values.attention import MultiHeadSelfAttention
 from keys_values.kvcache.base import KVCache
 from keys_values.model import Block as BaseBlock
-from keys_values.use_eager_kernel import transform_mha_kwargs
+from keys_values.attention.use_eager_kernel import transform_mha_kwargs
 
 
 @dataclass

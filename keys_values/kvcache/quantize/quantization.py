@@ -16,7 +16,7 @@ from typing import Optional, Tuple, Dict, Callable
 import torch
 
 from keys_values.array_limit import TemporaryArrayLimit
-from keys_values.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
+from keys_values.attention.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.kvcache.buffers import KVCacheBuffersParams
 
 QuantizerCallback = Callable[[int, int], None]

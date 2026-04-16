@@ -681,7 +681,7 @@ The typical structure of this `forward` call is implemented in
 [DefaultKVCache.forward](./keys_values/kvcache/base.py#L520). After the cache
 is updated, we make a `self.mha(...)` call, passing `query` along with the
 full cache content for keys and values. This
-[MultiHeadSelfAttention](./keys_values/attention.py#L95) abstraction computes
+[MultiHeadSelfAttention](keys_values/attention/base.py#L95) abstraction computes
 the *scaled dot product attention* (SDPA) inner part of MHA, after `query,
 key, value` are determined and position encoded. SDPA is by far the
 computationally most crucial primitive in LLM inference and is usually
@@ -704,7 +704,7 @@ be stored before encoding.
 #### Scaled Dot Product Attention
 
 Scaled dot product attention (SDPA) is represented by
-[MultiHeadSelfAttention.__call__](./keys_values/attention.py#L209). Ideally, its
+[MultiHeadSelfAttention.__call__](keys_values/attention/base.py#L209). Ideally, its
 implementations are via fast kernels, such as
 [torch.nn.functional.scaled_dot_product_attention](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html),
 [torch.nn.attention.flex_attention.flex_attention](https://docs.pytorch.org/docs/stable/nn.attention.flex_attention.html#torch.nn.attention.flex_attention.FlexKernelOptions),
@@ -717,7 +717,7 @@ or FlashInfer. However, we have some special requirements:
   ask for attention weights summed over the query axis, shape
   `(batch_size, n_head, kv_len)`, with `return_attn_weights=True`. This is
   sufficient to compute H2O and other scores. As our
-  [FlashInfer integration](./keys_values/flashinfer_wrapper.py) shows, this
+  [FlashInfer integration](keys_values/attention/flashinfer_wrapper.py) shows, this
   is rather easy to add to existing kernels.
 * We need the "rectangular" case, where `1 << q_len << kv_len`, not just the
   "training" (or prefill) case, `q_len == kv_len`, which many SDPA kernel
@@ -729,7 +729,7 @@ library (and would be very happy for help, see
 
 * PyTorch `flex_attention` SDPA: We use
   `torch.nn.attention.flex_attention.flex_attention`, see
-  [keys_values/flex_attention.py](./keys_values/flex_attention.py) for details.
+  [keys_values/flex_attention.py](keys_values/attention/flex_attention.py) for details.
   These kernels are the default. We support `config.attention_logit_softcapping`
   with them, but not (currently) `config.sliding_window_size`. We also reorder
   `key`, `query` so that the new entries (corresponding to `query`) are on the
@@ -737,7 +737,7 @@ library (and would be very happy for help, see
 * `FlashInfer` SDPA returning summed attention weights: We adapt
   [FlashInfer](https://github.com/flashinfer-ai/flashinfer) so that summed
   attention weights are returned, see
-  [keys_values/flashinfer_wrapper.py](./keys_values/flashinfer_wrapper.py)
+  [keys_values/flashinfer_wrapper.py](keys_values/attention/flashinfer_wrapper.py)
   for details. These kernels are the default if attention weights are needed,
   e.g. to use H2O cache strategies (`h2o`, `qh2o`). They are used in the
   default rectangular case if `flex_attention` is not asked for. We also
@@ -750,7 +750,7 @@ library (and would be very happy for help, see
   the right end. Cannot return attention weights. Use
   `--sdpa.flex_attention False` to activate these kernels. 
 * Naive blockwise SDPA: We use an own implementation
-  [scaled_dot_product_attention_in_blocks](./keys_values/attention.py#L477).
+  [scaled_dot_product_attention_in_blocks](keys_values/attention/base.py#L477).
   The computation is done in blocks so that no more than `tmp_array_limit_gb`
   GB of GPU memory is needed for the temporary buffers. These kernels are
   used for `forward` when attention weights are required, and for `backward`
@@ -876,7 +876,7 @@ rather than `chunk_size`, so becomes comparable to KV cache size.
 Second, when using `torch.nn.functional.scaled_dot_product_attention` as
 operator, we find that this creates several large arrays in the `autograd` graph.
 To get around this, we implemented our own `PyTorch` operator
-[KVCacheScatterUpdateAndSDPAFunction](./keys_values/kvcache/gradient/sdpa_op.py#L474).
+[KVCacheScatterUpdateAndSDPAFunction](keys_values/attention/sdpa_op.py#L474).
 for SDPA fused with `torch.scatter` KV cache update. Its `backward` requires naive
 blockwise SDPA. We are working on a CUDA version for this fused SDPA operator,
 which will speed up computations without sacrificing memory efficiency (like
