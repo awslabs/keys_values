@@ -160,9 +160,13 @@ class GradientArgs:
             this cell are as large as KV cache buffers. GPU memory scales
             linearly in this number.
         layercp_qname: Name of buffer type to be used for layer input
-            checkpointing. See :const:`SUPPORTED_QUANTIZERS`.
+            checkpointing. See :const:`SUPPORTED_QUANTIZERS`. Defaults to
+            "default" (no quantization). Quantization saves CPU space and is
+            faster (less CPU-GPU transfer), but affects gradient accuracy.
         cachecp_qname: Name of buffer type to be used for KV cache
-            checkpointing. See :const:`SUPPORTED_QUANTIZERS`.
+            checkpointing. See :const:`SUPPORTED_QUANTIZERS`. Defaults to
+            `layercp_qname`. Quantization saves CPU space and is faster (less
+            CPU-GPU transfer), but affects gradient accuracy.
         single_tokens_for_targets: If `True`, the targets part of a sequence is
             processed token per token (i.e., with chunk size 1). This is slower,
             but more realistic, mirroring how inference looks like.
@@ -204,17 +208,15 @@ class GradientArgs:
         _check_positive(self.layers_per_cell, "layers_per_cell")
         assert self.layers_per_cell >= 1
         _check_positive(self.chunks_per_cell_multiplier, "chunks_per_cell_multiplier")
-        if (
-            self.layercp_qname is not None
-            and self.layercp_qname not in SUPPORTED_QUANTIZERS
-        ):
+        if self.layercp_qname is None:
+            self.layercp_qname = "default"
+        elif self.layercp_qname not in SUPPORTED_QUANTIZERS:
             raise ValueError(
                 f"layercp_qname = {self.layercp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}"
             )
-        if (
-            self.cachecp_qname is not None
-            and self.cachecp_qname not in SUPPORTED_QUANTIZERS
-        ):
+        if self.cachecp_qname is None:
+            self.cachecp_qname = self.layercp_qname
+        elif self.cachecp_qname not in SUPPORTED_QUANTIZERS:
             raise ValueError(
                 f"cachecp_qname = {self.cachecp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}"
             )

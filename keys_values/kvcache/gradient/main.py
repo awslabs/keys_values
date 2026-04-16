@@ -343,7 +343,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         self.single_tokens_for_targets = single_tokens_for_targets
         if layercp_qname is None:
-            layercp_qname = "torch-quantized8"
+            layercp_qname = "default"
         elif layercp_qname not in SUPPORTED_QUANTIZERS:
             raise ValueError(
                 f"layercp_qname = {layercp_qname} is not supported, must be in {SUPPORTED_QUANTIZERS}"
