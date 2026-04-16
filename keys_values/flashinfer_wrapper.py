@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import math
 from typing import Optional, Tuple
 
 import torch
@@ -360,36 +361,12 @@ class FlashInferSDPA:
             logger.debug(f"Error checking vendored kernel availability: {e}")
             return False
 
-    # TODO: Needed??
-    def _should_use_chunk_processing(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-    ) -> bool:
-        """
-        Determine if decode-kernel processing should be used.
-
-        Returns True only for single-token decode (q_len == 1, kv_len > 1).
-        For non-square attention with q_len > 1 (e.g., chunked prefill),
-        the prefill kernel is used instead.
-
-        Args:
-            query: Query tensor, shape (batch_size, n_head, q_len, head_size)
-            key: Key tensor, shape (batch_size, n_query_groups, kv_len, head_size)
-
-        Returns:
-            True if decode-kernel processing should be used, False otherwise
-        """
-        q_len = query.shape[2]
-        kv_len = key.shape[2]
-        return q_len == 1 and kv_len > 1
-
     def scaled_dot_product_attention(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        scale_factor: float,
+        scale_factor: Optional[float],
         input_pos: int,
         token_positions: Optional[torch.Tensor],
         return_attn_weights: bool = False,
@@ -438,6 +415,8 @@ class FlashInferSDPA:
             raise ValueError(
                 f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
             )
+        if scale_factor is None:
+            scale_factor = 1.0 / math.sqrt(head_size)
 
         # Check if FlashInfer fast prefill can be used
         if return_attn_weights and not _triton_available:

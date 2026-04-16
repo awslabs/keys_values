@@ -93,36 +93,47 @@ def random_keys_values(
 def random_args_cache_forward(
     params: KVCacheParams,
     num: int,
-    vocab_size: int,
+    vocab_size: Optional[int] = None,
     device: Optional[torch.device] = None,
 ) -> Dict[str, torch.Tensor]:
     query = random_tensor(params, num=num, is_query=True, device=device)
     kv = random_keys_values(params, num=num, device=device)
-    idx = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(params.max_batch_size, num),
-        device=device,
-    )
-    return {
+    result = {
         "query": query,
         "key": kv[0],
         "value": kv[1],
-        "token_idx": idx,
     }
+    if vocab_size is not None:
+        result["token_idx"] = torch.randint(
+            low=0,
+            high=vocab_size,
+            size=(params.max_batch_size, num),
+            device=device,
+        )
+    return result
 
 
 def range_from_args(
     data: Dict[str, torch.Tensor],
     start: int,
     end: int,
+    only_query: bool = False,
 ) -> Dict[str, torch.Tensor]:
-    return {
-        "query": data["query"][:, :, start:end, :],
-        "key": data["key"][:, :, start:end, :],
-        "value": data["value"][:, :, start:end, :],
-        "token_idx": data["token_idx"][:, start:end],
-    }
+    result = {"query": data["query"][:, :, start:end, :]}
+    if not only_query:
+        result.update(
+            {
+                "key": data["key"][:, :, start:end, :],
+                "value": data["value"][:, :, start:end, :],
+            }
+        )
+        if "token_idx" in data:
+            result["token_idx"] = data["token_idx"][:, :, start:end, :]
+    else:
+        result.update({"key": data["key"], "value": data["value"]})
+        if "token_idx" in data:
+            result["token_idx"] = data["token_idx"]
+    return result
 
 
 def random_index(

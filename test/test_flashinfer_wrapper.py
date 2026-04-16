@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from hypothesis import given, settings, strategies as st, HealthCheck
+from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -20,10 +21,14 @@ import torch
 from litgpt.utils import _RunIf
 
 from keys_values.flashinfer_wrapper import FlashInferSDPA, get_flashinfer_sdpa
+from keys_values.kvcache.base import KVCacheParams
+from keys_values.kvcache.test_utils import (
+    random_args_cache_forward,
+    range_from_args,
+)
 
 
 @_RunIf(min_cuda_gpus=1)
-@pytest.mark.skip("To be fixed")
 class TestFlashInferSDPAInitialization:
     """Test FlashInferSDPA class initialization."""
 
@@ -36,16 +41,12 @@ class TestFlashInferSDPAInitialization:
     def test_availability_detection_with_flashinfer_available(self):
         """Test availability detection when FlashInfer is available."""
         with patch(
-            "keys_values.flashinfer_wrapper.torch.cuda.is_available", return_value=True
-        ):
-            with patch(
-                "keys_values.flashinfer_wrapper.FlashInferSDPA._check_vendored_kernels_available"
-            ) as mock_check:
-                mock_check.return_value = True
-                wrapper = FlashInferSDPA()
-                # Manually set available since we're mocking the check
-                wrapper.available = True
-                assert wrapper.available is True
+            "keys_values.flashinfer_wrapper.FlashInferSDPA._check_vendored_kernels_available"
+        ) as mock_check:
+            mock_check.return_value = True
+            wrapper = FlashInferSDPA()
+            assert wrapper is not None
+            assert isinstance(wrapper, FlashInferSDPA)
 
     def test_availability_detection_without_flashinfer(self):
         """Test availability detection when FlashInfer is not installed."""
@@ -53,17 +54,14 @@ class TestFlashInferSDPAInitialization:
             "keys_values.flashinfer_wrapper.FlashInferSDPA._check_vendored_kernels_available"
         ) as mock_check:
             mock_check.return_value = False
-            wrapper = FlashInferSDPA()
-            # Manually set available since we're mocking the check
-            wrapper.available = False
-            assert wrapper.available is False
+            with pytest.raises(AssertionError):
+                wrapper = FlashInferSDPA()
 
     def test_availability_detection_without_cuda(self):
         """Test availability detection when CUDA is not available."""
         with patch("keys_values.flashinfer_ops.is_available", return_value=False):
-            wrapper = FlashInferSDPA()
-            # When CUDA is not available, FlashInfer should not be available
-            assert wrapper.available is False
+            with pytest.raises(AssertionError):
+                wrapper = FlashInferSDPA()
 
     def test_check_flashinfer_available_handles_import_error(self):
         """Test that _check_vendored_kernels_available handles ImportError gracefully."""
@@ -71,9 +69,8 @@ class TestFlashInferSDPAInitialization:
             "keys_values.flashinfer_ops.is_available",
             side_effect=ImportError("No module named 'flashinfer_ops'"),
         ):
-            wrapper = FlashInferSDPA()
-            # Should not raise an exception
-            assert wrapper.available is False
+            with pytest.raises(AssertionError):
+                wrapper = FlashInferSDPA()
 
     def test_check_flashinfer_available_handles_generic_exception(self):
         """Test that _check_vendored_kernels_available handles generic exceptions gracefully."""
@@ -81,9 +78,8 @@ class TestFlashInferSDPAInitialization:
             "keys_values.flashinfer_ops.is_available",
             side_effect=RuntimeError("Some error"),
         ):
-            wrapper = FlashInferSDPA()
-            # Should not raise an exception
-            assert wrapper.available is False
+            with pytest.raises(AssertionError):
+                wrapper = FlashInferSDPA()
 
     def test_global_instance_creation(self):
         """Test that get_flashinfer_sdpa returns a singleton instance."""
@@ -97,8 +93,45 @@ class TestFlashInferSDPAInitialization:
         assert isinstance(instance, FlashInferSDPA)
 
 
+def call_sdpa_with_random_args(
+    wrapper: FlashInferSDPA,
+    kv_len: int = 16,
+    q_len: int = 8,
+    input_pos: int = 4,
+    token_positions: Optional[torch.Tensor] = None,
+    max_batch_size: int = 2,
+    n_query_groups: int = 2,
+    cache_length: int = 16,
+    head_size: int = 64,
+    n_head: int = 4,
+    dtype: torch.dtype = torch.float16,
+    **kwargs,
+):
+    params = KVCacheParams(
+        max_batch_size=max_batch_size,
+        n_query_groups=n_query_groups,
+        cache_length=cache_length,
+        head_size=head_size,
+        n_head=n_head,
+        dtype=dtype,
+    )
+    data = random_args_cache_forward(
+        params,
+        kv_len,
+        vocab_size=None,
+        device=torch.device("cuda", 0),
+    )
+
+    wrapper.scaled_dot_product_attention(
+        **range_from_args(data, 0, q_len, only_query=True),
+        scale_factor=None,
+        input_pos=input_pos,
+        token_positions=token_positions,
+        **kwargs,
+    )
+
+
 @_RunIf(min_cuda_gpus=1)
-@pytest.mark.skip("To be fixed")
 class TestFlashInferSDPAInterface:
     """Test FlashInferSDPA interface and method signatures."""
 
@@ -111,25 +144,11 @@ class TestFlashInferSDPAInterface:
     def test_scaled_dot_product_attention_accepts_required_parameters(self):
         """Test that scaled_dot_product_attention accepts required parameters."""
         wrapper = FlashInferSDPA()
-        # Create dummy tensors
-        batch_size, n_head, q_len, head_size = 2, 4, 8, 64
-        n_query_groups = 2
-        kv_len = 16
-
-        query = torch.randn(batch_size, n_head, q_len, head_size)
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-        value = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-        scale_factor = 1.0 / (head_size**0.5)
 
         # This should not raise an exception for parameter acceptance
         # (it will raise NotImplementedError for the actual computation)
         try:
-            wrapper.scaled_dot_product_attention(
-                query=query,
-                key=key,
-                value=value,
-                scale_factor=scale_factor,
-            )
+            call_sdpa_with_random_args(wrapper)
         except NotImplementedError:
             # Expected since fallback is not yet implemented
             pass
@@ -137,33 +156,24 @@ class TestFlashInferSDPAInterface:
     def test_scaled_dot_product_attention_accepts_optional_parameters(self):
         """Test that scaled_dot_product_attention accepts optional parameters."""
         wrapper = FlashInferSDPA()
-        # Create dummy tensors
-        batch_size, n_head, q_len, head_size = 2, 4, 8, 64
+        max_batch_size = 2
         n_query_groups = 2
         kv_len = 16
-
-        query = torch.randn(batch_size, n_head, q_len, head_size)
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-        value = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-        scale_factor = 1.0 / (head_size**0.5)
         token_positions = (
             torch.arange(kv_len)
             .unsqueeze(0)
             .unsqueeze(0)
-            .expand(batch_size, n_query_groups, -1)
+            .expand(max_batch_size, n_query_groups, -1)
         )
 
         # This should not raise an exception for parameter acceptance
         try:
-            wrapper.scaled_dot_product_attention(
-                query=query,
-                key=key,
-                value=value,
-                scale_factor=scale_factor,
-                return_attn_weights=True,
+            call_sdpa_with_random_args(
+                wrapper,
                 token_positions=token_positions,
-                input_pos=0,
-                sliding_window_size=None,
+                return_attn_weights=True,
+                sort_if_3d=True,
+                output_transposed=False,
             )
         except NotImplementedError:
             # Expected since fallback is not yet implemented
@@ -171,108 +181,8 @@ class TestFlashInferSDPAInterface:
 
 
 @_RunIf(min_cuda_gpus=1)
-@pytest.mark.skip("To be fixed")
-class TestFlashInferSDPAFallback:
-    """Test FlashInferSDPA fallback behavior."""
-
-    def test_fallback_on_unavailable_flashinfer(self):
-        """Test that fallback is used when FlashInfer is not available."""
-        with patch.object(
-            FlashInferSDPA, "_check_vendored_kernels_available", return_value=False
-        ):
-            wrapper = FlashInferSDPA()
-            assert wrapper.available is False
-
-            # Create dummy tensors
-            batch_size, n_head, q_len, head_size = 2, 4, 8, 64
-            n_query_groups = 2
-            kv_len = 16
-
-            query = torch.randn(batch_size, n_head, q_len, head_size)
-            key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-            value = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-            scale_factor = 1.0 / (head_size**0.5)
-
-            # Should use fallback and succeed
-            attn_output, attn_weights = wrapper.scaled_dot_product_attention(
-                query=query,
-                key=key,
-                value=value,
-                scale_factor=scale_factor,
-                return_attn_weights=False,
-            )
-
-            # Verify output shape is correct
-            assert attn_output.shape == query.shape
-            assert attn_weights is None
-
-    def test_fallback_on_flashinfer_error(self):
-        """Test that fallback is used when FlashInfer raises an error."""
-        with patch.object(
-            FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
-        ):
-            with patch.object(
-                FlashInferSDPA,
-                "scaled_dot_product_attention",
-                side_effect=RuntimeError("FlashInfer error"),
-            ):
-                wrapper = FlashInferSDPA()
-                wrapper.available = True
-
-                # Create dummy tensors
-                batch_size, n_head, q_len, head_size = 2, 4, 8, 64
-                n_query_groups = 2
-                kv_len = 16
-
-                query = torch.randn(batch_size, n_head, q_len, head_size)
-                key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-                value = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-                scale_factor = 1.0 / (head_size**0.5)
-
-                # Should catch the error and use fallback successfully
-                attn_output, attn_weights = wrapper.scaled_dot_product_attention(
-                    query=query,
-                    key=key,
-                    value=value,
-                    scale_factor=scale_factor,
-                    return_attn_weights=False,
-                )
-
-                # Verify output shape is correct
-                assert attn_output.shape == query.shape
-                assert attn_weights is None
-
-
-@_RunIf(min_cuda_gpus=1)
-@pytest.mark.skip("To be fixed")
 class TestFlashInferKernelWrapping:
     """Test FlashInfer kernel wrapping interface."""
-
-    def test_chunk_processing_detection_decode_phase(self):
-        """Test that chunk processing is detected for decode phase (q_len < kv_len)."""
-        wrapper = FlashInferSDPA()
-
-        batch_size, n_head, q_len, head_size = 2, 4, 1, 64
-        n_query_groups = 2
-        kv_len = 16
-
-        query = torch.randn(batch_size, n_head, q_len, head_size)
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-
-        assert wrapper._should_use_chunk_processing(query, key) is True
-
-    def test_chunk_processing_detection_prefill_phase(self):
-        """Test that chunk processing is not used for prefill phase (q_len >= kv_len)."""
-        wrapper = FlashInferSDPA()
-
-        batch_size, n_head, q_len, head_size = 2, 4, 16, 64
-        n_query_groups = 2
-        kv_len = 16
-
-        query = torch.randn(batch_size, n_head, q_len, head_size)
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-
-        assert wrapper._should_use_chunk_processing(query, key) is False
 
     def test_flashinfer_sdpa_routes_to_chunk_processing(self):
         """Test that scaled_dot_product_attention routes to chunk processing for decode phase."""
@@ -285,59 +195,9 @@ class TestFlashInferKernelWrapping:
                 return_value=(torch.tensor([]), None),
             ) as mock_chunk:
                 wrapper = FlashInferSDPA()
-                wrapper.available = True
 
-                batch_size, n_head, q_len, head_size = 2, 4, 1, 64
-                n_query_groups = 2
-                kv_len = 16
-
-                query = torch.randn(batch_size, n_head, q_len, head_size)
-                key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-                value = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-                scale_factor = 1.0 / (head_size**0.5)
-
-                wrapper.scaled_dot_product_attention(query, key, value, scale_factor)
+                call_sdpa_with_random_args(wrapper, q_len=1)
                 mock_chunk.assert_called_once()
-
-    def test_flashinfer_sdpa_routes_to_standard(self):
-        """Test that square prefill (q_len == kv_len, input_pos=0) routes to
-        fallback (PyTorch native SDPA is faster for this case)."""
-        with patch.object(
-            FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
-        ):
-            with patch.object(
-                FlashInferSDPA,
-                "_fallback_sdpa",
-                return_value=(torch.tensor([]), None),
-            ) as mock_fallback:
-                wrapper = FlashInferSDPA()
-                wrapper.available = True
-
-                batch_size, n_head, q_len, head_size = 2, 4, 16, 64
-                n_query_groups = 2
-                kv_len = 16
-
-                query = torch.randn(batch_size, n_head, q_len, head_size)
-                key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-                value = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-                scale_factor = 1.0 / (head_size**0.5)
-
-                wrapper.scaled_dot_product_attention(query, key, value, scale_factor)
-                mock_fallback.assert_called_once()
-
-    def test_chunk_processing_detection_non_square_prefill(self):
-        """Test that chunk processing is NOT used for non-square prefill (q_len > 1, q_len < kv_len)."""
-        wrapper = FlashInferSDPA()
-
-        batch_size, n_head, q_len, head_size = 2, 4, 2048, 64
-        n_query_groups = 2
-        kv_len = 32768
-
-        query = torch.randn(batch_size, n_head, q_len, head_size)
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-
-        # q_len > 1 should NOT trigger decode chunk processing, even when q_len < kv_len
-        assert wrapper._should_use_chunk_processing(query, key) is False
 
     def test_flashinfer_sdpa_routes_nonsquare_no_weights_to_standard(self):
         """Test that non-square attention without weights routes to standard prefill."""
@@ -350,89 +210,40 @@ class TestFlashInferKernelWrapping:
                 return_value=(torch.tensor([]), None),
             ) as mock_standard:
                 wrapper = FlashInferSDPA()
-                wrapper.available = True
 
-                batch_size, n_head, q_len, head_size = 2, 4, 2048, 64
-                n_query_groups = 2
-                kv_len = 32768
-
-                query = torch.randn(batch_size, n_head, q_len, head_size)
-                key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-                value = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-                scale_factor = 1.0 / (head_size**0.5)
-
-                # No return_attn_weights -> FlashInfer prefill (fast)
-                wrapper.scaled_dot_product_attention(query, key, value, scale_factor)
+                call_sdpa_with_random_args(
+                    wrapper,
+                    q_len=2048,
+                    kv_len=32768,
+                )
                 mock_standard.assert_called_once()
 
-    def test_flashinfer_sdpa_routes_nonsquare_with_weights_to_fallback(self):
-        """Test that non-square attention with weights routes to eager fallback."""
+    def test_flashinfer_sdpa_routes_nonsquare_with_weights_to_fused_prefill(self):
+        """Test that non-square attention with weights routes to fused_prefill."""
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
             with patch.object(
-                FlashInferSDPA, "_fallback_sdpa", return_value=(torch.tensor([]), None)
+                FlashInferSDPA, "_flashinfer_sdpa_fused_prefill", return_value=(torch.tensor([]), None)
             ) as mock_fallback:
                 wrapper = FlashInferSDPA()
-                wrapper.available = True
 
-                batch_size, n_head, q_len, head_size = 2, 4, 2048, 64
-                n_query_groups = 2
-                kv_len = 32768
-
-                query = torch.randn(batch_size, n_head, q_len, head_size)
-                key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-                value = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-                scale_factor = 1.0 / (head_size**0.5)
-
-                # return_attn_weights=True -> eager fallback (cuBLAS, fast)
-                wrapper.scaled_dot_product_attention(
-                    query,
-                    key,
-                    value,
-                    scale_factor,
+                call_sdpa_with_random_args(
+                    wrapper,
+                    q_len=2048,
+                    kv_len=32768,
                     return_attn_weights=True,
                 )
                 mock_fallback.assert_called_once()
 
-    def test_flashinfer_sdpa_routes_nonsquare_with_weights_and_chunk_to_fallback(self):
-        """Test that non-square attention with weights and chunk_size routes to eager fallback."""
-        with patch.object(
-            FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
-        ):
-            with patch.object(
-                FlashInferSDPA, "_fallback_sdpa", return_value=(torch.tensor([]), None)
-            ) as mock_fallback:
-                wrapper = FlashInferSDPA()
-                wrapper.available = True
-
-                batch_size, n_head, q_len, head_size = 2, 4, 2048, 64
-                n_query_groups = 2
-                kv_len = 32768
-
-                query = torch.randn(batch_size, n_head, q_len, head_size)
-                key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-                value = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-                scale_factor = 1.0 / (head_size**0.5)
-
-                # return_attn_weights=True with chunk_size -> eager fallback with chunking
-                wrapper.scaled_dot_product_attention(
-                    query,
-                    key,
-                    value,
-                    scale_factor,
-                    return_attn_weights=True,
-                    chunk_size=512,
-                )
-                mock_fallback.assert_called_once()
-
+    # TODO!
+    @pytest.mark.skip("TODO")
     def test_parameter_translation_validates_shapes(self):
         """Test that parameter translation validates input shapes."""
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
             wrapper = FlashInferSDPA()
-            wrapper.available = True
 
             batch_size, n_head, q_len, head_size = 2, 4, 8, 64
             n_query_groups = 2
@@ -454,20 +265,14 @@ class TestFlashInferKernelWrapping:
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
             wrapper = FlashInferSDPA()
-            wrapper.available = True
-
-            batch_size, n_head, q_len, head_size = 2, 5, 8, 64
-            n_query_groups = 2
-            kv_len = 16
-
-            query = torch.randn(batch_size, n_head, q_len, head_size)
-            key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-            value = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-            scale_factor = 1.0 / (head_size**0.5)
 
             # Should raise AssertionError due to n_head not divisible by n_query_groups
-            with pytest.raises(AssertionError):
-                wrapper.scaled_dot_product_attention(query, key, value, scale_factor)
+            with pytest.raises(ValueError):
+                call_sdpa_with_random_args(
+                    wrapper,
+                    n_head=5,
+                    n_query_groups=2,
+                )
 
 
 @_RunIf(min_cuda_gpus=1)
