@@ -128,7 +128,7 @@ def range_from_args(
             }
         )
         if "token_idx" in data:
-            result["token_idx"] = data["token_idx"][:, :, start:end, :]
+            result["token_idx"] = data["token_idx"][:, start:end]
     else:
         result.update({"key": data["key"], "value": data["value"]})
         if "token_idx" in data:
