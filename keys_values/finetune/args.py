@@ -590,9 +590,14 @@ class SDPAArgs:
             being faster overall.
         use_flex_for_attn_weights: If `False`, we do not use the FlexAttention
             baseline to compute SDPA with summed attention weights. This is
-            slower.
+            slower. If `True`, the baseline is used unless a faster CUDA kernel
+            is available.
         dynamo_cache_size_limit: Value for `torch._dynamo.config.cache_size_limit`.
             Defaults to 32. The built-in default 8 is too small for our purposes.
+        flashinfer_attention: If `True` and FlashInfer is available, we use
+            FlashInfer SDPA if summed attention weights are required. If
+            `flex_attention == False`, this kernel is also used if attention
+            weights are not needed.
     """
 
     flex_attention: bool = True
@@ -601,6 +606,7 @@ class SDPAArgs:
     reorder_sort_if_3d: bool = True
     use_flex_for_attn_weights: bool = True
     dynamo_cache_size_limit: int = 32
+    flashinfer_attention: bool = True
 
     def __post_init__(self):
         if self.flex_num_q_lens is not None and self.flex_num_q_lens <= 0:

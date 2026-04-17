@@ -486,6 +486,7 @@ class FlashInferSDPA:
                 value,
                 scale_factor,
             )
+            print(f"attn_outputs: {attn_outputs.shape}, attn_weights: {attn_weights.shape}")  # DEBUG
             if token_positions is not None:
                 # Undo reordering
                 attn_weights = reorder_inverse(attn_weights, **extra_info)
@@ -501,8 +502,11 @@ class FlashInferSDPA:
             attn_weights = None
 
         if head_size_diff is not None:
-            attn_outputs = attn_outputs[..., :head_size]
+            attn_outputs = attn_outputs[:, :, :, :head_size]
         if not output_transposed:
+            print(f"attn_outputs.type = {attn_outputs.type}")
+            if isinstance(attn_outputs, torch.Tensor):
+                print(f"attn_outputs.shape = {attn_outputs.shape}")  # DEBUG
             attn_outputs = attn_outputs.transpose(1, 2).contiguous()
         return attn_outputs, attn_weights
 
@@ -605,6 +609,7 @@ class FlashInferSDPA:
             return_weights=False,
             return_lse=True,
         )
+        print(f"output.shape = {output.shape}")  # DEBUG
         # output: [bs, q_len, n_head, head_size]
         # lse: [bs, q_len, n_head] (log2 scale)
 
@@ -624,6 +629,7 @@ class FlashInferSDPA:
             n_kv_heads=n_kv_heads,
             group_size=group_size,
         )
+        print(f"weights.shape = {weights.shape}")  # DEBUG
 
         return output, weights
 
