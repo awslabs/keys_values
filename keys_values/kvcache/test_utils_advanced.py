@@ -16,9 +16,7 @@ from typing import Optional, List
 
 import torch
 
-from keys_values.attention import (
-    DefaultKeysAndValues,
-)
+from keys_values.attention import DefaultKeysAndValues
 from keys_values.kvcache.buffers import DefaultKVCacheBuffers
 from keys_values.kvcache.gradient.accumulate import GradientAccumulator
 from keys_values.kvcache.gradient.checkpoints import KVCacheBufferCheckpoints

@@ -20,7 +20,10 @@ import torch
 
 from litgpt.utils import _RunIf
 
-from keys_values.flashinfer_wrapper import FlashInferSDPA, get_flashinfer_sdpa
+from keys_values.attention.flashinfer_wrapper import (
+    FlashInferSDPA,
+    get_flashinfer_sdpa,
+)
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.test_utils import (
     random_args_cache_forward,
@@ -795,7 +798,7 @@ class TestBackendEquivalenceVerification:
 
     def test_backend_equivalence_result_initialization(self):
         """Test BackendEquivalenceResult initialization."""
-        from keys_values.flashinfer_verification import BackendEquivalenceResult
+        from keys_values.attention.flashinfer_verification import BackendEquivalenceResult
 
         result = BackendEquivalenceResult(
             is_equivalent=True,
@@ -819,7 +822,7 @@ class TestBackendEquivalenceVerification:
 
     def test_backend_equivalence_result_bool_conversion(self):
         """Test BackendEquivalenceResult boolean conversion."""
-        from keys_values.flashinfer_verification import BackendEquivalenceResult
+        from keys_values.attention.flashinfer_verification import BackendEquivalenceResult
 
         # Equivalent result should be truthy
         result_true = BackendEquivalenceResult(
@@ -839,7 +842,7 @@ class TestBackendEquivalenceVerification:
 
     def test_backend_equivalence_result_repr(self):
         """Test BackendEquivalenceResult string representation."""
-        from keys_values.flashinfer_verification import BackendEquivalenceResult
+        from keys_values.attention.flashinfer_verification import BackendEquivalenceResult
 
         result = BackendEquivalenceResult(
             is_equivalent=True,
@@ -856,7 +859,7 @@ class TestBackendEquivalenceVerification:
 
     def test_check_numerical_equivalence_identical_tensors(self):
         """Test check_numerical_equivalence with identical tensors."""
-        from keys_values.flashinfer_verification import check_numerical_equivalence
+        from keys_values.attention.flashinfer_verification import check_numerical_equivalence
 
         tensor = torch.randn(2, 4, 8, 64)
         is_equiv, max_diff, mean_diff = check_numerical_equivalence(tensor, tensor)
@@ -867,7 +870,7 @@ class TestBackendEquivalenceVerification:
 
     def test_check_numerical_equivalence_within_tolerance(self):
         """Test check_numerical_equivalence with tensors within tolerance."""
-        from keys_values.flashinfer_verification import check_numerical_equivalence
+        from keys_values.attention.flashinfer_verification import check_numerical_equivalence
 
         tensor_a = torch.randn(2, 4, 8, 64)
         # Add small noise within tolerance
@@ -883,7 +886,7 @@ class TestBackendEquivalenceVerification:
 
     def test_check_numerical_equivalence_outside_tolerance(self):
         """Test check_numerical_equivalence with tensors outside tolerance."""
-        from keys_values.flashinfer_verification import check_numerical_equivalence
+        from keys_values.attention.flashinfer_verification import check_numerical_equivalence
 
         tensor_a = torch.randn(2, 4, 8, 64)
         # Add large noise outside tolerance
@@ -899,7 +902,7 @@ class TestBackendEquivalenceVerification:
 
     def test_check_numerical_equivalence_shape_mismatch(self):
         """Test check_numerical_equivalence raises error on shape mismatch."""
-        from keys_values.flashinfer_verification import check_numerical_equivalence
+        from keys_values.attention.flashinfer_verification import check_numerical_equivalence
 
         tensor_a = torch.randn(2, 4, 8, 64)
         tensor_b = torch.randn(2, 4, 16, 64)  # Different shape
@@ -909,13 +912,13 @@ class TestBackendEquivalenceVerification:
 
     def test_verify_backend_equivalence_raises_when_unavailable(self):
         """Test verify_backend_equivalence raises error when kernels unavailable."""
-        from keys_values.flashinfer_verification import verify_backend_equivalence
+        from keys_values.attention.flashinfer_verification import verify_backend_equivalence
 
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=False
         ):
             # Reset the global instance to pick up the mock
-            import keys_values.flashinfer_wrapper as wrapper_module
+            import keys_values.attention.flashinfer_wrapper as wrapper_module
 
             wrapper_module._flashinfer_sdpa_instance = None
 
@@ -933,7 +936,7 @@ class TestBackendEquivalenceVerification:
 
     def test_verify_backend_equivalence_handles_kernel_error(self):
         """Test verify_backend_equivalence handles kernel computation errors."""
-        from keys_values.flashinfer_verification import verify_backend_equivalence
+        from keys_values.attention.flashinfer_verification import verify_backend_equivalence
 
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
@@ -944,7 +947,7 @@ class TestBackendEquivalenceVerification:
                 side_effect=RuntimeError("Kernel error"),
             ):
                 # Reset the global instance
-                import keys_values.flashinfer_wrapper as wrapper_module
+                import keys_values.attention.flashinfer_wrapper as wrapper_module
 
                 wrapper_module._flashinfer_sdpa_instance = None
 
@@ -967,7 +970,7 @@ class TestBackendEquivalenceVerification:
 
     def test_verify_backend_equivalence_batch_empty_list(self):
         """Test verify_backend_equivalence_batch with empty list."""
-        from keys_values.flashinfer_verification import verify_backend_equivalence_batch
+        from keys_values.attention.flashinfer_verification import verify_backend_equivalence_batch
 
         passed, failed, results = verify_backend_equivalence_batch(
             [], log_results=False
@@ -979,7 +982,7 @@ class TestBackendEquivalenceVerification:
 
     def test_verify_backend_equivalence_batch_handles_exceptions(self):
         """Test verify_backend_equivalence_batch handles exceptions in test cases."""
-        from keys_values.flashinfer_verification import verify_backend_equivalence_batch
+        from keys_values.attention.flashinfer_verification import verify_backend_equivalence_batch
 
         # Test case with missing required key
         test_cases = [
@@ -1034,7 +1037,7 @@ class TestBackendEquivalenceVerificationIntegration:
 
     def test_numerical_tolerance_checking_with_different_tolerances(self):
         """Test numerical tolerance checking with various tolerance levels."""
-        from keys_values.flashinfer_verification import check_numerical_equivalence
+        from keys_values.attention.flashinfer_verification import check_numerical_equivalence
 
         tensor_a = torch.randn(2, 4, 8, 64)
         # Add noise of known magnitude
@@ -1058,7 +1061,7 @@ class TestBackendEquivalenceVerificationIntegration:
 
     def test_equivalence_result_message_contains_useful_info(self):
         """Test that equivalence result message contains useful debugging info."""
-        from keys_values.flashinfer_verification import BackendEquivalenceResult
+        from keys_values.attention.flashinfer_verification import BackendEquivalenceResult
 
         # Test failure message
         result_fail = BackendEquivalenceResult(
@@ -1584,7 +1587,7 @@ class TestTritonScoreSumKernel:
 
     def test_no_causal_matches_pytorch(self):
         """Without causal masking, Triton kernel matches PyTorch matmul-based weights."""
-        from keys_values.flashinfer_wrapper import triton_score_sum
+        from keys_values.attention.flashinfer_wrapper import triton_score_sum
 
         batch, q_len, n_head, n_kv, hd = 1, 32, 8, 2, 128
         kv_len = 64
@@ -1627,7 +1630,7 @@ class TestTritonScoreSumKernel:
 
     def test_causal_masking_zeros_future(self):
         """With causal masking, weights for KV positions > query position are zero."""
-        from keys_values.flashinfer_wrapper import triton_score_sum
+        from keys_values.attention.flashinfer_wrapper import triton_score_sum
 
         batch, q_len, n_head, n_kv, hd = 1, 16, 4, 2, 128
         input_pos = 32
@@ -1667,7 +1670,7 @@ class TestTritonScoreSumKernel:
 
     def test_causal_matches_pytorch_reference(self):
         """Triton causal score-sum matches full PyTorch reference computation."""
-        from keys_values.flashinfer_wrapper import triton_score_sum
+        from keys_values.attention.flashinfer_wrapper import triton_score_sum
 
         batch, q_len, n_head, n_kv, hd = 2, 32, 8, 2, 128
         input_pos = 64
@@ -1712,7 +1715,7 @@ class TestTritonScoreSumKernel:
 
     def test_noncontiguous_positions(self):
         """Simulates H2O eviction: non-contiguous token_positions."""
-        from keys_values.flashinfer_wrapper import triton_score_sum
+        from keys_values.attention.flashinfer_wrapper import triton_score_sum
 
         batch, q_len, n_head, n_kv, hd = 1, 16, 4, 2, 128
         kv_len = 64

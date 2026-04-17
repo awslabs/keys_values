@@ -22,7 +22,7 @@ import pytest
 from keys_values.config import Config
 
 from keys_values.attention import MultiHeadSelfAttention
-from keys_values.attention_utils import (
+from keys_values.attention.attention_utils import (
     build_mask_slice,
     sample_token_positions,
     ENTRIES_PER_GB,
@@ -36,7 +36,7 @@ from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.buffers import KVCacheBuffers
 from keys_values.kvcache.gradient.accumulate import copy_requires_grad
 from keys_values.kvcache.gradient.inference_replay import get_replay_logs
-from keys_values.kvcache.gradient.sdpa_op import (
+from keys_values.attention.sdpa_op import (
     SDPAFunction,
     sdpa_backward,
     KVCacheCatUpdateAndSDPAFunction,
@@ -53,7 +53,7 @@ from keys_values.kvcache.test_utils import (
     create_kv_cache,
 )
 from keys_values.model import GPT
-from keys_values.sdpa_wrapper import scaled_dot_product_attention
+from keys_values.attention.sdpa_wrapper import scaled_dot_product_attention
 from keys_values.utils import repeat_interleave, randint_torch
 
 

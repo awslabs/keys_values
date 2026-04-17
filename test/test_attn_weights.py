@@ -19,11 +19,11 @@ import pytest
 
 from litgpt.utils import _RunIf
 
-from keys_values.attention import (
+from keys_values.attention.base import (
     scaled_dot_product_attention_in_blocks,
     DefaultKeysAndValues,
 )
-from keys_values.flex_attention import (
+from keys_values.attention.flex_attention import (
     sdpa_flexatt_with_attn_weights,
     FlexAttentionArgs,
 )
@@ -40,7 +40,7 @@ def _get_flashinfer_sdpa():
     if not _flashinfer_checked:
         _flashinfer_checked = True
         try:
-            from keys_values.flashinfer_wrapper import FlashInferSDPA
+            from keys_values.attention.flashinfer_wrapper import FlashInferSDPA
 
             _flashinfer_sdpa = FlashInferSDPA()
         except Exception:

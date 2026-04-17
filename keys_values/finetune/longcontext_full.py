@@ -49,7 +49,7 @@ from litgpt.utils import (
 )
 
 from keys_values.array_limit import TemporaryArrayLimit
-from keys_values.attention_utils import (
+from keys_values.attention.attention_utils import (
     DEFAULT_TMP_ARRAY_LIMIT_GB,
     SDPA_KERNELS_BEST_ORDERING,
 )
@@ -57,8 +57,8 @@ from keys_values.config import Config as ConfigFull
 from keys_values.data import Helmet, LongBenchV2, MyDataLoader
 from keys_values.data.base import INPUT_IDS_NAME, TARGETS_STRINGS_NAME
 from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
-from keys_values.flashinfer_wrapper import get_flashinfer_sdpa
-from keys_values.flex_attention import FlexAttentionArgs, choose_q_lens
+from keys_values.attention.flashinfer_wrapper import get_flashinfer_sdpa
+from keys_values.attention.flex_attention import FlexAttentionArgs, choose_q_lens
 from keys_values.finetune.args import (
     TrainArgs,
     EvalArgs,

@@ -22,11 +22,11 @@ import torch
 
 from keys_values.config import Config
 
-from keys_values.attention import (
+from keys_values.attention.base import (
     scaled_dot_product_attention_in_blocks,
     DefaultKeysAndValues,
 )
-from keys_values.flex_attention import (
+from keys_values.attention.flex_attention import (
     scaled_dot_product_attention_flexatt,
     FlexAttentionArgs,
 )

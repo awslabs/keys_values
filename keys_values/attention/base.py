@@ -19,7 +19,7 @@ from torch.nn import functional as F
 from torch.nn.attention import SDPBackend
 
 from keys_values.array_limit import TemporaryArrayLimit
-from keys_values.attention_utils import (
+from keys_values.attention.attention_utils import (
     attention_compute_scores,
     attention_compute_weighted_values,
     build_mask_cache,
@@ -29,18 +29,18 @@ from keys_values.attention_utils import (
     slice_as_flat,
     pytorch_scaled_dot_product_attention,
 )
-from keys_values.config import Config
-from keys_values.flashinfer_wrapper import can_do_flashinfer
-from keys_values.flex_attention import (
+from keys_values.attention.flashinfer_wrapper import can_do_flashinfer
+from keys_values.attention.flex_attention import (
     scaled_dot_product_attention_flexatt,
     FlexAttentionArgs,
     sdpa_flexatt_with_attn_weights,
 )
-from keys_values.pos_encoding import position_encoding_factory, PositionEncoding
-from keys_values.sdpa_wrapper import (
+from keys_values.attention.sdpa_wrapper import (
     scaled_dot_product_attention as scaled_dot_product_attention_zeropad,
     ReorderAnnotationCallback,
 )
+from keys_values.config import Config
+from keys_values.pos_encoding import position_encoding_factory, PositionEncoding
 
 
 class KeysAndValues:
@@ -118,7 +118,7 @@ def _get_flashinfer_sdpa():
     if not _flashinfer_checked:
         _flashinfer_checked = True
         try:
-            from keys_values.flashinfer_wrapper import FlashInferSDPA
+            from keys_values.attention.flashinfer_wrapper import FlashInferSDPA
 
             _flashinfer_sdpa = FlashInferSDPA()
         except Exception:

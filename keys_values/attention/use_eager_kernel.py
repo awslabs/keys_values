@@ -21,7 +21,7 @@ from scipy.spatial import KDTree
 
 from keys_values.config import Config
 
-from keys_values.attention import UseEagerPredicate
+from keys_values.attention.base import UseEagerPredicate
 
 
 def linear_interpolation(

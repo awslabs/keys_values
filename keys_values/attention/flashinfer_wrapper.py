@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 
 import torch
 
-from keys_values.sdpa_wrapper import (
+from keys_values.attention.sdpa_wrapper import (
     sdpa_check_args,
     reorder_key_value,
     reorder_inverse,
@@ -345,7 +345,7 @@ class FlashInferSDPA:
             True if vendored kernels are available and compatible, False otherwise
         """
         try:
-            from keys_values import flashinfer_ops
+            from keys_values.attention import flashinfer_ops
 
             available = flashinfer_ops.is_available()
             if available:
@@ -530,7 +530,7 @@ class FlashInferSDPA:
             Attention outputs, shape `(batch_size, q_len, n_head, head_size)`
 
         """
-        from keys_values import flashinfer_ops
+        from keys_values.attention import flashinfer_ops
 
         # Transform tensors to vendored kernel format
         # Vendored kernel expects:
@@ -581,7 +581,7 @@ class FlashInferSDPA:
             Tuple of (attention_output, attention_weights)
 
         """
-        from keys_values import flashinfer_ops
+        from keys_values.attention import flashinfer_ops
 
         n_head = query.shape[1]
         n_kv_heads = key.shape[1]
@@ -660,7 +660,7 @@ class FlashInferSDPA:
         Returns:
             Tuple of (attention_output, attention_weights)
         """
-        from keys_values import flashinfer_ops
+        from keys_values.attention import flashinfer_ops
 
         q_len = query.shape[2]
         assert q_len == 1, f"Need q_len == 1, but got {q_len}"

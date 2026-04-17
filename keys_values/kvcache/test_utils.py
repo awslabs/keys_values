@@ -20,11 +20,11 @@ import torch
 
 from keys_values.config import Config
 
-from keys_values.attention import (
+from keys_values.attention.base import (
     KeysAndValues,
     eager_scaled_dot_product_attention,
 )
-from keys_values.attention_utils import build_mask_cache
+from keys_values.attention.attention_utils import build_mask_cache
 from keys_values.kvcache.base import KVCacheParams, KVCache
 from keys_values.kvcache.factory import KVCacheFactory
 
