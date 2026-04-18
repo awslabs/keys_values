@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
-from typing import Optional, Tuple, Dict, Callable, List, Any, Union
+from typing import Optional, Tuple, Dict, Callable, List, Any, Union, Type
 
 import torch
 
@@ -70,6 +70,19 @@ class KVCacheWithBuffersState:
         self.dtype = dtype
         self.device = device
         self.input_pos = input_pos
+
+    def asdict(self) -> Dict[str, Any]:
+        return dict(
+            n_head=self.n_head,
+            n_query_groups=self.n_query_groups,
+            head_size=self.head_size,
+            max_batch_size=self.max_batch_size,
+            cache_length=self.cache_length,
+            block_idx=self.block_idx,
+            dtype=self.dtype,
+            device=self.device,
+            input_pos=self.input_pos,
+        )
 
     def _is_compatible(
         self,
@@ -153,11 +166,8 @@ class KVCacheWithBuffers(DefaultKVCache):
     An important use case for buffer switching is if several token sequences
     are to be generated for the same prompt, or if both a sample-based metric
     and a loss function are to be computed for the same (long) prompt. In
-    this case, we want to process the prompt only once. Moreover, techniques
-    like KV cache offloading make sense for prompt processing, but are too
-    slow for token generation. We can use buffers with offloading for the
-    prompt processing, then switch to in-GPU-memory buffers for the token
-    generation.
+    this case, we want to process the prompt only once. Use
+    :class:`ReplayKVCacheBuffers` buffers for the generation.
     """
 
     def __init__(
@@ -332,6 +342,10 @@ class KVCacheWithBuffers(DefaultKVCache):
                 this one
 
         """
+        if cache_state is not None and not isinstance(cache_state, self._state_type()):
+            raise TypeError(
+                f"type(cache_state) = {type(cache_state)}, must be {str(self._state_type())}"
+            )
         self_state = self.get_state()
         name = self_state.is_compatible(new_buffers)
         if name is not None:
@@ -355,6 +369,10 @@ class KVCacheWithBuffers(DefaultKVCache):
             device=self.device,
             input_pos=self.input_pos,
         )
+
+    @staticmethod
+    def _state_type() -> Type[KVCacheWithBuffersState]:
+        return KVCacheWithBuffersState
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
         """
@@ -667,6 +685,13 @@ class LastRecentlyInsertedKVCacheState(KVCacheWithBuffersState):
         self.init_grace_tokens = init_grace_tokens
         self.next_position = next_position
 
+    def asdict(self) -> Dict[str, Any]:
+        return dict(
+            super().asdict(),
+            init_grace_tokens=self.init_grace_tokens,
+            next_position=self.next_position,
+        )
+
     def is_compatible(
         self,
         state_or_buffers: Union["KVCacheWithBuffersState", KVCacheBuffers],
@@ -887,36 +912,30 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         return LastRecentlyInsertedKVCache(**self._base_kwargs_for_clone())
 
     def get_state(self) -> KVCacheWithBuffersState:
+        super_state = super().get_state()
         return LastRecentlyInsertedKVCacheState(
-            n_head=self.n_head,
-            n_query_groups=self.n_query_groups,
-            head_size=self.head_size,
-            max_batch_size=self.max_batch_size,
-            cache_length=self.cache_length,
-            block_idx=self.block_idx,
-            dtype=self.dtype,
-            device=self.device,
-            input_pos=self.input_pos,
+            **super_state.asdict(),
             init_grace_tokens=self.init_grace_tokens,
             next_position=self.next_position,
         )
 
     def _create_token_pos(self):
         kwargs = dict(dtype=self.token_pos.dtype, device=self.token_pos.device)
-        igt = self.init_grace_tokens
         cl = self.cache_length
         ip = self.input_pos
-        np = self.next_position
         if ip <= cl:
             self.token_pos[:ip] = torch.arange(ip, **kwargs)
         else:
+            igt = self.init_grace_tokens
+            np = self.next_position
+            assert np >= igt, (np, igt)  # Sanity check
             if igt > 0:
                 self.token_pos[:igt] = torch.arange(igt, **kwargs)
-            cl2 = cl - igt
-            entries = torch.arange(ip - cl2, ip, **kwargs)
+            rsz = cl - igt  # Remaining entries to set
+            entries = torch.arange(ip - rsz, ip, **kwargs)
             sz = cl - np
             self.token_pos[np:] = entries[:sz]
-            rsz = cl2 - sz
+            rsz -= sz  # Remaining entries to set
             if rsz > 0:
                 self.token_pos[igt : (igt + rsz)] = entries[sz:]
 
@@ -927,10 +946,10 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     ):
         super().switch_buffers(new_buffers, cache_state)
         if cache_state is not None:
-            if not isinstance(cache_state, LastRecentlyInsertedKVCacheState):
-                raise TypeError(
-                    f"type(cache_state) = {type(cache_state)}, must be LastRecentlyInsertedKVCacheState"
-                )
             self.next_position = cache_state.next_position
             self._create_token_pos()
         self._replay_log = None
+
+    @staticmethod
+    def _state_type() -> Type[KVCacheWithBuffersState]:
+        return LastRecentlyInsertedKVCacheState

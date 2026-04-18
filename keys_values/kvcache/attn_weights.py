@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Tuple, Dict, List, Any, Union
+from typing import Optional, Tuple, Dict, List, Any, Union, Type
 from dataclasses import dataclass
 
 import torch
@@ -363,6 +363,18 @@ class AttnWeightsKVCacheState(KVCacheWithBuffersState):
         self.prefill_length = prefill_length
         self.token_pos = token_pos.clone()
         self.next_positions = None if next_positions is None else next_positions.clone()
+
+    def asdict(self) -> Dict[str, Any]:
+        return dict(
+            super().asdict(),
+            grace_period=self.grace_period,
+            replay_log_blocksize=self.replay_log_blocksize,
+            keep_initial_fraction=self.keep_initial_fraction,
+            next_grace_pos=self.next_grace_pos,
+            prefill_length=self.prefill_length,
+            token_pos=self.token_pos,
+            next_positions=self.next_positions,
+        )
 
     def is_compatible(
         self,
@@ -1081,16 +1093,9 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         return base_kwargs
 
     def get_state(self) -> KVCacheWithBuffersState:
+        super_state = super().get_state()
         return AttnWeightsKVCacheState(
-            n_head=self.n_head,
-            n_query_groups=self.n_query_groups,
-            head_size=self.head_size,
-            max_batch_size=self.max_batch_size,
-            cache_length=self.cache_length,
-            block_idx=self.block_idx,
-            dtype=self.dtype,
-            device=self.device,
-            input_pos=self.input_pos,
+            **super_state.asdict(),
             grace_period=self.grace_period,
             replay_log_blocksize=self.replay_log_blocksize,
             keep_initial_fraction=self._keep_initial_fraction,
@@ -1107,12 +1112,12 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
     ):
         super().switch_buffers(new_buffers, cache_state)
         if cache_state is not None:
-            if not isinstance(cache_state, AttnWeightsKVCacheState):
-                raise TypeError(
-                    f"type(cache_state) = {type(cache_state)}, must be AttnWeightsKVCacheState"
-                )
             self.next_grace_pos = cache_state.next_grace_pos
             self.prefill_length = cache_state.prefill_length
             self.token_pos.copy_(cache_state.token_pos)
             self._next_positions = cache_state.next_positions
         self._replay_log = None
+
+    @staticmethod
+    def _state_type() -> Type[KVCacheWithBuffersState]:
+        return AttnWeightsKVCacheState

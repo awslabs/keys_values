@@ -161,7 +161,6 @@ def test_loss_after_replay(
                 prompts_or_logits=logits,
                 max_returned_tokens=max_returned_tokens,
                 sample_args=dict(),
-                include_prompt=False,
                 deallocate_cache_buffers=False,
             )
         )
@@ -305,7 +304,6 @@ def test_generate_several_times(
                         prompts_or_logits=init_logits,
                         max_returned_tokens=num_targets,
                         sample_args=dict(),
-                        include_prompt=False,
                         deallocate_cache_buffers=False,
                     )
                 )

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Tuple, Dict, List, Any, Union
+from typing import Optional, Tuple, Dict, List, Any, Union, Type
 
 import torch
 from torch.linalg import vector_norm
@@ -73,6 +73,13 @@ class H2OKVCacheState(AttnWeightsKVCacheState):
         )
         self.normalize_scores = normalize_scores
         self.scores = scores.clone()
+
+    def asdict(self) -> Dict[str, Any]:
+        return dict(
+            super().asdict(),
+            normalize_scores=self.normalize_scores,
+            scores=self.scores,
+        )
 
     def is_compatible(
         self,
@@ -326,23 +333,9 @@ class H2OKVCache(AttnWeightsKVCache):
         return base_kwargs
 
     def get_state(self) -> KVCacheWithBuffersState:
+        super_state = super().get_state()
         return H2OKVCacheState(
-            n_head=self.n_head,
-            n_query_groups=self.n_query_groups,
-            head_size=self.head_size,
-            max_batch_size=self.max_batch_size,
-            cache_length=self.cache_length,
-            block_idx=self.block_idx,
-            dtype=self.dtype,
-            device=self.device,
-            input_pos=self.input_pos,
-            grace_period=self.grace_period,
-            replay_log_blocksize=self.replay_log_blocksize,
-            keep_initial_fraction=self._keep_initial_fraction,
-            next_grace_pos=self.next_grace_pos,
-            prefill_length=self.prefill_length,
-            token_pos=self.token_pos,
-            next_positions=self._next_positions,
+            **super_state.asdict(),
             normalize_scores=self.normalize_scores,
             scores=self.scores,
         )
@@ -354,11 +347,11 @@ class H2OKVCache(AttnWeightsKVCache):
     ):
         super().switch_buffers(new_buffers, cache_state)
         if cache_state is not None:
-            if not isinstance(cache_state, H2OKVCacheState):
-                raise TypeError(
-                    f"type(cache_state) = {type(cache_state)}, must be H2OKVCacheState"
-                )
             self.scores.copy_(cache_state.scores)
+
+    @staticmethod
+    def _state_type() -> Type[KVCacheWithBuffersState]:
+        return H2OKVCacheState
 
 
 class VLengthInstantScoreMixin:
@@ -479,6 +472,12 @@ class VLengthH2OKVCacheState(H2OKVCacheState):
             scores,
         )
         self.v_norm = v_norm.clone()
+
+    def asdict(self) -> Dict[str, Any]:
+        return dict(
+            super().asdict(),
+            v_norm=self.v_norm,
+        )
 
 
 class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
@@ -624,25 +623,9 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
         return VLengthH2OKVCache(**self._base_kwargs_for_clone())
 
     def get_state(self) -> KVCacheWithBuffersState:
+        super_state = super().get_state()
         return VLengthH2OKVCacheState(
-            n_head=self.n_head,
-            n_query_groups=self.n_query_groups,
-            head_size=self.head_size,
-            max_batch_size=self.max_batch_size,
-            cache_length=self.cache_length,
-            block_idx=self.block_idx,
-            dtype=self.dtype,
-            device=self.device,
-            input_pos=self.input_pos,
-            grace_period=self.grace_period,
-            replay_log_blocksize=self.replay_log_blocksize,
-            keep_initial_fraction=self._keep_initial_fraction,
-            next_grace_pos=self.next_grace_pos,
-            prefill_length=self.prefill_length,
-            token_pos=self.token_pos,
-            next_positions=self._next_positions,
-            normalize_scores=self.normalize_scores,
-            scores=self.scores,
+            **super_state.asdict(),
             v_norm=self.v_norm,
         )
 
@@ -653,11 +636,11 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
     ):
         super().switch_buffers(new_buffers, cache_state)
         if cache_state is not None:
-            if not isinstance(cache_state, VLengthH2OKVCacheState):
-                raise TypeError(
-                    f"type(cache_state) = {type(cache_state)}, must be VLengthH2OKVCacheState"
-                )
             self.v_norm.copy_(cache_state.v_norm)
+
+    @staticmethod
+    def _state_type() -> Type[KVCacheWithBuffersState]:
+        return VLengthH2OKVCacheState
 
 
 REMOVE_ARG_NAMES = (
@@ -709,6 +692,12 @@ class H2OOriginalKVCacheState(AttnWeightsKVCacheState):
             next_positions,
         )
         self.scores = scores.clone()
+
+    def asdict(self) -> Dict[str, Any]:
+        return dict(
+            super().asdict(),
+            scores=self.scores,
+        )
 
 
 class H2OOriginalKVCache(AttnWeightsKVCache):
@@ -841,23 +830,9 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
         }
 
     def get_state(self) -> KVCacheWithBuffersState:
+        super_state = super().get_state()
         return H2OOriginalKVCacheState(
-            n_head=self.n_head,
-            n_query_groups=self.n_query_groups,
-            head_size=self.head_size,
-            max_batch_size=self.max_batch_size,
-            cache_length=self.cache_length,
-            block_idx=self.block_idx,
-            dtype=self.dtype,
-            device=self.device,
-            input_pos=self.input_pos,
-            grace_period=self.grace_period,
-            replay_log_blocksize=self.replay_log_blocksize,
-            keep_initial_fraction=self._keep_initial_fraction,
-            next_grace_pos=self.next_grace_pos,
-            prefill_length=self.prefill_length,
-            token_pos=self.token_pos,
-            next_positions=self._next_positions,
+            **super_state.asdict(),
             scores=self.scores,
         )
 
@@ -868,8 +843,8 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
     ):
         super().switch_buffers(new_buffers, cache_state)
         if cache_state is not None:
-            if not isinstance(cache_state, H2OOriginalKVCacheState):
-                raise TypeError(
-                    f"type(cache_state) = {type(cache_state)}, must be H2OOriginalKVCacheState"
-                )
             self.scores.copy_(cache_state.scores)
+
+    @staticmethod
+    def _state_type() -> Type[KVCacheWithBuffersState]:
+        return H2OOriginalKVCacheState
