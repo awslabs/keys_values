@@ -89,7 +89,7 @@ class ScatterInformation:
             values[:, :, start:end, :] = self.value
         else:
             index = self._get_index()
-            if is_index_1d(self.index):
+            if index.ndim == 1:
                 keys[:, :, index, :] = self.key
                 values[:, :, index, :] = self.value
             else:
@@ -104,8 +104,8 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
 
     A prompt has been processed into a list of quantized cache buffers,
     which use a common :class:`DequantizedKVCacheBuffers`. As tokens are
-    generated, we store the `q_len=1` updates here in terms of `scatter`
-    operations. Each time the buffer contents are required, we compute them
+    generated, we store the `q_len=1` updates here as :class:`ScatterInformation`
+    objects. Each time the buffer contents are required, we compute them
     by de-quantization from the base buffers, then replaying all the stored
     updates in sequence.
 
@@ -115,7 +115,8 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
     than full de-quantization and quantization.
 
     After a certain number of tokens have been generated, it makes sense
-    to update the :class:`QuantizedKVCacheBuffers` buffers.
+    to update the :class:`QuantizedKVCacheBuffers` buffers using
+    :meth:`update_base_buffers`.
     """
 
     def __init__(self, quant_buffers: QuantizedKVCacheBuffers):
@@ -177,11 +178,13 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
     def _replay_updates(self):
         if not self.dequant_buffers.buffers_are_allocated:
             raise ValueError("dequant_buffers must have allocated buffers")
-        keys = self.dequant_buffers.k_buff[: self.batch_size, ...]
-        values = self.dequant_buffers.v_buff[: self.batch_size, ...]
-        for scat_info in self._updates:
-            scat_info.apply(keys, values)
-        self._last_recent_replay_len = len(self._updates)
+        if self._need_to_replay():
+            self.dequant_buffers.set_quantized_cache(self)
+            keys = self.dequant_buffers.k_buff[: self.batch_size, ...]
+            values = self.dequant_buffers.v_buff[: self.batch_size, ...]
+            for scat_info in self._updates:
+                scat_info.apply(keys, values)
+            self._last_recent_replay_len = len(self._updates)
 
     def _need_to_replay(self) -> bool:
         return (not self.dequant_buffers._quantized_cache is self) or (
@@ -192,10 +195,7 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
         self,
         positions: PositionsType,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        self.quant_buffers._assert_buffers_allocated()
-        if self._need_to_replay():
-            self.dequant_buffers.set_quantized_cache(self)
-            self._replay_updates()
+        self._replay_updates()
         return self.dequant_buffers.get_slots(positions)
 
     def _forward(
@@ -204,10 +204,7 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
         key: torch.Tensor,
         value: torch.Tensor,
     ) -> KeysAndValues:
-        self.quant_buffers._assert_buffers_allocated()
-        if self._need_to_replay():
-            self.dequant_buffers.set_quantized_cache(self)
-            self._replay_updates()
+        self._replay_updates()
         keys = self.dequant_buffers.k_buff[: self.batch_size, ...]
         values = self.dequant_buffers.v_buff[: self.batch_size, ...]
         scat_info = ScatterInformation(
@@ -235,8 +232,7 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
                 scat_info.value,
             )
         self.quant_buffers.write_back()
-        self.current_length = self.quant_buffers.current_length
-        self._updates = []
+        self._deallocate()
         self._base_has_been_updated = True
 
     def _deallocate(self):
@@ -347,20 +343,26 @@ class ModelForTokenGeneration:
         if token_generating == self.is_token_generating:
             return
         if token_generating:
+            # False -> True: Switch in replay buffers
             self._cache_states = []
             for cache in self.gpt_model.get_kv_caches():
                 self._cache_states.append(cache.get_state())
                 cache.switch_buffers(ReplayKVCacheBuffers(cache.kv_buffers))
         else:
+            # True -> False: Switch back to base buffers
             assert (
                 self._cache_states is not None
                 and len(self._cache_states) == self.gpt_model.config.n_layer
             )
+            if not self._can_switch_back:
+                raise AssertionError(
+                    "Cannot switch status back after `update_base_buffers`"
+                )
             if any(
                 c.kv_buffers.base_has_been_updated
                 for c in self.gpt_model.get_kv_caches()
             ):
-                raise IndexError(
+                raise AssertionError(
                     "At least one of the base KV cache buffers have been "
                     "updated. Cannot switch status back."
                 )
@@ -371,3 +373,20 @@ class ModelForTokenGeneration:
                 )
             self._cache_states = None
         self.is_token_generating = token_generating
+
+    def update_base_buffers(self):
+        """
+        Update base buffers to incorporate updates done so far during
+        generation, and store current cache states. After that, calling
+        `switch_status(False)` switches to the new base buffers.
+
+        """
+        if not self.is_token_generating:
+            raise AssertionError("Replay buffers are not active")
+        for pos, cache in enumerate(self.gpt_model.get_kv_caches()):
+            buffers = cache.kv_buffers
+            buffers.update_base_buffers()
+            # "Legal" update: Switching back works
+            buffers._base_has_been_updated = False
+            # Store state of cache after uodates
+            self._cache_states[pos] = cache.get_state()

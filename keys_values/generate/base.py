@@ -231,12 +231,13 @@ def batched_generate_fn(
     Generates tokens for a batch of prompts.
 
     Prompts may have been processed already, in which case `prompts_or_logits`
-    can be the logits for the final chunk, whose last column is used to
-    generate the first token. Even if `prompts_or_logits` are prompts, these
-    need not be the start, in that `input_pos` of the KV caches may be
-    positive.
+    are the logits for the final token position. Even if `prompts_or_logits`
+    are prompts, these need not be the start, in that `input_pos` of the KV
+    caches may be positive.
 
-    Note: Semantics have changed from `LitGPT` code!
+    Note: Semantics have changed from `LitGPT` code! For example, the
+    prompt is never returned here, and stop sequence tokens are always
+    returned.
 
     Args:
         model: The model to use. Must be :class:`LongContextInferenceModel`,
@@ -259,9 +260,8 @@ def batched_generate_fn(
             the end.
 
     Yields:
-        Tensors of shape `(batch_size, num)`, where `num >= 1`. Usually,
-        `num == 1` (single tokens). The entries for batch dimensions where
-        generation has stopped, are set to `ignore_index`.
+        Tensors of shape `(batch_size, 1)`. The entries for batch dimensions
+        where generation has stopped, are set to `ignore_index`.
 
     """
     is_logits = prompts_or_logits.ndim == 3
@@ -278,12 +278,12 @@ def batched_generate_fn(
         batch_size, prompt_len = prompts_or_logits.shape
     else:
         if input_pos == 0:
-            raise ValueError("Being 3D, prompts_or_logits represents logits, but the KV caches are empty")
+            raise ValueError(
+                "Being 3D, prompts_or_logits represents logits, but the KV caches are empty"
+            )
         batch_size, prompt_len = prompts_or_logits.shape[0], 0
     if max_returned_tokens <= 0:
         raise ValueError("max_returned_tokens must be > 0")
-    gpt_model.max_seq_length = input_pos + prompt_len + max_returned_tokens
-
     if isinstance(sample_args, dict):
         sample_args = [sample_args] * batch_size
     else:
@@ -294,6 +294,7 @@ def batched_generate_fn(
         raise ValueError(
             "None of the sequences in stop_tokens must be empty:\n" + str(stop_tokens)
         )
+    gpt_model.max_seq_length = input_pos + prompt_len + max_returned_tokens
 
     # Prompt processing (if any)
     if not is_logits:
@@ -321,8 +322,8 @@ def batched_generate_fn(
 
     # Generation loop: One token per iteration
     tokens = None
-    for current_idx in range(max_returned_tokens):
-        if current_idx == 0:
+    for _ in range(max_returned_tokens):
+        if logits_final_position is not None:
             tokens = batched_sample(logits_final_position, kwargs=sample_args)
             logits_final_position = None
         else:
@@ -334,13 +335,13 @@ def batched_generate_fn(
         int_tokens = [token.item() for token in tokens]
 
         # Check for stop sequences
-        stop_dims = []
-        for batch_idx, int_token in enumerate(int_tokens):
+        stop_dims = []  # Stop in this iter
+        for batch_idx, (int_token, stop_progress) in enumerate(
+            zip(int_tokens, stop_progresses)
+        ):
             if has_stopped[batch_idx]:
                 continue
-            for seq_idx, (seq, seq_pos) in enumerate(
-                zip(stop_tokens, stop_progresses[batch_idx])
-            ):
+            for seq_idx, (seq, seq_pos) in enumerate(zip(stop_tokens, stop_progress)):
                 assert seq_pos < len(seq)  # Sanity check
                 if int_token == seq[seq_pos]:
                     seq_pos += 1
@@ -349,9 +350,9 @@ def batched_generate_fn(
                         stop_dims.append(batch_idx)
                         break
                 else:
-                    # Reset
+                    # Reset, to 0 or 1
                     seq_pos = int(seq_pos > 0 and int_token == seq[0])
-                stop_progresses[batch_idx][seq_idx] = seq_pos
+                stop_progress[seq_idx] = seq_pos
 
         yield torch.where(stopped_mask, ignore_ind_vec, tokens.flatten()).view(-1, 1)
         for batch_idx in stop_dims:
