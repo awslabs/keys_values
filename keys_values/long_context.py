@@ -1167,7 +1167,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
         if self.verbose is not VerbosityLevels.NONE:
             extra = ": " + mode if mode != "both" else ""
             print(
-                f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode{extra})"
+                f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped "
+                f"into {len(self.chunks_per_cell)} cells (inference mode{extra})"
             )
         chunks_per_cell_copy = None
         chunk_sizes_copy = None

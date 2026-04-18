@@ -44,7 +44,10 @@ from keys_values.data.base import (
     INPUT_IDS_NAME,
     TARGETS_STRINGS_NAME,
 )
-from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
+from keys_values.evaluation.evaluator import (
+    SampleBasedMetricsEvaluator,
+    compute_sample_based_metrics,
+)
 from keys_values.evaluation.tasks import (
     EvaluationTasks,
     EvaluationWithTasksHelper,
@@ -125,6 +128,7 @@ def setup(
     use_sample_metric: bool = True,
     sample_metric_max_generated_tokens: int = 20,
     sample_metric_kwargs: Optional[Dict[str, Any]] = None,
+    sample_metric_num_samples: int = 1,
 ) -> None:
     """Evaluate a range of model checkpoints on a test set
 
@@ -190,6 +194,9 @@ def setup(
             for sample-based metric evaluation
         sample_metric_kwargs: Keyword arguments for token sampling (params
             can be "temperature", "top_k", "top_p")
+        sample_metric_num_samples: Sample basic metrics are averaged over this
+            many iterations of token generation (the prompt is processed once
+            only)
 
     """
     devices = parse_devices(devices)
@@ -320,6 +327,7 @@ def setup(
         use_sample_metric=use_sample_metric,
         sample_metric_max_generated_tokens=sample_metric_max_generated_tokens,
         sample_metric_kwargs=sample_metric_kwargs,
+        sample_metric_num_samples=sample_metric_num_samples,
     )
 
 
@@ -342,6 +350,7 @@ def main(
     use_sample_metric: bool,
     sample_metric_max_generated_tokens,
     sample_metric_kwargs: Dict[str, Any],
+    sample_metric_num_samples: int,
 ) -> None:
     is_lora = model_type == "lora"
     if torch.cuda.is_available():
@@ -436,13 +445,11 @@ def main(
             sample_kwargs=sample_metric_kwargs,
         )
         gen_wrapper = ModelForTokenGeneration(model.gpt_model)
-        metric_name = evaluator.metrics[0]
-        print(f"Evaluation metrics: val_loss, {metric_name}")
+        print(f"Evaluation metrics: val_loss, {evaluator.metrics[0]}")
     else:
         print("Evaluation metric: val_loss")
         evaluator = None
         gen_wrapper = None
-        metric_name = None
 
     # Load base model
     file_path = checkpoint_dir / LIT_MODEL_FNAME
@@ -516,18 +523,18 @@ def main(
             else:
                 # We first compute the sample-based metric, then the loss. The
                 # prompt is processed once only.
-                with torch.no_grad():
-                    logits = model(input_ids, targets, mode="inputs")
-                gen_wrapper.switch_status(True)
-                metrics_values = evaluator(
+                metrics_values = compute_sample_based_metrics(
                     model=model,
-                    prompts_or_logits=logits,
-                    targets=batch[TARGETS_STRINGS_NAME],
+                    evaluator=evaluator,
+                    gen_wrapper=gen_wrapper,
+                    input_ids=input_ids,
+                    targets=targets,
+                    raw_targets=batch[TARGETS_STRINGS_NAME],
+                    num_samples=sample_metric_num_samples,
                 )
-                gen_wrapper.switch_status(False)
                 with torch.no_grad():
                     metrics_values["val_loss"] = model(
-                        input_ids, targets, mode="targets"
+                        input_ids, targets, mode="targets",
                     )
             eval_time = time.perf_counter() - t0
             msg = ", ".join(

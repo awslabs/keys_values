@@ -543,12 +543,16 @@ class EvalArgs(_EvalArgs):
             generated for sample based metric evaluation
         sample_metric_kwargs: Keyword arguments for token sampling (params
             can be "temperature", "top_k", "top_p")
+        sample_metric_num_samples: Sample basic metrics are averaged over this
+            many iterations of token generation (the prompt is processed once
+            only)
     """
 
     micro_batch_size: Optional[int] = None
     use_sample_metric: bool = True
     sample_metric_max_generated_tokens: int = 20
     sample_metric_kwargs: Optional[Dict[str, Any]] = None
+    sample_metric_num_samples: int = 1
 
     def __post_init__(self) -> None:
         if self.micro_batch_size is not None:
@@ -559,6 +563,7 @@ class EvalArgs(_EvalArgs):
             assert set(self.sample_metric_kwargs.keys()).issubset(
                 {"temperature", "top_k", "top_p"}
             )
+        assert self.sample_metric_max_generated_tokens > 0
 
 
 @dataclass

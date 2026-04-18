@@ -54,7 +54,10 @@ from keys_values.attention_utils import (
 from keys_values.config import Config as ConfigFull
 from keys_values.data import Helmet, LongBenchV2, MyDataLoader
 from keys_values.data.base import INPUT_IDS_NAME, TARGETS_STRINGS_NAME
-from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
+from keys_values.evaluation.evaluator import (
+    SampleBasedMetricsEvaluator,
+    compute_sample_based_metrics,
+)
 from keys_values.flex_attention import FlexAttentionArgs, choose_q_lens
 from keys_values.finetune.args import (
     TrainArgs,
@@ -832,7 +835,6 @@ def main(
         eval=eval,
         data=data,
         evaluator=evaluator,
-        tokenizer=tokenizer,
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
@@ -1152,7 +1154,6 @@ def fit(
     eval: EvalArgs,
     data: DataModule,
     evaluator: Optional[SampleBasedMetricsEvaluator],
-    tokenizer: Tokenizer,
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
@@ -1707,18 +1708,19 @@ def validate(
         else:
             # We first compute the sample-based metric, then the loss. The
             # prompt is processed once only.
-            logits = model(input_ids, targets, mode="inputs")
-            gen_wrapper.switch_status(True)
             raw_targets = batch[TARGETS_STRINGS_NAME]
             num_cases += len(raw_targets)
-            metric_vals = evaluator(
+            metric_vals = compute_sample_based_metrics(
                 model=model,
-                prompts_or_logits=logits,
-                targets=raw_targets,
+                evaluator=evaluator,
+                gen_wrapper=gen_wrapper,
+                input_ids=input_ids,
+                targets=targets,
+                raw_targets=raw_targets,
+                num_samples=eval.sample_metric_num_samples,
             )
             sum_vals = metric_vals[metric_name].sum().item()
             sum_metric_values += sum_vals
-            gen_wrapper.switch_status(False)
             val_loss = (
                 model(input_ids, targets, mode="targets").mean().item()
                 * num_tokens_this_batch

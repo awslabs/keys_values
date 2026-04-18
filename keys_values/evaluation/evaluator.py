@@ -20,6 +20,7 @@ from litgpt.tokenizer import Tokenizer
 from keys_values.evaluation.metrics import sub_exact_match, rouge_n_f1
 from keys_values.evaluation.evaluation import _eval_rerank, _eval_icl, _eval_infinite_mc
 from keys_values.generate.base import batched_generate_fn
+from keys_values.kvcache.replay_buffers import ModelForTokenGeneration
 from keys_values.long_context import LongContextInferenceModel
 
 METRICS_FOR_HELMET_TASKS = {
@@ -51,7 +52,7 @@ def validate_targets(targets: TargetType, metric: str):
         raise ValueError(f"Metric {metric} needs string targets, got: {targets}")
 
 
-def compute_metric(
+def _compute_metric(
     output: str,
     targets: TargetType,
     metric: str,
@@ -181,7 +182,7 @@ class SampleBasedMetricsEvaluator:
         return {
             metric: torch.tensor(
                 [
-                    compute_metric(output, target, metric)
+                    _compute_metric(output, target, metric)
                     for output, target in zip(outputs, targets)
                 ],
                 dtype=torch.float32,
@@ -189,3 +190,67 @@ class SampleBasedMetricsEvaluator:
             )
             for metric in self.metrics
         }
+
+
+def compute_sample_based_metrics(
+    model: LongContextInferenceModel,
+    evaluator: SampleBasedMetricsEvaluator,
+    gen_wrapper: ModelForTokenGeneration,
+    input_ids: torch.Tensor,
+    targets: Optional[torch.Tensor],
+    raw_targets: List[TargetType],
+    num_samples: int = 1,
+) -> Dict[str, torch.Tensor]:
+    """
+    Computes sample-based metrics specified by `evaluator`, using replay
+    buffers during generation. The buffer switching is managed by
+    `gen_wrapper`.
+
+    Args:
+        model: LongContextInferenceModel
+        evaluator: Computes sample-based metrics
+        gen_wrapper: Manages buffer switching
+        input_ids: Inputs. If `targets == None`, these are the prompts
+        targets: If given, forms a data case with `input_ids`, in which
+            case `model.forward` is called with `mode="inputs"`, so that
+            the loss value can be computed afterwards. If not given,
+            `input_ids` are the prompts.
+        raw_targets: Raw targets (not tokenized) passed into `evaluator`
+        num_samples: Sample-based metrics are averaged over this many
+            token generations.
+
+    Returns:
+        Dictionary with entries `{name: values}`, where `name in
+        evaLuator.metrics` and `values.shape = (batch_size,)`, the metric
+        values for each entry in the batch. If `num_samples > 1`, the
+        values are averaged over this many samples.
+
+    """
+    if num_samples < 1:
+        raise ValueError(f"num_samples = {num_samples}, must be >= 1")
+    if not(model.gpt_model is gen_wrapper.gpt_model):
+        raise ValueError("model.gpt_model and gen_wrapper.gpt_model must be the same")
+    with torch.no_grad():
+        logits = model(
+            input_ids,
+            targets,
+            mode="both" if targets is None else "inputs",
+        )
+    result = None
+    for _ in range(num_samples):
+        gen_wrapper.switch_status(True)
+        metric_vals = evaluator(
+            model=model,
+            prompts_or_logits=logits,
+            targets=raw_targets,
+        )
+        gen_wrapper.switch_status(False)
+        if result is None:
+            result = metric_vals
+        else:
+            for k, v in metric_vals.items():
+                result[k] += v
+    if num_samples > 1:
+        for k, v in result.items():
+            v /= num_samples
+    return result
