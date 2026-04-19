@@ -228,7 +228,7 @@ def compute_sample_based_metrics(
     """
     if num_samples < 1:
         raise ValueError(f"num_samples = {num_samples}, must be >= 1")
-    if not(model.gpt_model is gen_wrapper.gpt_model):
+    if not (model.gpt_model is gen_wrapper.gpt_model):
         raise ValueError("model.gpt_model and gen_wrapper.gpt_model must be the same")
     with torch.no_grad():
         logits = model(

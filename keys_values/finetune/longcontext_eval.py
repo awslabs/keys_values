@@ -534,7 +534,9 @@ def main(
                 )
                 with torch.no_grad():
                     metrics_values["val_loss"] = model(
-                        input_ids, targets, mode="targets",
+                        input_ids,
+                        targets,
+                        mode="targets",
                     )
             eval_time = time.perf_counter() - t0
             msg = ", ".join(

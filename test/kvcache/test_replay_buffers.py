@@ -13,7 +13,7 @@
 # limitations under the License.
 from itertools import product
 from dataclasses import replace
-from typing import List, Union, Tuple
+from typing import List, Union, Tuple, Optional
 from unittest import mock
 
 import torch
@@ -41,6 +41,7 @@ def create_model_and_data(
     cache_kwargs,
     cache_lengths,
     device,
+    max_num_targets: Optional[int] = None,
 ) -> Tuple[
     LongContextInferenceModel,
     ModelForTokenGeneration,
@@ -111,6 +112,8 @@ def create_model_and_data(
             device=device,
         )
         num_output_tokens = randint_torch(4, int(seq_length * 0.5))
+        if max_num_targets is not None:
+            num_output_tokens = min(max_num_targets, num_output_tokens)
         all_input_ids.append(token_ids[:, :-1])
         all_targets.append(token_ids[:, (-num_output_tokens):])
 
@@ -160,7 +163,10 @@ def test_loss_after_replay(
 
     max_returned_tokens = 8
     model, gen_wrapper, all_input_ids, all_targets, _ = create_model_and_data(
-        cache_name, cache_kwargs, cache_lengths, device,
+        cache_name,
+        cache_kwargs,
+        cache_lengths,
+        device,
     )
 
     # We compare loss values (1) computed directly and (2) computed by first
@@ -208,8 +214,13 @@ def test_generate_several_times(
     torch.random.manual_seed(seed)
 
     num_comp = 4
+    max_num_targets = 20
     model, gen_wrapper, all_input_ids, all_targets, _ = create_model_and_data(
-        cache_name, cache_kwargs, cache_lengths, device,
+        cache_name,
+        cache_kwargs,
+        cache_lengths,
+        device,
+        max_num_targets=max_num_targets,
     )
 
     data_idx = [0]
@@ -228,7 +239,8 @@ def test_generate_several_times(
     for i, input_ids in enumerate(all_input_ids):
         data_idx[0] = i
         num_targets = all_targets[i].shape[-1]
-        init_logits = model(input_ids, targets=None)
+        model.gpt_model.max_seq_length = input_ids.shape[-1]
+        init_logits = model(input_ids[:, :(-num_targets)], targets=None)
         results = []
         for _ in range(num_comp):
             gen_wrapper.switch_status(True)
@@ -252,7 +264,7 @@ def test_generate_several_times(
         # Compare them
         print("Comparing logits")
         for j, logits in enumerate(zip(*results)):
-            print(f"Token position {j}")
+            print(f"Data case {i}, token position {j}")
             for logit in logits[1:]:
                 torch.testing.assert_close(logits[0], logit)
 
@@ -272,8 +284,13 @@ def test_generate_old_new(
 
     qname = "torch-quantized8"
     chunk_size = 16
+    max_num_targets = 20
     model, gen_wrapper, all_input_ids, all_targets, params = create_model_and_data(
-        cache_name, cache_kwargs, cache_lengths, device,
+        cache_name,
+        cache_kwargs,
+        cache_lengths,
+        device,
+        max_num_targets=max_num_targets,
     )
 
     data_idx = [0]
@@ -293,7 +310,8 @@ def test_generate_old_new(
     for i, input_ids in enumerate(all_input_ids):
         data_idx[0] = i
         num_targets = all_targets[i].shape[-1]
-        init_logits = model(input_ids, targets=None)
+        model.gpt_model.max_seq_length = input_ids.shape[-1]
+        init_logits = model(input_ids[:, :(-num_targets)], targets=None)
         gen_wrapper.switch_status(True)
         gen_logits.clear()
         with mock.patch(
@@ -338,6 +356,7 @@ def test_generate_old_new(
     for i, input_ids in enumerate(all_input_ids):
         data_idx[0] = i
         num_targets = all_targets[i].shape[-1]
+        gpt_model.max_seq_length = input_ids.shape[-1]
         gen_logits.clear()
         with mock.patch(
             "keys_values.generate.base.batched_sample",
@@ -346,7 +365,7 @@ def test_generate_old_new(
             dummy = list(
                 batched_generate_fn(
                     model=model2,
-                    prompts_or_logits=input_ids,
+                    prompts_or_logits=input_ids[:, :(-num_targets)],
                     max_returned_tokens=num_targets,
                     sample_args=dict(),
                     deallocate_cache_buffers=False,
