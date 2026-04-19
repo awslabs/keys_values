@@ -24,8 +24,8 @@ from keys_values.kvcache.buffers import (
     KVCacheBuffersParams,
 )
 from keys_values.kvcache.quant_buffers import (
-    QuantizedKVCacheBuffers,
     DequantizedKVCacheBuffers,
+    QuantizedBuffersType,
 )
 from keys_values.kvcache.quantize.quantization import Quantizer
 from keys_values.model import GPT
@@ -119,7 +119,7 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
     :meth:`update_base_buffers`.
     """
 
-    def __init__(self, quant_buffers: QuantizedKVCacheBuffers):
+    def __init__(self, quant_buffers: QuantizedBuffersType):
         """
         Args:
             quant_buffers: Base buffers, on top of which we track additional
@@ -331,7 +331,7 @@ class ModelForTokenGeneration:
                 raise ValueError(
                     f"Cache for layer {layer_idx} is not a KVCacheWithBuffers"
                 )
-            if not isinstance(cache.kv_buffers, QuantizedKVCacheBuffers):
+            if not isinstance(cache.kv_buffers, QuantizedBuffersType):
                 raise ValueError(
                     f"Cache for layer {layer_idx} does not have buffers of type QuantizedKVCacheBuffers"
                 )

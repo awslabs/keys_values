@@ -27,11 +27,9 @@ from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.long_context import LongContextInferenceModel
+from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.replay_buffers import ModelForTokenGeneration
-from keys_values.kvcache.test_utils import (
-    create_kv_cache,
-    available_backends,
-)
+from keys_values.kvcache.test_utils import available_backends, create_kv_cache
 from keys_values.model import GPT
 from keys_values.utils import randint_torch
 
@@ -42,6 +40,7 @@ def create_model_and_data(
     cache_lengths,
     device,
     max_num_targets: Optional[int] = None,
+    non_quantized_buffers: bool = False,
 ) -> Tuple[
     LongContextInferenceModel,
     ModelForTokenGeneration,
@@ -87,17 +86,17 @@ def create_model_and_data(
     with torch.device(device):
         gpt_model = GPT(config, **mha_kwargs)
         gpt_model.apply(gpt_model._init_weights)  # Initialization
-    gpt_model.assign_kv_caches(
-        [
-            create_kv_cache(
-                name=cache_name + "-" + qname,
-                params=replace(params, cache_length=cache_length),
-                block_idx=block_idx,
-                **cache_kwargs,
-            )
-            for block_idx, cache_length in enumerate(cache_lengths)
-        ]
+    caches = KVCacheFactory.create(
+        gpt_model=gpt_model,
+        name=cache_name + "-" + qname,
+        max_batch_size=max(batch_sizes),
+        cache_length=cache_lengths,
+        device=device,
+        dtype=dtype,
+        cache_kwargs=cache_kwargs,
+        for_testing=non_quantized_buffers,
     )
+    gpt_model.assign_kv_caches(caches)
 
     # Create data batches
     head_model_name = CrossEntropyOnLogits.NAME
@@ -282,15 +281,17 @@ def test_generate_old_new(
     seed = 31415927
     torch.random.manual_seed(seed)
 
-    qname = "torch-quantized8"
     chunk_size = 16
     max_num_targets = 20
+    # We use non-quantized KV cache buffers here, since otherwise the logits
+    # cannot be the same
     model, gen_wrapper, all_input_ids, all_targets, params = create_model_and_data(
         cache_name,
         cache_kwargs,
         cache_lengths,
         device,
         max_num_targets=max_num_targets,
+        non_quantized_buffers=True,
     )
 
     data_idx = [0]
@@ -337,7 +338,7 @@ def test_generate_old_new(
     gpt_model.assign_kv_caches(
         [
             create_kv_cache(
-                name=cache_name + "-" + qname,
+                name=cache_name + "-default",
                 params=replace(params, cache_length=cache_length),
                 block_idx=block_idx,
                 **cache_kwargs,

@@ -43,6 +43,8 @@ from keys_values.kvcache.quant_buffers import (
     DequantizedKVCacheBuffers,
     create_quantized_kv_buffers,
     get_quant_kwargs,
+    TestingKVCacheBuffers,
+    create_testing_kv_buffers,
 )
 from keys_values.model import GPT
 
@@ -208,6 +210,7 @@ class KVCacheFactory:
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
+        for_testing: bool = False,
     ) -> List[KVCache]:
         """
         By default, caches are created for all layers of the model. A subrange
@@ -228,6 +231,9 @@ class KVCacheFactory:
             dtype: Data type for cache buffers (de-quantized). If not given,
                 this is determined with first usage
             cache_kwargs: Additional keyword arguments for cache creation
+            for_testing: If `True` and quantized buffers are used, we create
+                :class:`TestingKVCacheBuffers` instead. This is only used
+                for unit testing
 
         Returns:
             KV cache objects
@@ -297,16 +303,26 @@ class KVCacheFactory:
                 else:
                     allocate_buffers = False
                 dequant_kwargs = dict(max_num_ranges=max_num_ranges)
-                quant_buffers = create_quantized_kv_buffers(
-                    qname=qname,
-                    cache_lengths=cache_length,
-                    cache_params=cache_params,
-                    cache_kwargs=cache_kwargs,
-                    dequant_kwargs=dequant_kwargs,
-                    allocate_buffers=allocate_buffers,
-                    device=device,
-                    first_block_idx=start,
-                )
+                if not for_testing:
+                    quant_buffers = create_quantized_kv_buffers(
+                        qname=qname,
+                        cache_lengths=cache_length,
+                        cache_params=cache_params,
+                        cache_kwargs=cache_kwargs,
+                        dequant_kwargs=dequant_kwargs,
+                        allocate_buffers=allocate_buffers,
+                        device=device,
+                        first_block_idx=start,
+                    )
+                else:
+                    quant_buffers = create_testing_kv_buffers(
+                        cache_lengths=cache_length,
+                        cache_params=cache_params,
+                        dequant_kwargs=dequant_kwargs,
+                        allocate_buffers=allocate_buffers,
+                        device=device,
+                        first_block_idx=start,
+                    )
                 kv_caches = [
                     cache_type(
                         config=config,

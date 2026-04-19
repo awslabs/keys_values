@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple, Optional, Dict, List, Any
+from typing import Tuple, Optional, Dict, List, Any, Union
 from inspect import isclass
 from dataclasses import dataclass, replace
 
@@ -23,6 +23,7 @@ from keys_values.kvcache.buffers import (
     KVCacheBuffers,
     KVCacheBuffersParams,
     PositionsType,
+    DefaultKVCacheBuffers,
 )
 from keys_values.kvcache.consts import SUPPORTED_QUANTIZERS
 from keys_values.kvcache.quantize.quantization import Quantizer
@@ -332,6 +333,139 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
         )
 
 
+class TestingKVCacheBuffers(DefaultKVCacheBuffers):
+    """
+    Can be used as replacement of :class:`QuantizedKVCacheBuffers` in unit
+    tests when no quantization is to be used.
+    """
+
+    def __init__(
+        self,
+        dequant_buffers: "DequantizedKVCacheBuffers",
+        debug_label: Optional[str] = None,
+        block_idx: Optional[int] = None,
+        cache_length: Optional[int] = None,
+        allocate_buffers: bool = False,
+    ):
+        """
+        Args:
+            dequant_buffers: Object used to store de-quantized content. Should
+                be shared between several quantized buffers.
+            block_idx: Index of layer the cache is used in the current model.
+                This is needed if CPU offloading is used.
+
+        """
+        if cache_length is None:
+            cache_length = dequant_buffers.cache_length
+        super().__init__(
+            dequant_buffers.get_params(), cache_length, allocate_buffers,
+        )
+        self.dequant_buffers = dequant_buffers
+        self._debug_label = debug_label
+        self.block_idx = block_idx
+
+    @property
+    def debug_label(self) -> Optional[str]:
+        return self._debug_label
+
+    def get_slots(
+        self,
+        positions: PositionsType,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self._assert_buffers_allocated()
+        self.dequant_buffers.set_quantized_cache(self)
+        return self.dequant_buffers.get_slots(positions)
+
+    def _get_slots(
+        self,
+        positions: PositionsType,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return super().get_slots(positions)
+
+    def set_slots(
+        self,
+        positions: PositionsType,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ):
+        self._assert_buffers_allocated()
+        self.dequant_buffers.set_quantized_cache(self)
+        self.dequant_buffers.set_slots(positions, key, value)
+
+    def _set_slots(
+        self,
+        positions: PositionsType,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ):
+        super().set_slots(positions, key, value)
+
+    def _forward(
+        self,
+        positions: PositionsType,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> KeysAndValues:
+        self._assert_buffers_allocated()
+        self.dequant_buffers.set_quantized_cache(self)
+        return self.dequant_buffers.forward(positions, key, value)
+
+    def write_back(self):
+        """
+        Normally, the buffer content of `dequant_buffers` is quantized and
+        written back to its associated quantized cache once the association
+        is changed. But this may not happen at the end of an iteration over
+        all layers.
+
+        To be safe, call this method for all quantized caches. This makes
+        sure that content is written back for all `dequant_buffers` being
+        used. Associations are not changed here.
+
+        """
+        self.dequant_buffers.write_back()
+
+    def drop_association(self):
+        """
+        Drops association to `dequant_buffers`. Call this method if the
+        quantized cache content is modified *not* through `dequant_buffers`.
+        Once the association is dropped, the next access here will reset the
+        association and populate the `dequant_buffers`.
+
+        If the quantized content here is changed without dropping the
+        association, `dequant_buffers` is not re-populated and wrong content
+        may be served.
+
+        """
+        self.dequant_buffers.set_quantized_cache(None)
+
+    def get_keys_values(self) -> Optional[KeysAndValues]:
+        self._assert_buffers_allocated()
+        self.dequant_buffers.set_quantized_cache(self)
+        return self.dequant_buffers.get_keys_values()
+
+    def _prefill(self, key: torch.Tensor, value: torch.Tensor):
+        if self.buffers_are_allocated and key.device != self.device:
+            raise ValueError(f"key.device = {key.device}, must be {self.device}")
+        # check_for_nan(key, "QuantizedKVCacheBuffers._prefill", "key")
+        # check_for_nan(value, "QuantizedKVCacheBuffers._prefill", "value")
+        self._allocate_buffers(device=key.device)
+        self.dequant_buffers.set_quantized_cache(self)
+        return self.dequant_buffers.prefill(
+            key.to(dtype=self.dtype),
+            value.to(dtype=self.dtype),
+        )
+
+    def size_estimate(self) -> Tuple[int, Dict[str, int]]:
+        raise NotImplementedError
+
+    @staticmethod
+    def size_estimate_apriori(
+        params: KVCacheBuffersParams,
+        **kwargs,
+    ) -> Tuple[int, Dict[str, int]]:
+        raise NotImplementedError
+
+
 @dataclass(frozen=True)
 class DebugDequantBuffEvent:
     kind: str
@@ -356,6 +490,9 @@ MAX_SLOTS_TRACKED_FRACTION = 0.2
 MAX_SIZE_POSITIONS_TO_CHECK = 32
 
 DEFAULT_MAX_NUM_RANGES = 4
+
+
+QuantizedBuffersType = Union[QuantizedKVCacheBuffers, TestingKVCacheBuffers]
 
 
 class DequantizedKVCacheBuffers:
@@ -470,7 +607,7 @@ class DequantizedKVCacheBuffers:
     def buffers_are_allocated(self) -> bool:
         return self.k_buff is not None
 
-    def set_quantized_cache(self, cache: Optional[QuantizedKVCacheBuffers]):
+    def set_quantized_cache(self, cache: Optional[QuantizedBuffersType]):
         """
         This method has to be called by the KV cache before other methods. This
         is because the same object here is in general used with different KV caches,
@@ -731,6 +868,7 @@ class DequantizedKVCacheBuffers:
 
     def _quantize(self) -> None:
         cache = self._quantized_cache
+        is_testing = isinstance(cache, TestingKVCacheBuffers)
         assert cache is not None
         assert self.batch_size is not None
         assert self._needs_write_back
@@ -743,63 +881,77 @@ class DequantizedKVCacheBuffers:
                 self._slots_to_write_back,
                 self._max_num_ranges,
             )
-        for a, b in ranges:
-            cache.quantizer_k.quantize(
-                a,
-                b,
-                self.k_buff[: self.batch_size, :, a:b, :],
-                block_idx=cache.block_idx,
-            )
-            cache.quantizer_v.quantize(
-                a,
-                b,
-                self.v_buff[: self.batch_size, :, a:b, :],
-                block_idx=cache.block_idx,
-            )
-        if self.debug_events is not None:
-            slots = (
-                None
-                if self._slots_to_write_back is None
-                else list(self._slots_to_write_back)
-            )
-            self.debug_events.append(
-                DebugDequantBuffEvent(
-                    kind="write",
-                    label=cache.debug_label,
-                    num_slots=sum(b - a for a, b in ranges),
-                    slots=slots,
+        if not is_testing:
+            for a, b in ranges:
+                cache.quantizer_k.quantize(
+                    a,
+                    b,
+                    self.k_buff[: self.batch_size, :, a:b, :],
+                    block_idx=cache.block_idx,
                 )
-            )
+                cache.quantizer_v.quantize(
+                    a,
+                    b,
+                    self.v_buff[: self.batch_size, :, a:b, :],
+                    block_idx=cache.block_idx,
+                )
+            if self.debug_events is not None:
+                slots = (
+                    None
+                    if self._slots_to_write_back is None
+                    else list(self._slots_to_write_back)
+                )
+                self.debug_events.append(
+                    DebugDequantBuffEvent(
+                        kind="write",
+                        label=cache.debug_label,
+                        num_slots=sum(b - a for a, b in ranges),
+                        slots=slots,
+                    )
+                )
+        else:
+            for a, b in ranges:
+                cache._set_slots(
+                    positions=(a, b),
+                    key=self.k_buff[: self.batch_size, :, a:b, :],
+                    value=self.v_buff[: self.batch_size, :, a:b, :],
+                )
         self._needs_write_back = False
         self._slots_to_write_back = None
 
     def _dequantize(self) -> None:
         cache = self._quantized_cache
+        is_testing = isinstance(cache, TestingKVCacheBuffers)
         assert cache is not None
         assert self.batch_size is not None
         assert self.buffers_are_allocated
         ecl = self.eff_cache_length
-        cache.quantizer_k.dequantize(
-            start=0,
-            end=ecl,
-            out=self.k_buff[: self.batch_size, :, :ecl, :],
-            block_idx=cache.block_idx,
-        )
-        cache.quantizer_v.dequantize(
-            start=0,
-            end=ecl,
-            out=self.v_buff[: self.batch_size, :, :ecl, :],
-            block_idx=cache.block_idx,
-        )
-        if self.debug_events is not None:
-            self.debug_events.append(
-                DebugDequantBuffEvent(
-                    kind="read",
-                    label=cache.debug_label,
-                    num_slots=ecl,
-                    slots=None,
-                )
+        if not is_testing:
+            cache.quantizer_k.dequantize(
+                start=0,
+                end=ecl,
+                out=self.k_buff[: self.batch_size, :, :ecl, :],
+                block_idx=cache.block_idx,
             )
+            cache.quantizer_v.dequantize(
+                start=0,
+                end=ecl,
+                out=self.v_buff[: self.batch_size, :, :ecl, :],
+                block_idx=cache.block_idx,
+            )
+            if self.debug_events is not None:
+                self.debug_events.append(
+                    DebugDequantBuffEvent(
+                        kind="read",
+                        label=cache.debug_label,
+                        num_slots=ecl,
+                        slots=None,
+                    )
+                )
+        else:
+            key, value = cache._get_slots((0, ecl))
+            self.k_buff[: self.batch_size, :, :ecl, :] = key
+            self.v_buff[: self.batch_size, :, :ecl, :] = value
         self._needs_write_back = False
         self._slots_to_write_back = None
 
@@ -942,6 +1094,45 @@ def create_quantized_kv_buffers(
                 dequant_buffers=dequant_buffers,
                 block_idx=i + offset,
                 **kwargs,
+            )
+        )
+    return quant_buffers
+
+
+def create_testing_kv_buffers(
+    cache_lengths: List[int],
+    cache_params: KVCacheParams,
+    dequant_kwargs: Optional[Dict[str, Any]] = None,
+    allocate_buffers: bool = False,
+    device: Optional[torch.device] = None,
+    first_block_idx: Optional[int] = None,
+) -> List[TestingKVCacheBuffers]:
+    buffer_params = replace(
+        KVCacheBuffersParams.from_params(cache_params),
+        device=device,
+    )
+    max_cache_length = max(cache_lengths)
+    if dequant_kwargs is None:
+        dequant_kwargs = dict()
+    dequant_buffers = DequantizedKVCacheBuffers(
+        params=buffer_params,
+        cache_length=max_cache_length,
+        allocate_buffers=allocate_buffers,
+        **dequant_kwargs,
+    )
+    quant_buffers = []
+    offset = 0 if first_block_idx is None else first_block_idx
+    for i, cache_length in enumerate(cache_lengths):
+        _cache_params = replace(
+            cache_params,
+            cache_length=cache_length,
+        )
+        quant_buffers.append(
+            TestingKVCacheBuffers(
+                dequant_buffers=dequant_buffers,
+                block_idx=i + offset,
+                cache_length=cache_length,
+                allocate_buffers=allocate_buffers,
             )
         )
     return quant_buffers
