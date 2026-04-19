@@ -354,10 +354,6 @@ class ModelForTokenGeneration:
                 self._cache_states is not None
                 and len(self._cache_states) == self.gpt_model.config.n_layer
             )
-            if not self._can_switch_back:
-                raise AssertionError(
-                    "Cannot switch status back after `update_base_buffers`"
-                )
             if any(
                 c.kv_buffers.base_has_been_updated
                 for c in self.gpt_model.get_kv_caches()

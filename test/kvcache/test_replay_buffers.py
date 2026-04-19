@@ -13,7 +13,7 @@
 # limitations under the License.
 from itertools import product
 from dataclasses import replace
-from typing import List, Union
+from typing import List, Union, Tuple
 from unittest import mock
 
 import torch
@@ -36,37 +36,18 @@ from keys_values.model import GPT
 from keys_values.utils import randint_torch
 
 
-def args_loss_after_replay():
-    return [
-        b + c + (a,)
-        for a, b, c in product(
-            available_backends(),
-            [
-                ("lastrec", dict()),
-                ("h2o", {"replay_log_blocksize": 64}),
-                ("h2o", {"grace_period": 10, "replay_log_blocksize": 64}),
-            ],
-            [
-                ([128, 128],),
-                ([96, 128],),
-            ],
-        )
-    ]
-
-
-@pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths, device",
-    args_loss_after_replay(),
-)
-def test_loss_after_replay(
+def create_model_and_data(
     cache_name,
     cache_kwargs,
     cache_lengths,
     device,
-):
-    seed = 31415927
-    torch.random.manual_seed(seed)
-
+) -> Tuple[
+    LongContextInferenceModel,
+    ModelForTokenGeneration,
+    List[torch.Tensor],
+    List[torch.Tensor],
+    KVCacheParams,
+]:
     dtype = torch.float16
     torch.set_default_dtype(dtype)  # Set default dtype
 
@@ -78,7 +59,6 @@ def test_loss_after_replay(
     head_size = 64
     vocab_size = 128
     chunk_size = 16
-    max_returned_tokens = 8
     max_sequence_length = max(cache_lengths) * 8
     min_sequence_length = max(cache_lengths) * 2
 
@@ -144,7 +124,46 @@ def test_loss_after_replay(
     model.eval()
     gen_wrapper = ModelForTokenGeneration(gpt_model)
 
-    # We compare loss values (1) compute directly and (2) computed by first
+    return model, gen_wrapper, all_input_ids, all_targets, params
+
+
+def args_loss_after_replay():
+    return [
+        b + c + (a,)
+        for a, b, c in product(
+            available_backends(),
+            [
+                ("lastrec", dict()),
+                ("h2o", {"replay_log_blocksize": 64}),
+                ("h2o", {"grace_period": 10, "replay_log_blocksize": 64}),
+            ],
+            [
+                ([128, 128],),
+                ([96, 128],),
+            ],
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "cache_name, cache_kwargs, cache_lengths, device",
+    args_loss_after_replay(),
+)
+def test_loss_after_replay(
+    cache_name,
+    cache_kwargs,
+    cache_lengths,
+    device,
+):
+    seed = 31415927
+    torch.random.manual_seed(seed)
+
+    max_returned_tokens = 8
+    model, gen_wrapper, all_input_ids, all_targets, _ = create_model_and_data(
+        cache_name, cache_kwargs, cache_lengths, device,
+    )
+
+    # We compare loss values (1) computed directly and (2) computed by first
     # processing the prompt, then generating tokens with replay buffers,
     # finally computing the loss value.
     loss_direct = []
@@ -188,90 +207,10 @@ def test_generate_several_times(
     seed = 31415927
     torch.random.manual_seed(seed)
 
-    dtype = torch.float16
-    torch.set_default_dtype(dtype)  # Set default dtype
-
-    qname = "torch-quantized8"
-    batch_sizes = [5] + [4] * (len(cache_lengths) - 1)
-    n_layer = len(cache_lengths)
-    n_head = 8
-    n_query_groups = 4
-    head_size = 64
-    vocab_size = 128
-    chunk_size = 16
-    max_returned_tokens = 64
-    max_sequence_length = max(cache_lengths) * 4
-    min_sequence_length = max(cache_lengths) * 2
-
-    # Create model and KV caches
-    config = Config(
-        n_layer=n_layer,
-        n_head=n_head,
-        n_query_groups=n_query_groups,
-        n_embd=n_head * head_size,
-        block_size=max_sequence_length,
-        vocab_size=vocab_size,
-        rotary_percentage=1,
+    num_comp = 4
+    model, gen_wrapper, all_input_ids, all_targets, _ = create_model_and_data(
+        cache_name, cache_kwargs, cache_lengths, device,
     )
-    params = KVCacheParams.from_config(
-        config=config,
-        max_batch_size=max(batch_sizes),
-        cache_length=cache_lengths[0],
-        dtype=dtype,
-    )
-    if device == torch.device("cpu"):
-        mha_kwargs = dict()
-    else:
-        mha_kwargs = dict(flexatt_args=FlexAttentionArgs())
-    cache_kwargs.update(mha_kwargs)
-    with torch.device(device):
-        gpt_model = GPT(config, **mha_kwargs)
-        gpt_model.apply(gpt_model._init_weights)  # Initialization
-    gpt_model.assign_kv_caches(
-        [
-            create_kv_cache(
-                name=cache_name + "-" + qname,
-                params=replace(params, cache_length=cache_length),
-                block_idx=block_idx,
-                **cache_kwargs,
-            )
-            for block_idx, cache_length in enumerate(cache_lengths)
-        ]
-    )
-
-    # Create data batches
-    head_model_name = CrossEntropyOnLogits.NAME
-    all_input_ids = []
-    all_targets = []
-    for batch_size in batch_sizes:
-        seq_length = randint_torch(min_sequence_length, max_sequence_length)
-        all_input_ids.append(
-            torch.randint(
-                low=0,
-                high=config.vocab_size,
-                size=(batch_size, seq_length),
-                device=device,
-            )
-        )
-        num_targets = randint_torch(max_returned_tokens // 4, max_returned_tokens)
-        all_targets.append(
-            torch.randint(
-                low=0,
-                high=config.vocab_size,
-                size=(batch_size, num_targets),
-                device=device,
-            )
-        )
-
-    # Create model
-    head_model = HeadModelFactory.create(name=head_model_name, config=config)
-    model = LongContextInferenceModel(
-        gpt_model=gpt_model,
-        head_model=head_model,
-        chunk_size=chunk_size,
-    )
-    model.eval()
-    gen_wrapper = ModelForTokenGeneration(gpt_model)
 
     data_idx = [0]
     gen_logits = []
@@ -284,14 +223,14 @@ def test_generate_several_times(
         gen_logits.append(logits_stack)
         return all_targets[data_idx[0]][:, pos].unsqueeze(-1)
 
-    # We process the targets 2x and check whether the same logits are
-    # produced
+    # We process the targets `num_comp` times and check whether the same
+    # logits are produced
     for i, input_ids in enumerate(all_input_ids):
         data_idx[0] = i
         num_targets = all_targets[i].shape[-1]
         init_logits = model(input_ids, targets=None)
         results = []
-        for _ in range(2):
+        for _ in range(num_comp):
             gen_wrapper.switch_status(True)
             gen_logits.clear()
             with mock.patch(
@@ -310,8 +249,116 @@ def test_generate_several_times(
             assert len(gen_logits) == num_targets
             results.append(gen_logits.copy())
             gen_wrapper.switch_status(False)
-        # Compare the two
+        # Compare them
         print("Comparing logits")
-        for j, (logits1, logits2) in enumerate(zip(results[0], results[1])):
+        for j, logits in enumerate(zip(*results)):
             print(f"Token position {j}")
-            torch.testing.assert_close(logits1, logits2)
+            for logit in logits[1:]:
+                torch.testing.assert_close(logits[0], logit)
+
+
+@pytest.mark.parametrize(
+    "cache_name, cache_kwargs, cache_lengths, device",
+    args_loss_after_replay(),
+)
+def test_generate_old_new(
+    cache_name,
+    cache_kwargs,
+    cache_lengths,
+    device,
+):
+    seed = 31415927
+    torch.random.manual_seed(seed)
+
+    qname = "torch-quantized8"
+    chunk_size = 16
+    model, gen_wrapper, all_input_ids, all_targets, params = create_model_and_data(
+        cache_name, cache_kwargs, cache_lengths, device,
+    )
+
+    data_idx = [0]
+    gen_logits = []
+
+    def batched_sample(
+        logits_stack: torch.Tensor,
+        kwargs: Union[dict, List[dict]],
+    ) -> torch.Tensor:
+        pos = len(gen_logits)
+        gen_logits.append(logits_stack)
+        return all_targets[data_idx[0]][:, pos].unsqueeze(-1)
+
+    # Generate targets the new way (with replay buffers)
+    all_results = []
+    results = []
+    for i, input_ids in enumerate(all_input_ids):
+        data_idx[0] = i
+        num_targets = all_targets[i].shape[-1]
+        init_logits = model(input_ids, targets=None)
+        gen_wrapper.switch_status(True)
+        gen_logits.clear()
+        with mock.patch(
+            "keys_values.generate.base.batched_sample",
+            batched_sample,
+        ):
+            dummy = list(
+                batched_generate_fn(
+                    model=model,
+                    prompts_or_logits=init_logits,
+                    max_returned_tokens=num_targets,
+                    sample_args=dict(),
+                    deallocate_cache_buffers=False,
+                )
+            )
+        assert len(gen_logits) == num_targets
+        results.append(gen_logits.copy())
+        gen_wrapper.switch_status(False)
+    all_results.append(results)
+
+    # Generate targets the old way (without replay buffers)
+    gpt_model = model.gpt_model
+    gpt_model.assign_kv_caches(
+        [
+            create_kv_cache(
+                name=cache_name + "-" + qname,
+                params=replace(params, cache_length=cache_length),
+                block_idx=block_idx,
+                **cache_kwargs,
+            )
+            for block_idx, cache_length in enumerate(cache_lengths)
+        ]
+    )
+    model2 = LongContextInferenceModel(
+        gpt_model=gpt_model,
+        head_model=model.head_model,
+        chunk_size=chunk_size,
+    )
+    model2.eval()
+
+    results = []
+    for i, input_ids in enumerate(all_input_ids):
+        data_idx[0] = i
+        num_targets = all_targets[i].shape[-1]
+        gen_logits.clear()
+        with mock.patch(
+            "keys_values.generate.base.batched_sample",
+            batched_sample,
+        ):
+            dummy = list(
+                batched_generate_fn(
+                    model=model2,
+                    prompts_or_logits=input_ids,
+                    max_returned_tokens=num_targets,
+                    sample_args=dict(),
+                    deallocate_cache_buffers=False,
+                )
+            )
+        assert len(gen_logits) == num_targets
+        results.append(gen_logits.copy())
+    all_results.append(results)
+
+    # Compare them
+    print("Comparing logits")
+    for i, (logits0, logits1) in enumerate(zip(*all_results)):
+        for j, (logit0, logit1) in enumerate(zip(logits0, logits1)):
+            print(f"Data case {i}, token position {j}")
+            torch.testing.assert_close(logit0, logit1)
