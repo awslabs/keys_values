@@ -152,8 +152,13 @@ def get_variants():
         (2, "FlexAttention"),
     )
     if _get_flashinfer_sdpa() is not None:
-        variants += (flashinfer_weights,)
-        ind_and_names += ((3, "FlashInfer"),)
+        # variants += (flashinfer_weights,)
+        # ind_and_names += ((3, "FlashInfer"),)
+        # DEBUG!!
+        variants = variants[:-1] + (flashinfer_weights, flexatt_weights)
+        ind_and_names = ind_and_names[:-1] + (
+            (2, "FlashInfer"), (3, "FlexAttention"),
+        )
     return variants, ind_and_names
 
 
@@ -238,6 +243,8 @@ def test_small_comparison():
     [
         (16, 256, 240, 0.5, "kv_len=256, keep 50%"),
         (16, 512, 496, 0.5, "kv_len=512, keep 50%"),
+        (1, 256, 240, 0.5, "q_len=1, kv_len=256, keep 50%"),
+        (1, 512, 496, 0.5, "q_len=1, kv_len=512, keep 50%"),
         (16, 1024, 1008, 0.5, "kv_len=1024, keep 50%"),
         (16, 2048, 2032, 0.5, "kv_len=2048, keep 50%"),
         (16, 1024, 1008, 0.25, "kv_len=1024, keep 25% (aggressive eviction)"),

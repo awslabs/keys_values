@@ -44,7 +44,7 @@ class TestFlashInferSDPAInitialization:
     def test_availability_detection_with_flashinfer_available(self):
         """Test availability detection when FlashInfer is available."""
         with patch(
-            "keys_values.flashinfer_wrapper.FlashInferSDPA._check_vendored_kernels_available"
+            "keys_values.attention.flashinfer_wrapper.FlashInferSDPA._check_vendored_kernels_available"
         ) as mock_check:
             mock_check.return_value = True
             wrapper = FlashInferSDPA()
@@ -54,7 +54,7 @@ class TestFlashInferSDPAInitialization:
     def test_availability_detection_without_flashinfer(self):
         """Test availability detection when FlashInfer is not installed."""
         with patch(
-            "keys_values.flashinfer_wrapper.FlashInferSDPA._check_vendored_kernels_available"
+            "keys_values.attention.flashinfer_wrapper.FlashInferSDPA._check_vendored_kernels_available"
         ) as mock_check:
             mock_check.return_value = False
             with pytest.raises(AssertionError):
@@ -62,14 +62,14 @@ class TestFlashInferSDPAInitialization:
 
     def test_availability_detection_without_cuda(self):
         """Test availability detection when CUDA is not available."""
-        with patch("keys_values.flashinfer_ops.is_available", return_value=False):
+        with patch("keys_values.attention.flashinfer_ops.is_available", return_value=False):
             with pytest.raises(AssertionError):
                 wrapper = FlashInferSDPA()
 
     def test_check_flashinfer_available_handles_import_error(self):
         """Test that _check_vendored_kernels_available handles ImportError gracefully."""
         with patch(
-            "keys_values.flashinfer_ops.is_available",
+            "keys_values.attention.flashinfer_ops.is_available",
             side_effect=ImportError("No module named 'flashinfer_ops'"),
         ):
             with pytest.raises(AssertionError):
@@ -78,7 +78,7 @@ class TestFlashInferSDPAInitialization:
     def test_check_flashinfer_available_handles_generic_exception(self):
         """Test that _check_vendored_kernels_available handles generic exceptions gracefully."""
         with patch(
-            "keys_values.flashinfer_ops.is_available",
+            "keys_values.attention.flashinfer_ops.is_available",
             side_effect=RuntimeError("Some error"),
         ):
             with pytest.raises(AssertionError):
@@ -187,15 +187,19 @@ class TestFlashInferSDPAInterface:
 class TestFlashInferKernelWrapping:
     """Test FlashInfer kernel wrapping interface."""
 
+    # HIER: Shape returned by mock is wrong!
     def test_flashinfer_sdpa_routes_to_chunk_processing(self):
         """Test that scaled_dot_product_attention routes to chunk processing for decode phase."""
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
+            attn_outputs = torch.zeros(
+                (2, 4, 64), dtype=torch.float16, device=torch.device("cuda", 0),
+            )
             with patch.object(
                 FlashInferSDPA,
                 "_flashinfer_sdpa_chunk_processing",
-                return_value=(torch.tensor([]), None),
+                return_value=(attn_outputs, None),
             ) as mock_chunk:
                 wrapper = FlashInferSDPA()
 
@@ -207,10 +211,13 @@ class TestFlashInferKernelWrapping:
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
+            attn_outputs = torch.zeros(
+                (2, 1, 4, 64), dtype=torch.float16, device=torch.device("cuda", 0),
+            )
             with patch.object(
                 FlashInferSDPA,
                 "_flashinfer_sdpa_standard",
-                return_value=(torch.tensor([]), None),
+                return_value=attn_outputs,
             ) as mock_standard:
                 wrapper = FlashInferSDPA()
 
@@ -226,15 +233,26 @@ class TestFlashInferKernelWrapping:
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
+            q_len = 2048
+            kv_len = 32768
+            device = torch.device("cuda", 0)
+            attn_outputs = torch.zeros(
+                (2, q_len, 4, 64), dtype=torch.float16, device=device,
+            )
+            attn_weights = torch.zeros(
+                (2, 2, kv_len), dtype=torch.float32, device=device,
+            )
             with patch.object(
-                FlashInferSDPA, "_flashinfer_sdpa_fused_prefill", return_value=(torch.tensor([]), None)
+                FlashInferSDPA,
+                "_flashinfer_sdpa_fused_prefill",
+                return_value=(attn_outputs, attn_weights),
             ) as mock_fallback:
                 wrapper = FlashInferSDPA()
 
                 call_sdpa_with_random_args(
                     wrapper,
-                    q_len=2048,
-                    kv_len=32768,
+                    q_len=q_len,
+                    kv_len=kv_len,
                     return_attn_weights=True,
                 )
                 mock_fallback.assert_called_once()
@@ -385,7 +403,6 @@ class TestAttentionWeightsReturn:
 
 
 @_RunIf(min_cuda_gpus=1)
-@pytest.mark.skip("To be fixed")
 class TestAttentionWeightsProperties:
     """Property-based tests for attention weights functionality."""
 
@@ -394,11 +411,12 @@ class TestAttentionWeightsProperties:
         n_head=st.integers(min_value=1, max_value=8),
         q_len=st.integers(min_value=1, max_value=16),
         head_size=st.sampled_from([32, 64, 128]),
-        kv_len=st.integers(min_value=1, max_value=32),
+        kv_len=st.integers(min_value=4, max_value=32),
     )
     @settings(
         max_examples=100,
         suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
+        deadline=None,
     )
     def test_property_3_attention_weights_summation(
         self, batch_size, n_head, q_len, head_size, kv_len
@@ -416,16 +434,20 @@ class TestAttentionWeightsProperties:
         n_query_groups = max(1, n_head // max(1, n_head // 2))
         if n_head % n_query_groups != 0:
             n_query_groups = 1
+        if q_len >= kv_len:
+            q_len = kv_len // 2
 
         wrapper = FlashInferSDPA()
 
-        query = torch.randn(batch_size, n_head, q_len, head_size, device="cpu")
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        value = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        scale_factor = 1.0 / (head_size**0.5)
-
-        attn_output, attn_weights = wrapper._fallback_sdpa(
-            query, key, value, scale_factor, return_attn_weights=True
+        attn_output, attn_weights = call_sdpa_with_random_args(
+            wrapper,
+            max_batch_size=batch_size,
+            n_head=n_head,
+            n_query_groups=n_query_groups,
+            q_len=q_len,
+            kv_len=kv_len,
+            head_size=head_size,
+            return_attn_weights=True,
         )
 
         # Property: Attention weights shape should be (batch_size, n_query_groups, kv_len)
@@ -437,23 +459,27 @@ class TestAttentionWeightsProperties:
 
         # Property: Attention weights should be non-negative (summed softmax values)
         assert torch.all(attn_weights >= 0), "Attention weights should be non-negative"
-
-        # Property: Attention weights should be finite
-        assert torch.all(
-            torch.isfinite(attn_weights)
-        ), "Attention weights should be finite (no NaN or Inf)"
+        # Entries must sum to `q_len`
+        must_be = torch.tensor(
+            q_len, device=attn_weights.device, dtype=attn_weights.dtype,
+        ).view(1, 1).expand(batch_size, n_query_groups)
+        sum_over_kv = attn_weights.sum(dim=-1)
+        torch.testing.assert_close(
+            sum_over_kv, must_be, atol=0.0003, rtol=5e-5,
+        )
 
     @given(
         batch_size=st.integers(min_value=1, max_value=4),
         n_head=st.integers(min_value=1, max_value=8),
         q_len=st.integers(min_value=1, max_value=16),
         head_size=st.sampled_from([32, 64, 128]),
-        kv_len=st.integers(min_value=1, max_value=32),
-        input_dtype=st.sampled_from([torch.float32, torch.float16]),
+        kv_len=st.integers(min_value=4, max_value=32),
+        input_dtype=st.sampled_from([torch.bfloat16, torch.float16]),
     )
     @settings(
         max_examples=100,
         suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much],
+        deadline=None,
     )
     def test_property_4_attention_weights_float32_dtype(
         self, batch_size, n_head, q_len, head_size, kv_len, input_dtype
@@ -470,32 +496,20 @@ class TestAttentionWeightsProperties:
         n_query_groups = max(1, n_head // max(1, n_head // 2))
         if n_head % n_query_groups != 0:
             n_query_groups = 1
+        if q_len >= kv_len:
+            q_len = kv_len // 2
 
         wrapper = FlashInferSDPA()
 
-        query = torch.randn(
-            batch_size, n_head, q_len, head_size, dtype=input_dtype, device="cpu"
-        )
-        key = torch.randn(
-            batch_size,
-            n_query_groups,
-            kv_len,
-            head_size,
-            dtype=input_dtype,
-            device="cpu",
-        )
-        value = torch.randn(
-            batch_size,
-            n_query_groups,
-            kv_len,
-            head_size,
-            dtype=input_dtype,
-            device="cpu",
-        )
-        scale_factor = 1.0 / (head_size**0.5)
-
-        attn_output, attn_weights = wrapper._fallback_sdpa(
-            query, key, value, scale_factor, return_attn_weights=True
+        attn_output, attn_weights = call_sdpa_with_random_args(
+            wrapper,
+            max_batch_size=batch_size,
+            n_head=n_head,
+            n_query_groups=n_query_groups,
+            q_len=q_len,
+            kv_len=kv_len,
+            head_size=head_size,
+            return_attn_weights=True,
         )
 
         # Property: Attention weights should always be float32 regardless of input dtype
@@ -503,13 +517,16 @@ class TestAttentionWeightsProperties:
             attn_weights.dtype == torch.float32
         ), f"Expected attention weights dtype float32, got {attn_weights.dtype}"
 
-        # Property: Attention weights should be finite
-        assert torch.all(
-            torch.isfinite(attn_weights)
-        ), "Attention weights should be finite (no NaN or Inf)"
-
-        # Property: Attention weights should be non-negative
+        # Property: Attention weights should be non-negative (summed softmax values)
         assert torch.all(attn_weights >= 0), "Attention weights should be non-negative"
+        # Entries must sum to `q_len`
+        must_be = torch.tensor(
+            q_len, device=attn_weights.device, dtype=attn_weights.dtype,
+        ).view(1, 1).expand(batch_size, n_query_groups)
+        sum_over_kv = attn_weights.sum(dim=-1)
+        torch.testing.assert_close(
+            sum_over_kv, must_be, atol=0.0003, rtol=5e-5,
+        )
 
 
 @_RunIf(min_cuda_gpus=1)

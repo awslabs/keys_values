@@ -486,7 +486,6 @@ class FlashInferSDPA:
                 value,
                 scale_factor,
             )
-            print(f"attn_outputs: {attn_outputs.shape}, attn_weights: {attn_weights.shape}")  # DEBUG
             if token_positions is not None:
                 # Undo reordering
                 attn_weights = reorder_inverse(attn_weights, **extra_info)
@@ -504,9 +503,6 @@ class FlashInferSDPA:
         if head_size_diff is not None:
             attn_outputs = attn_outputs[:, :, :, :head_size]
         if not output_transposed:
-            print(f"attn_outputs.type = {attn_outputs.type}")
-            if isinstance(attn_outputs, torch.Tensor):
-                print(f"attn_outputs.shape = {attn_outputs.shape}")  # DEBUG
             attn_outputs = attn_outputs.transpose(1, 2).contiguous()
         return attn_outputs, attn_weights
 
@@ -609,7 +605,6 @@ class FlashInferSDPA:
             return_weights=False,
             return_lse=True,
         )
-        print(f"output.shape = {output.shape}")  # DEBUG
         # output: [bs, q_len, n_head, head_size]
         # lse: [bs, q_len, n_head] (log2 scale)
 
@@ -629,7 +624,6 @@ class FlashInferSDPA:
             n_kv_heads=n_kv_heads,
             group_size=group_size,
         )
-        print(f"weights.shape = {weights.shape}")  # DEBUG
 
         return output, weights
 
@@ -667,22 +661,20 @@ class FlashInferSDPA:
 
         # Transform key and value to vendored kernel format
         # From (batch_size, n_query_groups, kv_len, head_size) to (batch_size, kv_len, n_query_groups, head_size)
-        query = query.contiguous()
+        query = query.squeeze(2).contiguous()
         key_transformed = key.transpose(1, 2).contiguous()
         value_transformed = value.transpose(1, 2).contiguous()
 
         # Call vendored decode kernel
         # Expected query shape: [batch_size, num_qo_heads, head_size]
         output_token, attn_weights = flashinfer_ops.sdpa_decode(
-            query=query.squeeze(2),
+            query=query,
             key=key_transformed,
             value=value_transformed,
             scale=scale_factor,
             return_weights=return_attn_weights,
         )
         attn_outputs = output_token.unsqueeze(1)
-        if return_attn_weights:
-            attn_weights = attn_weights.to(dtype=torch.float32)
 
         return attn_outputs, attn_weights
 
