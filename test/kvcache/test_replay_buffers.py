@@ -13,7 +13,7 @@
 # limitations under the License.
 from itertools import product
 from dataclasses import replace
-from typing import List, Union, Tuple, Optional
+from typing import List, Union, Tuple, Optional, Dict, Any
 from unittest import mock
 
 import torch
@@ -47,6 +47,7 @@ def create_model_and_data(
     List[torch.Tensor],
     List[torch.Tensor],
     KVCacheParams,
+    Dict[str, Any],
 ]:
     dtype = torch.float16
     torch.set_default_dtype(dtype)  # Set default dtype
@@ -82,7 +83,7 @@ def create_model_and_data(
         mha_kwargs = dict()
     else:
         mha_kwargs = dict(flexatt_args=FlexAttentionArgs())
-    cache_kwargs.update(mha_kwargs)
+    _cache_kwargs = {**cache_kwargs, **mha_kwargs}
     with torch.device(device):
         gpt_model = GPT(config, **mha_kwargs)
         gpt_model.apply(gpt_model._init_weights)  # Initialization
@@ -93,7 +94,7 @@ def create_model_and_data(
         cache_length=cache_lengths,
         device=device,
         dtype=dtype,
-        cache_kwargs=cache_kwargs,
+        cache_kwargs=_cache_kwargs,
         for_testing=non_quantized_buffers,
     )
     gpt_model.assign_kv_caches(caches)
@@ -126,7 +127,7 @@ def create_model_and_data(
     model.eval()
     gen_wrapper = ModelForTokenGeneration(gpt_model)
 
-    return model, gen_wrapper, all_input_ids, all_targets, params
+    return model, gen_wrapper, all_input_ids, all_targets, params, mha_kwargs
 
 
 def args_loss_after_replay():
@@ -161,7 +162,7 @@ def test_loss_after_replay(
     torch.random.manual_seed(seed)
 
     max_returned_tokens = 8
-    model, gen_wrapper, all_input_ids, all_targets, _ = create_model_and_data(
+    model, gen_wrapper, all_input_ids, all_targets, _, _ = create_model_and_data(
         cache_name,
         cache_kwargs,
         cache_lengths,
@@ -214,7 +215,7 @@ def test_generate_several_times(
 
     num_comp = 4
     max_num_targets = 20
-    model, gen_wrapper, all_input_ids, all_targets, _ = create_model_and_data(
+    model, gen_wrapper, all_input_ids, all_targets, _, _ = create_model_and_data(
         cache_name,
         cache_kwargs,
         cache_lengths,
@@ -285,7 +286,7 @@ def test_generate_old_new(
     max_num_targets = 20
     # We use non-quantized KV cache buffers here, since otherwise the logits
     # cannot be the same
-    model, gen_wrapper, all_input_ids, all_targets, params = create_model_and_data(
+    model, gen_wrapper, all_input_ids, all_targets, params, mha_kwargs = create_model_and_data(
         cache_name,
         cache_kwargs,
         cache_lengths,
@@ -309,6 +310,7 @@ def test_generate_old_new(
     all_results = []
     results = []
     for i, input_ids in enumerate(all_input_ids):
+        print(f"New, case {i}")
         data_idx[0] = i
         num_targets = all_targets[i].shape[-1]
         model.gpt_model.max_seq_length = input_ids.shape[-1]
@@ -342,6 +344,7 @@ def test_generate_old_new(
                 params=replace(params, cache_length=cache_length),
                 block_idx=block_idx,
                 **cache_kwargs,
+                **mha_kwargs,
             )
             for block_idx, cache_length in enumerate(cache_lengths)
         ]
@@ -355,7 +358,9 @@ def test_generate_old_new(
 
     results = []
     for i, input_ids in enumerate(all_input_ids):
+        print(f"Old, case {i}")
         data_idx[0] = i
+        gpt_model.reset()
         num_targets = all_targets[i].shape[-1]
         gpt_model.max_seq_length = input_ids.shape[-1]
         gen_logits.clear()

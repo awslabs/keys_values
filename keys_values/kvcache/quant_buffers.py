@@ -368,6 +368,19 @@ class TestingKVCacheBuffers(DefaultKVCacheBuffers):
     def debug_label(self) -> Optional[str]:
         return self._debug_label
 
+    def _assert_buffers_allocated(self):
+        assert (
+            self.buffers_are_allocated
+        ), "Buffers are not allocated. Call 'prefill' first"
+
+    @property
+    def quantizer_k(self) -> Optional[Quantizer]:
+        return None
+
+    @property
+    def quantizer_v(self) -> Optional[Quantizer]:
+        return None
+
     def get_slots(
         self,
         positions: PositionsType,
@@ -868,7 +881,6 @@ class DequantizedKVCacheBuffers:
 
     def _quantize(self) -> None:
         cache = self._quantized_cache
-        is_testing = isinstance(cache, TestingKVCacheBuffers)
         assert cache is not None
         assert self.batch_size is not None
         assert self._needs_write_back
@@ -881,7 +893,7 @@ class DequantizedKVCacheBuffers:
                 self._slots_to_write_back,
                 self._max_num_ranges,
             )
-        if not is_testing:
+        if cache.quantizer_k is not None:
             for a, b in ranges:
                 cache.quantizer_k.quantize(
                     a,
@@ -921,12 +933,11 @@ class DequantizedKVCacheBuffers:
 
     def _dequantize(self) -> None:
         cache = self._quantized_cache
-        is_testing = isinstance(cache, TestingKVCacheBuffers)
         assert cache is not None
         assert self.batch_size is not None
         assert self.buffers_are_allocated
         ecl = self.eff_cache_length
-        if not is_testing:
+        if cache.quantizer_k is not None:
             cache.quantizer_k.dequantize(
                 start=0,
                 end=ecl,

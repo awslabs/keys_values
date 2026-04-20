@@ -26,6 +26,7 @@ from keys_values.kvcache.buffers import (
 from keys_values.kvcache.quant_buffers import (
     DequantizedKVCacheBuffers,
     QuantizedBuffersType,
+    TestingKVCacheBuffers,
 )
 from keys_values.kvcache.quantize.quantization import Quantizer
 from keys_values.model import GPT
@@ -126,12 +127,11 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
                 small updates.
         """
 
-        cache_length = quant_buffers.quantizer_k.shape[2]
         if not quant_buffers.buffers_are_allocated:
             raise ValueError("quant_buffers must have allocated buffers")
         super().__init__(
             quant_buffers.dequant_buffers.get_params(),
-            cache_length,
+            quant_buffers.cache_length,
         )
         self.quant_buffers = quant_buffers
         self._updates: List[ScatterInformation] = []
@@ -140,6 +140,7 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
         self.batch_size = quant_buffers.batch_size
         self.current_length = quant_buffers.current_length
         self.cache_length = quant_buffers.cache_length
+        self._is_testing = isinstance(quant_buffers, TestingKVCacheBuffers)
 
     @property
     def base_has_been_updated(self) -> bool:
@@ -160,12 +161,30 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
         return True
 
     @property
-    def quantizer_k(self) -> Quantizer:
-        return self.quant_buffers.quantizer_k
+    def quantizer_k(self) -> Optional[Quantizer]:
+        return None if self._is_testing else self.quant_buffers.quantizer_k
+
+    def _get_slots(
+        self,
+        positions: PositionsType,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if not self._is_testing:
+            raise NotImplementedError
+        return self.quant_buffers._get_slots(positions)
+
+    def _set_slots(
+        self,
+        positions: PositionsType,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ):
+        if not self._is_testing:
+            raise NotImplementedError
+        self.quant_buffers._set_slots(positions, key, value)
 
     @property
-    def quantizer_v(self) -> Quantizer:
-        return self.quant_buffers.quantizer_v
+    def quantizer_v(self) -> Optional[Quantizer]:
+        return None if self._is_testing else self.quant_buffers.quantizer_v
 
     @property
     def block_idx(self) -> int:
