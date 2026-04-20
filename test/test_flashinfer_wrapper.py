@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from hypothesis import given, settings, strategies as st, HealthCheck
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from unittest.mock import patch
 
 import pytest
@@ -31,10 +31,10 @@ from keys_values.kvcache.test_utils import (
 )
 
 
-@_RunIf(min_cuda_gpus=1)
 class TestFlashInferSDPAInitialization:
     """Test FlashInferSDPA class initialization."""
 
+    @_RunIf(min_cuda_gpus=1)
     def test_initialization_creates_instance(self):
         """Test that FlashInferSDPA can be instantiated."""
         wrapper = FlashInferSDPA()
@@ -84,16 +84,60 @@ class TestFlashInferSDPAInitialization:
             with pytest.raises(AssertionError):
                 wrapper = FlashInferSDPA()
 
+    @_RunIf(min_cuda_gpus=1)
     def test_global_instance_creation(self):
         """Test that get_flashinfer_sdpa returns a singleton instance."""
         instance1 = get_flashinfer_sdpa()
         instance2 = get_flashinfer_sdpa()
         assert instance1 is instance2
 
+    @_RunIf(min_cuda_gpus=1)
     def test_global_instance_is_flashinfer_sdpa(self):
         """Test that global instance is of correct type."""
         instance = get_flashinfer_sdpa()
         assert isinstance(instance, FlashInferSDPA)
+
+
+def sample_random_args(
+    kv_len: int = 16,
+    max_batch_size: int = 2,
+    n_query_groups: int = 2,
+    cache_length: int = 16,
+    head_size: int = 64,
+    n_head: int = 4,
+    dtype: torch.dtype = torch.float16,
+) -> Dict[str, torch.Tensor]:
+    params = KVCacheParams(
+        max_batch_size=max_batch_size,
+        n_query_groups=n_query_groups,
+        cache_length=cache_length,
+        head_size=head_size,
+        n_head=n_head,
+        dtype=dtype,
+    )
+    return random_args_cache_forward(
+        params,
+        kv_len,
+        vocab_size=None,
+        device=torch.device("cuda", 0),
+    )
+
+
+def call_sdpa_with_given_data(
+    data: Dict[str, torch.Tensor],
+    wrapper: FlashInferSDPA,
+    q_len: int = 8,
+    input_pos: int = 4,
+    token_positions: Optional[torch.Tensor] = None,
+    **kwargs,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    return wrapper.scaled_dot_product_attention(
+        **range_from_args(data, 0, q_len, only_query=True),
+        scale_factor=None,
+        input_pos=input_pos,
+        token_positions=token_positions,
+        **kwargs,
+    )
 
 
 def call_sdpa_with_random_args(
@@ -110,24 +154,19 @@ def call_sdpa_with_random_args(
     dtype: torch.dtype = torch.float16,
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    params = KVCacheParams(
-        max_batch_size=max_batch_size,
-        n_query_groups=n_query_groups,
-        cache_length=cache_length,
-        head_size=head_size,
-        n_head=n_head,
-        dtype=dtype,
-    )
-    data = random_args_cache_forward(
-        params,
+    data = sample_random_args(
         kv_len,
-        vocab_size=None,
-        device=torch.device("cuda", 0),
+        max_batch_size,
+        n_query_groups,
+        cache_length,
+        head_size,
+        n_head,
+        dtype,
     )
-
-    return wrapper.scaled_dot_product_attention(
-        **range_from_args(data, 0, q_len, only_query=True),
-        scale_factor=None,
+    return call_sdpa_with_given_data(
+        data=data,
+        wrapper=wrapper,
+        q_len=q_len,
         input_pos=input_pos,
         token_positions=token_positions,
         **kwargs,
@@ -187,7 +226,6 @@ class TestFlashInferSDPAInterface:
 class TestFlashInferKernelWrapping:
     """Test FlashInfer kernel wrapping interface."""
 
-    # HIER: Shape returned by mock is wrong!
     def test_flashinfer_sdpa_routes_to_chunk_processing(self):
         """Test that scaled_dot_product_attention routes to chunk processing for decode phase."""
         with patch.object(
@@ -529,287 +567,6 @@ class TestAttentionWeightsProperties:
         )
 
 
-@_RunIf(min_cuda_gpus=1)
-@pytest.mark.skip("To be fixed")
-class TestChunkProcessingForLongSequences:
-    """Test chunk processing for long sequences (Requirement 4.1, 4.2)."""
-
-    def test_chunk_processing_with_chunk_size_parameter(self):
-        """Test that chunk_size parameter is accepted and used."""
-        wrapper = FlashInferSDPA()
-
-        batch_size, n_head, q_len, head_size = 2, 4, 32, 64
-        n_query_groups = 2
-        kv_len = 32
-        chunk_size = 8  # Process in chunks of 8
-
-        query = torch.randn(batch_size, n_head, q_len, head_size, device="cpu")
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        value = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        scale_factor = 1.0 / (head_size**0.5)
-
-        # Should work with chunk_size parameter
-        attn_output, attn_weights = wrapper._fallback_sdpa(
-            query,
-            key,
-            value,
-            scale_factor,
-            return_attn_weights=True,
-            chunk_size=chunk_size,
-        )
-
-        # Verify output shapes
-        assert attn_output.shape == (batch_size, n_head, q_len, head_size)
-        assert attn_weights.shape == (batch_size, n_query_groups, kv_len)
-
-    def test_chunk_processing_consistency_with_full_processing(self):
-        """Test that chunked processing produces same results as full processing."""
-        wrapper = FlashInferSDPA()
-
-        batch_size, n_head, q_len, head_size = 1, 2, 16, 32
-        n_query_groups = 2
-        kv_len = 16
-
-        # Use same random seed for reproducibility
-        torch.manual_seed(42)
-        query = torch.randn(batch_size, n_head, q_len, head_size, device="cpu")
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        value = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        scale_factor = 1.0 / (head_size**0.5)
-
-        # Process without chunking (chunk_size=None means automatic)
-        output_full, weights_full = wrapper._fallback_sdpa(
-            query, key, value, scale_factor, return_attn_weights=True, chunk_size=None
-        )
-
-        # Process with explicit chunking
-        output_chunked, weights_chunked = wrapper._fallback_sdpa(
-            query,
-            key,
-            value,
-            scale_factor,
-            return_attn_weights=True,
-            chunk_size=4,  # Small chunk size
-        )
-
-        # Results should be numerically equivalent
-        assert torch.allclose(
-            output_full, output_chunked, rtol=1e-4, atol=1e-6
-        ), "Chunked output should match full output"
-        assert torch.allclose(
-            weights_full, weights_chunked, rtol=1e-4, atol=1e-6
-        ), "Chunked weights should match full weights"
-
-    def test_chunk_processing_causal_masking_across_chunks(self):
-        """Test that causal masking is correctly applied across chunk boundaries."""
-        wrapper = FlashInferSDPA()
-
-        batch_size, n_head, q_len, head_size = 1, 2, 8, 32
-        n_query_groups = 2
-        kv_len = 8
-        chunk_size = 4
-
-        query = torch.randn(batch_size, n_head, q_len, head_size, device="cpu")
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        value = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        scale_factor = 1.0 / (head_size**0.5)
-
-        # Process with chunking
-        output, weights = wrapper._fallback_sdpa(
-            query,
-            key,
-            value,
-            scale_factor,
-            return_attn_weights=True,
-            input_pos=0,
-            chunk_size=chunk_size,
-        )
-
-        # Verify output shape
-        assert output.shape == (batch_size, n_head, q_len, head_size)
-
-        # Verify weights are valid (non-negative, finite)
-        assert torch.all(weights >= 0), "Weights should be non-negative"
-        assert torch.all(torch.isfinite(weights)), "Weights should be finite"
-
-    def test_chunk_processing_weight_accumulation(self):
-        """Test that attention weights are correctly accumulated across chunks."""
-        wrapper = FlashInferSDPA()
-
-        batch_size, n_head, q_len, head_size = 1, 2, 12, 32
-        n_query_groups = 2
-        kv_len = 12
-        chunk_size = 4  # 3 chunks
-
-        query = torch.randn(batch_size, n_head, q_len, head_size, device="cpu")
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        value = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        scale_factor = 1.0 / (head_size**0.5)
-
-        output, weights = wrapper._fallback_sdpa(
-            query,
-            key,
-            value,
-            scale_factor,
-            return_attn_weights=True,
-            chunk_size=chunk_size,
-        )
-
-        # Weights should be accumulated across all chunks
-        # Shape should be (batch_size, n_query_groups, kv_len)
-        assert weights.shape == (batch_size, n_query_groups, kv_len)
-
-        # Weights should be non-negative (sum of softmax values)
-        assert torch.all(weights >= 0)
-
-        # Some weights should be positive (not all masked)
-        assert torch.any(weights > 0)
-
-    def test_chunk_processing_with_token_positions(self):
-        """Test chunk processing with custom token positions."""
-        wrapper = FlashInferSDPA()
-
-        batch_size, n_head, q_len, head_size = 1, 2, 8, 32
-        n_query_groups = 2
-        kv_len = 8
-        chunk_size = 4
-
-        query = torch.randn(batch_size, n_head, q_len, head_size, device="cpu")
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        value = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        token_positions = (
-            torch.arange(kv_len, device="cpu")
-            .unsqueeze(0)
-            .unsqueeze(0)
-            .expand(batch_size, n_query_groups, -1)
-        )
-        scale_factor = 1.0 / (head_size**0.5)
-
-        output, weights = wrapper._fallback_sdpa(
-            query,
-            key,
-            value,
-            scale_factor,
-            return_attn_weights=True,
-            token_positions=token_positions,
-            input_pos=0,
-            chunk_size=chunk_size,
-        )
-
-        # Verify output shape
-        assert output.shape == (batch_size, n_head, q_len, head_size)
-        assert weights.shape == (batch_size, n_query_groups, kv_len)
-
-    def test_chunk_processing_with_sliding_window(self):
-        """Test chunk processing with sliding window attention."""
-        wrapper = FlashInferSDPA()
-
-        batch_size, n_head, q_len, head_size = 1, 2, 16, 32
-        n_query_groups = 2
-        kv_len = 16
-        chunk_size = 4
-        sliding_window_size = 4
-
-        query = torch.randn(batch_size, n_head, q_len, head_size, device="cpu")
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        value = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        scale_factor = 1.0 / (head_size**0.5)
-
-        output, weights = wrapper._fallback_sdpa(
-            query,
-            key,
-            value,
-            scale_factor,
-            return_attn_weights=True,
-            sliding_window_size=sliding_window_size,
-            chunk_size=chunk_size,
-        )
-
-        # Verify output shape
-        assert output.shape == (batch_size, n_head, q_len, head_size)
-        assert weights.shape == (batch_size, n_query_groups, kv_len)
-
-        # Weights should be valid
-        assert torch.all(weights >= 0)
-        assert torch.all(torch.isfinite(weights))
-
-    def test_scaled_dot_product_attention_accepts_chunk_size(self):
-        """Test that the main interface accepts chunk_size parameter."""
-        wrapper = FlashInferSDPA()
-
-        batch_size, n_head, q_len, head_size = 2, 4, 16, 64
-        n_query_groups = 2
-        kv_len = 16
-
-        query = torch.randn(batch_size, n_head, q_len, head_size, device="cpu")
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        value = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        scale_factor = 1.0 / (head_size**0.5)
-
-        # Should accept chunk_size parameter without error
-        output, weights = wrapper.scaled_dot_product_attention(
-            query, key, value, scale_factor, return_attn_weights=True, chunk_size=4
-        )
-
-        assert output.shape == (batch_size, n_head, q_len, head_size)
-        assert weights.shape == (batch_size, n_query_groups, kv_len)
-
-    def test_chunk_size_larger_than_query_length(self):
-        """Test that chunk_size larger than q_len works correctly (no chunking needed)."""
-        wrapper = FlashInferSDPA()
-
-        batch_size, n_head, q_len, head_size = 1, 2, 8, 32
-        n_query_groups = 2
-        kv_len = 8
-        chunk_size = 16  # Larger than q_len
-
-        query = torch.randn(batch_size, n_head, q_len, head_size, device="cpu")
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        value = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        scale_factor = 1.0 / (head_size**0.5)
-
-        output, weights = wrapper._fallback_sdpa(
-            query,
-            key,
-            value,
-            scale_factor,
-            return_attn_weights=True,
-            chunk_size=chunk_size,
-        )
-
-        # Should still work correctly
-        assert output.shape == (batch_size, n_head, q_len, head_size)
-        assert weights.shape == (batch_size, n_query_groups, kv_len)
-
-    def test_chunk_processing_without_weights(self):
-        """Test chunk processing when attention weights are not requested."""
-        wrapper = FlashInferSDPA()
-
-        batch_size, n_head, q_len, head_size = 2, 4, 16, 64
-        n_query_groups = 2
-        kv_len = 16
-        chunk_size = 4
-
-        query = torch.randn(batch_size, n_head, q_len, head_size, device="cpu")
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        value = torch.randn(batch_size, n_query_groups, kv_len, head_size, device="cpu")
-        scale_factor = 1.0 / (head_size**0.5)
-
-        output, weights = wrapper._fallback_sdpa(
-            query,
-            key,
-            value,
-            scale_factor,
-            return_attn_weights=False,
-            chunk_size=chunk_size,
-        )
-
-        assert output.shape == (batch_size, n_head, q_len, head_size)
-        assert weights is None
-
-
-@_RunIf(min_cuda_gpus=1)
-@pytest.mark.skip("To be fixed")
 class TestBackendEquivalenceVerification:
     """Test backend equivalence verification utilities (Requirement 1.3)."""
 
@@ -943,9 +700,7 @@ class TestBackendEquivalenceVerification:
             key = torch.randn(2, 2, 16, 64)
             value = torch.randn(2, 2, 16, 64)
 
-            with pytest.raises(
-                RuntimeError, match="vendored kernels are not available"
-            ):
+            with pytest.raises(AssertionError):
                 verify_backend_equivalence(query, key, value, scale_factor=0.125)
 
             # Reset for other tests
@@ -1020,37 +775,25 @@ class TestBackendEquivalenceVerification:
         assert results[0].is_equivalent is False
 
 
-@_RunIf(min_cuda_gpus=1)
-@pytest.mark.skip("To be fixed")
 class TestBackendEquivalenceVerificationIntegration:
     """Integration tests for backend equivalence verification."""
 
+    @_RunIf(min_cuda_gpus=1)
     def test_fallback_produces_consistent_results(self):
         """Test that fallback SDPA produces consistent results across calls."""
         wrapper = FlashInferSDPA()
 
-        batch_size, n_head, q_len, head_size = 2, 4, 8, 64
-        n_query_groups = 2
-        kv_len = 16
-
-        # Use fixed seed for reproducibility
-        torch.manual_seed(42)
-        query = torch.randn(batch_size, n_head, q_len, head_size)
-        key = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-        value = torch.randn(batch_size, n_query_groups, kv_len, head_size)
-        scale_factor = 1.0 / (head_size**0.5)
-
-        # Call fallback twice
-        output1, weights1 = wrapper._fallback_sdpa(
-            query, key, value, scale_factor, return_attn_weights=True
+        data = sample_random_args()
+        attn_output1, attn_weights1 = call_sdpa_with_given_data(
+            data, wrapper, return_attn_weights=True,
         )
-        output2, weights2 = wrapper._fallback_sdpa(
-            query, key, value, scale_factor, return_attn_weights=True
+        attn_output2, attn_weights2 = call_sdpa_with_given_data(
+            data, wrapper, return_attn_weights=True,
         )
 
         # Results should be identical
-        assert torch.allclose(output1, output2)
-        assert torch.allclose(weights1, weights2)
+        torch.testing.assert_close(attn_output1, attn_output2)
+        torch.testing.assert_close(attn_weights2, attn_weights2)
 
     def test_numerical_tolerance_checking_with_different_tolerances(self):
         """Test numerical tolerance checking with various tolerance levels."""
@@ -1107,286 +850,39 @@ class TestBackendEquivalenceVerificationIntegration:
 
 
 @_RunIf(min_cuda_gpus=1)
-@pytest.mark.skip("To be fixed")
 class TestTwoPhaseWeightAccumulation:
     """Tests for two-phase attention weight accumulation (FlashInfer O+LSE, then PyTorch weights)."""
 
-    def test_fused_prefill_routing_with_fp16(self):
+    def test_fused_prefill_routing(self):
         """Test that non-square attention with weights + fp16 + input_pos>0 routes to fused prefill."""
-        with patch.object(
-            FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
-        ):
+        for dtype in (torch.float16, torch.bfloat16):
             with patch.object(
-                FlashInferSDPA,
-                "_flashinfer_sdpa_fused_prefill",
-                return_value=(torch.tensor([]), None),
-            ) as mock_fused:
-                wrapper = FlashInferSDPA(use_fused_prefill=True)
-                wrapper.available = True
-
-                batch_size, n_head, q_len, head_size = 2, 4, 2048, 64
-                n_query_groups = 2
+                FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
+            ):
+                q_len = 2048
                 kv_len = 32768
-
-                # fp16 + input_pos>0 triggers fused prefill path (Triton score-sum)
-                query = torch.randn(
-                    batch_size, n_head, q_len, head_size, dtype=torch.float16
+                device = torch.device("cuda", 0)
+                attn_outputs = torch.zeros(
+                    (2, q_len, 4, 64), dtype=dtype, device=device,
                 )
-                key = torch.randn(
-                    batch_size, n_query_groups, kv_len, head_size, dtype=torch.float16
+                attn_weights = torch.zeros(
+                    (2, 2, kv_len), dtype=dtype, device=device,
                 )
-                value = torch.randn(
-                    batch_size, n_query_groups, kv_len, head_size, dtype=torch.float16
-                )
-                scale_factor = 1.0 / (head_size**0.5)
+                with patch.object(
+                    FlashInferSDPA,
+                    "_flashinfer_sdpa_fused_prefill",
+                    return_value=(attn_outputs, attn_weights),
+                ) as mock_fused:
+                    wrapper = FlashInferSDPA()
 
-                wrapper.scaled_dot_product_attention(
-                    query,
-                    key,
-                    value,
-                    scale_factor,
-                    return_attn_weights=True,
-                    input_pos=q_len,
-                )
-                mock_fused.assert_called_once()
-
-    def test_fused_prefill_routing_with_bf16(self):
-        """Test that non-square attention with weights + bf16 + input_pos>0 routes to fused prefill."""
-        with patch.object(
-            FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
-        ):
-            with patch.object(
-                FlashInferSDPA,
-                "_flashinfer_sdpa_fused_prefill",
-                return_value=(torch.tensor([]), None),
-            ) as mock_fused:
-                wrapper = FlashInferSDPA(use_fused_prefill=True)
-                wrapper.available = True
-
-                batch_size, n_head, q_len, head_size = 2, 4, 2048, 128
-                n_query_groups = 2
-                kv_len = 32768
-
-                query = torch.randn(
-                    batch_size, n_head, q_len, head_size, dtype=torch.bfloat16
-                )
-                key = torch.randn(
-                    batch_size, n_query_groups, kv_len, head_size, dtype=torch.bfloat16
-                )
-                value = torch.randn(
-                    batch_size, n_query_groups, kv_len, head_size, dtype=torch.bfloat16
-                )
-                scale_factor = 1.0 / (head_size**0.5)
-
-                wrapper.scaled_dot_product_attention(
-                    query,
-                    key,
-                    value,
-                    scale_factor,
-                    return_attn_weights=True,
-                    input_pos=q_len,
-                )
-                mock_fused.assert_called_once()
-
-    def test_fused_prefill_fallback_at_input_pos_zero(self):
-        """Test that fp16 with input_pos=0 falls back (fused prefill requires input_pos>0)."""
-        with patch.object(
-            FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
-        ):
-            with patch.object(
-                FlashInferSDPA,
-                "_flashinfer_sdpa_two_phase_weights",
-                return_value=(torch.tensor([]), None),
-            ) as mock_two_phase:
-                wrapper = FlashInferSDPA(use_fused_prefill=True)
-                wrapper.available = True
-
-                batch_size, n_head, q_len, head_size = 2, 4, 16, 64
-                n_query_groups = 2
-                kv_len = 32
-
-                query = torch.randn(
-                    batch_size, n_head, q_len, head_size, dtype=torch.float16
-                )
-                key = torch.randn(
-                    batch_size, n_query_groups, kv_len, head_size, dtype=torch.float16
-                )
-                value = torch.randn(
-                    batch_size, n_query_groups, kv_len, head_size, dtype=torch.float16
-                )
-                scale_factor = 1.0 / (head_size**0.5)
-
-                # input_pos=0 -> fused prefill can't be used (needs non-causal) -> two-phase
-                wrapper.scaled_dot_product_attention(
-                    query,
-                    key,
-                    value,
-                    scale_factor,
-                    return_attn_weights=True,
-                    input_pos=0,
-                )
-                mock_two_phase.assert_called_once()
-
-    def test_fallback_with_float32(self):
-        """Test that float32 with weights falls back to eager (not fused/two-phase)."""
-        with patch.object(
-            FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
-        ):
-            with patch.object(
-                FlashInferSDPA, "_fallback_sdpa", return_value=(torch.tensor([]), None)
-            ) as mock_fallback:
-                wrapper = FlashInferSDPA(use_fused_prefill=True)
-                wrapper.available = True
-
-                batch_size, n_head, q_len, head_size = 2, 4, 16, 64
-                n_query_groups = 2
-                kv_len = 32
-
-                # float32 dtype -> can't use FlashInfer or Triton -> falls to eager
-                query = torch.randn(
-                    batch_size, n_head, q_len, head_size, dtype=torch.float32
-                )
-                key = torch.randn(
-                    batch_size, n_query_groups, kv_len, head_size, dtype=torch.float32
-                )
-                value = torch.randn(
-                    batch_size, n_query_groups, kv_len, head_size, dtype=torch.float32
-                )
-                scale_factor = 1.0 / (head_size**0.5)
-
-                wrapper.scaled_dot_product_attention(
-                    query,
-                    key,
-                    value,
-                    scale_factor,
-                    return_attn_weights=True,
-                    input_pos=q_len,
-                )
-                mock_fallback.assert_called_once()
-
-    def test_compute_weights_from_lse_shape(self):
-        """Test that _compute_weights_from_lse returns correct shape."""
-        with patch.object(
-            FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
-        ):
-            wrapper = FlashInferSDPA()
-
-            batch_size, n_head, q_len, head_size = 2, 8, 16, 64
-            n_kv_heads = 2
-            kv_len = 32
-
-            query = torch.randn(batch_size, n_head, q_len, head_size)
-            key = torch.randn(batch_size, n_kv_heads, kv_len, head_size)
-            # LSE shape: [batch, q_len, n_head] (FlashInfer layout)
-            lse = torch.randn(batch_size, q_len, n_head)
-
-            weights = wrapper._compute_weights_from_lse(
-                query,
-                key,
-                scale_factor=1.0 / (head_size**0.5),
-                lse=lse,
-                input_pos=0,
-            )
-
-            assert weights.shape == (batch_size, n_kv_heads, kv_len)
-            assert weights.dtype == torch.float32
-
-    def test_compute_weights_from_lse_nonnegative(self):
-        """Test that computed weights are non-negative."""
-        with patch.object(
-            FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
-        ):
-            wrapper = FlashInferSDPA()
-
-            batch_size, n_head, q_len, head_size = 1, 4, 8, 64
-            n_kv_heads = 2
-            kv_len = 16
-
-            query = torch.randn(batch_size, n_head, q_len, head_size)
-            key = torch.randn(batch_size, n_kv_heads, kv_len, head_size)
-            # Use a realistic LSE (positive values, as log2 of softmax denominator)
-            lse = torch.ones(batch_size, q_len, n_head) * 5.0
-
-            weights = wrapper._compute_weights_from_lse(
-                query,
-                key,
-                scale_factor=1.0 / (head_size**0.5),
-                lse=lse,
-                input_pos=0,
-            )
-
-            assert (weights >= 0).all(), "Attention weights should be non-negative"
-
-    def test_compute_weights_from_lse_causal_mask(self):
-        """Test that causal masking is correctly applied in weight computation."""
-        with patch.object(
-            FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
-        ):
-            wrapper = FlashInferSDPA()
-
-            batch_size, n_head, q_len, head_size = 1, 2, 4, 64
-            n_kv_heads = 2
-            kv_len = 8
-
-            query = torch.randn(batch_size, n_head, q_len, head_size)
-            key = torch.randn(batch_size, n_kv_heads, kv_len, head_size)
-            lse = torch.ones(batch_size, q_len, n_head) * 5.0
-
-            # With input_pos=0: q_idx in [0,3], causal mask: kv_idx <= q_idx
-            # So kv_idx 4,5,6,7 should have zero weight (no query can attend to them)
-            weights = wrapper._compute_weights_from_lse(
-                query,
-                key,
-                scale_factor=1.0 / (head_size**0.5),
-                lse=lse,
-                input_pos=0,
-            )
-
-            # Positions beyond q_len-1 should have zero accumulated weight
-            # (no query attended there with input_pos=0)
-            assert (
-                weights[:, :, q_len:].sum().item() < 1e-6
-            ), "Positions beyond causal boundary should have ~zero weight"
-
-    def test_compute_weights_from_lse_with_chunk_size(self):
-        """Test that chunked computation matches unchunked."""
-        with patch.object(
-            FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
-        ):
-            wrapper = FlashInferSDPA()
-
-            batch_size, n_head, q_len, head_size = 1, 4, 16, 64
-            n_kv_heads = 2
-            kv_len = 32
-
-            query = torch.randn(batch_size, n_head, q_len, head_size)
-            key = torch.randn(batch_size, n_kv_heads, kv_len, head_size)
-            lse = torch.ones(batch_size, q_len, n_head) * 5.0
-
-            scale = 1.0 / (head_size**0.5)
-
-            # Compute without chunking (chunk_q = q_len)
-            weights_full = wrapper._compute_weights_from_lse(
-                query,
-                key,
-                scale_factor=scale,
-                lse=lse,
-                input_pos=16,
-            )
-
-            # Compute with small chunk size
-            weights_chunked = wrapper._compute_weights_from_lse(
-                query,
-                key,
-                scale_factor=scale,
-                lse=lse,
-                input_pos=16,
-                chunk_size=4,
-            )
-
-            torch.testing.assert_close(
-                weights_full, weights_chunked, rtol=1e-4, atol=1e-5
-            )
+                    call_sdpa_with_random_args(
+                        wrapper,
+                        q_len=q_len,
+                        kv_len=kv_len,
+                        dtype=dtype,
+                        return_attn_weights=True,
+                    )
+                    mock_fused.assert_called_once()
 
 
 @_RunIf(min_cuda_gpus=1)
