@@ -38,6 +38,7 @@ from keys_values.kvcache.test_utils import (
     create_kv_cache,
     cache_names_and_devices,
 )
+from keys_values.kvcache.test_utils_advanced import cache_kwargs_for_smart_lastrec
 from keys_values.model import GPT
 
 
@@ -62,7 +63,7 @@ class ForTestInferenceAttnWeightsReplayCache(InferenceAttnWeightsReplayCache):
 
 
 def _cache_kwargs(name: str) -> Dict[str, Any]:
-    if name.startswith("lastrec"):
+    if name.startswith("lastrec") or name.startswith("smart-lastrec"):
         return dict()
     else:
         return dict(replay_log_blocksize=16)
@@ -129,6 +130,8 @@ def test_inference_replay(cache_name, device, cache_kwargs):
     )
     with torch.device(device):
         model = GPT(config)
+    if cache_name.startswith("smart-lastrec"):
+        cache_kwargs = {**cache_kwargs, **cache_kwargs_for_smart_lastrec()}
     kv_cache = create_kv_cache(
         name=cache_name,
         params=params,
@@ -278,6 +281,8 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_old_c
     )
     with torch.device(device):
         model = GPT(config)
+    if cache_name.startswith("smart-lastrec"):
+        cache_kwargs = {**cache_kwargs, **cache_kwargs_for_smart_lastrec()}
     kv_cache = create_kv_cache(
         name=cache_name,
         params=params,

@@ -86,6 +86,7 @@ from keys_values.finetune.utils import (
     create_optimizer,
     may_match_twice_factory,
     fix_dtype_of_score_buffers,
+    adjust_cache_kwargs,
 )
 from keys_values.generate.base import generate
 from keys_values.gpu_memory import RecordGPUMemory
@@ -667,6 +668,9 @@ def main(
             fabric,
             devices,
         )
+        # Depending on the cahe type `kv_cache.name`, the arguments
+        # `kv_cache.cache_kwargs` are adjusted
+        adjust_cache_kwargs(kv_cache, data, tokenizer)
         dtype = fabric_precision_to_dtype(fabric._precision.precision)
         torch.set_default_dtype(dtype)
         if do_cpu_offload:

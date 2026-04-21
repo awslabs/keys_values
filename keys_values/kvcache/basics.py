@@ -16,8 +16,6 @@ from typing import Optional, Tuple, Dict, Callable, List, Any
 
 import torch
 
-from keys_values.config import Config
-
 from keys_values.attention import KeysAndValues
 from keys_values.kvcache.base import (
     KVCache,
@@ -32,6 +30,7 @@ from keys_values.kvcache.buffers import (
     KVCacheBuffersParams,
     positions_wrap_around,
 )
+from keys_values.config import Config
 from keys_values.utils import index_to_3d, bits_for_torch_dtype, bitsize_of
 
 NOT_NEEDED_ARGS = ("max_batch_size", "cache_length", "dtype")
@@ -439,7 +438,6 @@ class DenseKVCache(KVCacheWithBuffers):
 class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
     """
     Replay log for :class:`LastRecentlyInsertedKVCache`.
-
     """
 
     def __init__(
@@ -612,14 +610,12 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         self.token_pos[np : (np + num1)] = torch.arange(
             ntp, ntp + num1, device=self.device, dtype=torch.int
         )
-        if diff > 0:
+        np += num1
+        if diff > 0 or np == self.cache_length:
             self.token_pos[start : (start + diff)] = torch.arange(
                 ntp + num1, ntp + num, device=self.device, dtype=torch.int
             )
-        np += num
-        diff = np - self.cache_length
-        if diff >= 0:
-            np = diff + start
+            np = start + diff
         self.next_position = np
         if self._replay_log is not None:
             if not isinstance(self._replay_log, DefaultKVCacheReplayLog):
@@ -637,7 +633,14 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     ):
         init_length = key.shape[2]
         self.kv_buffers.prefill(key, value)
-        self.next_position = init_length % self.cache_length
+        if init_length < self.cache_length:
+            self.next_position = init_length
+        else:
+            assert init_length == self.cache_length, (
+                init_length,
+                self.cache_length,
+            )  # Sanity check
+            self.next_position = self.init_grace_tokens
         self.token_pos[:init_length] = torch.arange(
             init_length,
             dtype=self.token_pos.dtype,

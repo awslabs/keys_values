@@ -15,8 +15,4 @@ results/
 logs/
 out/
 checkpoints/
-test_fused_v2.py
-test_fused_v2b.py
-benchmark_long_context.py
-FLASHINFER_INTEGRATION.md
-FUSED_WEIGHTS_DESIGN.md
+test_tokenizer/

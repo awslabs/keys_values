@@ -25,6 +25,7 @@ from keys_values.kvcache.quant_buffers import (
     DequantizedKVCacheBuffers,
     DequantizedBufferKeysAndValues,
 )
+from keys_values.kvcache.smart_lastrec import SmartInitialLastRecentlyInsertedKVCache
 
 __all__ = [
     "AttnWeightsKVCache",
@@ -39,5 +40,6 @@ __all__ = [
     "QuantizedH2OKVCache",
     "QuantizedKVCacheBuffers",
     "QuantizedVLengthH2OKVCache",
+    "SmartInitialLastRecentlyInsertedKVCache",
     "VLengthH2OKVCache",
 ]
