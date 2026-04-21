@@ -26,7 +26,7 @@ import tarfile
 import tempfile
 import zipfile
 from functools import partial
-from typing import Literal
+from typing import Literal, Tuple
 import random
 from pathlib import Path
 from dotenv import load_dotenv
@@ -286,6 +286,127 @@ def drop_duplicates(
     return data.select(indices_to_keep)
 
 
+def get_instruction_template(dataset_key: str) -> Tuple[str, Tuple[str, ...]]:
+    """
+    We centralize the instruction templates here to simplify unit testing.
+
+    Args:
+        dataset_key: The name of the dataset
+
+    Returns:
+       `(instruction_template, slot_names)`
+
+    """
+    if dataset_key in ("nq", "trivia_qa", "hotpot_qa", "pop_qa"):
+        return (
+            "Use the given documents to write a concise and short answer to the question. Write your answer in the following format:\nAnswer: [answer]\n\n{demos}{context}\n\nQuestion: {question}\nAnswer:",
+            (
+                "demos",
+                "context",
+                "question",
+            ),
+        )
+    elif dataset_key in ("alce_asqa", "alce_qampari"):
+        return (
+            "{demos}Instruction: Write an accurate, engaging, and concise answer for the given question using only the provided search results (some of which might be irrelevant) and cite them properly. Use an unbiased and journalistic tone. Always cite for any factual claim. When citing a document, surround its ID with square brackets, such as [x] to cite document x. To cite multiple documents, simply concatenate the citation markers; for example, use [x][y][z] to cite the documents with ID x, y, and z. Cite at least one document and at most three documents in each sentence. If multiple documents support the sentence, only cite a minimum sufficient subset of the documents.\n\nQuestion: {question}\n\n{context}\n\nAnswer:",
+            (
+                "demos",
+                "question",
+                "context",
+            ),
+        )
+    elif dataset_key == "ms_macro":
+        return (
+            "You are provided with a list of documents, each indicated by their ID. Rank each document based on their relevance to the question in descending order from most relelvant to least relevant texts. Include all documents in the rankings. Write your answer using the unique IDs, with the following format:\nRanking: ID3 > ID1 > ID2\n\n{demos}{context}\n\nQuery: {question}\nRanking:",
+            (
+                "demos",
+                "context",
+                "question",
+            ),
+        )
+    elif dataset_key in ("trec_coarse", "trec_fine", "nlu", "banking77", "clinc150"):
+        return (
+            'Use the provided mapping from the text to label to assign a label to the text. Only output "label: {{label}}" and nothing else. \n\n{context}\n\n{question}\nlabel:',
+            (
+                "context",
+                "question",
+            ),
+        )
+    elif dataset_key == "narrative_qa":
+        return (
+            "You are given a story, which can be either a novel or a movie script, and a question. Answer the question as concisely as you can, using a single phrase if possible.\n\n{demos}{context}\n\nQuestion: {question}\nAnswer:",
+            (
+                "demos",
+                "context",
+                "question",
+            ),
+        )
+    elif dataset_key == "infinite_bench_qa":
+        return (
+            "You are given a story and a question. Answer the question as concisely as you can, using a single phrase if possible.\n\n{demos}{context}\n\nQuestion: {question}\nAnswer:",
+            (
+                "demos",
+                "context",
+                "question",
+            ),
+        )
+    elif dataset_key == "infinite_bench_mc":
+        return (
+            "You are given a story and a question with multiple choices. Choose the best answer from the options provided. Only one of the following options is correct, output the answer using one single letter (A, B, C, or D). Don't say anything else.\n\n{demos}{context}\n\nQuestion: {question}\nOptions:\n{options}\nAnswer:",
+            (
+                "demos",
+                "context",
+                "question",
+                "options",
+            ),
+        )
+    elif dataset_key == "infinite_bench_sum":
+        return (
+            "You are given a book and you are tasked to summarize it. Write a summary of about 1000 to 1200 words. Only write about the plot and characters of the story. Do not discuss the themes or background of the book. Do not provide any analysis or commentary.\n\n{demos}{context}\n\nNow summarize the book.\nSummary:",
+            (
+                "demos",
+                "context",
+            ),
+        )
+    elif dataset_key == "multi_lex_sum":
+        return (
+            "You are given the legal documents in a civil rights lawsuit, and you are tasked to summarize the case. Write a concise summary of one paragraph (200 to 250 words). The summary should contain a short description of the background, the parties involved, and the outcomes of the case.\n\n{demos}Legal documents:\n{context}\n\nNow please summarize the case.\nSummary:",
+            (
+                "demos",
+                "context",
+            ),
+        )
+    elif dataset_key == "json_kv":
+        return (
+            "{context}\n\nExtract the value corresponding to the specified key in the JSON object below.\n\n{demos}Key: {question}\nCorresponding value:",
+            (
+                "context",
+                "demos",
+                "question",
+            ),
+        )
+    elif dataset_key in ("ruler_mk_needle", "ruler_mk_uuid"):
+        return (
+            "A special magic {type_needle_v} is hidden within the following text. Make sure to memorize it. I will quiz you about the {type_needle_v} afterwards.\n{context}\nWhat is the special magic {type_needle_v} for {query} mentioned in the provided text?\nThe special magic {type_needle_v} for {query} mentioned in the provided text is",
+            (
+                "type_needle_v",
+                "context",
+                "query",
+            ),
+        )
+    elif dataset_key == "ruler_mv":
+        return (
+            "Some special magic {type_needle_v} are hidden within the following text. Make sure to memorize it. I will quiz you about the {type_needle_v} afterwards.\n{context}\nWhat are all the special magic {type_needle_v} for {query} mentioned in the provided text?\nThe special magic {type_needle_v} for {query} mentioned in the provided text are",
+            (
+                "type_needle_v",
+                "context",
+                "query",
+            ),
+        )
+    else:
+        raise AssertionError(f"Unrecognized dataset key: {dataset_key}")
+
+
 def load_rag(
     dataset_key: Literal["nq", "trivia_qa", "hotpot_qa", "pop_qa"] = "nq",
     max_length: Literal["8k", "16k", "32k", "64k", "128k"] = "8k",
@@ -335,7 +456,7 @@ def load_rag(
             "8k": "kilt/popqa_test_1000_k50_dep6.jsonl",
         },
     }  # the load paths can only be stored in this way, as they are hard-coded from the original code
-    instruction_template = "Use the given documents to write a concise and short answer to the question. Write your answer in the following format:\nAnswer: [answer]\n\n{demos}{context}\n\nQuestion: {question}\nAnswer:"
+    instruction_template = get_instruction_template(dataset_key)
 
     instance_path = str(
         Path(dataset_parent_dir) / Path(file_paths[dataset_key][max_length])
@@ -468,7 +589,7 @@ def load_cited_generation(
         "16k": 75,
         "8k": 30,
     }
-    instruction_template = "{demos}Instruction: Write an accurate, engaging, and concise answer for the given question using only the provided search results (some of which might be irrelevant) and cite them properly. Use an unbiased and journalistic tone. Always cite for any factual claim. When citing a document, surround its ID with square brackets, such as [x] to cite document x. To cite multiple documents, simply concatenate the citation markers; for example, use [x][y][z] to cite the documents with ID x, y, and z. Cite at least one document and at most three documents in each sentence. If multiple documents support the sentence, only cite a minimum sufficient subset of the documents.\n\nQuestion: {question}\n\n{context}\n\nAnswer:"
+    instruction_template = get_instruction_template(dataset_key)
     demo_template = "Instruction: Write an accurate, engaging, and concise answer for the given question using only the provided search results (some of which might be irrelevant) and cite them properly. Use an unbiased and journalistic tone. Always cite for any factual claim. When citing a document, surround its ID with square brackets, such as [x] to cite document x. To cite multiple documents, simply concatenate the citation markers; for example, use [x][y][z] to cite the documents with ID x, y, and z. Cite at least one document and at most three documents in each sentence. If multiple documents support the sentence, only cite a minimum sufficient subset of the documents.\n\nQuestion: {question}\n\n{context}\n\nAnswer: {answer}"
     doc_template = "Document [{ID}](Title: {title}): {text}"
 
@@ -537,7 +658,7 @@ def load_rerank(
             "8k": "msmarco/test_reranking_data_k50_dep3.jsonl",
         },
     }
-    instruction_template = "You are provided with a list of documents, each indicated by their ID. Rank each document based on their relevance to the question in descending order from most relelvant to least relevant texts. Include all documents in the rankings. Write your answer using the unique IDs, with the following format:\nRanking: ID3 > ID1 > ID2\n\n{demos}{context}\n\nQuery: {question}\nRanking:"
+    instruction_template = get_instruction_template(dataset_key)
 
     instance_path = str(
         Path(dataset_parent_dir) / Path(file_paths[dataset_key][max_length])
@@ -644,7 +765,7 @@ def load_icl(
         "banking77": 77,
         "clinc150": 151,
     }
-    instruction_template = 'Use the provided mapping from the text to label to assign a label to the text. Only output "label: {{label}}" and nothing else. \n\n{context}\n\n{question}\nlabel:'
+    instruction_template = get_instruction_template(dataset_key)
     demo_template = "{text}\nlabel: {label}"
 
     if dataset_key == "trec_coarse":
@@ -817,8 +938,8 @@ def load_long_doc_qa(
     )
     eval_questions_num = 100
 
+    instruction_template = get_instruction_template(dataset_key)
     if dataset_key == "narrative_qa":
-        instruction_template = "You are given a story, which can be either a novel or a movie script, and a question. Answer the question as concisely as you can, using a single phrase if possible.\n\n{demos}{context}\n\nQuestion: {question}\nAnswer:"
         all_data = load_dataset("narrativeqa")
         instance_data = all_data["test"].shuffle(seed=seed)
         demo_data = all_data[
@@ -870,7 +991,6 @@ def load_long_doc_qa(
 
     else:
         if dataset_key == "infinite_bench_qa":
-            instruction_template = "You are given a story and a question. Answer the question as concisely as you can, using a single phrase if possible.\n\n{demos}{context}\n\nQuestion: {question}\nAnswer:"
             demo_template = "[story text]\nQuestion: {input}\nAnswer: {answer[0]}"
             ft = Features(
                 {
@@ -885,7 +1005,6 @@ def load_long_doc_qa(
                 "longbook_qa_eng"
             ]
         else:
-            instruction_template = "You are given a story and a question with multiple choices. Choose the best answer from the options provided. Only one of the following options is correct, output the answer using one single letter (A, B, C, or D). Don't say anything else.\n\n{demos}{context}\n\nQuestion: {question}\nOptions:\n{options}\nAnswer:"
             demo_template = "[story text]\nQuestion: {input}\nOptions:\n{options}\nAnswer: {answer[0]}"
             ft = Features(
                 {
@@ -995,9 +1114,9 @@ def load_summarization(
         "meta-llama/Llama-2-7b-hf", token=HF_TOKEN
     )
 
+    instruction_template = get_instruction_template(dataset_key)
     if dataset_key == "infinite_bench_sum":
         eval_questions_num = 50  # different from HELMET
-        instruction_template = "You are given a book and you are tasked to summarize it. Write a summary of about 1000 to 1200 words. Only write about the plot and characters of the story. Do not discuss the themes or background of the book. Do not provide any analysis or commentary.\n\n{demos}{context}\n\nNow summarize the book.\nSummary:"
         ft = Features(
             {
                 "id": Value("int64"),
@@ -1065,7 +1184,6 @@ def load_summarization(
         )
     else:
         eval_questions_num = 100
-        instruction_template = "You are given the legal documents in a civil rights lawsuit, and you are tasked to summarize the case. Write a concise summary of one paragraph (200 to 250 words). The summary should contain a short description of the background, the parties involved, and the outcomes of the case.\n\n{demos}Legal documents:\n{context}\n\nNow please summarize the case.\nSummary:"
         all_data = load_dataset(
             "allenai/multi_lexsum", name="v20230518", trust_remote_code=True
         )  # use dataset < 4.0.0
@@ -1184,8 +1302,8 @@ def load_synthetic(
     )
     instance_data = load_dataset("json", data_files=data_path)["train"]
 
+    instruction_template = get_instruction_template(dataset_key)
     if dataset_key == "json_kv":
-        instruction_template = "{context}\n\nExtract the value corresponding to the specified key in the JSON object below.\n\n{demos}Key: {question}\nCorresponding value:"
         demo_template = "Key: {key}\nCorresponding value:{value}"
 
         def _json_kv_instruction_fillup(instance):
@@ -1215,10 +1333,6 @@ def load_synthetic(
         eval_data = instance_data.select(range(eval_questions_num))
         dev_data = instance_data.select(range(eval_questions_num, len(instance_data)))
     else:
-        if dataset_key in ["ruler_mk_needle", "ruler_mk_uuid"]:
-            instruction_template = "A special magic {type_needle_v} is hidden within the following text. Make sure to memorize it. I will quiz you about the {type_needle_v} afterwards.\n{context}\nWhat is the special magic {type_needle_v} for {query} mentioned in the provided text?\nThe special magic {type_needle_v} for {query} mentioned in the provided text is"
-        else:
-            instruction_template = "Some special magic {type_needle_v} are hidden within the following text. Make sure to memorize it. I will quiz you about the {type_needle_v} afterwards.\n{context}\nWhat are all the special magic {type_needle_v} for {query} mentioned in the provided text?\nThe special magic {type_needle_v} for {query} mentioned in the provided text are"
 
         def _ruler_instruction_fillup(instance):
             input_text = instruction_template.format(**instance)

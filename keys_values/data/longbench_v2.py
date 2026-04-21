@@ -16,6 +16,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 import json
 
+from tokenizers import Tokenizer as HFTokenizer
 from tqdm import tqdm
 
 from litgpt.tokenizer import Tokenizer
@@ -39,6 +40,10 @@ from keys_values.head_model import (
     CrossEntropyOnLogits,
     SequenceClassificationOnLogits,
     SequenceClassification,
+)
+from keys_values.kvcache.smart_lastrec import (
+    SmartInitialInformation,
+    end_initial_regex_from_string,
 )
 from keys_values.utils import get_dict, set_dict
 
@@ -160,8 +165,8 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         Args:
             tokenizer: Tokenizer
             batch_size: Batch size for :meth:`train_dataloader`
-            num_devices: Number of GPU devices used for distributed
-                data parallel training
+            num_devices: Number of GPU devices used for distributed data
+                parallel training
             rank: Rank (only if `num_devices > 1`)
             max_seq_length: Cutoff for sequence length
             **kwargs: See above
@@ -329,6 +334,23 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
                 json.dump(data, fp)
             print(f"Metadata stored in {meta_path}")
 
+    def smart_lastrec_info(self, tokenizer: HFTokenizer) -> SmartInitialInformation:
+        """
+        Returns:
+            Information used to detect the end of the initial part supposed to
+            remain in the cache for
+            :class:`SmartInitialLastRecentlyInsertedKVCache`.
+
+        """
+        return SmartInitialInformation(
+            end_initial_regex=end_initial_regex_from_string(
+                PROMPTLINES_PREFIX[-1],
+                tokenizer=tokenizer,
+            ),
+            max_initial_fraction=0.1,
+            include_end_string=True,
+        )
+
 
 PROMPTLINES_PREFIX = [
     "Please read the following text and answer the question below.",
@@ -460,6 +482,26 @@ def filter_and_transform(
     if seq_lengths is None:
         seq_lengths = new_seq_lengths
     return train_results, seq_lengths, test_results
+
+
+def get_instruction_template(head_model: str) -> Tuple[str, Tuple[str, ...]]:
+    template = "\n".join(
+        PROMPTLINES_PREFIX
+        + ["{context}"]
+        + PROMPTLINES_POSTFIX
+        + PROMPTLINES_FINAL[head_model]
+    )
+    return (
+        template,
+        (
+            "context",
+            "question",
+            "choice_A",
+            "choice_B",
+            "choice_C",
+            "choice_D",
+        ),
+    )
 
 
 METADATA_TRUNCATION_LENGHTS_KEY = "truncation_lengths"
