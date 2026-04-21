@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
+from dataclasses import dataclass
 import re
 from typing import Optional, Tuple, Dict, List, Any, Union
 
@@ -35,6 +36,32 @@ from keys_values.kvcache.buffers import (
 )
 from keys_values.config import Config
 from keys_values.utils import bits_for_torch_dtype, bitsize_of
+
+
+@dataclass(frozen=True)
+class SmartInitialInformation:
+    """
+    Collects parameters of :class:`SmartInitialLastRecentlyInsertedKVCache`.
+    The idea is that datasets can define default values for them, see for
+    example
+    :meth:`keys_values.data.longbench_v2.LongBenchV2.smart_lastrec_info`.
+
+    Args:
+        end_initial_regex: Regular expression for end of initial part sequence
+        max_initial_fraction: Fraction of cache length initial parts can
+            occupy at most
+        include_end_string: Include end of init sequence in initial part?
+
+    """
+    end_initial_regex: Union[str, re.Pattern]
+    max_initial_fraction: float
+    include_end_string: bool = True
+
+    def __post_init__(self):
+        if self.max_initial_fraction == 0:
+            raise ValueError("Use LastRecentlyInsertedKVCache for cache without initial parts")
+        if not (0 < self.max_initial_fraction < 1):
+            raise ValueError(f"max_initial_fraction = {self.max_initial_fraction}, must be in (0, 1)")
 
 
 class SmartInitialLastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):

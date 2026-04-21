@@ -15,6 +15,7 @@ import os
 from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 import json
+import re
 
 from tqdm import tqdm
 
@@ -40,6 +41,7 @@ from keys_values.head_model import (
     SequenceClassificationOnLogits,
     SequenceClassification,
 )
+from keys_values.kvcache.smart_lastrec import SmartInitialInformation
 from keys_values.utils import get_dict, set_dict
 
 METADATA_FNAME = "longbench_v2_metadata.json"
@@ -328,6 +330,20 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
             with meta_path.open("w") as fp:
                 json.dump(data, fp)
             print(f"Metadata stored in {meta_path}")
+
+    def smart_lastrec_info(self) -> SmartInitialInformation:
+        """
+        Returns:
+            Information used to detect the end of the initial part supposed to
+            remain in the cache for
+            :class:`SmartInitialLastRecentlyInsertedKVCache`.
+
+        """
+        return SmartInitialInformation(
+            end_initial_regex=re.escape(PROMPTLINES_PREFIX[-1]),
+            max_initial_fraction=0.1,
+            include_end_string=True,
+        )
 
 
 PROMPTLINES_PREFIX = [

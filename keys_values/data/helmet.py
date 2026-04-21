@@ -13,6 +13,7 @@
 # limitations under the License.
 import json
 from pathlib import Path
+import re
 from typing import List, Optional, Dict, Any, Tuple, Literal
 
 from tqdm import tqdm
@@ -31,6 +32,7 @@ from keys_values.data.module import (
     NUM_TOKENS_NAME,
 )
 from keys_values.data.sft_dataset import SFTDataset, get_sft_collate_fn
+from keys_values.kvcache.smart_lastrec import SmartInitialInformation
 from keys_values.utils import get_dict, set_dict
 
 METADATA_FNAME = "helmet_metadata.json"
@@ -273,3 +275,69 @@ class Helmet(SequenceLengthFilteredDataModule):
 
     def _get_collate_fn(self) -> MyDataLoader:
         return get_sft_collate_fn(ignore_index=self.ignore_index)
+
+    def smart_lastrec_info(self) -> SmartInitialInformation:
+        """
+        Returns:
+            Information used to detect the end of the initial part supposed to
+            remain in the cache for
+            :class:`SmartInitialLastRecentlyInsertedKVCache`.
+
+        """
+        include_end_string = True
+        max_initial_fraction = 0.1
+        if self.dataset_key in ("nq", "trivia_qa", "hotpot_qa", "pop_qa"):
+            # See :func:`keys_values.data.load_helmet_dev_eval.load_rag`
+            end_initial_regex = re.escape("Answer: [answer]")
+        elif self.dataset_key in ("alce_asqa", "alce_qampari"):
+            # See :func:`keys_values.data.load_helmet_dev_eval.load_cited_generation`
+            # These are instructions for the first demo shot (2 in total)
+            end_initial_regex = re.escape(
+                "Cite at least one document and at most three documents in each sentence. If multiple documents support the sentence, only cite a minimum sufficient subset of the documents."
+            )
+        elif self.dataset_key == "ms_macro":
+            # See :func:`keys_values.data.load_helmet_dev_eval.load_rerank`
+            end_initial_regex = re.escape("Ranking: ID3 > ID1 > ID2")
+        elif self.dataset_key in ("trec_coarse", "trec_fine", "nlu", "banking77", "clinc150"):
+            # See :func:`keys_values.data.load_helmet_dev_eval.load_icl`
+            end_initial_regex = re.escape(
+                'Only output "label: {{label}}" and nothing else. '
+            )
+        elif self.dataset_key in ("narrative_qa", "infinite_bench_qa"):
+            # See :func:`keys_values.data.load_helmet_dev_eval.load_long_doc_qa`
+            end_initial_regex = re.escape(
+                "Answer the question as concisely as you can, using a single phrase if possible."
+            )
+        elif self.dataset_key == "infinite_bench_mc":
+            # See :func:`keys_values.data.load_helmet_dev_eval.load_long_doc_qa`
+            end_initial_regex = re.escape(
+                "output the answer using one single letter (A, B, C, or D). Don't say anything else."
+            )
+        elif self.dataset_key == "infinite_bench_sum":
+            # See :func:`keys_values.data.load_helmet_dev_eval.load_summarization`
+            end_initial_regex = re.escape(
+                "Do not provide any analysis or commentary."
+            )
+        elif self.dataset_key == "multi_lex_sum":
+            # See :func:`keys_values.data.load_helmet_dev_eval.load_summarization`
+            end_initial_regex = re.escape(
+                "the parties involved, and the outcomes of the case."
+            )
+        elif self.dataset_key == "json_kv":
+            # See :func:`keys_values.data.load_helmet_dev_eval.load_synthetic`
+            # This will mostly not work, because the context precedes the
+            # instructions (and may be long)
+            end_initial_regex = re.escape(
+                "Extract the value corresponding to the specified key in the JSON object below."
+            )
+        elif self.dataset_key in ("ruler_mk_needle", "ruler_mk_uuid", "ruler_mv"):
+            # See :func:`keys_values.data.load_helmet_dev_eval.load_synthetic`
+            end_initial_regex = r"I will quiz you about the [^ ]+ afterwards."
+        else:
+            raise AssertionError(f"Unrecognized dataset key: {self.dataset_key}")
+
+        return SmartInitialInformation(
+            end_initial_regex=end_initial_regex,
+            max_initial_fraction=max_initial_fraction,
+            include_end_string=include_end_string,
+        )

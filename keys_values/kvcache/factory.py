@@ -44,11 +44,13 @@ from keys_values.kvcache.quant_buffers import (
     create_quantized_kv_buffers,
     get_quant_kwargs,
 )
+from keys_values.kvcache.smart_lastrec import SmartInitialLastRecentlyInsertedKVCache
 from keys_values.model import GPT
 
 _SUPPORTED_CACHES = (
     ("dense", DenseKVCache, True),
     ("lastrec", LastRecentlyInsertedKVCache, True),
+    ("smart-lastrec", SmartInitialLastRecentlyInsertedKVCache, True),
     ("h2o", H2OKVCache, True),
     ("h2o-vlen", VLengthH2OKVCache, True),
     ("qh2o", QuantizedH2OKVCache, False),
@@ -535,45 +537,43 @@ def deallocate_kv_cache_buffers_of_model(gpt_model: GPT):
     deallocate_kv_cache_buffers(gpt_model.get_kv_caches())
 
 
+LASTREC_REMKEYS = (
+    "init_grace_tokens",
+)
+
+SMART_LASTREC_REMKEYS = (
+    "end_initial_regex",
+    "include_end_string",
+    "max_initial_fraction",
+    "tokenizer",
+)
+
+ATTN_WEIGHTS_REMKEYS = (
+    "detach_attn_weights",
+    "grace_period",
+    "keep_initial_fraction",
+    "max_chunk_size",
+    "replay_log_blocksize",
+)
+
+H2O_REMKEYS = (
+    "normalize_scores",
+)
+
+QH2O_REMKEYS = (
+    "combination_constant",
+    "scratch_blocksize",
+)
+
 REMOVE_KEYS = {
-    "dense": (
-        "combination_constant",
-        "detach_attn_weights",
-        "grace_period",
-        "init_grace_tokens",
-        "keep_initial_fraction",
-        "max_chunk_size",
-        "normalize_scores",
-        "replay_log_blocksize",
-        "scratch_blocksize",
-    ),
-    "lastrec": (
-        "detach_attn_weights",
-        "grace_period",
-        "keep_initial_fraction",
-        "max_chunk_size",
-        "normalize_scores" "combination_constant",
-        "replay_log_blocksize",
-        "scratch_blocksize",
-    ),
-    "h2o": (
-        "combination_constant",
-        "init_grace_tokens",
-        "scratch_blocksize",
-    ),
-    "h2o-vlen": (
-        "combination_constant",
-        "init_grace_tokens",
-        "scratch_blocksize",
-    ),
-    "qh2o": ("init_grace_tokens",),
-    "qh2o-vlen": ("init_grace_tokens",),
-    "h2o-orig": (
-        "init_grace_tokens",
-        "normalize_scores",
-        "combination_constant",
-        "scratch_blocksize",
-    ),
+    "dense": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS + ATTN_WEIGHTS_REMKEYS + H2O_REMKEYS + QH2O_REMKEYS,
+    "lastrec": SMART_LASTREC_REMKEYS + ATTN_WEIGHTS_REMKEYS + H2O_REMKEYS + QH2O_REMKEYS,
+    "smart-lastrec": LASTREC_REMKEYS + ATTN_WEIGHTS_REMKEYS + H2O_REMKEYS + QH2O_REMKEYS,
+    "h2o": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS + QH2O_REMKEYS,
+    "h2o-vlen": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS + QH2O_REMKEYS,
+    "qh2o": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS,
+    "qh2o-vlen": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS,
+    "h2o-orig": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS + H2O_REMKEYS + QH2O_REMKEYS,
 }
 
 

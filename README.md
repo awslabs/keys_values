@@ -502,6 +502,13 @@ currently supported:
   inserted tokens in the cache (but see `init_grace_tokens` argument). When the
   cache is full, new information overwrites slots which have not been
   overwritten for the longest time.
+* `smart-lastrec`: [SmartInitialLastRecentlyInsertedKVCache](./keys_values/kvcache/smart_lastrec.py#130).
+  Variant of `lastrec`, where the initial (grace) part of the prompt, which is
+  kept in the cache, is defined by a regular expression determining the end of
+  it. If you write prompts with important information up front (e.g., a
+  "system prompt"), use a string which marks the end of this. This policy needs
+  some configuration in `kv_cache.cache_kwargs`, defaults for which can be
+  provided with the dataset (see below).
 * `h2o`: [H2OKVCache](./keys_values/kvcache/h2o.py#L28). Implements an improved
   variant of the heavy hitter oracle (H2O) strategy (for citation, see
   docstring). H2O scores each `(b, h, j)` by the sum of attention weights
@@ -561,11 +568,7 @@ are:
   `input_pos == 0`). This is used to speed up finding the score minimizers.
 * `init_grace_tokens`: Only for `lastrec`. KV information for the first
   `init_grace_tokens` tokens remains in the cache.<br>
-  **Note**: Use knowledge about system prompt and "pinned context" in order to
-  set `init_grace_tokens`. A better solution would be a KV cache policy which
-  retains initial tokens up to some control sequence. This is not currently
-  supported, but would be easy to implement (see
-  [below](#implementing-new-kv-cache-policies)).
+  **Note**: A better solution is offered by the `smart-lastrec` policy.
 * `keep_initial_fraction`: Not for `dense`, `lastrec`. See docstring of
   [AttnWeightsKVCache](./keys_values/kvcache/attn_weights.py#L283).
 * `normalize_scores`: Not for `dense`, `lastrec`. Scores are cumulative over
@@ -576,6 +579,13 @@ are:
   forward pass. To be precise, we iterate over cells, then layers, then chunks
   of cell, keeping KV cache buffers for the current layer in GPU memory only.
   This saves GPU memory, but can run quite a bit slower (see comments below).
+* `end_initial_regex`, `max_initial_fraction`, `include_end_string`: These
+  fields in `kv_cache.cache_kwargs` configure the `smart-lastrec` cache policy.
+  See [SmartInitialInformation](./keys_values/kvcache/smart_lastrec.py#42)
+  for details, and
+  [LongBenchV2.smart_lastrec_info](./keys_values/data/longbench_v2.py#334)
+  for an example. Some supported datasets provide default values for these
+  arguments, so they don't have to be set in `kv_cache.cache_kwargs`.
 
 An important property of a KV cache policy is whether its evaluation requires
 attention weights (summed over the query axis) returned by SDPA or not. For

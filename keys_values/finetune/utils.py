@@ -19,6 +19,7 @@ from typing import Optional, Tuple, Literal, Dict, Any
 import lightning as L
 import torch
 
+from keys_values.kvcache.smart_lastrec import SmartInitialInformation
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
@@ -421,3 +422,41 @@ def fix_dtype_of_score_buffers(gpt_model: GPT):
     for cache in gpt_model.get_kv_caches():
         if isinstance(cache, AttnWeightsKVCache):
             cache.fix_dtype_of_score_buffers()
+
+
+def _get_smart_lastrec_info(data: DataModule) -> SmartInitialInformation:
+    from keys_values.data.longbench_v2 import LongBenchV2
+    from keys_values.data.helmet import Helmet
+
+    if isinstance(data, LongBenchV2) or isinstance(data, Helmet):
+        return data.smart_lastrec_info()
+    else:
+        raise ValueError(f"data of type {type(data)} does not provide SmartInitialInformation. Implement `data.smart_lastrec_info`")
+
+
+def adjust_cache_kwargs(
+    kv_cache: KVCacheArgs,
+    data: DataModule,
+    tokenizer: Tokenizer,
+):
+    """
+    Called before :func:`wrap_gpt_model`. Sets fields in
+    `kv_cache.cache_kwargs`, needed to create KV cache of type `kv_cache.name`.
+
+    Note: Other adjustments of `kv_cache.cache_kwargs` are made in
+    :func:`get_mha_and_cache_kwargs`, but they pertain to multi-head attention,
+    not to the KV cache type.
+
+    """
+    if kv_cache.name == "smart-lastrec":
+        cache_kwargs = kv_cache.cache_kwargs
+        if cache_kwargs is None:
+            cache_kwargs = dict()
+        cache_kwargs["tokenizer"] = tokenizer
+        smart_lastrec_info = None
+        for name in ("end_initial_regex", "max_initial_fraction", "include_end_initial_regex"):
+            if name not in cache_kwargs:
+                if smart_lastrec_info is None:
+                    smart_lastrec_info = _get_smart_lastrec_info(data)
+                cache_kwargs[name] = getattr(smart_lastrec_info, name)
+        kv_cache.cache_kwargs = cache_kwargs
