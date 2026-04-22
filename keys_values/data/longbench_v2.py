@@ -162,8 +162,8 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         Args:
             tokenizer: Tokenizer
             batch_size: Batch size for :meth:`train_dataloader`
-            num_devices: Number of GPU devices used for distributed
-                data parallel training
+            num_devices: Number of GPU devices used for distributed data
+                parallel training
             rank: Rank (only if `num_devices > 1`)
             max_seq_length: Cutoff for sequence length
             **kwargs: See above
@@ -476,6 +476,19 @@ def filter_and_transform(
     if seq_lengths is None:
         seq_lengths = new_seq_lengths
     return train_results, seq_lengths, test_results
+
+
+def get_instruction_template(head_model: str) -> Tuple[str, Tuple[str, ...]]:
+    template = "\n".join(
+        PROMPTLINES_PREFIX
+        + ["{context}"]
+        + PROMPTLINES_POSTFIX
+        + PROMPTLINES_FINAL[head_model]
+    )
+    return (
+        template,
+        ("context", "question", "choice_A", "choice_B", "choice_C", "choice_D",),
+    )
 
 
 METADATA_TRUNCATION_LENGHTS_KEY = "truncation_lengths"
