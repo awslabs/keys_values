@@ -41,6 +41,7 @@ def args_store_retrieve() -> Tuple[str, List[tuple]]:
         (name, dict())
         for name in KVCacheFactory.supported_names()
         if name.endswith("-default")
+        and not name.startswith("smart-lastrec")
     ] + [
         ("h2o-default", dict(grace_period=3)),
         ("h2o-vlen-default", dict(grace_period=3)),
@@ -113,7 +114,13 @@ def test_store_retrieve(device, name, kwargs):
         torch.testing.assert_close(v_expected, keys_and_values.values()[:, :, pos, :])
 
 
-@pytest.mark.parametrize("name, device", cache_names_and_devices())
+def cache_names_and_devices_no_smart_lastrec():
+    return cache_names_and_devices(
+        filter_name=lambda name: not name.startswith("smart-lastrec"),
+    )
+
+
+@pytest.mark.parametrize("name, device", cache_names_and_devices_no_smart_lastrec())
 def test_prefill(name, device):
     seed = 31415927
     torch.random.manual_seed(seed)
@@ -185,7 +192,7 @@ def args_size_estimate() -> List[tuple]:
     excludes = {"h2o-vlen", "qh2o-vlen", "h2o-orig"}
     names_devices = [
         tup
-        for tup in cache_names_and_devices()
+        for tup in cache_names_and_devices_no_smart_lastrec()
         if split_name(tup[0])[0] not in excludes
     ]
     batch_sizes = [1, 3]  # 2

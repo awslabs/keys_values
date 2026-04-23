@@ -332,7 +332,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                     ntp, ntp + num1, **tp_kwargs,
                 )
                 np += num1
-                if diff > 0:
+                if diff > 0 or np == self.cache_length:
                     self.token_pos[bpos, start : (start + diff)] = torch.arange(
                         ntp + num1, ntp + num, **tp_kwargs,
                     )
