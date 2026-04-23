@@ -33,6 +33,7 @@ from keys_values.kvcache.test_utils import (
     random_args_cache_forward,
     range_from_args,
 )
+from keys_values.kvcache.test_utils_advanced import cache_kwargs_for_smart_lastrec
 from keys_values.utils import randint_torch
 
 
@@ -41,7 +42,6 @@ def args_store_retrieve() -> Tuple[str, List[tuple]]:
         (name, dict())
         for name in KVCacheFactory.supported_names()
         if name.endswith("-default")
-        and not name.startswith("smart-lastrec")
     ] + [
         ("h2o-default", dict(grace_period=3)),
         ("h2o-vlen-default", dict(grace_period=3)),
@@ -65,6 +65,8 @@ def test_store_retrieve(device, name, kwargs):
         dtype=dtype,
     )
     cache_length = params.cache_length
+    if name.startswith("smart-lastrec"):
+        kwargs = {**kwargs, **cache_kwargs_for_smart_lastrec()}
     kv_cache = create_kv_cache(name, params, **kwargs)
     if name.startswith("dense"):
         num_insert = randint_torch(cache_length // 2, cache_length)
@@ -114,13 +116,7 @@ def test_store_retrieve(device, name, kwargs):
         torch.testing.assert_close(v_expected, keys_and_values.values()[:, :, pos, :])
 
 
-def cache_names_and_devices_no_smart_lastrec():
-    return cache_names_and_devices(
-        filter_name=lambda name: not name.startswith("smart-lastrec"),
-    )
-
-
-@pytest.mark.parametrize("name, device", cache_names_and_devices_no_smart_lastrec())
+@pytest.mark.parametrize("name, device", cache_names_and_devices())
 def test_prefill(name, device):
     seed = 31415927
     torch.random.manual_seed(seed)
@@ -137,7 +133,11 @@ def test_prefill(name, device):
         dtype=dtype,
     )
     cache_length = params.cache_length
-    kv_cache = create_kv_cache(name, params)
+    if name.startswith("smart-lastrec"):
+        cache_kwargs = cache_kwargs_for_smart_lastrec()
+    else:
+        cache_kwargs = dict()
+    kv_cache = create_kv_cache(name, params, **cache_kwargs)
 
     data = random_args_cache_forward(
         params,
@@ -192,7 +192,7 @@ def args_size_estimate() -> List[tuple]:
     excludes = {"h2o-vlen", "qh2o-vlen", "h2o-orig"}
     names_devices = [
         tup
-        for tup in cache_names_and_devices_no_smart_lastrec()
+        for tup in cache_names_and_devices()
         if split_name(tup[0])[0] not in excludes
     ]
     batch_sizes = [1, 3]  # 2
@@ -258,6 +258,8 @@ def test_size_estimate(
             cache_kwargs = dict()
         else:
             cache_kwargs = dict(blocks_over_heads=blocks_over_heads)
+        if name.startswith("smart-lastrec"):
+            cache_kwargs.update(cache_kwargs_for_smart_lastrec())
         kv_caches = [
             KVCacheFactory.create_single(
                 name=name,

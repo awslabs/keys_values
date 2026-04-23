@@ -11,17 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from dataclasses import asdict
 from functools import partial
 import os
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from tokenizers import Tokenizer
 import torch
 from transformers import AutoTokenizer
 
-from keys_values.attention import (
-    DefaultKeysAndValues,
-)
+from keys_values.attention import DefaultKeysAndValues
+from keys_values.data.longbench_v2 import LongBenchV2
 from keys_values.kvcache.buffers import DefaultKVCacheBuffers
 from keys_values.kvcache.gradient.accumulate import GradientAccumulator
 from keys_values.kvcache.gradient.checkpoints import KVCacheBufferCheckpoints
@@ -129,13 +129,37 @@ def load_tokenizer(
 
     """
     if cache_dir is None:
-        cache_dir = os.getenv("HF_HOME", None)
+        cache_dir = os.getenv("HF_HOME", "./test_tokenizer")
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         cache_dir=cache_dir
     )
     return tokenizer
+
+
+class MockTokenizer:
+    def encode(self, dec: str) -> List[int]:
+        return [int(x) for x in dec.encode("utf-8")]
+
+    def decode(self, enc: List[int], **kwargs) -> str:
+        return bytes(enc).decode("utf-8")
+
+
+def cache_kwargs_for_smart_lastrec(
+    use_mock_tokenizer: bool = True,
+    **kwargs,
+) -> Dict[str, Any]:
+    if use_mock_tokenizer:
+        tokenizer = MockTokenizer()
+    else:
+        tokenizer = load_tokenizer(**kwargs)
+    data = LongBenchV2()
+    smart_lastrec_info = data.smart_lastrec_info(tokenizer)
+    return dict(
+        asdict(smart_lastrec_info),
+        tokenizer=tokenizer,
+    )
 
 
 SEPARATORS = (" ", ", ", ". ", ": ", "; ")

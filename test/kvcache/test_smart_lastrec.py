@@ -109,7 +109,7 @@ def test_smart_lastrec_set_init_length(
     dtype = torch.float16
 
     # Create tokenizer and dataset
-    tokenizer = load_tokenizer(cache_dir="./test_tokenizer")
+    tokenizer = load_tokenizer()
     if data_name == "longbench_v2":
         data = LongBenchV2()
     else:

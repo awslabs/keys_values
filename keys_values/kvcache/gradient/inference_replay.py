@@ -15,8 +15,8 @@ from typing import Optional, Dict, Tuple, List
 
 import torch
 
+from keys_values.attention import KeysAndValues
 from keys_values.config import Config
-
 from keys_values.kvcache.attn_weights import (
     AttnWeightsKVCache,
     AttnWeightsReplayLog,
@@ -33,6 +33,11 @@ from keys_values.kvcache.basics import (
     KVCacheWithBuffers,
 )
 from keys_values.kvcache.buffers import KVCacheBuffers, PositionsType
+from keys_values.kvcache.smart_lastrec import (
+    SmartInitialLastRecentlyInsertedKVCache,
+    SmartInitialLastRecentlyInsertedKVCacheReplayLog, end_initial_regex_from_string,
+)
+
 from keys_values.model import GPT
 
 
@@ -331,7 +336,84 @@ class InferenceLastRecentlyInsertedReplayCache(
         InferenceReplayCacheMixin._validate_token_idx(self, token_idx)
 
 
-# HIER: `mha` should be the same object, right?
+class InferenceSmartInitialLastRecentlyInsertedReplayCache(
+    SmartInitialLastRecentlyInsertedKVCache, InferenceReplayCacheMixin
+):
+    def __init__(
+        self,
+        config: Config,
+        buffers: KVCacheBuffers,
+        block_idx: int,
+        replay_log: SmartInitialLastRecentlyInsertedKVCacheReplayLog,
+        **base_kwargs,
+    ):
+        SmartInitialLastRecentlyInsertedKVCache.__init__(
+            self,
+            config=config,
+            buffers=buffers,
+            block_idx=block_idx,
+            tokenizer=replay_log.tokenizer,
+            end_initial_regex=replay_log.end_initial_regex,
+            max_initial_fraction=replay_log.max_initial_fraction,
+            include_end_string=replay_log.include_end_string,
+            pad_id=replay_log.pad_id,
+            **base_kwargs,
+        )
+        InferenceReplayCacheMixin.__init__(self)
+        if (
+            replay_log is None
+            or len(replay_log) == 0
+            or not isinstance(replay_log, SmartInitialLastRecentlyInsertedKVCacheReplayLog)
+        ):
+            raise ValueError("replay_log is empty or has wrong type")
+        check_replay_log(self, replay_log)
+        self.replay_log = replay_log
+
+    @property
+    def input_pos(self) -> int:
+        return super().input_pos
+
+    @property
+    def current_length(self) -> int:
+        return super().current_length
+
+    @property
+    def cache_length(self) -> int:
+        return super().cache_length
+
+    @property
+    def device(self) -> Optional[torch.device]:
+        return super().device
+
+    @property
+    def batch_size(self) -> Optional[int]:
+        return super().batch_size
+
+    @property
+    def n_query_groups(self) -> int:
+        return super().n_query_groups
+
+    def next_positions(self, num: int) -> torch.Tensor:
+        return InferenceReplayCacheMixin.next_positions(self, num)
+
+    def _validate_token_idx(self, token_idx: torch.Tensor):
+        InferenceReplayCacheMixin._validate_token_idx(self, token_idx)
+
+    def _forward_internal(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+    ) -> KeysAndValues:
+        if self.init_length != self.replay_log.init_length:
+            raise AssertionError(
+                f"init_length:            {self.init_length}\n"
+                f"replay_log.init_length: {self.replay_log.init_length}\n"
+                "Must be the same!"
+            )
+        return super()._forward_internal(key, value, token_idx)
+
+
 def inference_replay_cache_factory(
     kv_cache: KVCacheWithBuffers,
     config: Config,
@@ -353,6 +435,8 @@ def inference_replay_cache_factory(
         return InferenceLastRecentlyInsertedReplayCache(**kwargs)
     elif isinstance(kv_cache, AttnWeightsKVCache):
         return InferenceAttnWeightsReplayCache(**kwargs)
+    elif isinstance(kv_cache, SmartInitialLastRecentlyInsertedKVCache):
+        return InferenceSmartInitialLastRecentlyInsertedReplayCache(**kwargs)
     else:
         raise TypeError(
             f"type(kv_cache) = {type(kv_cache)}, does not have corresponding "

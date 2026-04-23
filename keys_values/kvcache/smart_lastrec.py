@@ -82,6 +82,11 @@ class SmartInitialLastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
         token_chunks: List[torch.Tensor],
         cache_length: int,
         n_query_groups: int,
+        tokenizer: Tokenizer,
+        end_initial_regex: Union[str, re.Pattern],
+        max_initial_fraction: float,
+        include_end_string: bool,
+        pad_id: int,
         init_length: List[int],
     ):
         super().__init__(
@@ -91,6 +96,11 @@ class SmartInitialLastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
             grace_period=0,
         )
         self.n_query_groups = n_query_groups
+        self.tokenizer = tokenizer
+        self.end_initial_regex = end_initial_regex
+        self.max_initial_fraction = max_initial_fraction
+        self.include_end_string = include_end_string
+        self.pad_id = pad_id
         self.init_length = init_length.copy()
 
     def extract_index(
@@ -415,6 +425,11 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 token_chunks=[token_idx],
                 cache_length=self.cache_length,
                 n_query_groups=self.n_query_groups,
+                tokenizer=self.tokenizer,
+                end_initial_regex=self.end_initial_regex,
+                max_initial_fraction=self.max_initial_fraction,
+                include_end_string=self.include_end_string,
+                pad_id=self._pad_id,
                 init_length=self.init_length,
             )
 

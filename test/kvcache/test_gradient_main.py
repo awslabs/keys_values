@@ -36,6 +36,7 @@ from keys_values.kvcache.test_utils import (
     available_backends,
     cache_names_and_devices,
 )
+from keys_values.kvcache.test_utils_advanced import cache_kwargs_for_smart_lastrec
 from keys_values.model import GPT
 from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.utils import randint_torch
@@ -294,12 +295,17 @@ def run_copy_model_to_device(
     )
     gpt_model = GPT(config)
     gpt_model.apply(gpt_model._init_weights)  # Initialization
+    if cache_name.startswith("smart-lastrec"):
+        cache_kwargs = cache_kwargs_for_smart_lastrec()
+    else:
+        cache_kwargs = dict()
     gpt_model.assign_kv_caches(
         [
             create_kv_cache(
                 name=cache_name,
                 params=replace(params, cache_length=cache_length),
                 block_idx=block_idx,
+                **cache_kwargs,
             )
             for block_idx, cache_length in enumerate(cache_lengths)
         ]
