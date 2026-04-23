@@ -36,7 +36,6 @@ from keys_values.kvcache.buffers import KVCacheBuffers, PositionsType
 from keys_values.kvcache.smart_lastrec import (
     SmartInitialLastRecentlyInsertedKVCache,
     SmartInitialLastRecentlyInsertedKVCacheReplayLog,
-    end_initial_regex_from_string,
 )
 
 from keys_values.model import GPT
