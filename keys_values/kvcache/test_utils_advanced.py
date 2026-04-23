@@ -13,9 +13,9 @@
 # limitations under the License.
 from functools import partial
 import os
-import random
 from typing import Optional, List
 
+from tokenizers import Tokenizer
 import torch
 from transformers import AutoTokenizer
 
@@ -107,7 +107,9 @@ class KVCacheBufferTestingCheckpoints(KVCacheBufferCheckpoints):
         out.prefill_from_keys_values(checkpoint)
 
 
-def load_tokenizer(model_name="prajjwal1/bert-tiny", cache_dir=None):
+def load_tokenizer(
+    model_name="prajjwal1/bert-tiny", cache_dir=None,
+) -> Tokenizer:
     """
     Load a subword tokenizer from Hugging Face Hub.
 
@@ -139,7 +141,7 @@ def load_tokenizer(model_name="prajjwal1/bert-tiny", cache_dir=None):
 SEPARATORS = (" ", ", ", ". ", ": ", "; ")
 
 
-def sequence_of_words(num_words):
+def sequence_of_words(num_words: int) -> str:
     """
     Generate a sequence of random English words. Two words are separated by one
     of :const:`SEPARATORS`.

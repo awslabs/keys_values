@@ -16,9 +16,8 @@ from dataclasses import dataclass
 import re
 from typing import Optional, Tuple, Dict, List, Any, Union
 
+from tokenizers import Tokenizer
 import torch
-
-from litgpt.tokenizer import Tokenizer
 
 from keys_values.attention import KeysAndValues
 from keys_values.kvcache.base import (
@@ -62,6 +61,14 @@ class SmartInitialInformation:
             raise ValueError("Use LastRecentlyInsertedKVCache for cache without initial parts")
         if not (0 < self.max_initial_fraction < 1):
             raise ValueError(f"max_initial_fraction = {self.max_initial_fraction}, must be in (0, 1)")
+
+
+def end_initial_regex_from_string(
+    s: str, tokenizer: Tokenizer,
+) -> str:
+    return re.escape(
+        tokenizer.decode(tokenizer.encode(s), skip_special_tokens=True)
+    )
 
 
 class SmartInitialLastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
@@ -163,6 +170,14 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
     initial parts iff `include_end_string == True`. However, both
     `int(max_initial_fraction * cache_length)` and the prefill length limit the
     initial part lengths.
+
+    ATTENTION: The regular expression `end_initial_regex` is matched against
+    a string coming out of `tokenizer.decode(..., skip_special_tokens=True)`. It
+    needs to account for the fact that in general, `decode(encode(text)) != text`,
+    and differences may depend on the tokenizer (treatment of whitespace, newline,
+    inserting of whitespace, etc.). If `end_initial_regex` is just a substring to
+    be matched, we recommend to use :func:`end_initial_regex_from_string`, passing
+    the tokenizer.
     """
 
     def __init__(
@@ -174,6 +189,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         end_initial_regex: Union[str, re.Pattern],
         max_initial_fraction: float,
         include_end_string: bool = True,
+        pad_id: int = 0,
         **base_kwargs,
     ):
         super().__init__(config, buffers, block_idx, **base_kwargs)
@@ -206,6 +222,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         # (per batch dimension)
         self.next_position = None
         self._replay_log = None
+        self._pad_id = pad_id
 
     @staticmethod
     def from_config(
@@ -341,10 +358,13 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         self.init_length = []
         for tokens in token_idx:
             tokens = tokens.tolist()
-            decoded = self.tokenizer.decode(tokens)
+            num_left_pad = next(i for i, t in enumerate(tokens) if t != self._pad_id)
+            tokens = tokens[num_left_pad:]
+            decoded = self.tokenizer.decode(tokens, skip_special_tokens=True)
             match = re.search(self.end_initial_regex, decoded)
             if match is not None:
                 raw_length = match.end(0) if self.include_end_string else match.start(0)
+                print(f"Found match:\n{decoded[:raw_length]}")  # DEBUG
                 init_encoded = self.tokenizer.encode(decoded[:raw_length])
                 new_length = len(init_encoded)
                 try:
@@ -366,7 +386,8 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                         new_length = max(diff_pos, 1)
                 except StopIteration:
                     pass
-                new_length = min(new_length, max_init_length)
+                print(f"new_length = {new_length}, before adding padding")  # DEBUG
+                new_length = min(new_length + num_left_pad, max_init_length)
             else:
                 new_length = max_init_length
             self.init_length.append(new_length)
@@ -385,11 +406,11 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         else:
             assert init_length == self.cache_length, (init_length, self.cache_length)  # Sanity check
             self.next_position = self.init_length.copy()
-        self.token_pos[:init_length] = torch.arange(
+        self.token_pos[:self.batch_size, :init_length] = torch.arange(
             init_length,
             dtype=self.token_pos.dtype,
             device=self.device,
-        )
+        ).unsqueeze(0).expand(self.batch_size, -1)
         if self._replay_log is not None:
             self._replay_log = SmartInitialLastRecentlyInsertedKVCacheReplayLog(
                 token_chunks=[token_idx],
