@@ -293,39 +293,39 @@ class Helmet(SequenceLengthFilteredDataModule):
         substring = None
         if self.dataset_key in ("nq", "trivia_qa", "hotpot_qa", "pop_qa"):
             # See :func:`keys_values.data.load_helmet_dev_eval.load_rag`
-           substring = "Answer: [answer]"
+            substring = "Answer: [answer]"
         elif self.dataset_key in ("alce_asqa", "alce_qampari"):
             # See :func:`keys_values.data.load_helmet_dev_eval.load_cited_generation`
             # These are instructions for the first demo shot (2 in total)
-           substring = "Cite at least one document and at most three documents in each sentence. If multiple documents support the sentence, only cite a minimum sufficient subset of the documents."
+            substring = "Cite at least one document and at most three documents in each sentence. If multiple documents support the sentence, only cite a minimum sufficient subset of the documents."
         elif self.dataset_key == "ms_macro":
             # See :func:`keys_values.data.load_helmet_dev_eval.load_rerank`
-           substring = "Ranking: ID3 > ID1 > ID2"
+            substring = "Ranking: ID3 > ID1 > ID2"
         elif self.dataset_key in ("trec_coarse", "trec_fine", "nlu", "banking77", "clinc150"):
             # See :func:`keys_values.data.load_helmet_dev_eval.load_icl`
-           substring = 'Only output "label: {{label}}" and nothing else. '
+            substring = 'Only output "label: {label}" and nothing else. '
         elif self.dataset_key in ("narrative_qa", "infinite_bench_qa"):
             # See :func:`keys_values.data.load_helmet_dev_eval.load_long_doc_qa`
-           substring = "Answer the question as concisely as you can, using a single phrase if possible."
+            substring = "Answer the question as concisely as you can, using a single phrase if possible."
         elif self.dataset_key == "infinite_bench_mc":
             # See :func:`keys_values.data.load_helmet_dev_eval.load_long_doc_qa`
-           substring = "output the answer using one single letter (A, B, C, or D). Don't say anything else."
+            substring = "output the answer using one single letter (A, B, C, or D). Don't say anything else."
         elif self.dataset_key == "infinite_bench_sum":
             # See :func:`keys_values.data.load_helmet_dev_eval.load_summarization`
-           substring = "Do not provide any analysis or commentary."
+            substring = "Do not provide any analysis or commentary."
         elif self.dataset_key == "multi_lex_sum":
             # See :func:`keys_values.data.load_helmet_dev_eval.load_summarization`
-           substring = "the parties involved, and the outcomes of the case."
+            substring = "the parties involved, and the outcomes of the case."
         elif self.dataset_key == "json_kv":
             # See :func:`keys_values.data.load_helmet_dev_eval.load_synthetic`
             # This will mostly not work, because the context precedes the
             # instructions (and may be long)
-           substring = "Extract the value corresponding to the specified key in the JSON object below."
+            substring = "Extract the value corresponding to the specified key in the JSON object below."
         elif self.dataset_key in ("ruler_mk_needle", "ruler_mk_uuid", "ruler_mv"):
             # See :func:`keys_values.data.load_helmet_dev_eval.load_synthetic`
             end_initial_regex = (
                 end_initial_regex_from_string("I will quiz you about the", tokenizer=tokenizer)
-                + r" [^ ] +"
+                + r" [^ ]+ "
                 + end_initial_regex_from_string("afterwards.", tokenizer=tokenizer)
             )
         else:

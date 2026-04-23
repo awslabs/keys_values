@@ -64,11 +64,12 @@ class SmartInitialInformation:
 
 
 def end_initial_regex_from_string(
-    s: str, tokenizer: Tokenizer,
+    s: str, tokenizer: Tokenizer, do_escape: bool = True,
 ) -> str:
-    return re.escape(
-        tokenizer.decode(tokenizer.encode(s), skip_special_tokens=True)
-    )
+    result = tokenizer.decode(tokenizer.encode(s), skip_special_tokens=True)
+    if do_escape:
+        result = re.escape(result)
+    return result
 
 
 class SmartInitialLastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
@@ -364,7 +365,6 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
             match = re.search(self.end_initial_regex, decoded)
             if match is not None:
                 raw_length = match.end(0) if self.include_end_string else match.start(0)
-                print(f"Found match:\n{decoded[:raw_length]}")  # DEBUG
                 init_encoded = self.tokenizer.encode(decoded[:raw_length])
                 new_length = len(init_encoded)
                 try:
@@ -386,7 +386,6 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                         new_length = max(diff_pos, 1)
                 except StopIteration:
                     pass
-                print(f"new_length = {new_length}, before adding padding")  # DEBUG
                 new_length = min(new_length + num_left_pad, max_init_length)
             else:
                 new_length = max_init_length

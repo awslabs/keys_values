@@ -78,21 +78,21 @@ def sample_slot_values(
         ("helmet", "alce_asqa", None, 4096, [145, 145, 145, 145, 145]),
         ("helmet", "alce_qampari", None, 4096, [145, 145, 145]),
         ("helmet", "ms_macro", None, 4096, [71, 71]),
-        ("helmet", "trec_coarse", None, 4096, [0, 0, 0]), # FAILS
-        ("helmet", "trec_fine", None, 4096, [0]), # FAILS
-        ("helmet", "nlu", None, 4096, [0, 0, 0, 0]), # FAILS
-        ("helmet", "banking77", None, 4096, [0, 0, 0]), # FAILS
-        ("helmet", "clinc150", None, 4096, [0, 0, 0]), # FAILS
+        ("helmet", "trec_coarse", None, 4096, [31, 31, 31]),
+        ("helmet", "trec_fine", None, 4096, [31]),
+        ("helmet", "nlu", None, 4096, [31, 31, 31, 31]),
+        ("helmet", "banking77", None, 4096, [31, 31, 31]),
+        ("helmet", "clinc150", None, 4096, [31, 31, 31]),
         ("helmet", "narrative_qa", None, 4096, [40, 40, 40, 40]),
         ("helmet", "infinite_bench_qa", None, 4096, [28, 28]),
         ("helmet", "infinite_bench_mc", None, 4096, [56, 56, 56]),
         ("helmet", "infinite_bench_sum", None, 4096, [56]),
         ("helmet", "multi_lex_sum", None, 4096, [61, 61, 61, 61]),
         ("helmet", "json_kv", None, 4096, [16, 16, 16]),
-        ("helmet", "ruler_mk_needle", None, 4096, [0, 0]), # FAILS
-        ("helmet", "ruler_mk_uuid", None, 4096, [0, 0]), # FAILS
-        ("helmet", "ruler_mv", None, 4096, [0, 0]), # FAILS
-    ][8:13]
+        ("helmet", "ruler_mk_needle", None, 4096, [28, 28]),
+        ("helmet", "ruler_mk_uuid", None, 4096, [28, 28]),
+        ("helmet", "ruler_mv", None, 4096, [28, 28]),
+    ]
 )
 def test_smart_lastrec_set_init_length(
     data_name: str,
