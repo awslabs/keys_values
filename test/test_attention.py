@@ -925,6 +925,7 @@ def test_mha_is_passed_on(device):
         get_inputs_slice=get_inputs_slice,
         write_head_gradients_slice=write_head_gradients_slice,
         targets=targets,
+        average_loss_per_batch=False,
     )
     # Note: Must call `accumulator._create_inference_replay_caches` for
     # single-layer shards only

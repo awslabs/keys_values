@@ -240,6 +240,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         offload_device: Optional[torch.device] = None,
         offload_grad_accum: Optional[CPUOffloadAccumulateGradients] = None,
         track_unmatched_annotations: Optional[Callable[[int, int], bool]] = None,
+        average_loss_per_batch: bool = False,
         debug_gpt_model: Optional[GPT] = None,
         debug_intermediates: Optional[DebugIntermediates] = None,
         debug_profile_forward: bool = False,
@@ -316,6 +317,8 @@ class LongContextGradientModel(LongContextInferenceModel):
                 print this information for `(layer_idx, chunk_idx)` such that
                 `track_unmatched_annotations(layer_idx, chunk_idx)` is `True`,
                 where `chunk_idx` is the first chunk in the cell.
+            average_loss_per_batch: See :meth:`LongContextInferenceModel.forward`.
+                Defaults to `False`.
 
         """
         if head_model is None:
@@ -423,6 +426,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         # This is needed in :meth:`backward`
         self._current_scale_factor = None
         self._track_unmatched_annotations = track_unmatched_annotations
+        self._average_loss_per_batch = average_loss_per_batch
         self._work_device = None
         self._debug_gpt_model = debug_gpt_model
         if self.debug_intermediates is not None:
@@ -501,16 +505,25 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
             if self._record_gpu_memory_snapshots is not None:
                 self._record_gpu_memory_kind = kwargs.get("record_gpu_memory_kind")
+        average_loss_per_batch = kwargs.get(
+            "average_loss_per_batch",
+            self._average_loss_per_batch,
+        )
         if self.training:
             if targets is None:
                 raise ValueError(
                     "In training mode (self.training == True), targets must be given"
+                )
+            if average_loss_per_batch != self._average_loss_per_batch:
+                raise ValueError(
+                    "Don't use average_loss_per_batch argument in training mode. Value passed at construction is used instead."
                 )
             self._timer_start = time.perf_counter()  # Start timer
             loss_value = self._inference_forward_pass(
                 input_ids,
                 targets,
                 scale_factor,
+                average_loss_per_batch=average_loss_per_batch,
             )
             self._current_scale_factor = scale_factor
         else:
@@ -518,6 +531,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 input_ids,
                 targets,
                 scale_factor,
+                average_loss_per_batch=average_loss_per_batch,
             )
         return loss_value
 
@@ -800,6 +814,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         input_ids: torch.Tensor,
         targets: torch.Tensor,
         scale_factor: float,
+        average_loss_per_batch: bool,
     ) -> LossValue:
         if self.verbose is not VerbosityLevels.NONE:
             lines = [
@@ -862,6 +877,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 input_ids,
                 targets,
                 scale_factor,
+                average_loss_per_batch,
             ).mean()
         finally:
             # Restore
@@ -1099,6 +1115,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             get_inputs_slice=partial(get_inputs_slice, layer_idx=self.config.n_layer),
             write_head_gradients_slice=write_head_gradients_slice,
             targets=self._targets,
+            average_loss_per_batch=self._average_loss_per_batch,
         )
         if self.offload_device is not None:
             module_pairs = [

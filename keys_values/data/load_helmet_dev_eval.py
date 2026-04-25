@@ -456,7 +456,7 @@ def load_rag(
             "8k": "kilt/popqa_test_1000_k50_dep6.jsonl",
         },
     }  # the load paths can only be stored in this way, as they are hard-coded from the original code
-    instruction_template = get_instruction_template(dataset_key)
+    instruction_template = get_instruction_template(dataset_key)[0]
 
     instance_path = str(
         Path(dataset_parent_dir) / Path(file_paths[dataset_key][max_length])
@@ -589,7 +589,7 @@ def load_cited_generation(
         "16k": 75,
         "8k": 30,
     }
-    instruction_template = get_instruction_template(dataset_key)
+    instruction_template = get_instruction_template(dataset_key)[0]
     demo_template = "Instruction: Write an accurate, engaging, and concise answer for the given question using only the provided search results (some of which might be irrelevant) and cite them properly. Use an unbiased and journalistic tone. Always cite for any factual claim. When citing a document, surround its ID with square brackets, such as [x] to cite document x. To cite multiple documents, simply concatenate the citation markers; for example, use [x][y][z] to cite the documents with ID x, y, and z. Cite at least one document and at most three documents in each sentence. If multiple documents support the sentence, only cite a minimum sufficient subset of the documents.\n\nQuestion: {question}\n\n{context}\n\nAnswer: {answer}"
     doc_template = "Document [{ID}](Title: {title}): {text}"
 
@@ -658,7 +658,7 @@ def load_rerank(
             "8k": "msmarco/test_reranking_data_k50_dep3.jsonl",
         },
     }
-    instruction_template = get_instruction_template(dataset_key)
+    instruction_template = get_instruction_template(dataset_key)[0]
 
     instance_path = str(
         Path(dataset_parent_dir) / Path(file_paths[dataset_key][max_length])
@@ -765,7 +765,7 @@ def load_icl(
         "banking77": 77,
         "clinc150": 151,
     }
-    instruction_template = get_instruction_template(dataset_key)
+    instruction_template = get_instruction_template(dataset_key)[0]
     demo_template = "{text}\nlabel: {label}"
 
     if dataset_key == "trec_coarse":
@@ -938,7 +938,7 @@ def load_long_doc_qa(
     )
     eval_questions_num = 100
 
-    instruction_template = get_instruction_template(dataset_key)
+    instruction_template = get_instruction_template(dataset_key)[0]
     if dataset_key == "narrative_qa":
         all_data = load_dataset("narrativeqa")
         instance_data = all_data["test"].shuffle(seed=seed)
@@ -1114,7 +1114,7 @@ def load_summarization(
         "meta-llama/Llama-2-7b-hf", token=HF_TOKEN
     )
 
-    instruction_template = get_instruction_template(dataset_key)
+    instruction_template = get_instruction_template(dataset_key)[0]
     if dataset_key == "infinite_bench_sum":
         eval_questions_num = 50  # different from HELMET
         ft = Features(
@@ -1302,7 +1302,7 @@ def load_synthetic(
     )
     instance_data = load_dataset("json", data_files=data_path)["train"]
 
-    instruction_template = get_instruction_template(dataset_key)
+    instruction_template = get_instruction_template(dataset_key)[0]
     if dataset_key == "json_kv":
         demo_template = "Key: {key}\nCorresponding value:{value}"
 
