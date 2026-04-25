@@ -49,6 +49,7 @@ def setup(
         max_seq_length=None,
         intermed_save_interval=None,
         intermed_save_num=None,
+        max_grad_norm=1.0,
     ),
     eval: EvalArgs = EvalArgs(
         interval=100,

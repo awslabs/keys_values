@@ -68,18 +68,22 @@ def create_chunk_sizes(
 
     """
     mpl = min(c.max_prefill_length for c in gpt_model.get_kv_caches())
-    if seq_length <= mpl:
-        # Does not need anything special, but should still work. Maybe one
-        # of the batches is short
-        chunk_sizes = [seq_length]
-    else:
-        points_to_cover = list(
+    points_to_cover = sorted(
+        list(
             set(
                 cache.cache_length
                 for cache in gpt_model.get_kv_caches()
                 if cache.cache_length <= seq_length
             )
         )
+    )
+    if not points_to_cover:
+        # Does not need anything special, but should still work
+        if mpl >= seq_length:
+            chunk_sizes = [seq_length]
+        else:
+            chunk_sizes = [mpl, seq_length - mpl]
+    else:
         chunk_sizes = [mpl]  # First chunk (prefill)
         num_done = mpl
         step = chunk_size // 2
@@ -152,41 +156,6 @@ def _assert_chunk_sizes(
                     shape_lengths.add(cat_length)
 
 
-def chunk_weights_for_loss(
-    head_model: HeadModel,
-    targets: torch.Tensor,
-    chunk_sizes: List[int],
-    num_input_tokens: int,
-) -> List[float]:
-    num_target_entries = []
-    input_pos = 0
-    for num in chunk_sizes:
-        num_target_entries.append(
-            head_model.num_target_entries(
-                get_chunk_of_targets(
-                    targets=targets,
-                    input_pos=input_pos,
-                    chunk_size=num,
-                    num_input_tokens=num_input_tokens,
-                )
-            )
-        )
-        input_pos += num
-    if num_target_entries[0] is None:
-        weight_per_chunk = [1] * len(num_target_entries)
-    else:
-        total_sum = sum(num_target_entries)
-        if total_sum == 0:
-            raise ValueError(
-                "Targets are invalid (all of them are masked out!):\n"
-                f"targets:            {targets}\n"
-                f"chunk_sizes:        {chunk_sizes}\n"
-                f"num_target_entries: {num_target_entries}"
-            )
-        weight_per_chunk = [x / total_sum for x in num_target_entries]
-    return weight_per_chunk
-
-
 def write_back_cache_buffers(gpt_model: GPT):
     """
     This function should be called at the end of a loop over all layers,
@@ -216,7 +185,8 @@ class ChunksForCell:
         assert self.chunk_ranges[0][0] == 0
         assert all(a < b for a, b in self.chunk_ranges)
         assert all(
-            a[1] == b[0] for a, b in zip(self.chunk_ranges[:-1], self.chunk_ranges[1:])
+            a == b
+            for (_, a), (b, _) in zip(self.chunk_ranges[:-1], self.chunk_ranges[1:])
         )
         assert self.chunk_ranges[-1][1] == self.input_range[1] - self.input_range[0]
 
@@ -225,29 +195,24 @@ class ChunksForCell:
         return len(self.chunk_ranges)
 
 
+def ranges_from_sizes(sizes: List[int]) -> Tuple[List[Tuple[int, int]], List[int]]:
+    numbers = [0] + list(accumulate(sizes))
+    return list(zip(numbers[:-1], numbers[1:])), numbers
+
+
 def get_chunks_for_cells(
     chunks_per_cell: List[int],
     chunk_sizes: List[int],
 ) -> List[ChunksForCell]:
-    chunk_numbers = [0] + list(accumulate(chunks_per_cell))[:-1] + [len(chunk_sizes)]
-    part_lens = [
-        sum(chunk_sizes[start:end])
-        for start, end in zip(chunk_numbers[:-1], chunk_numbers[1:])
-    ]
-    part_numbers = [0] + list(accumulate(part_lens))
-    input_ranges = [
-        (start, end) for start, end in zip(part_numbers[:-1], part_numbers[1:])
-    ]
-
-    def get_chunk_ranges(sizes: List[int]) -> List[Tuple[int, int]]:
-        numbers = [0] + list(accumulate(sizes))
-        return list(zip(numbers[:-1], numbers[1:]))
+    chunk_ranges, chunk_numbers = ranges_from_sizes(chunks_per_cell)
+    cell_lens = [sum(chunk_sizes[start:end]) for start, end in chunk_ranges]
+    input_ranges = ranges_from_sizes(cell_lens)[0]
 
     return [
         ChunksForCell(
             input_range=input_range,
             first_chunk_idx=first,
-            chunk_ranges=get_chunk_ranges(chunk_sizes[first : (first + num)]),
+            chunk_ranges=ranges_from_sizes(chunk_sizes[first : (first + num)])[0],
         )
         for input_range, first, num in zip(
             input_ranges,
@@ -264,8 +229,7 @@ def get_chunk_of_targets(
     num_input_tokens: int,
 ) -> torch.Tensor:
     assert targets.ndim == 2
-    num_output_tokens = targets.shape[1]
-    start_output = num_input_tokens - num_output_tokens
+    start_output = num_input_tokens - targets.shape[1]
     end = input_pos + chunk_size
     if end > start_output:
         start_rel = max(input_pos - start_output, 0)
@@ -282,7 +246,6 @@ def compute_loss_for_chunk(
     targets: torch.Tensor,
     num_input_tokens: int,
     input_pos: int,
-    scale_factor: float = 1.0,
 ) -> torch.Tensor:
     assert model_outputs_for_chunk.ndim == 3
     targets_chunk = get_chunk_of_targets(
@@ -293,12 +256,11 @@ def compute_loss_for_chunk(
     )
     if targets_chunk is not None:
         targets_chunk = targets_chunk.to(device=model_outputs_for_chunk.device)
-    result = head_model(
+    return head_model(
         model_outputs=model_outputs_for_chunk,
         targets=targets_chunk,
         input_pos=input_pos,
     )
-    return result * scale_factor
 
 
 def compute_loss_with_limited_logits_tensor(
@@ -308,10 +270,9 @@ def compute_loss_with_limited_logits_tensor(
     targets: torch.Tensor,
     num_input_tokens: int,
     input_pos: int,
-    scale_factor: float,
 ) -> torch.Tensor:
     """
-    Helper for `LongContextGradientModel._forward_internal`, only if
+    Helper for `LongContextGradientModel._forward_internal_no_check`, only if
     `head_model.needs_logits() == True`. Here, `model_outputs_for_chunk` have
     been computed with `skip_lm_head=True`. We ensure that the size of
     intermediate logits tensors remain below
@@ -327,19 +288,20 @@ def compute_loss_with_limited_logits_tensor(
         batch_size * config.padded_vocab_size * bytes_for_torch_dtype(weights_dtype)
     )
     max_chunk_size = max(HEAD_OR_INITIAL_TENSORS_MAX_BYTES // bytes_per_token, 1)
-    loss_all = 0
+    loss_all = 0.0
     for off in range(0, chunk_size, max_chunk_size):
         len = min(off + max_chunk_size, chunk_size) - off
         x = gpt_model.lm_head(model_outputs_for_chunk[:, off : (off + len), :])
-        loss_part = compute_loss_for_chunk(
-            head_model=head_model,
-            model_outputs_for_chunk=x,
-            targets=targets,
-            num_input_tokens=num_input_tokens,
-            input_pos=input_pos + off,
-            scale_factor=scale_factor,
+        loss_all = (
+            compute_loss_for_chunk(
+                head_model=head_model,
+                model_outputs_for_chunk=x,
+                targets=targets,
+                num_input_tokens=num_input_tokens,
+                input_pos=input_pos + off,
+            )
+            + loss_all
         )
-        loss_all = loss_part + loss_all
     return loss_all
 
 
@@ -630,12 +592,22 @@ class LongContextInferenceModel(GPTAndHeadModel):
             final token position being processed. The KV caches are not reset,
             as the model is to be used for token generations.
 
+        Some luss functions are defined over target tokens. For these:
+        If `average_loss_per_batch == False` (default), each loss value
+        `l[b]` is normalized by the number `nz[b]` of (not ignored)
+        target tokens: `l[b] = s[b] / nz[b]`, if `s[b]` is the sum of loss
+        values over target tokens.
+        If `average_loss_per_batch == True`, we normalize loss values by the
+        number of (not ignored) target tokens in the whole batch:
+        `l[b] = s[b] * B / sum(nz[b])`, where `B` is the batch size.
+
         Args:
             input_ids: Batch of full input token sequences
             targets: Targets, these are right-aligned with `input_ids`. Only
                 if `head_model` is given. If `head_model` is given and
                 `targets=None`, we return logits as well
             scale_factor: Loss is multiplied by this factor. Defaults to 1.
+            average_loss_per_batch: See above. Defaults to `False`.
 
         Returns:
             Loss values, shape `(batch_size,)`. If `targets` are not given,
@@ -657,7 +629,12 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self._init_members_from_tokens(input_ids, targets)
         # Reset all KV caches
         self.gpt_model.reset()
-        return self._forward_only(input_ids, targets, scale_factor)
+        return self._forward_only(
+            input_ids,
+            targets,
+            scale_factor,
+            average_loss_per_batch=kwargs.get("average_loss_per_batch", False),
+        )
 
     def set_record_gpu_memory(
         self,
@@ -812,6 +789,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float,
+        average_loss_per_batch: bool,
     ) -> torch.Tensor:
         """
         Wrapper around :meth:`_forward_internal_no_check`. If
@@ -825,6 +803,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 input_ids,
                 targets,
                 scale_factor,
+                average_loss_per_batch,
             )
         else:
             result = None
@@ -835,6 +814,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         input_ids,
                         targets,
                         scale_factor,
+                        average_loss_per_batch,
                     )
                 except RuntimeError as ex:
                     oom_exception_action(ex, self._tmp_array_limit_gb)
@@ -853,6 +833,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float,
+        average_loss_per_batch: bool,
     ) -> torch.Tensor:
         """
         We run a nested loop with 3 levels. Over cells, then over layers, then
@@ -863,17 +844,16 @@ class LongContextInferenceModel(GPTAndHeadModel):
         """
         compute_loss = targets is not None
         assert not compute_loss or self.head_model is not None
-        loss_full = 0
+        loss_full = 0.0
         num_input_tokens = input_ids.shape[-1]
         if compute_loss:
-            weight_per_chunk = chunk_weights_for_loss(
-                head_model=self.head_model,
-                targets=targets,
-                chunk_sizes=self.chunk_sizes,
-                num_input_tokens=num_input_tokens,
-            )
+            num_target_entries = self.head_model.num_target_entries(targets)
+            if num_target_entries is not None:
+                num_target_entries = num_target_entries.to(dtype=torch.float32)
+                if average_loss_per_batch:
+                    num_target_entries = num_target_entries.mean()
         else:
-            weight_per_chunk = None
+            num_target_entries = None
         logits_final_position = None  # Only if no loss is computed
         # Need grouping of chunks into cells, for outermost loop
         chunks_for_cells = get_chunks_for_cells(
@@ -900,6 +880,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 chunks_for_cells, verbose=self.verbose
             ):
                 start, end = chunks_for_cell.input_range
+                is_final_cell = end == chunks_for_cells[-1].input_range[1]
                 # Input embeddings
                 embeddings = wte(input_ids[:, start:end])
                 if self.config.scale_embeddings:
@@ -909,6 +890,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
 
                 # Loop over layers
                 for block_idx, block in enumerate(model_blocks):
+                    is_final_layer = block_idx == self.config.n_layer - 1
                     # Layer input checkpointing
                     self._checkpoint_layer_input(
                         x=embeddings.detach(),
@@ -922,6 +904,10 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     new_embed_parts = []
                     # Innermost loop over chunks per cell
                     for rel_start, rel_end in chunks_for_cell.chunk_ranges:
+                        is_final_chunk = (
+                            is_final_cell
+                            and rel_end == chunks_for_cell.chunk_ranges[-1][1]
+                        )
                         if self.debug_intermediates is not None:
 
                             def callback(
@@ -952,7 +938,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         if self.debug_intermediates is not None:
                             callback(value=y)
                         new_embed_parts.append(y)
-                        if not compute_loss:
+                        if not compute_loss and is_final_chunk and is_final_layer:
                             # We need the final layer output for the last chunk
                             logits_final_position = y[:, -1:, :].detach()
                     if self._do_checkpoint_layer_input() and torch.cuda.is_available():
@@ -984,13 +970,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
 
                 if compute_loss:
                     # Head model
-                    a = chunks_for_cell.first_chunk_idx
-                    b = a + chunks_for_cell.num_chunks
                     input_pos = start
-                    for (rel_start, rel_end), weight in zip(
-                        chunks_for_cell.chunk_ranges,
-                        weight_per_chunk[a:b],
-                    ):
+                    for rel_start, rel_end in chunks_for_cell.chunk_ranges:
                         ch_size = rel_end - rel_start
                         output_chunk = embeddings[:, rel_start:rel_end, :]
                         if self.head_model.needs_logits():
@@ -1001,7 +982,6 @@ class LongContextInferenceModel(GPTAndHeadModel):
                                 targets=targets,
                                 num_input_tokens=num_input_tokens,
                                 input_pos=input_pos,
-                                scale_factor=weight * scale_factor,
                             )
                         else:
                             loss_part = compute_loss_for_chunk(
@@ -1010,7 +990,6 @@ class LongContextInferenceModel(GPTAndHeadModel):
                                 targets=targets,
                                 num_input_tokens=num_input_tokens,
                                 input_pos=input_pos,
-                                scale_factor=weight * scale_factor,
                             )
                         loss_full = loss_part + loss_full
                         input_pos += ch_size
@@ -1037,6 +1016,13 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     # `embeddings`, but just unlink it.
                     torch.cuda.synchronize()
 
+        if compute_loss:
+            if num_target_entries is not None:
+                _scale = scale_factor / num_target_entries.to(device=loss_full.device)
+            else:
+                _scale = scale_factor
+            dtype = loss_full.dtype
+            loss_full = (loss_full * _scale).to(dtype=dtype)
         write_back_cache_buffers(self.gpt_model)  # Just to be safe
         if self.cache_offloader is not None:
             self.cache_offloader.flush()
@@ -1051,6 +1037,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float,
+        average_loss_per_batch: bool,
     ) -> torch.Tensor:
         # Ensure that all KV caches do not record replay logs
         for cache in self.gpt_model.get_kv_caches():
@@ -1059,7 +1046,12 @@ class LongContextInferenceModel(GPTAndHeadModel):
             print(
                 f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode)"
             )
-        result = self._forward_internal(input_ids, targets, scale_factor)
+        result = self._forward_internal(
+            input_ids,
+            targets,
+            scale_factor,
+            average_loss_per_batch,
+        )
         if not (targets is None or self._debug_no_deallocate_buffers):
             self.clear()
         return result

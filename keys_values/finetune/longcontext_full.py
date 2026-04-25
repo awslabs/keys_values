@@ -16,7 +16,6 @@ import csv
 import dataclasses
 import gc
 
-import math
 import os
 import time
 from pathlib import Path
@@ -155,6 +154,8 @@ def setup(
         max_seq_length=None,
         intermed_save_interval=None,
         intermed_save_num=None,
+        max_grad_norm=1.0,
+        average_loss_per_batch=False,
     ),
     eval: EvalArgs = EvalArgs(
         interval=600,
@@ -427,6 +428,8 @@ def setup_internal(
         )
     else:
         print(str(optimizer))
+    if train.max_grad_norm is not None:
+        print(f"Using gradient clipping with max_grad_norm = {train.max_grad_norm}")
     global_batch_size = train.micro_batch_size * devices * num_nodes
     if train.global_batch_size is None:
         train.global_batch_size = global_batch_size
@@ -710,6 +713,7 @@ def main(
             attention_backward_temp_size_gb=attention_backward_temp_size_gb,
             max_batch_size=batch_size,
             dtype=dtype,
+            average_loss_per_batch=train.average_loss_per_batch,
             profile_grad_times=profile_grad_times > 0,
             profile_parts=profile_parts,
             fabric=fabric,
@@ -1007,6 +1011,7 @@ def wrap_gpt_model(
     attention_backward_temp_size_gb: Optional[float],
     max_batch_size: int,
     dtype: torch.dtype,
+    average_loss_per_batch: bool,
     profile_grad_times: bool = False,
     profile_parts: Optional[str] = None,
     cpu_offload_device: Optional[torch.device] = None,
@@ -1134,6 +1139,7 @@ def wrap_gpt_model(
             profile_steps=profile_grad_times,
             offload_device=cpu_offload_device,
             offload_grad_accum=offload_grad_accum,
+            average_loss_per_batch=average_loss_per_batch,
             debug_profile_forward=profile_parts == "forward",
             debug_profile_backward=profile_parts == "backward",
             debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
@@ -1417,18 +1423,17 @@ def fit(
             if train_iterator.epoch >= train.epochs:
                 break
 
-            if devices > 1:
+            loss_weight = 1.0
+            if train.average_loss_per_batch and devices > 1:
                 # Cater for token-averaging of loss values and gradients
                 num_tokens_batch = model.head_model.num_target_entries(batch["targets"])
-                sum_tokens_tensor = torch.tensor(
-                    num_tokens_batch,
-                    device=fabric.device,
-                    dtype=torch.int64,
-                )
-                fabric.all_reduce(sum_tokens_tensor, reduce_op="sum")
-                loss_weight = num_tokens_batch * devices / sum_tokens_tensor.item()
-            else:
-                loss_weight = 1.0
+                if num_tokens_batch is not None:
+                    num_tokens_batch = num_tokens_batch.sum()
+                    avg_tokens_tensor = num_tokens_batch.to(
+                        device=fabric.device
+                    ).clone()
+                    fabric.all_reduce(avg_tokens_tensor, reduce_op="mean")
+                    loss_weight = num_tokens_batch.item() / avg_tokens_tensor.item()
 
             if record_gpu_memory_snapshots is not None:
                 run_no = state["iter_num"] - 1
@@ -1456,6 +1461,18 @@ def fit(
                 )
                 record_gpu_memory_snapshots.start_recording()
 
+            # DEBUG
+            # Compute loss and gradient naively for the current batch, to compare
+            # with what is done below. Works only for short enough sequences
+            # assert devices == 1, "DEBUG only for single device"
+            # debug_gradient, debug_loss = debug_compute_loss_and_gradient(
+            #    gpt_model=model.gpt_model,
+            #    batch=batch,
+            #    device=fabric.device,
+            #    average_loss_per_batch=train.average_loss_per_batch,
+            # )
+            # model.gpt_model.reset()
+            # END DEBUG
             is_accumulating = (not do_cpu_offloading) and state[
                 "iter_num"
             ] % train.gradient_accumulation_iters(devices, num_nodes) != 0
@@ -1512,6 +1529,19 @@ def fit(
                     print(f"Done {num_steps} updates. Stopping.")
                     exit(0)
 
+            # DEBUG
+            # Compare loss and gradient to naively computed ones
+            # real_loss = loss.item()
+            # real_gradient = debug_get_gradient(model.gpt_model)
+            # print(f"real_loss = {real_loss}, debug_loss = {debug_loss}")
+            # for name, real_grad in real_gradient.items():
+            #    print(name)
+            #    debug_grad = debug_gradient.get(name)
+            #    if debug_grad is None:
+            #        raise IndexError(f"{name} is in real_gradient, but not in debug_gradient")
+            #    torch.testing.assert_close(real_grad, debug_grad)
+            # END DEBUG
+
             if record_gpu_memory_snapshots is not None and record_gpu_memory_kind != 2:
                 # Stop recording and store snapshot. For kind 0, this is the single
                 # snapshot for the iteration. For kind 1, this is the final snapshot.
@@ -1519,6 +1549,11 @@ def fit(
                 record_gpu_memory_snapshots.stop_recording()
 
             if not is_accumulating:
+                if train.max_grad_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        train.max_grad_norm,
+                    )
                 if cpu_optimizer is not None:
                     cpu_optimizer.step()
                     cpu_optimizer.zero_grad(set_to_none=True)
@@ -1687,11 +1722,8 @@ def validate_and_all_reduce(
     with torch.no_grad():
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
         time_start = time.perf_counter()
-        # If `evaluator` is given, `avg_loss` is the average metric value
-        # over all cases, and `num_entries` the number of cases.
-        # If `evaluator` is not given, `avg_loss` is the average loss value
-        # over all non-masked tokens, and `num_entries` the number of such
-        # tokens. The reduction over devices is the same.
+        # `avg_loss` is the average metric or loss value over all cases, and
+        # `num_entries` the number of cases.
         if evaluator is None:
             avg_loss, num_entries = validate(
                 model,
@@ -1699,6 +1731,7 @@ def validate_and_all_reduce(
                 eval,
                 batch_transform,
             )
+            metric_name = "val_loss"
         else:
             avg_loss, num_entries = validate_sample_metric(
                 model,
@@ -1707,6 +1740,7 @@ def validate_and_all_reduce(
                 eval,
                 batch_transform,
             )
+            metric_name = evaluator.metrics[0]
         if generate_example_kwargs is not None:
             generate_example(
                 fabric=fabric,
@@ -1727,8 +1761,13 @@ def validate_and_all_reduce(
         )
         fabric.all_reduce(sum_num_entries_tensor, reduce_op="sum")
         weight = num_entries / sum_num_entries_tensor.item()
-        val_loss_tensor = (avg_loss.clone() * weight).to(fabric.device)
+        val_loss_tensor = torch.tensor(
+            avg_loss * weight,
+            device=fabric.device,
+            dtype=torch.float32,
+        )
         fabric.all_reduce(val_loss_tensor, reduce_op="sum")
+        avg_loss = val_loss_tensor.item()
         val_time_tensor = torch.tensor(
             val_time,
             device=fabric.device,
@@ -1736,20 +1775,11 @@ def validate_and_all_reduce(
         )
         fabric.all_reduce(val_time_tensor, reduce_op="mean")
         val_time = val_time_tensor.item()
-    else:
-        val_loss_tensor = avg_loss.clone()
-    avg_loss = val_loss_tensor.item()
-    if evaluator is None:
-        metrics = {
-            "val_loss": avg_loss,
-            "val_ppl": math.exp(avg_loss),
-            "val_time": val_time,
-        }
-    else:
-        metrics = {
-            evaluator.metrics[0]: avg_loss,
-            "val_time": val_time,
-        }
+
+    metrics = {
+        metric_name: avg_loss,
+        "val_time": val_time,
+    }
     if fabric is not None and log_metrics:
         fabric.log_dict(metrics)
     return metrics
@@ -1762,21 +1792,18 @@ def validate(
     val_dataloader: MyDataLoader,
     eval: EvalArgs,
     batch_transform: BatchTransform,
-) -> Tuple[torch.Tensor, int]:
+) -> Tuple[float, int]:
     model.eval()
-    losses = torch.zeros(min(len(val_dataloader), eval.max_iters))
-    num_target_tokens = 0
+    sum_loss = 0.0
+    num_entries = 0
     for k, batch in enumerate(val_dataloader):
         if k >= eval.max_iters:
             break
         batch = batch_transform(batch)
-        targets = batch["targets"]
-        num_tokens_this_batch = model.head_model.num_target_entries(targets)
-        num_target_tokens += num_tokens_this_batch
-        losses[k] = model(batch[INPUT_IDS_NAME], targets).mean() * num_tokens_this_batch
-    val_loss = losses.sum() / num_target_tokens
+        sum_loss += model(batch[INPUT_IDS_NAME], batch["targets"]).mean().item()
+        num_entries += 1
     model.train()
-    return val_loss, num_target_tokens
+    return sum_loss / num_entries, num_entries
 
 
 @torch.no_grad()
@@ -1786,28 +1813,23 @@ def validate_sample_metric(
     val_dataloader: MyDataLoader,
     eval: EvalArgs,
     batch_transform: BatchTransform,
-) -> Tuple[torch.Tensor, int]:
+) -> Tuple[float, int]:
     model.eval()
-    num_cases = 0
-    sum_metric_values = None
+    sum_metric_values = 0.0
+    num_entries = 0
     for k, batch in enumerate(val_dataloader):
         if k >= eval.max_iters:
             break
         batch = batch_transform(batch)
         input_ids = batch[INPUT_IDS_NAME]
-        targets = batch[TARGETS_STRINGS_NAME]
-        num_cases += len(targets)
+        raw_targets = batch[TARGETS_STRINGS_NAME]
         prompt_len = input_ids.shape[1] - batch["targets"].shape[1] + 1
         prompts = input_ids[:, :prompt_len]
-        metric_vals = evaluator(model, prompts, targets)
-        sum_vals = metric_vals[evaluator.metrics[0]].sum()
-        if sum_metric_values is None:
-            sum_metric_values = sum_vals
-        else:
-            sum_metric_values += sum_vals
-    avg_metric_values = sum_metric_values / num_cases
+        metric_vals = evaluator(model, prompts, raw_targets)
+        sum_metric_values += metric_vals[evaluator.metrics[0]].sum().item()
+        num_entries += 1
     model.train()
-    return avg_metric_values, num_cases
+    return sum_metric_values / num_entries, num_entries
 
 
 def string_for_val_metrics(
@@ -1907,3 +1929,66 @@ def save_checkpoint_regular(
                         (root / name).rmdir()
                 if interval_dir.exists():
                     interval_dir.rmdir()
+
+
+# DEBUG: Code for comparison of gradients and loss value against naive
+
+
+def debug_loss_function(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    average_loss_per_batch: bool,
+    ignore_index: int = -100,
+) -> torch.Tensor:
+    assert logits.ndim == 3 and targets.ndim == 2
+    assert logits.shape[:2] == targets.shape
+    vocab_size = logits.shape[-1]
+    num_target_entries = targets.ne(ignore_index).to(dtype=torch.float32).sum(dim=-1)
+    if average_loss_per_batch:
+        num_target_entries = num_target_entries.mean()
+    num_targets = targets.shape[-1]
+    losses = (
+        torch.nn.functional.cross_entropy(
+            logits[:, (-num_targets):, :].reshape(-1, vocab_size),
+            targets.reshape(-1),
+            ignore_index=ignore_index,
+            reduction="none",
+        )
+        .view(*logits.shape[:2])
+        .sum(dim=-1)
+        .to(dtype=torch.float32)
+    )
+    return losses / num_target_entries.to(dtype=torch.float32)
+
+
+def debug_get_gradient(model: torch.nn.Module) -> Dict[str, torch.Tensor]:
+    return {
+        name: param.grad.data.to(device=torch.device("cpu"))
+        for name, param in model.named_parameters()
+        if param.requires_grad
+    }
+
+
+def debug_compute_loss_and_gradient(
+    gpt_model: Union[GPTFull, GPTLoRA],
+    batch: Dict[str, Any],
+    device: torch.device,
+    average_loss_per_batch: bool,
+    ignore_index: int = -100,
+) -> Tuple[Dict[str, torch.Tensor], float]:
+    input_ids = batch[INPUT_IDS_NAME].to(device=device)
+    targets = batch["targets"].to(device=device)
+    gpt_model.reset()
+    gpt_model.max_seq_length = input_ids.shape[1]
+    logits = gpt_model(input_ids)
+    loss_value = debug_loss_function(
+        logits,
+        targets,
+        average_loss_per_batch,
+        ignore_index,
+    ).mean()
+    loss_value.backward()
+    gradient = debug_get_gradient(gpt_model)
+    gpt_model.zero_grad(set_to_none=True)
+    loss_value = loss_value.item()
+    return gradient, loss_value
