@@ -421,6 +421,9 @@ class TrainArgs:
     Args:
         intermed_save_interval: See above
         intermed_save_num: See above
+        max_grad_norm: If not `None`, we use gradient clipping (so
+            `torch.nn.utils.clip_grad_norm_`) with this maximum norm.
+            Defaults to 1.0.
     """
 
     save_interval: Optional[int] = 1000
@@ -450,6 +453,7 @@ class TrainArgs:
     """Whether to tie the embedding weights with the language modeling head weights"""
     intermed_save_interval: Optional[int] = None
     intermed_save_num: Optional[int] = None
+    max_grad_norm: Optional[float] = 1.0
 
     def __post_init__(self) -> None:
         if self.lr_warmup_fraction and self.lr_warmup_steps:
@@ -492,6 +496,8 @@ class TrainArgs:
             raise ValueError(
                 "intermed_save_num only needed if intermed_save_interval is given"
             )
+        if self.max_grad_norm is not None and self.max_grad_norm <= 0:
+            raise ValueError("max_grad_norm must be positive (or `None` to disable)")
 
     def gradient_accumulation_iters(self, devices: int, num_nodes: int = 1) -> int:
         """Number of iterations between gradient synchronizations"""

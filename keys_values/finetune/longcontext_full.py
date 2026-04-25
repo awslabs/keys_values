@@ -155,6 +155,7 @@ def setup(
         max_seq_length=None,
         intermed_save_interval=None,
         intermed_save_num=None,
+        max_grad_norm=1.0,
     ),
     eval: EvalArgs = EvalArgs(
         interval=600,
@@ -427,6 +428,8 @@ def setup_internal(
         )
     else:
         print(str(optimizer))
+    if train.max_grad_norm is not None:
+        print(f"Using gradient clipping with max_grad_norm = {train.max_grad_norm}")
     global_batch_size = train.micro_batch_size * devices * num_nodes
     if train.global_batch_size is None:
         train.global_batch_size = global_batch_size
@@ -1519,6 +1522,10 @@ def fit(
                 record_gpu_memory_snapshots.stop_recording()
 
             if not is_accumulating:
+                if train.max_grad_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), train.max_grad_norm,
+                    )
                 if cpu_optimizer is not None:
                     cpu_optimizer.step()
                     cpu_optimizer.zero_grad(set_to_none=True)
