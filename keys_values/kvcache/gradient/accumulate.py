@@ -59,7 +59,6 @@ from keys_values.kvcache.gradient.inference_replay import inference_replay_cache
 from keys_values.kvcache.stack_layers import CellBlocks
 from keys_values.long_context import (
     get_chunks_for_cells,
-    get_chunk_of_targets,
     compute_loss_for_chunk,
     HEAD_OR_INITIAL_TENSORS_MAX_BYTES,
 )
@@ -870,26 +869,16 @@ class GradientAccumulator:
         # Head model must be on the same device as the final outputs
         if self._verbose_more:
             print("\nGradient accumulation for head model")
-        # First loop to obtain normalization constants
-        num_target_entries = [
-            head_model.num_target_entries(
-                get_chunk_of_targets(
-                    targets=targets,
-                    input_pos=start,
-                    chunk_size=end - start,
-                    num_input_tokens=self.seq_length,
-                )
-            )
-            for start, end in self.top_bottom_ranges
-        ]
-        if num_target_entries[0] is None:
-            weight_per_chunk = [1] * len(num_target_entries)
+        # Normalization (per batch dimension):
+        num_target_entries = self.head_model.num_target_entries(targets)
+        if num_target_entries is None:
+            _scale = scale_factor
         else:
-            total_sum = sum(num_target_entries)
-            weight_per_chunk = [x / total_sum for x in num_target_entries]
-        # Second loop to compute loss value and gradients
+            _scale = scale_factor / num_target_entries.to(dtype=torch.float32, device=targets.device)
+
+        # Loop over cells to compute loss value and gradients
         loss_full = 0
-        for (start, end), weight in zip(self.top_bottom_ranges, weight_per_chunk):
+        for start, end in self.top_bottom_ranges:
             x = copy_requires_grad(get_inputs_slice(start, end))
             model_outputs = gpt_model.transformer.ln_f(x)
             if head_model.needs_logits():
@@ -900,9 +889,9 @@ class GradientAccumulator:
                 targets=targets,
                 num_input_tokens=self.seq_length,
                 input_pos=start,
-                scale_factor=weight * scale_factor,
             )
-            loss_part = loss_part.mean()
+            # Normalization
+            loss_part = (loss_part * _scale).mean()
             if loss_part.grad_fn is not None:
                 loss_part.backward()
                 head_grad_part = x.grad

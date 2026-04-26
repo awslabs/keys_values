@@ -984,7 +984,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
 
         if compute_loss:
             if num_target_entries is not None:
-                _scale = scale_factor / num_input_tokens.to(dtype=torch.float32, device=loss_full.device)
+                _scale = scale_factor / num_target_entries.to(dtype=torch.float32, device=loss_full.device)
             else:
                 _scale = scale_factor
             dtype = loss_full.dtype
