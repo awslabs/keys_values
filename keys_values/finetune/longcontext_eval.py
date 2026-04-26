@@ -502,16 +502,17 @@ def main(
             t0 = time.perf_counter()
             # One entry per batch dimension:
             input_ids = batch[INPUT_IDS_NAME]
+            targets = batch["targets"]
             if evaluator is None:
                 with torch.no_grad():
-                    metric_values = model(input_ids, batch["targets"])
+                    metric_values = model(input_ids, targets)
                 metric_name = "eval_loss"
             else:
                 metric_name = evaluator.metrics[0]
-                targets = batch[TARGETS_STRINGS_NAME]
-                prompt_len = input_ids.shape[1] - batch["targets"].shape[1] + 1
+                prompt_len = input_ids.shape[1] - targets.shape[1] + 1
                 prompts = input_ids[:, :prompt_len]
-                metric_values = evaluator(model, prompts, targets)[metric_name]
+                raw_targets = batch[TARGETS_STRINGS_NAME]
+                metric_values = evaluator(model, prompts, raw_targets)[metric_name]
             eval_time = time.perf_counter() - t0
             print_with_rank_and_timestamp(
                 f"Batch {task}, {orig_idxs}: {metric_name} = {metric_values.mean().item():.3f}, eval_time = {eval_time * 1000:.2f} ms",

@@ -1694,11 +1694,8 @@ def validate_and_all_reduce(
     with torch.no_grad():
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
         time_start = time.perf_counter()
-        # If `evaluator` is given, `avg_loss` is the average metric value
-        # over all cases, and `num_entries` the number of cases.
-        # If `evaluator` is not given, `avg_loss` is the average loss value
-        # over all non-masked tokens, and `num_entries` the number of such
-        # tokens. The reduction over devices is the same.
+        # `avg_loss` is the average metric or loss value over all cases, and
+        # `num_entries` the number of cases.
         if evaluator is None:
             avg_loss, num_entries = validate(
                 model,
@@ -1706,6 +1703,7 @@ def validate_and_all_reduce(
                 eval,
                 batch_transform,
             )
+            metric_name = "val_loss"
         else:
             avg_loss, num_entries = validate_sample_metric(
                 model,
@@ -1714,6 +1712,7 @@ def validate_and_all_reduce(
                 eval,
                 batch_transform,
             )
+            metric_name = evaluator.metrics[0]
         if generate_example_kwargs is not None:
             generate_example(
                 fabric=fabric,
@@ -1734,8 +1733,13 @@ def validate_and_all_reduce(
         )
         fabric.all_reduce(sum_num_entries_tensor, reduce_op="sum")
         weight = num_entries / sum_num_entries_tensor.item()
-        val_loss_tensor = (avg_loss.clone() * weight).to(fabric.device)
+        val_loss_tensor = torch.tensor(
+            avg_loss * weight,
+            device=fabric.device,
+            dtype=torch.float32,
+        )
         fabric.all_reduce(val_loss_tensor, reduce_op="sum")
+        avg_loss = val_loss_tensor.item()
         val_time_tensor = torch.tensor(
             val_time,
             device=fabric.device,
@@ -1743,20 +1747,11 @@ def validate_and_all_reduce(
         )
         fabric.all_reduce(val_time_tensor, reduce_op="mean")
         val_time = val_time_tensor.item()
-    else:
-        val_loss_tensor = avg_loss.clone()
-    avg_loss = val_loss_tensor.item()
-    if evaluator is None:
-        metrics = {
-            "val_loss": avg_loss,
-            "val_ppl": math.exp(avg_loss),
-            "val_time": val_time,
-        }
-    else:
-        metrics = {
-            evaluator.metrics[0]: avg_loss,
-            "val_time": val_time,
-        }
+
+    metrics = {
+        metric_name: avg_loss,
+        "val_time": val_time,
+    }
     if fabric is not None and log_metrics:
         fabric.log_dict(metrics)
     return metrics
@@ -1769,21 +1764,18 @@ def validate(
     val_dataloader: MyDataLoader,
     eval: EvalArgs,
     batch_transform: BatchTransform,
-) -> Tuple[torch.Tensor, int]:
+) -> Tuple[float, int]:
     model.eval()
-    losses = torch.zeros(min(len(val_dataloader), eval.max_iters))
-    num_target_tokens = 0
+    sum_loss = 0.0
+    num_entries = 0
     for k, batch in enumerate(val_dataloader):
         if k >= eval.max_iters:
             break
         batch = batch_transform(batch)
-        targets = batch["targets"]
-        num_tokens_this_batch = model.head_model.num_target_entries(targets)
-        num_target_tokens += num_tokens_this_batch
-        losses[k] = model(batch[INPUT_IDS_NAME], targets).mean() * num_tokens_this_batch
-    val_loss = losses.sum() / num_target_tokens
+        sum_loss += model(batch[INPUT_IDS_NAME], batch["targets"]).mean().item()
+        num_entries += 1
     model.train()
-    return val_loss, num_target_tokens
+    return sum_loss / num_entries, num_entries
 
 
 @torch.no_grad()
@@ -1793,28 +1785,23 @@ def validate_sample_metric(
     val_dataloader: MyDataLoader,
     eval: EvalArgs,
     batch_transform: BatchTransform,
-) -> Tuple[torch.Tensor, int]:
+) -> Tuple[float, int]:
     model.eval()
-    num_cases = 0
-    sum_metric_values = None
+    sum_metric_values = 0.0
+    num_entries = 0
     for k, batch in enumerate(val_dataloader):
         if k >= eval.max_iters:
             break
         batch = batch_transform(batch)
         input_ids = batch[INPUT_IDS_NAME]
-        targets = batch[TARGETS_STRINGS_NAME]
-        num_cases += len(targets)
+        raw_targets = batch[TARGETS_STRINGS_NAME]
         prompt_len = input_ids.shape[1] - batch["targets"].shape[1] + 1
         prompts = input_ids[:, :prompt_len]
-        metric_vals = evaluator(model, prompts, targets)
-        sum_vals = metric_vals[evaluator.metrics[0]].sum()
-        if sum_metric_values is None:
-            sum_metric_values = sum_vals
-        else:
-            sum_metric_values += sum_vals
-    avg_metric_values = sum_metric_values / num_cases
+        metric_vals = evaluator(model, prompts, raw_targets)
+        sum_metric_values += metric_vals[evaluator.metrics[0]].sum().item()
+        num_entries += 1
     model.train()
-    return avg_metric_values, num_cases
+    return sum_metric_values / num_entries, num_entries
 
 
 def string_for_val_metrics(
