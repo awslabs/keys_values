@@ -68,18 +68,22 @@ def create_chunk_sizes(
 
     """
     mpl = min(c.max_prefill_length for c in gpt_model.get_kv_caches())
-    if seq_length <= mpl:
-        # Does not need anything special, but should still work. Maybe one
-        # of the batches is short
-        chunk_sizes = [seq_length]
-    else:
-        points_to_cover = list(
+    points_to_cover = sorted(
+        list(
             set(
                 cache.cache_length
                 for cache in gpt_model.get_kv_caches()
                 if cache.cache_length <= seq_length
             )
         )
+    )
+    if not points_to_cover:
+        # Does not need anything special, but should still work
+        if mpl >= seq_length:
+            chunk_sizes = [seq_length]
+        else:
+            chunk_sizes = [mpl, seq_length - mpl]
+    else:
         chunk_sizes = [mpl]  # First chunk (prefill)
         num_done = mpl
         step = chunk_size // 2
@@ -181,7 +185,7 @@ class ChunksForCell:
         assert self.chunk_ranges[0][0] == 0
         assert all(a < b for a, b in self.chunk_ranges)
         assert all(
-            a[1] == b[0] for a, b in zip(self.chunk_ranges[:-1], self.chunk_ranges[1:])
+            a == b for (_, a), (b, _) in zip(self.chunk_ranges[:-1], self.chunk_ranges[1:])
         )
         assert self.chunk_ranges[-1][1] == self.input_range[1] - self.input_range[0]
 
@@ -226,8 +230,7 @@ def get_chunk_of_targets(
     num_input_tokens: int,
 ) -> torch.Tensor:
     assert targets.ndim == 2
-    num_output_tokens = targets.shape[1]
-    start_output = num_input_tokens - num_output_tokens
+    start_output = num_input_tokens - targets.shape[1]
     end = input_pos + chunk_size
     if end > start_output:
         start_rel = max(input_pos - start_output, 0)
