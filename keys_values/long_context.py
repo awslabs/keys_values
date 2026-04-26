@@ -876,7 +876,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     new_embed_parts = []
                     # Innermost loop over chunks per cell
                     for rel_start, rel_end in chunks_for_cell.chunk_ranges:
-                        is_final_chunk = is_final_cell and rel_end == chunks_for_cell[-1].chunk_ranges[1]
+                        is_final_chunk = is_final_cell and rel_end == chunks_for_cell.chunk_ranges[-1][1]
                         if self.debug_intermediates is not None:
 
                             def callback(

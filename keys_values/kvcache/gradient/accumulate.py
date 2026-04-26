@@ -870,7 +870,7 @@ class GradientAccumulator:
         if self._verbose_more:
             print("\nGradient accumulation for head model")
         # Normalization (per batch dimension):
-        num_target_entries = self.head_model.num_target_entries(targets)
+        num_target_entries = head_model.num_target_entries(targets)
         if num_target_entries is None:
             _scale = scale_factor
         else:
