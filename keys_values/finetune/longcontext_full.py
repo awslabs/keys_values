@@ -1420,19 +1420,6 @@ def fit(
             if train_iterator.epoch >= train.epochs:
                 break
 
-            if devices > 1:
-                # Cater for token-averaging of loss values and gradients
-                num_tokens_batch = model.head_model.num_target_entries(batch["targets"])
-                sum_tokens_tensor = torch.tensor(
-                    num_tokens_batch,
-                    device=fabric.device,
-                    dtype=torch.int64,
-                )
-                fabric.all_reduce(sum_tokens_tensor, reduce_op="sum")
-                loss_weight = num_tokens_batch * devices / sum_tokens_tensor.item()
-            else:
-                loss_weight = 1.0
-
             if record_gpu_memory_snapshots is not None:
                 run_no = state["iter_num"] - 1
                 if record_gpu_memory_period >= 1:
@@ -1459,6 +1446,16 @@ def fit(
                 )
                 record_gpu_memory_snapshots.start_recording()
 
+            # DEBUG
+            # Compute loss and gradient naively for the current batch, to compare
+            # with what is done below. Works only for short enough sequences
+            debug_gradient, debug_loss = debug_compute_loss_and_gradient(
+                gpt_model=model.gpt_model,
+                batch=batch,
+                device=fabric.device,
+            )
+            model.gpt_model.reset()
+            # END DEBUG
             is_accumulating = (not do_cpu_offloading) and state[
                 "iter_num"
             ] % train.gradient_accumulation_iters(devices, num_nodes) != 0
@@ -1470,8 +1467,7 @@ def fit(
             model_kwargs = dict(
                 input_ids=batch[INPUT_IDS_NAME],
                 targets=batch["targets"],
-                scale_factor=loss_weight
-                / train.gradient_accumulation_iters(devices, num_nodes),
+                scale_factor=1.0 / train.gradient_accumulation_iters(devices, num_nodes),
                 record_gpu_memory_snapshots=record_gpu_memory_snapshots,
                 record_gpu_memory_kind=(
                     record_gpu_memory_kind
@@ -1514,6 +1510,19 @@ def fit(
                 if len(records) >= num_steps:
                     print(f"Done {num_steps} updates. Stopping.")
                     exit(0)
+
+            # DEBUG
+            # Compare loss and gradient to naively computed ones
+            real_loss = loss.item()
+            real_gradient = debug_get_gradient(model.gpt_model)
+            print(f"real_loss = {real_loss}, debug_loss = {debug_loss}")
+            for name, real_grad in real_gradient.items():
+                print(name)
+                debug_grad = debug_gradient.get(name)
+                if debug_grad is None:
+                    raise IndexError(f"{name} is in real_gradient, but not in debug_gradient")
+                torch.testing.assert_close(real_grad, debug_grad)
+            # END DEBUG
 
             if record_gpu_memory_snapshots is not None and record_gpu_memory_kind != 2:
                 # Stop recording and store snapshot. For kind 0, this is the single
@@ -1901,3 +1910,52 @@ def save_checkpoint_regular(
                         (root / name).rmdir()
                 if interval_dir.exists():
                     interval_dir.rmdir()
+
+
+# DEBUG: Code for comparison of gradients and loss value against naive
+
+def debug_loss_function(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    ignore_index: int = -100,
+) -> torch.Tensor:
+    assert logits.ndim == 3 and targets.ndim == 2
+    assert logits.shape[:2] == targets.shape
+    vocab_size = logits.shape[-1]
+    num_target_entries = targets.ne(ignore_index).to(dtype=torch.int32).sum(dim=-1)
+    num_targets = targets.shape[-1]
+    losses = torch.nn.functional.cross_entropy(
+        logits[:, (-num_targets):, :].reshape(-1, vocab_size),
+        targets.reshape(-1),
+        ignore_index=ignore_index,
+        reduction="none",
+    ).view(*logits.shape[:2]).sum(dim=-1).to(dtype=torch.float32)
+    return losses / num_target_entries.to(dtype=torch.float32)
+
+
+def debug_get_gradient(model: torch.nn.Module) -> Dict[str, torch.Tensor]:
+    return {
+        name: param.grad.data.clone()
+        for name, param in model.named_parameters()
+        if param.requires_grad
+    }
+
+
+def debug_compute_loss_and_gradient(
+    gpt_model: Union[GPTFull, GPTLoRA],
+    batch: Dict[str, Any],
+    device: torch.device,
+    ignore_index: int = -100,
+) -> Tuple[Dict[str, torch.Tensor], float]:
+    input_ids = batch[INPUT_IDS_NAME]
+    targets = batch["targets"]
+    # Deallocate KV cache buffers before cloning
+    deallocate_kv_cache_buffers_of_model(gpt_model)
+    model_copy = gpt_model.clone(device)
+
+    logits = model_copy(input_ids)
+    loss_value = debug_loss_function(logits, targets, ignore_index).mean()
+    loss_value.backward()
+    gradient = debug_get_gradient(model_copy)
+    loss_value = loss_value.item()
+    return gradient, loss_value
