@@ -1462,10 +1462,12 @@ def fit(
             # DEBUG
             # Compute loss and gradient naively for the current batch, to compare
             # with what is done below. Works only for short enough sequences
+            assert devices == 1, "DEBUG only for single device"
             debug_gradient, debug_loss = debug_compute_loss_and_gradient(
                 gpt_model=model.gpt_model,
                 batch=batch,
                 device=fabric.device,
+                average_loss_per_batch=train.average_loss_per_batch,
             )
             model.gpt_model.reset()
             # END DEBUG
@@ -1930,12 +1932,15 @@ def save_checkpoint_regular(
 def debug_loss_function(
     logits: torch.Tensor,
     targets: torch.Tensor,
+    average_loss_per_batch: bool,
     ignore_index: int = -100,
 ) -> torch.Tensor:
     assert logits.ndim == 3 and targets.ndim == 2
     assert logits.shape[:2] == targets.shape
     vocab_size = logits.shape[-1]
-    num_target_entries = targets.ne(ignore_index).to(dtype=torch.int32).sum(dim=-1)
+    num_target_entries = targets.ne(ignore_index).to(dtype=torch.float32).sum(dim=-1)
+    if average_loss_per_batch:
+        num_target_entries = num_target_entries.mean()
     num_targets = targets.shape[-1]
     losses = torch.nn.functional.cross_entropy(
         logits[:, (-num_targets):, :].reshape(-1, vocab_size),
@@ -1958,6 +1963,7 @@ def debug_compute_loss_and_gradient(
     gpt_model: Union[GPTFull, GPTLoRA],
     batch: Dict[str, Any],
     device: torch.device,
+    average_loss_per_batch: bool,
     ignore_index: int = -100,
 ) -> Tuple[Dict[str, torch.Tensor], float]:
     input_ids = batch[INPUT_IDS_NAME]
@@ -1967,7 +1973,9 @@ def debug_compute_loss_and_gradient(
     model_copy = gpt_model.clone(device)
 
     logits = model_copy(input_ids)
-    loss_value = debug_loss_function(logits, targets, ignore_index).mean()
+    loss_value = debug_loss_function(
+        logits, targets, average_loss_per_batch, ignore_index,
+    ).mean()
     loss_value.backward()
     gradient = debug_get_gradient(model_copy)
     loss_value = loss_value.item()
