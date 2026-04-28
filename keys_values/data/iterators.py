@@ -203,10 +203,6 @@ class SimilarSequenceLengthSampler(BatchSampler):
     ):
         assert micro_batch_size >= 1
         assert num_devices >= 1
-        if micro_batch_size == 1 and num_devices == 1:
-            raise ValueError(
-                "This sampler requires micro_batch_size > 1 or num_devices > 1"
-            )
         if shortest_first and longest_first:
             raise ValueError("Cannot set both shortest_first and longest_first")
         if num_devices > 1:

@@ -847,7 +847,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         if compute_loss:
             num_target_entries = self.head_model.num_target_entries(targets)
             if num_target_entries is not None:
-                num_input_tokens = num_target_entries.to(dtype=torch.float32)
+                num_target_entries = num_target_entries.to(dtype=torch.float32)
                 if average_loss_per_batch:
                     num_target_entries = num_target_entries.mean()
         else:

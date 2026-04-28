@@ -1112,6 +1112,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             get_inputs_slice=partial(get_inputs_slice, layer_idx=self.config.n_layer),
             write_head_gradients_slice=write_head_gradients_slice,
             targets=self._targets,
+            average_loss_per_batch=self._average_loss_per_batch,
         )
         if self.offload_device is not None:
             module_pairs = [

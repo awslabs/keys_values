@@ -1462,14 +1462,14 @@ def fit(
             # DEBUG
             # Compute loss and gradient naively for the current batch, to compare
             # with what is done below. Works only for short enough sequences
-            assert devices == 1, "DEBUG only for single device"
-            debug_gradient, debug_loss = debug_compute_loss_and_gradient(
-                gpt_model=model.gpt_model,
-                batch=batch,
-                device=fabric.device,
-                average_loss_per_batch=train.average_loss_per_batch,
-            )
-            model.gpt_model.reset()
+            #assert devices == 1, "DEBUG only for single device"
+            #debug_gradient, debug_loss = debug_compute_loss_and_gradient(
+            #    gpt_model=model.gpt_model,
+            #    batch=batch,
+            #    device=fabric.device,
+            #    average_loss_per_batch=train.average_loss_per_batch,
+            #)
+            #model.gpt_model.reset()
             # END DEBUG
             is_accumulating = (not do_cpu_offloading) and state[
                 "iter_num"
@@ -1528,15 +1528,15 @@ def fit(
 
             # DEBUG
             # Compare loss and gradient to naively computed ones
-            real_loss = loss.item()
-            real_gradient = debug_get_gradient(model.gpt_model)
-            print(f"real_loss = {real_loss}, debug_loss = {debug_loss}")
-            for name, real_grad in real_gradient.items():
-                print(name)
-                debug_grad = debug_gradient.get(name)
-                if debug_grad is None:
-                    raise IndexError(f"{name} is in real_gradient, but not in debug_gradient")
-                torch.testing.assert_close(real_grad, debug_grad)
+            #real_loss = loss.item()
+            #real_gradient = debug_get_gradient(model.gpt_model)
+            #print(f"real_loss = {real_loss}, debug_loss = {debug_loss}")
+            #for name, real_grad in real_gradient.items():
+            #    print(name)
+            #    debug_grad = debug_gradient.get(name)
+            #    if debug_grad is None:
+            #        raise IndexError(f"{name} is in real_gradient, but not in debug_gradient")
+            #    torch.testing.assert_close(real_grad, debug_grad)
             # END DEBUG
 
             if record_gpu_memory_snapshots is not None and record_gpu_memory_kind != 2:
@@ -1953,7 +1953,7 @@ def debug_loss_function(
 
 def debug_get_gradient(model: torch.nn.Module) -> Dict[str, torch.Tensor]:
     return {
-        name: param.grad.data.clone()
+        name: param.grad.data.to(device=torch.device("cpu"))
         for name, param in model.named_parameters()
         if param.requires_grad
     }
@@ -1966,17 +1966,16 @@ def debug_compute_loss_and_gradient(
     average_loss_per_batch: bool,
     ignore_index: int = -100,
 ) -> Tuple[Dict[str, torch.Tensor], float]:
-    input_ids = batch[INPUT_IDS_NAME]
-    targets = batch["targets"]
-    # Deallocate KV cache buffers before cloning
-    deallocate_kv_cache_buffers_of_model(gpt_model)
-    model_copy = gpt_model.clone(device)
-
-    logits = model_copy(input_ids)
+    input_ids = batch[INPUT_IDS_NAME].to(device=device)
+    targets = batch["targets"].to(device=device)
+    gpt_model.reset()
+    gpt_model.max_seq_length = input_ids.shape[1]
+    logits = gpt_model(input_ids)
     loss_value = debug_loss_function(
         logits, targets, average_loss_per_batch, ignore_index,
     ).mean()
     loss_value.backward()
-    gradient = debug_get_gradient(model_copy)
+    gradient = debug_get_gradient(gpt_model)
+    gpt_model.zero_grad(set_to_none=True)
     loss_value = loss_value.item()
     return gradient, loss_value
