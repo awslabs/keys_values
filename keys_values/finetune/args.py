@@ -424,6 +424,11 @@ class TrainArgs:
         max_grad_norm: If not `None`, we use gradient clipping (so
             `torch.nn.utils.clip_grad_norm_`) with this maximum norm.
             Defaults to 1.0.
+        average_loss_per_batch: If `True`, the sum of loss values for a batch
+            is normalized by the number of non-masked target tokens in that
+            batch. Otherwise (`False`, the default), we average the sum of loss
+            values per data case (by the number of non-masked target tokens),
+            then use the uniform average over the batch.
     """
 
     save_interval: Optional[int] = 1000
@@ -454,6 +459,7 @@ class TrainArgs:
     intermed_save_interval: Optional[int] = None
     intermed_save_num: Optional[int] = None
     max_grad_norm: Optional[float] = 1.0
+    average_loss_per_batch: Optional[bool] = False
 
     def __post_init__(self) -> None:
         if self.lr_warmup_fraction and self.lr_warmup_steps:

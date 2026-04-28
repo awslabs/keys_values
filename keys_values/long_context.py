@@ -590,12 +590,22 @@ class LongContextInferenceModel(GPTAndHeadModel):
             final token position being processed. The KV caches are not reset,
             as the model is to be used for token generations.
 
+        Some luss functions are defined over target tokens. For these:
+        If `average_loss_per_batch == False` (default), each loss value
+        `l[b]` is normalized by the number `nz[b]` of (not ignored)
+        target tokens: `l[b] = s[b] / nz[b]`, if `s[b]` is the sum of loss
+        values over target tokens.
+        If `average_loss_per_batch == True`, we normalize loss values by the
+        number of (not ignored) target tokens in the whole batch:
+        `l[b] = s[b] * B / sum(nz[b])`, where `B` is the batch size.
+
         Args:
             input_ids: Batch of full input token sequences
             targets: Targets, these are right-aligned with `input_ids`. Only
                 if `head_model` is given. If `head_model` is given and
                 `targets=None`, we return logits as well
             scale_factor: Loss is multiplied by this factor. Defaults to 1.
+            average_loss_per_batch: See above. Defaults to `False`.
 
         Returns:
             Loss values, shape `(batch_size,)`. If `targets` are not given,
@@ -617,7 +627,12 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self._init_members_from_tokens(input_ids, targets)
         # Reset all KV caches
         self.gpt_model.reset()
-        return self._forward_only(input_ids, targets, scale_factor)
+        return self._forward_only(
+            input_ids,
+            targets,
+            scale_factor,
+            average_loss_per_batch=kwargs.get("average_loss_per_batch", False),
+        )
 
     def set_record_gpu_memory(
         self,
@@ -772,6 +787,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float,
+        average_loss_per_batch: bool,
     ) -> torch.Tensor:
         """
         Wrapper around :meth:`_forward_internal_no_check`. If
@@ -785,6 +801,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 input_ids,
                 targets,
                 scale_factor,
+                average_loss_per_batch,
             )
         else:
             result = None
@@ -795,6 +812,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         input_ids,
                         targets,
                         scale_factor,
+                        average_loss_per_batch,
                     )
                 except RuntimeError as ex:
                     oom_exception_action(ex, self._tmp_array_limit_gb)
@@ -813,6 +831,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float,
+        average_loss_per_batch: bool,
     ) -> torch.Tensor:
         """
         We run a nested loop with 3 levels. Over cells, then over layers, then
@@ -825,7 +844,14 @@ class LongContextInferenceModel(GPTAndHeadModel):
         assert not compute_loss or self.head_model is not None
         loss_full = 0.0
         num_input_tokens = input_ids.shape[-1]
-        num_target_entries = self.head_model.num_target_entries(targets) if compute_loss else None
+        if compute_loss:
+            num_target_entries = self.head_model.num_target_entries(targets)
+            if num_target_entries is not None:
+                num_input_tokens = num_target_entries.to(dtype=torch.float32)
+                if average_loss_per_batch:
+                    num_target_entries = num_target_entries.mean()
+        else:
+            num_target_entries = None
         logits_final_position = None  # Only if no loss is computed
         # Need grouping of chunks into cells, for outermost loop
         chunks_for_cells = get_chunks_for_cells(
@@ -987,7 +1013,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
 
         if compute_loss:
             if num_target_entries is not None:
-                _scale = scale_factor / num_target_entries.to(dtype=torch.float32, device=loss_full.device)
+                _scale = scale_factor / num_target_entries.to(device=loss_full.device)
             else:
                 _scale = scale_factor
             dtype = loss_full.dtype
@@ -1006,6 +1032,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float,
+        average_loss_per_batch: bool,
     ) -> torch.Tensor:
         # Ensure that all KV caches do not record replay logs
         for cache in self.gpt_model.get_kv_caches():
@@ -1014,7 +1041,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
             print(
                 f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode)"
             )
-        result = self._forward_internal(input_ids, targets, scale_factor)
+        result = self._forward_internal(
+            input_ids, targets, scale_factor, average_loss_per_batch,
+        )
         if not (targets is None or self._debug_no_deallocate_buffers):
             self.clear()
         return result

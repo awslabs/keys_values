@@ -805,6 +805,7 @@ class GradientAccumulator:
         get_inputs_slice: GetInputSlice,
         write_head_gradients_slice: WriteOutputsSlice,
         targets: torch.Tensor,
+        average_loss_per_batch: bool,
     ) -> torch.Tensor:
         """
         The loss function is represented in `head_model`, input tokens are
@@ -838,6 +839,7 @@ class GradientAccumulator:
             targets: Tensor of targets, aligned with `input_ids` on the right.
                 Must be on the same device as `head_model` and final layer of
                 `gpt_model`
+            average_loss_per_batch: See :meth:`LongContextInferenceModel.forward`
 
         Returns:
             Loss function value. We use mean reduction over the sequence.
@@ -874,7 +876,10 @@ class GradientAccumulator:
         if num_target_entries is None:
             _scale = scale_factor
         else:
-            _scale = scale_factor / num_target_entries.to(dtype=torch.float32, device=targets.device)
+            num_target_entries = num_target_entries.to(dtype=torch.float32, device=targets.device)
+            if average_loss_per_batch:
+                num_target_entries = num_target_entries.mean()
+            _scale = scale_factor / num_target_entries
 
         # Loop over cells to compute loss value and gradients
         loss_full = 0

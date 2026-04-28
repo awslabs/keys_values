@@ -16,7 +16,6 @@ import csv
 import dataclasses
 import gc
 
-import math
 import os
 import time
 from pathlib import Path
@@ -156,6 +155,7 @@ def setup(
         intermed_save_interval=None,
         intermed_save_num=None,
         max_grad_norm=1.0,
+        average_loss_per_batch=False,
     ),
     eval: EvalArgs = EvalArgs(
         interval=600,
@@ -713,6 +713,7 @@ def main(
             attention_backward_temp_size_gb=attention_backward_temp_size_gb,
             max_batch_size=batch_size,
             dtype=dtype,
+            average_loss_per_batch=train.average_loss_per_batch,
             profile_grad_times=profile_grad_times > 0,
             profile_parts=profile_parts,
             fabric=fabric,
@@ -1010,6 +1011,7 @@ def wrap_gpt_model(
     attention_backward_temp_size_gb: Optional[float],
     max_batch_size: int,
     dtype: torch.dtype,
+    average_loss_per_batch: bool,
     profile_grad_times: bool = False,
     profile_parts: Optional[str] = None,
     cpu_offload_device: Optional[torch.device] = None,
@@ -1137,6 +1139,7 @@ def wrap_gpt_model(
             profile_steps=profile_grad_times,
             offload_device=cpu_offload_device,
             offload_grad_accum=offload_grad_accum,
+            average_loss_per_batch=average_loss_per_batch,
             debug_profile_forward=profile_parts == "forward",
             debug_profile_backward=profile_parts == "backward",
             debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
@@ -1420,6 +1423,16 @@ def fit(
             if train_iterator.epoch >= train.epochs:
                 break
 
+            loss_weight = 1.0
+            if train.average_loss_per_batch and devices > 1:
+                # Cater for token-averaging of loss values and gradients
+                num_tokens_batch = model.head_model.num_target_entries(batch["targets"])
+                if num_tokens_batch is not None:
+                    num_tokens_batch = num_tokens_batch.sum()
+                    avg_tokens_tensor = num_tokens_batch.to(device=fabric.device).clone()
+                    fabric.all_reduce(avg_tokens_tensor, reduce_op="mean")
+                    loss_weight = num_tokens_batch.item() / avg_tokens_tensor.item()
+
             if record_gpu_memory_snapshots is not None:
                 run_no = state["iter_num"] - 1
                 if record_gpu_memory_period >= 1:
@@ -1467,7 +1480,7 @@ def fit(
             model_kwargs = dict(
                 input_ids=batch[INPUT_IDS_NAME],
                 targets=batch["targets"],
-                scale_factor=1.0 / train.gradient_accumulation_iters(devices, num_nodes),
+                scale_factor=loss_weight / train.gradient_accumulation_iters(devices, num_nodes),
                 record_gpu_memory_snapshots=record_gpu_memory_snapshots,
                 record_gpu_memory_kind=(
                     record_gpu_memory_kind

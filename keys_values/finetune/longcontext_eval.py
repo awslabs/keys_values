@@ -419,6 +419,7 @@ def main(
             attention_backward_temp_size_gb=None,
             max_batch_size=batch_size,
             dtype=dtype,
+            average_loss_per_batch=False,
             fabric=fabric,
             model_kwargs=None,
         )
