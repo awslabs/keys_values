@@ -607,6 +607,12 @@ class SDPAArgs:
             Triton is unavailable, the tensor is on CPU, or the input shape
             is unsupported. Correctness verified against an fp64 reference.
             See `keys_values/fused_rmsnorm.py`.
+        fused_swiglu: If `True`, patch `LLaMAMLP.forward` (both
+            `keys_values.lora` and `litgpt.model` variants) so the
+            `F.silu(x_fc_1) * x_fc_2` step runs as a single fused Triton
+            kernel instead of two eager kernels. Falls back to eager when
+            inputs are not on CUDA or dtypes mismatch. Correctness verified
+            against an fp64 reference. See `keys_values/fused_swiglu.py`.
     """
 
     flex_attention: bool = True
@@ -617,6 +623,7 @@ class SDPAArgs:
     dynamo_cache_size_limit: int = 32
     fused_rope: bool = False
     fused_rmsnorm: bool = False
+    fused_swiglu: bool = False
 
     def __post_init__(self):
         if self.flex_num_q_lens is not None and self.flex_num_q_lens <= 0:
