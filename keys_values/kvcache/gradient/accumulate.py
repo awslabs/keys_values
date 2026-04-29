@@ -505,15 +505,19 @@ class GradientAccumulator:
             if self._verbose_more:
                 print("Forward pass to store KV cache checkpoints")
             infer_replay_caches = self._create_inference_replay_caches(model_part)
+            torch.cuda.nvtx.range_push("compute_checkpoints")
             self._compute_checkpoints(
                 model_part,
                 infer_replay_caches,
                 get_inputs_slice,
             )
+            torch.cuda.nvtx.range_pop()
             if torch.cuda.is_available():
                 # Synchronize here to make sure the checkpoints are properly
                 # written to CPU (host), before they are read below
+                torch.cuda.nvtx.range_push("sync_checkpoints")
                 torch.cuda.synchronize()
+                torch.cuda.nvtx.range_pop()
             # We could delete `infer_replay_caches` here. But we still use their
             # buffers to de-quantize checkpoints below
         else:
@@ -559,6 +563,7 @@ class GradientAccumulator:
                 # - Inputs left:     k_buffers, v_buffers
                 # - Gradients top:   head_gradients_top
                 # - Gradients right: head_gradients_k, head_gradients_v
+                torch.cuda.nvtx.range_push(f"cell_inputs_{col_idx}")
                 cell_inputs = copy_requires_grad(get_inputs_slice(start, end))
                 head_gradients_top = get_head_gradients_slice(start, end)
                 if col_idx == 0:
@@ -574,10 +579,12 @@ class GradientAccumulator:
                     )
                     k_buffers = [copy_requires_grad(x) for x in k_buffers]
                     v_buffers = [copy_requires_grad(x) for x in v_buffers]
+                torch.cuda.nvtx.range_pop()
 
                 # Forward-backward, using the autograd hooks (if given)
                 scalar_output = None
                 try:
+                    torch.cuda.nvtx.range_push(f"forward_{col_idx}")
                     with (
                         torch.autograd.graph.saved_tensors_hooks(
                             lambda x: self.autograd_hooks.pack_hook(x),
@@ -597,12 +604,17 @@ class GradientAccumulator:
                             first_chunk_idx=first_chunk_idx,
                             num_chunks=num_chunks,
                         )
+                    torch.cuda.nvtx.range_pop()
 
+                    torch.cuda.nvtx.range_push(f"backward_{col_idx}")
                     scalar_output.backward()
+                    torch.cuda.nvtx.range_pop()
+                    torch.cuda.nvtx.range_push(f"write_head_grads_{col_idx}")
                     write_head_gradients_slice(start, cell_inputs.grad)
                     if col_idx > 0:
                         head_gradients_k = [x.grad for x in k_buffers]
                         head_gradients_v = [x.grad for x in v_buffers]
+                    torch.cuda.nvtx.range_pop()
                 finally:
                     del scalar_output
                     del cell_inputs
