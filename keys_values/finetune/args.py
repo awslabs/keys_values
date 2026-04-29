@@ -601,6 +601,12 @@ class SDPAArgs:
             typically *more* accurate than eager in bf16/fp16. Measured at
             Qwen3-4B on A100-40GB: ~2% end-to-end speedup, val_loss matches
             or improves. See `keys_values/fused_rope.py`.
+        fused_rmsnorm: If `True`, patch both `keys_values.model.RMSNorm` and
+            `litgpt.model.RMSNorm` so their `forward` dispatches to a fused
+            Triton kernel. Falls back to the original eager forward when
+            Triton is unavailable, the tensor is on CPU, or the input shape
+            is unsupported. Correctness verified against an fp64 reference.
+            See `keys_values/fused_rmsnorm.py`.
     """
 
     flex_attention: bool = True
@@ -610,6 +616,7 @@ class SDPAArgs:
     use_flex_for_attn_weights: bool = True
     dynamo_cache_size_limit: int = 32
     fused_rope: bool = False
+    fused_rmsnorm: bool = False
 
     def __post_init__(self):
         if self.flex_num_q_lens is not None and self.flex_num_q_lens <= 0:
