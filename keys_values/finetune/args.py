@@ -429,6 +429,7 @@ class TrainArgs:
             batch. Otherwise (`False`, the default), we average the sum of loss
             values per data case (by the number of non-masked target tokens),
             then use the uniform average over the batch.
+            Defaults to `True`.
     """
 
     save_interval: Optional[int] = 1000
@@ -459,7 +460,7 @@ class TrainArgs:
     intermed_save_interval: Optional[int] = None
     intermed_save_num: Optional[int] = None
     max_grad_norm: Optional[float] = 1.0
-    average_loss_per_batch: Optional[bool] = False
+    average_loss_per_batch: Optional[bool] = True
 
     def __post_init__(self) -> None:
         if self.lr_warmup_fraction and self.lr_warmup_steps:

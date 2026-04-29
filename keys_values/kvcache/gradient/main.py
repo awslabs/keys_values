@@ -240,7 +240,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         offload_device: Optional[torch.device] = None,
         offload_grad_accum: Optional[CPUOffloadAccumulateGradients] = None,
         track_unmatched_annotations: Optional[Callable[[int, int], bool]] = None,
-        average_loss_per_batch: bool = False,
+        average_loss_per_batch: bool = True,
         debug_gpt_model: Optional[GPT] = None,
         debug_intermediates: Optional[DebugIntermediates] = None,
         debug_profile_forward: bool = False,
@@ -318,7 +318,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 `track_unmatched_annotations(layer_idx, chunk_idx)` is `True`,
                 where `chunk_idx` is the first chunk in the cell.
             average_loss_per_batch: See :meth:`LongContextInferenceModel.forward`.
-                Defaults to `False`.
+                Defaults to `True`.
 
         """
         if head_model is None:

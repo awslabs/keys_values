@@ -156,7 +156,7 @@ def setup(
         intermed_save_interval=None,
         intermed_save_num=None,
         max_grad_norm=1.0,
-        average_loss_per_batch=False,
+        average_loss_per_batch=True,
     ),
     eval: EvalArgs = EvalArgs(
         interval=600,

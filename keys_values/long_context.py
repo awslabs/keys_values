@@ -593,7 +593,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
             as the model is to be used for token generations.
 
         Some luss functions are defined over target tokens. For these:
-        If `average_loss_per_batch == False` (default), each loss value
+        If `average_loss_per_batch == False`, each loss value
         `l[b]` is normalized by the number `nz[b]` of (not ignored)
         target tokens: `l[b] = s[b] / nz[b]`, if `s[b]` is the sum of loss
         values over target tokens.
