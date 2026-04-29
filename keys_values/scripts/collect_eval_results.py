@@ -65,17 +65,15 @@ if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
     datasets = [
         "helmet_nq_32k",
-        "helmet_trivia_qa_32k",
-        "helmet_hotpot_qa_32k",
-        "helmet_pop_qa_32k",
+#        "helmet_trivia_qa_32k",
+#        "helmet_hotpot_qa_32k",
+#        "helmet_pop_qa_32k",
     ]
     cases = [
-        "lr_4gpu_lr5",
+        "lr_4gpu_lpc2_avg1_lr5",
     ]
     model_type = "lora"
     for dataset, case in product(datasets, cases):
-        out_dir = (
-            Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b" / dataset / case
-        )
+        out_dir = base_path / dataset / case
         if out_dir.exists():
             main(out_dir, model_type)

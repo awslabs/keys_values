@@ -34,6 +34,7 @@ ssh -i "matthis_deeplearning_uswest2.pem" ubuntu@ec2-34-209-209-37.us-west-2.com
 * AMI: `Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 24.04)`
 * Volume size: 180 GiB
 * Security group: `sg-0b00b6174eab4d62b (launch-wizard-16)`
+* VPC: `vpc-0619b17e`
 
 
 ## Create EFS volume
