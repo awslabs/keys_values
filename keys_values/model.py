@@ -762,8 +762,14 @@ class CausalSelfAttention(nn.Module):
                 input_pos=_input_pos,
                 block_idx=self.block_idx,
             )
-            q = torch.cat((q_roped, q[..., rope_n_elem:]), dim=-1)
-            k = torch.cat((k_roped, k[..., rope_n_elem:]), dim=-1)
+            # Skip the outer cat when rope covers the full head dim (e.g.,
+            # Qwen3): the tail slice is empty and cat would just copy.
+            if rope_n_elem == head_size:
+                q = q_roped
+                k = k_roped
+            else:
+                q = torch.cat((q_roped, q[..., rope_n_elem:]), dim=-1)
+                k = torch.cat((k_roped, k[..., rope_n_elem:]), dim=-1)
             if do_debug:
                 debug_intermediates(
                     value=q,
