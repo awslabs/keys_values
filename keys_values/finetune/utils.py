@@ -466,7 +466,7 @@ def adjust_cache_kwargs(
         for name in (
             "end_initial_regex",
             "max_initial_fraction",
-            "include_end_initial_regex",
+            "include_end_string",
         ):
             if name not in cache_kwargs:
                 print(f"adjust_cache_kwargs: Setting {name} from data module")
