@@ -50,7 +50,6 @@ class SmartInitialInformation:
         max_initial_fraction: Fraction of cache length initial parts can
             occupy at most
         include_end_string: Include end of init sequence in initial part?
-
     """
 
     end_initial_regex: Union[str, re.Pattern]
