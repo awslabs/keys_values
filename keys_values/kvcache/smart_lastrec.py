@@ -73,7 +73,9 @@ def end_initial_regex_from_string(
     tokenizer: HFTokenizer,
     do_escape: bool = True,
 ) -> str:
-    result = tokenizer.decode(tokenizer.encode(s), skip_special_tokens=True)
+    result = tokenizer.decode(
+        tokenizer.encode(s).ids, skip_special_tokens=True,
+    )
     if do_escape:
         result = re.escape(result)
     return result
@@ -404,7 +406,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
             match = re.search(self.end_initial_regex, decoded)
             if match is not None:
                 raw_length = match.end(0) if self.include_end_string else match.start(0)
-                init_encoded = self.tokenizer.encode(decoded[:raw_length])
+                init_encoded = self.tokenizer.encode(decoded[:raw_length]).ids
                 new_length = len(init_encoded)
                 try:
                     diff_pos = next(

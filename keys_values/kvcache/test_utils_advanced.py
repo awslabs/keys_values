@@ -136,9 +136,14 @@ def load_tokenizer(
     return tokenizer
 
 
+class MockEncoding:
+    def __init__(self, ids: List[int]):
+        self.ids = ids
+
+
 class MockTokenizer:
-    def encode(self, dec: str) -> List[int]:
-        return [int(x) for x in dec.encode("utf-8")]
+    def encode(self, dec: str) -> MockEncoding:
+        return MockEncoding([int(x) for x in dec.encode("utf-8")])
 
     def decode(self, enc: List[int], **kwargs) -> str:
         return bytes(enc).decode("utf-8")
