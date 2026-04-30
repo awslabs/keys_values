@@ -423,21 +423,9 @@ def setup_internal(
     if train.max_grad_norm is not None:
         print(f"Using gradient clipping with max_grad_norm = {train.max_grad_norm}")
     global_batch_size = train.micro_batch_size * devices
-    if train.global_batch_size is None:
+    if train.global_batch_size != global_batch_size:
+        print(f"train.global_batch_size not supported, set to {global_batch_size}")
         train.global_batch_size = global_batch_size
-    elif do_cpu_offload:
-        if train.global_batch_size != global_batch_size:
-            print(f"train.global_batch_size not supported, set to {global_batch_size}")
-            train.global_batch_size = global_batch_size
-    elif (
-        train.global_batch_size % global_batch_size != 0
-        or train.global_batch_size < global_batch_size
-    ):
-        raise ValueError(
-            f"train.global_batch_size = {train.global_batch_size}, must be "
-            "positive multiple of devices * train.micro_batch_size = "
-            f"{global_batch_size}."
-        )
     if profile_parts is not None and profile_parts not in ("forward", "backward"):
         raise ValueError("profile_parts: Must be 'forward' or 'backward'")
     if size_log_quantiles is not None:
@@ -456,11 +444,6 @@ def setup_internal(
         print(
             "Warning: Device out of memory error recovery does not properly "
             "work at the moment."
-        )
-    gradacc_iters = train.gradient_accumulation_iters(devices, num_nodes=1)
-    if gradacc_iters > 1:
-        print(
-            f"Using sequential gradient accumulation with {gradacc_iters} iterations per update step"
         )
     # Legacy arguments
     if verbose is None:
@@ -750,7 +733,6 @@ def main(
             "cpu_optimizer": cpu_optimizer,
             "cpu_scheduler": cpu_scheduler,
             "iter_num": 0,
-            "step_count": 0,
         }
         head_model_params = list(head_model.parameters())
         if head_model_params:
@@ -782,7 +764,6 @@ def main(
             "optimizer": optimizer,
             "scheduler": scheduler,
             "iter_num": 0,
-            "step_count": 0,
         }
 
     if eval.use_sample_metric:
@@ -1406,7 +1387,7 @@ def fit(
         )
         total_t0 = time.perf_counter()
 
-        while state["step_count"] < max_steps:
+        while state["iter_num"] < max_steps:
             state["iter_num"] += 1
             iter_t0 = time.perf_counter()
             batch = batch_transform(next(train_iterator))
@@ -1463,9 +1444,6 @@ def fit(
             # )
             # model.gpt_model.reset()
             # END DEBUG
-            is_accumulating = (not do_cpu_offloading) and state[
-                "iter_num"
-            ] % train.gradient_accumulation_iters(devices, num_nodes=1) != 0
             print_with_rank_and_timestamp(
                 "Starting gradient computation.",
                 fabric.global_rank,
@@ -1478,8 +1456,7 @@ def fit(
             loss = model(
                 input_ids=batch[INPUT_IDS_NAME],
                 targets=batch["targets"],
-                scale_factor=loss_weight
-                / train.gradient_accumulation_iters(devices, num_nodes=1),
+                scale_factor=loss_weight,
                 record_gpu_memory_snapshots=record_gpu_memory_snapshots,
                 record_gpu_memory_kind=(
                     record_gpu_memory_kind
@@ -1543,23 +1520,21 @@ def fit(
                 record_gpu_memory_snapshots.store_current_snapshot()
                 record_gpu_memory_snapshots.stop_recording()
 
-            if not is_accumulating:
-                if train.max_grad_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(),
-                        train.max_grad_norm,
-                    )
-                if cpu_optimizer is not None:
-                    cpu_optimizer.step()
-                    cpu_optimizer.zero_grad(set_to_none=True)
-                    cpu_scheduler.step()
-                if gpu_optimizer is not None:
-                    gpu_optimizer.step()
-                    gpu_optimizer.zero_grad(set_to_none=True)
-                    gpu_scheduler.step()
-                print_message("Optimizer update done.", fabric)
-                state["step_count"] += 1
-                check_for_nan_module_weights(model.gpt_model)
+            if train.max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    train.max_grad_norm,
+                )
+            if cpu_optimizer is not None:
+                cpu_optimizer.step()
+                cpu_optimizer.zero_grad(set_to_none=True)
+                cpu_scheduler.step()
+            if gpu_optimizer is not None:
+                gpu_optimizer.step()
+                gpu_optimizer.zero_grad(set_to_none=True)
+                gpu_scheduler.step()
+            print_message("Optimizer update done.", fabric)
+            check_for_nan_module_weights(model.gpt_model)
 
             del loss
             gc.collect()
@@ -1597,7 +1572,6 @@ def fit(
                 metrics = {
                     "loss": loss,
                     "iter": state["iter_num"],
-                    "step": state["step_count"],
                     "epoch": train_iterator.epoch,
                     "iter_time": t1 - iter_t0,
                     "tokens": token_counts["raw_tokens_plus_prompt_template"],
@@ -1609,16 +1583,15 @@ def fit(
                 if not isinstance(val_loss, str):
                     val_loss = f"{val_loss:.3f}"
                 print_message(
-                    f"\nEpoch {metrics['epoch']} | iter {metrics['iter']:3d} step {metrics['step']:3d} |"
+                    f"\nEpoch {metrics['epoch']} | iter {metrics['iter']:3d} |"
                     f" loss train: {metrics['loss']:.3f},"
                     f" {eval_metric_name} valid: {val_loss} |"
-                    f" iter time: {metrics['iter_time']:.3f} s"
-                    f"{' (step)' if not is_accumulating else ''}",
+                    f" iter time: {metrics['iter_time']:.3f} s",
                     fabric,
                 )
                 fabric.log_dict(metrics, step=state["iter_num"])
 
-            if not is_accumulating and state["step_count"] % eval.interval == 0:
+            if state["iter_num"] % eval.interval == 0:
                 print_with_rank_and_timestamp(
                     "Starting validation evaluations.",
                     fabric.global_rank,
@@ -1666,17 +1639,16 @@ def fit(
                     del valid_model
                 fabric.barrier()
 
-            if not is_accumulating:
-                save_checkpoint_regular(
-                    fabric=fabric,
-                    model=model,
-                    out_dir=out_dir,
-                    checkpoint_dir=checkpoint_dir,
-                    step=state["step_count"],
-                    train=train,
-                    data=data,
-                    original_setup=original_setup,
-                )
+            save_checkpoint_regular(
+                fabric=fabric,
+                model=model,
+                out_dir=out_dir,
+                checkpoint_dir=checkpoint_dir,
+                step=state["iter_num"],
+                train=train,
+                data=data,
+                original_setup=original_setup,
+            )
 
     except torch._dynamo.exc.FailOnRecompileLimitHit as ex:
         # This error is thrown by FlexAttention if too many graphs have been

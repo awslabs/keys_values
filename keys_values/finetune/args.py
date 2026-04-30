@@ -406,9 +406,8 @@ class TrainArgs:
     """
     Modified training-related arguments in :class:`litgpt.args.TrainArgs`.
 
-    Here, `global_batch_size` does not have a default value. If not given,
-    it should be set to the product of `micro_batch_size` and the number of
-    devices, unless sequential gradient averaging is desired.
+    `global_batch_size` is a legacy argument, which must be equal to the
+    product of `micro_batch_size` and the number of devices, if given.
 
     Storing intermediate checkpoints: Normal checkpoints are stored whenever
     `state["step_count"] % train.save_interval == 0`. If
@@ -437,7 +436,7 @@ class TrainArgs:
     log_interval: int = 1
     """Number of iterations between logging calls"""
     global_batch_size: Optional[int] = None
-    """Number of samples between optimizer steps across data-parallel ranks"""
+    """Legacy argument: Do not use"""
     micro_batch_size: int = 4
     """Number of samples per data-parallel rank"""
     lr_warmup_steps: Optional[int] = 100
@@ -513,15 +512,6 @@ class TrainArgs:
         )
         assert gradient_accumulation_iters > 0
         return gradient_accumulation_iters
-
-    def batch_size(self, devices: int, num_nodes: int = 1) -> int:
-        """Number of samples between optimizer steps per data-parallel rank"""
-        if self.global_batch_size is None:
-            batch_size = self.micro_batch_size
-        else:
-            batch_size = self.global_batch_size // (devices * num_nodes)
-        assert batch_size > 0
-        return batch_size
 
     def warmup_iters(
         self, devices: int, num_nodes: int, max_iters: int, train_dataloader
