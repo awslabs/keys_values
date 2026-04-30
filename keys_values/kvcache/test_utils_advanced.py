@@ -16,7 +16,7 @@ from functools import partial
 import os
 from typing import Optional, List, Dict, Any
 
-from tokenizers import Tokenizer
+from tokenizers import Tokenizer as HFTokenizer
 import torch
 from transformers import AutoTokenizer
 
@@ -110,7 +110,7 @@ class KVCacheBufferTestingCheckpoints(KVCacheBufferCheckpoints):
 def load_tokenizer(
     model_name="prajjwal1/bert-tiny",
     cache_dir=None,
-) -> Tokenizer:
+) -> HFTokenizer:
     """
     Load a subword tokenizer from Hugging Face Hub.
 

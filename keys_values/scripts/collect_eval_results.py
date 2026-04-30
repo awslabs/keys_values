@@ -65,9 +65,9 @@ if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
     datasets = [
         "helmet_nq_32k",
-#        "helmet_trivia_qa_32k",
-#        "helmet_hotpot_qa_32k",
-#        "helmet_pop_qa_32k",
+        #        "helmet_trivia_qa_32k",
+        #        "helmet_hotpot_qa_32k",
+        #        "helmet_pop_qa_32k",
     ]
     cases = [
         "lr_4gpu_lpc2_avg1_lr5",

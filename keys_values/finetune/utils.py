@@ -14,12 +14,13 @@
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Literal, Dict, Any
+from typing import Optional, Tuple, Literal, Dict, Any, Union
 
 import lightning as L
 from tokenizers import Tokenizer as HFTokenizer
 import torch
 
+from keys_values.data import LongBenchV2
 from keys_values.kvcache.smart_lastrec import SmartInitialInformation
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
@@ -443,7 +444,7 @@ def _get_smart_lastrec_info(
 def adjust_cache_kwargs(
     kv_cache: KVCacheArgs,
     data: DataModule,
-    tokenizer: HFTokenizer,
+    tokenizer: Union[HFTokenizer, Tokenizer],
 ):
     """
     Called before :func:`wrap_gpt_model`. Sets fields in
@@ -458,6 +459,8 @@ def adjust_cache_kwargs(
         cache_kwargs = kv_cache.cache_kwargs
         if cache_kwargs is None:
             cache_kwargs = dict()
+        if isinstance(tokenizer, Tokenizer):
+            tokenizer = tokenizer.processor
         cache_kwargs["tokenizer"] = tokenizer
         smart_lastrec_info = None
         for name in (
