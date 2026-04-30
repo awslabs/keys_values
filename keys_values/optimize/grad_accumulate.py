@@ -134,7 +134,12 @@ class CPUOffloadAccumulateGradients:
 
     @staticmethod
     def _is_mean_reducible(dtype: torch.dtype) -> bool:
-        return dtype == torch.float16 or dtype == torch.bfloat16 or dtype == torch.float32 or dtype == torch.float64
+        return (
+            dtype == torch.float16
+            or dtype == torch.bfloat16
+            or dtype == torch.float32
+            or dtype == torch.float64
+        )
 
     def _all_reduce(self, vec: torch.Tensor, mean_reduction: bool):
         if mean_reduction and self._is_mean_reducible(vec.dtype):
@@ -186,7 +191,9 @@ class CPUOffloadAccumulateGradients:
         num_none = sum(mod_to is None for _, mod_to in module_pairs)
         do_offload = num_none == 0
         if not do_offload and num_none != len(module_pairs):
-            raise ValueError("Entries of module_pairs: Either all mod_to are None, or none")
+            raise ValueError(
+                "Entries of module_pairs: Either all mod_to are None, or none"
+            )
         if debug_modules is None:
             debug_modules = [None] * len(module_pairs)
         else:

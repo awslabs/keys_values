@@ -73,7 +73,8 @@ def end_initial_regex_from_string(
     do_escape: bool = True,
 ) -> str:
     result = tokenizer.decode(
-        tokenizer.encode(s).ids, skip_special_tokens=True,
+        tokenizer.encode(s).ids,
+        skip_special_tokens=True,
     )
     if do_escape:
         result = re.escape(result)
