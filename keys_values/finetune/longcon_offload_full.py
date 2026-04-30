@@ -216,7 +216,6 @@ def setup(
         out_dir,
         precision,
         devices,
-        1,
         resume,
         data,
         train,

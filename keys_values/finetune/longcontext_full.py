@@ -85,7 +85,6 @@ from keys_values.finetune.utils import (
     check_kv_cache,
     create_optimizer,
     may_match_twice_factory,
-    fix_dtype_of_score_buffers,
     adjust_cache_kwargs,
 )
 from keys_values.generate.base import generate
@@ -141,7 +140,6 @@ def setup(
     out_dir: Path = Path(DEFAULT_OUT_DIR),
     precision: Optional[str] = None,
     devices: Union[int, str] = 1,
-    num_nodes: int = 1,
     resume: Union[bool, Literal["auto"], Path] = False,
     data: Optional[DataModule] = None,
     train: TrainArgs = TrainArgs(
@@ -226,7 +224,6 @@ def setup(
             /teamspace/jobs/<job-name>/share.
         precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
         devices: How many devices/GPUs to use
-        num_nodes: How many nodes the code is being run on.
         resume: Path to a checkpoint directory to resume from in case training
             was interrupted, or ``True`` to resume from the latest checkpoint in
             ``out_dir``. An error will be raised if no checkpoint is found. Passing
@@ -319,7 +316,6 @@ def setup(
         out_dir,
         precision,
         devices,
-        num_nodes,
         resume,
         data,
         train,
@@ -357,7 +353,6 @@ def setup_internal(
     out_dir: Path,
     precision: Optional[str],
     devices: Union[int, str],
-    num_nodes: int,
     resume: Union[bool, Literal["auto"], Path],
     data: Optional[DataModule],
     train: TrainArgs,
@@ -386,7 +381,7 @@ def setup_internal(
     size_log_quantiles: Optional[str],
     debug_dont_use_autograd_hooks: bool,
 ) -> None:
-    if do_cpu_offload and not torch.cuda.is_available():
+    if not torch.cuda.is_available():
         raise ValueError("CUDA not available")
     checkpoint_dir = auto_download_checkpoint(
         model_name=checkpoint_dir,
@@ -410,14 +405,10 @@ def setup_internal(
     if head_model_kwargs is None:
         head_model_kwargs = dict()
     devices = parse_devices(devices)
-    if do_cpu_offload and not (1 <= devices <= torch.cuda.device_count()):
+    if not (1 <= devices <= torch.cuda.device_count()):
         raise ValueError(
             f"devices = {devices}, must be in [1, {torch.cuda.device_count()}]"
         )
-    if num_nodes <= 0:
-        raise ValueError(f"num_nodes = {num_nodes}, must be positive")
-    if do_cpu_offload and num_nodes > 1:
-        raise ValueError(f"Must have num_nodes = 1 with CPU offloading")
     if eval.initial_validation is None:
         # Run initial evaluation in multi-device setup, but not with a
         # single device
@@ -431,22 +422,10 @@ def setup_internal(
         print(str(optimizer))
     if train.max_grad_norm is not None:
         print(f"Using gradient clipping with max_grad_norm = {train.max_grad_norm}")
-    global_batch_size = train.micro_batch_size * devices * num_nodes
-    if train.global_batch_size is None:
+    global_batch_size = train.micro_batch_size * devices
+    if train.global_batch_size != global_batch_size:
+        print(f"train.global_batch_size not supported, set to {global_batch_size}")
         train.global_batch_size = global_batch_size
-    elif do_cpu_offload:
-        if train.global_batch_size != global_batch_size:
-            print(f"train.global_batch_size not supported, set to {global_batch_size}")
-            train.global_batch_size = global_batch_size
-    elif (
-        train.global_batch_size % global_batch_size != 0
-        or train.global_batch_size < global_batch_size
-    ):
-        raise ValueError(
-            f"train.global_batch_size = {train.global_batch_size}, must be "
-            "positive multiple of devices * num_nodes * train.micro_batch_size = "
-            f"{global_batch_size}."
-        )
     if profile_parts is not None and profile_parts not in ("forward", "backward"):
         raise ValueError("profile_parts: Must be 'forward' or 'backward'")
     if size_log_quantiles is not None:
@@ -465,11 +444,6 @@ def setup_internal(
         print(
             "Warning: Device out of memory error recovery does not properly "
             "work at the moment."
-        )
-    gradacc_iters = train.gradient_accumulation_iters(devices, num_nodes)
-    if gradacc_iters > 1:
-        print(
-            f"Using sequential gradient accumulation with {gradacc_iters} iterations per update step"
         )
     # Legacy arguments
     if verbose is None:
@@ -521,14 +495,14 @@ def setup_internal(
         log_interval=train.log_interval,
     )
 
-    if devices * num_nodes > 1:
+    if devices > 1:
         strategy = DDPStrategy(static_graph=True, broadcast_buffers=False)
     else:
         strategy = "auto"
 
     fabric = L.Fabric(
         devices=devices,
-        num_nodes=num_nodes,
+        num_nodes=1,
         strategy=strategy,
         precision=precision,
         loggers=logger,
@@ -546,7 +520,6 @@ def setup_internal(
         do_cpu_offload=do_cpu_offload,
         original_setup=original_setup,
         devices=devices,
-        num_nodes=num_nodes,
         resume=resume,
         seed=seed,
         config=config,
@@ -595,7 +568,6 @@ def main(
     do_cpu_offload: bool,
     original_setup: Callable,
     devices: int,
-    num_nodes: int,
     resume: Union[bool, Literal["auto"], Path],
     seed: int,
     config: Union[ConfigFull, ConfigLoRA],
@@ -737,8 +709,6 @@ def main(
     if do_cpu_offload:
         # We use a optimizer on CPU for all parameters of `gpt_model`. If
         # `head_model` has parameters, we use another optimizer on GPU for them.
-        # Note: We do not wrap model or optimizer with `fabric`, since our CPU
-        # offloading deviates from their strategies.
         gpt_param_prefixes = tuple(
             BlockComponentName.h(layer_idx) for layer_idx in range(config.n_layer)
         ) + (
@@ -763,7 +733,6 @@ def main(
             "cpu_optimizer": cpu_optimizer,
             "cpu_scheduler": cpu_scheduler,
             "iter_num": 0,
-            "step_count": 0,
         }
         head_model_params = list(head_model.parameters())
         if head_model_params:
@@ -778,18 +747,14 @@ def main(
                 max_steps=lr_max_steps,
             )
     else:
-        model = fabric.setup(model)
-        # After `fabric.setup`, the score buffers in
-        # :class:`AttnWeightsKVCache` KV cache have their `dtype`
-        # changed to the default dtype. We need to change them back to
-        # `float32`.
-        fix_dtype_of_score_buffers(model.gpt_model)
+        # Note: We do not wrap `model` or `optimizer` in `fabric`, since we do
+        # not use their abstraction (which creates endless trouble with DDP,
+        # such as autograd graphs not being deallocated)
         optimizer = instantiate_torch_optimizer(
             optimizer.name,
             model.parameters(),
             **optimizer.optimizer_kwargs(),
         )
-        optimizer = fabric.setup_optimizers(optimizer)
         scheduler = get_lr_scheduler(
             optimizer, train_args=train, max_steps=lr_max_steps
         )
@@ -799,7 +764,6 @@ def main(
             "optimizer": optimizer,
             "scheduler": scheduler,
             "iter_num": 0,
-            "step_count": 0,
         }
 
     if eval.use_sample_metric:
@@ -846,7 +810,6 @@ def main(
         val_dataloader=val_dataloader,
         batch_transform=batch_transform,
         devices=devices,
-        num_nodes=num_nodes,
         checkpoint_dir=checkpoint_dir,
         out_dir=out_dir,
         train=train,
@@ -1180,7 +1143,6 @@ def fit(
     val_dataloader: MyDataLoader,
     batch_transform: BatchTransform,
     devices: int,
-    num_nodes: int,
     checkpoint_dir: Path,
     out_dir: Path,
     train: TrainArgs,
@@ -1203,12 +1165,17 @@ def fit(
         cpu_optimizer = None
         cpu_scheduler = None
         optim_device = fabric.device
+        grad_reducer = CPUOffloadAccumulateGradients(
+            group=list(range(devices)),
+            fabric=fabric,
+        )
     else:
         gpu_optimizer = state.get("gpu_optimizer")
         gpu_scheduler = state.get("gpu_scheduler")
         cpu_optimizer = state["cpu_optimizer"]
         cpu_scheduler = state["cpu_scheduler"]
         optim_device = torch.device("cpu")
+        grad_reducer = None
     if evaluator is None:
         eval_metric_name = "val_loss"
     else:
@@ -1406,10 +1373,7 @@ def fit(
         else:
             size_logs = None
 
-        running_loss = RunningMean(
-            window=train.gradient_accumulation_iters(devices, num_nodes),
-            sync_on_compute=False,
-        ).to(optim_device)
+        running_loss = RunningMean(window=1, sync_on_compute=False).to(optim_device)
         fabric.barrier()
         total_lengths = 0
         gc.collect()
@@ -1420,7 +1384,7 @@ def fit(
         )
         total_t0 = time.perf_counter()
 
-        while state["step_count"] < max_steps:
+        while state["iter_num"] < max_steps:
             state["iter_num"] += 1
             iter_t0 = time.perf_counter()
             batch = batch_transform(next(train_iterator))
@@ -1477,19 +1441,19 @@ def fit(
             # )
             # model.gpt_model.reset()
             # END DEBUG
-            is_accumulating = (not do_cpu_offloading) and state[
-                "iter_num"
-            ] % train.gradient_accumulation_iters(devices, num_nodes) != 0
             print_with_rank_and_timestamp(
                 "Starting gradient computation.",
                 fabric.global_rank,
             )
 
-            model_kwargs = dict(
+            # Compute loss and gradients
+            # We do not use `fabric.backward`. For CPU offloading, loss and
+            # gradient accumulation happens in `loss.backward` already. Otherwise,
+            # we run an explicit all_reduce.
+            loss = model(
                 input_ids=batch[INPUT_IDS_NAME],
                 targets=batch["targets"],
-                scale_factor=loss_weight
-                / train.gradient_accumulation_iters(devices, num_nodes),
+                scale_factor=loss_weight,
                 record_gpu_memory_snapshots=record_gpu_memory_snapshots,
                 record_gpu_memory_kind=(
                     record_gpu_memory_kind
@@ -1497,16 +1461,17 @@ def fit(
                     else None
                 ),
             )
+            loss.backward()
+
             if not do_cpu_offloading:
-                with fabric.no_backward_sync(model, enabled=is_accumulating):
-                    loss = model(**model_kwargs)
-                    fabric.backward(loss)
-            else:
-                # Note: We do not use `fabric.backward` here. If `devices > 1`,
-                # gradient accumulation happens in `model.backward`, using
-                # `fabric.all_reduce` explicitly.
-                loss = model(**model_kwargs)
-                loss.backward()
+                module_pairs = [(model.gpt_model, None)]
+                if model.head_model.parameters():
+                    module_pairs.append((model.head_model, None))
+                grad_reducer(
+                    module_pairs=module_pairs,
+                    mean_reduction=True,
+                )
+                fabric.all_reduce(loss, reduce_op="mean")
 
             running_loss.update(loss.detach().to(device=optim_device))
             flush_io_streams()
@@ -1552,23 +1517,21 @@ def fit(
                 record_gpu_memory_snapshots.store_current_snapshot()
                 record_gpu_memory_snapshots.stop_recording()
 
-            if not is_accumulating:
-                if train.max_grad_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(),
-                        train.max_grad_norm,
-                    )
-                if cpu_optimizer is not None:
-                    cpu_optimizer.step()
-                    cpu_optimizer.zero_grad(set_to_none=True)
-                    cpu_scheduler.step()
-                if gpu_optimizer is not None:
-                    gpu_optimizer.step()
-                    gpu_optimizer.zero_grad(set_to_none=True)
-                    gpu_scheduler.step()
-                print_message("Optimizer update done.", fabric)
-                state["step_count"] += 1
-                check_for_nan_module_weights(model.gpt_model)
+            if train.max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    train.max_grad_norm,
+                )
+            if cpu_optimizer is not None:
+                cpu_optimizer.step()
+                cpu_optimizer.zero_grad(set_to_none=True)
+                cpu_scheduler.step()
+            if gpu_optimizer is not None:
+                gpu_optimizer.step()
+                gpu_optimizer.zero_grad(set_to_none=True)
+                gpu_scheduler.step()
+            print_message("Optimizer update done.", fabric)
+            check_for_nan_module_weights(model.gpt_model)
 
             del loss
             gc.collect()
@@ -1606,7 +1569,6 @@ def fit(
                 metrics = {
                     "loss": loss,
                     "iter": state["iter_num"],
-                    "step": state["step_count"],
                     "epoch": train_iterator.epoch,
                     "iter_time": t1 - iter_t0,
                     "tokens": token_counts["raw_tokens_plus_prompt_template"],
@@ -1618,16 +1580,15 @@ def fit(
                 if not isinstance(val_loss, str):
                     val_loss = f"{val_loss:.3f}"
                 print_message(
-                    f"\nEpoch {metrics['epoch']} | iter {metrics['iter']:3d} step {metrics['step']:3d} |"
+                    f"\nEpoch {metrics['epoch']} | iter {metrics['iter']:3d} |"
                     f" loss train: {metrics['loss']:.3f},"
                     f" {eval_metric_name} valid: {val_loss} |"
-                    f" iter time: {metrics['iter_time']:.3f} s"
-                    f"{' (step)' if not is_accumulating else ''}",
+                    f" iter time: {metrics['iter_time']:.3f} s",
                     fabric,
                 )
                 fabric.log_dict(metrics, step=state["iter_num"])
 
-            if not is_accumulating and state["step_count"] % eval.interval == 0:
+            if state["iter_num"] % eval.interval == 0:
                 print_with_rank_and_timestamp(
                     "Starting validation evaluations.",
                     fabric.global_rank,
@@ -1675,17 +1636,16 @@ def fit(
                     del valid_model
                 fabric.barrier()
 
-            if not is_accumulating:
-                save_checkpoint_regular(
-                    fabric=fabric,
-                    model=model,
-                    out_dir=out_dir,
-                    checkpoint_dir=checkpoint_dir,
-                    step=state["step_count"],
-                    train=train,
-                    data=data,
-                    original_setup=original_setup,
-                )
+            save_checkpoint_regular(
+                fabric=fabric,
+                model=model,
+                out_dir=out_dir,
+                checkpoint_dir=checkpoint_dir,
+                step=state["iter_num"],
+                train=train,
+                data=data,
+                original_setup=original_setup,
+            )
 
     except torch._dynamo.exc.FailOnRecompileLimitHit as ex:
         # This error is thrown by FlexAttention if too many graphs have been

@@ -37,7 +37,6 @@ def setup(
     out_dir: Path = Path(DEFAULT_OUT_DIR),
     precision: Optional[str] = None,
     devices: Union[int, str] = 1,
-    num_nodes: int = 1,
     resume: Union[bool, Literal["auto"], Path] = False,
     data: Optional[DataModule] = None,
     train: TrainArgs = TrainArgs(
@@ -132,7 +131,6 @@ def setup(
             /teamspace/jobs/<job-name>/share.
         precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
         devices: How many devices/GPUs to use
-        num_nodes: How many nodes the code is being run on.
         resume: Path to a checkpoint directory to resume from in case training
             was interrupted, or ``True`` to resume from the latest checkpoint in
             ``out_dir``. An error will be raised if no checkpoint is found. Passing
@@ -230,7 +228,6 @@ def setup(
         out_dir,
         precision,
         devices,
-        num_nodes,
         resume,
         data,
         train,

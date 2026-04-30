@@ -34,7 +34,7 @@ from keys_values.kvcache.buffers import (
     positions_wrap_around,
 )
 from keys_values.config import Config
-from keys_values.utils import bits_for_torch_dtype, bitsize_of
+from keys_values.utils import bits_for_torch_dtype, bitsize_of, encode
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,6 @@ class SmartInitialInformation:
         max_initial_fraction: Fraction of cache length initial parts can
             occupy at most
         include_end_string: Include end of init sequence in initial part?
-
     """
 
     end_initial_regex: Union[str, re.Pattern]
@@ -74,7 +73,8 @@ def end_initial_regex_from_string(
     do_escape: bool = True,
 ) -> str:
     result = tokenizer.decode(
-        tokenizer.encode(s).ids, skip_special_tokens=True,
+        encode(tokenizer, s),
+        skip_special_tokens=True,
     )
     if do_escape:
         result = re.escape(result)
@@ -406,7 +406,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
             match = re.search(self.end_initial_regex, decoded)
             if match is not None:
                 raw_length = match.end(0) if self.include_end_string else match.start(0)
-                init_encoded = self.tokenizer.encode(decoded[:raw_length]).ids
+                init_encoded = encode(self.tokenizer, decoded[:raw_length])
                 new_length = len(init_encoded)
                 try:
                     diff_pos = next(

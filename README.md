@@ -107,6 +107,7 @@ pip install --upgrade pip
 pip install torch==2.10.0 torchmetrics==1.8.2 torchvision==0.25.0
 echo "torch==2.10.0" >constraints.txt
 pip install flashinfer-python==0.6.7 -c constraints.txt
+rm constraints.txt
 pip install 'litgpt[all,test,extra]'
 cd keys_values
 pip install -e .

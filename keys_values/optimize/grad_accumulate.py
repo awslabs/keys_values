@@ -65,6 +65,22 @@ class DistributedPrimitives:
             else:
                 dist.all_reduce(x, op=dist.ReduceOp.SUM, group=group)
 
+    @staticmethod
+    def all_reduce_mean(
+        x: torch.Tensor,
+        fabric: Optional[L.Fabric] = None,
+        group: Optional[List[int]] = None,
+    ):
+        if fabric is not None or torch.cuda.is_available():
+            if x.device != DistributedPrimitives.device(fabric):
+                raise ValueError(
+                    f"x.device = {x.device}, must be {DistributedPrimitives.device(fabric)}"
+                )
+            if fabric is not None:
+                fabric.all_reduce(x, reduce_op="mean")
+            else:
+                dist.all_reduce(x, op=dist.ReduceOp.AVG, group=group)
+
 
 DebugStoreGradsNamePredicate = Callable[[str], bool]
 
@@ -77,6 +93,12 @@ class CPUOffloadAccumulateGradients:
     the reductions are done for flat vectors. If the group size is 1, `dist`
     is not used at all, and `group[0]` does not matter.
 
+    This class is used to implement distributed data parallel (DDP) optimization
+    with CPU offloading, where the full model and optimizer state resides on the
+    host (CPU), but gradients are accumulated on the device (GPU).
+
+    We also use it to implement standard DDP, with model and optimizer states
+    on devices, see :meth:`__call__`.
     """
 
     def __init__(
@@ -110,23 +132,55 @@ class CPUOffloadAccumulateGradients:
         self._debug_store_grads_name_predicate = debug_store_grads_name_predicate
         self._debug_iter_count = 0
 
+    @staticmethod
+    def _is_mean_reducible(dtype: torch.dtype) -> bool:
+        return (
+            dtype == torch.float16
+            or dtype == torch.bfloat16
+            or dtype == torch.float32
+            or dtype == torch.float64
+        )
+
+    def _all_reduce(self, vec: torch.Tensor, mean_reduction: bool):
+        if mean_reduction and self._is_mean_reducible(vec.dtype):
+            DistributedPrimitives.all_reduce_mean(
+                vec,
+                self.fabric,
+                self.group,
+            )
+        else:
+            DistributedPrimitives.all_reduce_sum(
+                vec,
+                self.fabric,
+                self.group,
+            )
+
     def __call__(
         self,
-        module_pairs: List[Tuple[torch.nn.Module, torch.nn.Module]],
+        module_pairs: List[Tuple[torch.nn.Module, Optional[torch.nn.Module]]],
         module_on_device: Optional[torch.nn.Module] = None,
         debug_modules: Optional[List[torch.nn.Module]] = None,
+        mean_reduction: bool = False,
     ) -> Optional[float]:
         """
         Run gradient accumulation for module pairs `(mod_from, mod_to)`. This
         is called by every rank from `group`, and the ranks are synchronized
         here.
 
+        By default, for the tuples `(mod_from, mod_to)`, `mod_from` is on the
+        device, `mod_to` on the host (CPU). We also support DDP without CPU
+        offloading, in which case `mod_to == None`, and gradients are written
+        back to `mod_from` after accumulation.
+
         Args:
             module_pairs: List of `(mod_from, mod_to)` tuples. Here, `mod_from`
-                is on the device, `mod_to` is on the CPU.
+                is on the device, `mod_to` is on the CPU. If `mod_to == None`,
+                gradients are written back to `mod_from`.
             module_on_device: If given, this source module is on the device.
                 Its gradients are accumulated if the group size is > 1.
             debug_modules: Use for debugging only. Only for group size 1.
+            mean_reduction: If `True`, use mean reduction in `all_reduce`, otherwise
+                sum reduction. Mean reduction is done only for floating point types.
 
         Returns:
             Idle time in seconds at `all_reduce` sync point, or `None` if not
@@ -134,6 +188,12 @@ class CPUOffloadAccumulateGradients:
 
         """
         use_dist = self.is_distributed
+        num_none = sum(mod_to is None for _, mod_to in module_pairs)
+        do_offload = num_none == 0
+        if not do_offload and num_none != len(module_pairs):
+            raise ValueError(
+                "Entries of module_pairs: Either all mod_to are None, or none"
+            )
         if debug_modules is None:
             debug_modules = [None] * len(module_pairs)
         else:
@@ -148,19 +208,18 @@ class CPUOffloadAccumulateGradients:
                 idle_time_now = None
                 start_time = time.perf_counter()
                 for vec in flat_vectors.values():
-                    DistributedPrimitives.all_reduce_sum(
-                        vec,
-                        self.fabric,
-                        self.group,
-                    )
+                    self._all_reduce(vec, mean_reduction)
                     if idle_time_now is None:
                         idle_time_now = time.perf_counter() - start_time
                 if idle_time_now is not None:
                     idle_time += idle_time_now
             mod_from.zero_grad(set_to_none=True)
-            flat_vectors = {
-                k: v.to(device=torch.device("cpu")) for k, v in flat_vectors.items()
-            }
+            if do_offload:
+                flat_vectors = {
+                    k: v.to(device=torch.device("cpu")) for k, v in flat_vectors.items()
+                }
+            else:
+                mod_to = mod_from
             AccessWeightsGradients(mod_to).accumulate_gradients(flat_vectors)
 
             if mod_debug is not None:
@@ -180,11 +239,7 @@ class CPUOffloadAccumulateGradients:
             flat_vectors = access.get_gradients()
             if use_dist:
                 for vec in flat_vectors.values():
-                    DistributedPrimitives.all_reduce_sum(
-                        vec,
-                        self.fabric,
-                        self.group,
-                    )
+                    self._all_reduce(vec, mean_reduction)
             AccessWeightsGradients(module_on_device).accumulate_gradients(flat_vectors)
 
         return idle_time if use_dist else None

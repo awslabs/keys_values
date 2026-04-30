@@ -20,7 +20,6 @@ import lightning as L
 from tokenizers import Tokenizer as HFTokenizer
 import torch
 
-from keys_values.data import LongBenchV2
 from keys_values.kvcache.smart_lastrec import SmartInitialInformation
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
@@ -461,6 +460,9 @@ def adjust_cache_kwargs(
             cache_kwargs = dict()
         if isinstance(tokenizer, Tokenizer):
             tokenizer = tokenizer.processor
+        assert isinstance(
+            tokenizer, HFTokenizer
+        ), f"type(tokenizer) = {type(tokenizer)} not supported"
         cache_kwargs["tokenizer"] = tokenizer
         smart_lastrec_info = None
         for name in (
