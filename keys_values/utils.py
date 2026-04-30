@@ -12,16 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import csv
-import sys
 from enum import unique, Enum
-
 from filelock import FileLock, Timeout
 from pathlib import Path
+import sys
 import time
 from typing import List, Dict, Any, Optional, Iterable, Union, Iterator, Tuple, Set
 
+from tokenizers import Tokenizer as HFTokenizer
 import torch
 from tqdm import tqdm
+
+from litgpt.tokenizer import Tokenizer
 
 # Currently, `F.scaled_dot_product_attention` does not properly support the
 # case `enabla_gqa=True` (i.e., keys and values have less heads than
@@ -355,3 +357,16 @@ def remove_keys(
     names: Set[str],
 ) -> Dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k not in names}
+
+
+def encode(
+    tokenizer: Union[Tokenizer, HFTokenizer],
+    s: str,
+    **kwargs,
+) -> List[int]:
+    if isinstance(tokenizer, Tokenizer):
+        tokenizer = tokenizer.processor
+    result = tokenizer.encode(s, **kwargs)
+    if hasattr(result, "ids"):
+        result = result.ids
+    return result

@@ -34,7 +34,7 @@ from keys_values.kvcache.test_utils_advanced import (
     load_tokenizer,
     sequence_of_words,
 )
-from keys_values.utils import randint_torch
+from keys_values.utils import randint_torch, encode
 
 
 def sample_slot_values(
@@ -166,7 +166,7 @@ def test_smart_lastrec_set_init_length(
         # Tokenize and pad sequences. We do left padding, the number of
         # pad tokens need to be added to `expected_init_length`
         encoded_seqs = [
-            tokenizer.encode(seq, return_tensors="pt").squeeze(0) for seq in sequences
+            encode(tokenizer, seq, return_tensors="pt").squeeze(0) for seq in sequences
         ]
         kwargs = dict(dtype=encoded_seqs[0].dtype)
         max_length = max([x.numel() for x in encoded_seqs])
