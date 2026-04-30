@@ -1373,10 +1373,7 @@ def fit(
         else:
             size_logs = None
 
-        running_loss = RunningMean(
-            window=train.gradient_accumulation_iters(devices, num_nodes=1),
-            sync_on_compute=False,
-        ).to(optim_device)
+        running_loss = RunningMean(window=1, sync_on_compute=False).to(optim_device)
         fabric.barrier()
         total_lengths = 0
         gc.collect()

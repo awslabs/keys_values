@@ -505,14 +505,6 @@ class TrainArgs:
         if self.max_grad_norm is not None and self.max_grad_norm <= 0:
             raise ValueError("max_grad_norm must be positive (or `None` to disable)")
 
-    def gradient_accumulation_iters(self, devices: int, num_nodes: int = 1) -> int:
-        """Number of iterations between gradient synchronizations"""
-        gradient_accumulation_iters = (
-            self.batch_size(devices, num_nodes) // self.micro_batch_size
-        )
-        assert gradient_accumulation_iters > 0
-        return gradient_accumulation_iters
-
     def warmup_iters(
         self, devices: int, num_nodes: int, max_iters: int, train_dataloader
     ) -> int:
@@ -522,11 +514,7 @@ class TrainArgs:
                 max_iters, math.ceil(self.lr_warmup_fraction * len(train_dataloader))
             )
         if self.lr_warmup_steps:
-            return min(
-                max_iters,
-                self.lr_warmup_steps
-                * self.gradient_accumulation_iters(devices, num_nodes),
-            )
+            return min(max_iters, self.lr_warmup_steps)
         return 0
 
 
