@@ -1004,9 +1004,10 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 else:
                     # `logits_final_position` has final layer outputs for last
                     # position. Map to logits
-                    logits_final_position = self.gpt_model.lm_head(
-                        logits_final_position
-                    )
+                    if logits_final_position is not None:
+                        logits_final_position = self.gpt_model.lm_head(
+                            logits_final_position
+                        )
                 if self._do_checkpoint_layer_input() and torch.cuda.is_available():
                     # `_checkpoint_layer_input` called above transfers
                     # `embeddings` to CPU. For this not to lead to
