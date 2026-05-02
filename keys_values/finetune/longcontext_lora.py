@@ -37,7 +37,7 @@ def setup(
     out_dir: Path = Path(DEFAULT_OUT_DIR),
     precision: Optional[str] = None,
     devices: Union[int, str] = 1,
-    resume: Union[bool, Literal["auto"], Path] = False,
+    resume: Optional[str] = None,
     data: Optional[DataModule] = None,
     train: TrainArgs = TrainArgs(
         save_interval=50,
@@ -111,6 +111,7 @@ def setup(
         flex_extend_kv=False,
         flex_num_q_lens=4,
     ),
+    training_state_num: Optional[int] = 5,
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
     record_gpu_memory_period: int = 0,
@@ -131,13 +132,10 @@ def setup(
             /teamspace/jobs/<job-name>/share.
         precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
         devices: How many devices/GPUs to use
-        resume: Path to a checkpoint directory to resume from in case training
-            was interrupted, or ``True`` to resume from the latest checkpoint in
-            ``out_dir``. An error will be raised if no checkpoint is found. Passing
-            ``'auto'`` will resume from the latest checkpoint but not error if
-            no checkpoint exists.
-            Note: At present, we do not store the optimizer state as part of the
-            checkpoint, so fine-tuning is started from scratch from there.
+        resume: Name of checkpoint directory from which training is to be
+            resumed, such as "step-000100" or "final". Training can only be
+            resumed from a checkpoint for which a training state is also
+            available, see `training_state_num`.
         data: Data-related arguments. If not provided, the default is
             ``keys_values.data.LongBenchV2``.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
@@ -190,6 +188,10 @@ def setup(
             `sdpa.flex_attention` to `True` to activate PyTorch
             `flex_attention`. Otherwise, the zero-padded query SDPA kernel is
             used.
+        training_state_num: If not `None`, training states are stored alongside
+            the `training_state_num` last recently stored checkpoints. A
+            training run can be resumed from a checkpoint plus training state.
+            Defaults to 5.
         record_gpu_memory_snapshots: If given, we record GPU memory traces in
             snapshots. This argument is the `max_entries` parameter, a good
             value is 50000 or 100000.
@@ -247,6 +249,7 @@ def setup(
         oom_error_recovery,
         yarn_rope,
         sdpa,
+        training_state_num,
         record_gpu_memory_snapshots,
         record_gpu_memory_kind,
         record_gpu_memory_period,
