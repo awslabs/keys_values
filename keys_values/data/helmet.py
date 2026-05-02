@@ -40,6 +40,8 @@ from keys_values.utils import get_dict, set_dict
 
 METADATA_FNAME = "helmet_metadata.json"
 
+METADATA_TARGET_CHOICE_KEY = "target_choice"
+
 
 class Helmet(SequenceLengthFilteredDataModule):
     """Data module for HELMET benchmark datasets.
@@ -119,10 +121,16 @@ class Helmet(SequenceLengthFilteredDataModule):
         self.max_length = max_length
         self.dataset_parent_dir = dataset_parent_dir
         self.metadata_dir = metadata_dir
+        self.target_choices = [None, None, None]
+        self._metadata = None
 
-    def _metadata_keys(self, split: str) -> List[str]:
+    def _metadata_keys(
+        self,
+        root_key: str,
+        split: str,
+    ) -> List[str]:
         return [
-            METADATA_SEQ_LENGTHS_KEY,
+            root_key,
             self.dataset_key,
             self.max_length,
             self.tokenizer.model_name,
@@ -137,6 +145,12 @@ class Helmet(SequenceLengthFilteredDataModule):
         )
         print(f"\nTransforming HELMET '{self.dataset_key}' ({self.max_length}) ...")
         metadata = self._load_metadata()
+        self._metadata = metadata  # Needed in :meth:`_create_datasets`
+        self.target_choices = [
+            self._get_target_choice(metadata, "train"),
+            self._get_target_choice(metadata, "val"),
+            self._get_target_choice(metadata, "test"),
+        ]
         train_data, dev_seq_lengths, dev_needs_store = self._transform(
             dev_data, split="dev", seq_lengths=self._get_seq_lengths(metadata, "dev")
         )
@@ -147,9 +161,17 @@ class Helmet(SequenceLengthFilteredDataModule):
             if metadata is None:
                 metadata = dict()
             if dev_needs_store:
-                set_dict(metadata, self._metadata_keys("dev"), dev_seq_lengths)
+                set_dict(
+                    metadata,
+                    self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, "dev"),
+                    dev_seq_lengths,
+                )
             if eval_needs_store:
-                set_dict(metadata, self._metadata_keys("eval"), eval_seq_lengths)
+                set_dict(
+                    metadata,
+                    self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, "eval"),
+                    eval_seq_lengths,
+                )
             self._store_metadata(metadata)
         return train_data, test_data
 
@@ -221,7 +243,14 @@ class Helmet(SequenceLengthFilteredDataModule):
     def _get_seq_lengths(
         self, metadata: Optional[Dict[str, Any]], split: str
     ) -> Optional[List[int]]:
-        return get_dict(metadata, self._metadata_keys(split))
+        return get_dict(metadata, self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, split))
+
+    def _get_target_choice(
+        self, metadata: Optional[Dict[str, Any]], split: str
+    ) -> Optional[List[int]]:
+        return get_dict(
+            metadata, self._metadata_keys(METADATA_TARGET_CHOICE_KEY, split)
+        )
 
     def _load_metadata(self) -> Optional[Dict[str, Any]]:
         if self.metadata_dir is None:
@@ -253,16 +282,19 @@ class Helmet(SequenceLengthFilteredDataModule):
         val_kwargs: Dict[str, Any],
         test_kwargs: Optional[Dict[str, Any]],
     ) -> None:
+        num_sets = 2
         self.train_dataset = SFTDataset(
             **train_kwargs,
             mask_prompt=self.mask_prompt,
             ignore_index=self.ignore_index,
+            target_choice=self.target_choices[0],
             seed=self.seed,
         )
         self.val_dataset = SFTDataset(
             **val_kwargs,
             mask_prompt=self.mask_prompt,
             ignore_index=self.ignore_index,
+            target_choice=self.target_choices[1],
             seed=self.seed,
         )
         if test_kwargs is not None:
@@ -270,8 +302,28 @@ class Helmet(SequenceLengthFilteredDataModule):
                 **test_kwargs,
                 mask_prompt=self.mask_prompt,
                 ignore_index=self.ignore_index,
+                target_choice=self.target_choices[2],
                 seed=self.seed,
             )
+            num_sets += 1
+        # Update meta-data?
+        do_store_meta = any(x is None for x in self.target_choices[:num_sets])
+        if do_store_meta:
+            for i, (data, split) in enumerate(
+                zip(
+                    (self.train_dataset, self.val_dataset, self.test_dataset),
+                    ("train", "val", "test"),
+                )
+            ):
+                if self.target_choices[i] is None and data is not None:
+                    new_choices = data.target_choice.copy()
+                    self.target_choices[i] = new_choices
+                    set_dict(
+                        self._metadata,
+                        self._metadata_keys(METADATA_TARGET_CHOICE_KEY, split),
+                        new_choices,
+                    )
+            self._store_metadata(self._metadata)
 
     def _get_collate_fn(self) -> MyDataLoader:
         return get_sft_collate_fn(ignore_index=self.ignore_index)

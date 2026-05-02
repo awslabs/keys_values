@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from functools import partial
+import math
 from typing import List, Dict, Optional, Callable, Union, Any
 
 import torch
@@ -59,6 +60,7 @@ class SFTDataset(LongContextDataset):
         mask_prompt: bool = True,
         ignore_index: int = -100,
         transform: Optional[Callable[[Dict[str, str]], Dict[str, str]]] = None,
+        target_choice: Optional[List[int]] = None,
         seed: Optional[int] = None,
         retain_targets_strings: bool = True,
     ) -> None:
@@ -71,10 +73,21 @@ class SFTDataset(LongContextDataset):
         )
         self.mask_prompt = mask_prompt
         self.ignore_index = ignore_index
-        # We need
-        if seed is None:
-            seed = 31415927
-        self._prng = torch.Generator().manual_seed(seed)
+        if target_choice is None:
+            if seed is None:
+                seed = 31415927
+            target_choice = sample_target_choice(
+                data,
+                generator=torch.Generator().manual_seed(seed),
+            )
+        else:
+            if len(target_choice) != len(data):
+                raise ValueError(
+                    f"len(target_choice) = {len(target_choice)} != {len(data)} = len(data)"
+                )
+            if not all(x >= 0 for x in target_choice):
+                raise ValueError("target_choice must all be non-negative")
+        self.target_choice = target_choice
         self._retain_target_strings = retain_targets_strings
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
@@ -89,11 +102,10 @@ class SFTDataset(LongContextDataset):
             prompt,
             max_length=max_length,
         )
+        num_tokens_prompt = encoded_prompt.numel()
         targets = example["output"]
         if isinstance(targets, list):
-            _targets = targets[
-                torch.randint(0, len(targets), (1,), generator=self._prng).item()
-            ]
+            _targets = targets[self.target_choice[idx]]
         else:
             _targets = targets
         encoded_response = self.tokenizer.encode(
@@ -102,28 +114,31 @@ class SFTDataset(LongContextDataset):
             eos=True,
             max_length=max_length,
         )
+        num_tokens_response = encoded_response.numel()
         encoded_prompt_and_response = torch.cat(
             (encoded_prompt, encoded_response)
         ).type(torch.int64)
-        if 0 < max_length < len(encoded_prompt_and_response):
+        if 0 < max_length < num_tokens_prompt + num_tokens_response:
             encoded_prompt_and_response = encoded_prompt_and_response[:max_length]
             encoded_prompt_and_response[max_length - 1] = self.tokenizer.eos_id
 
         # The labels are the full prompt with response, but with the prompt masked out
         labels = encoded_prompt_and_response.clone()
         if self.mask_prompt:
-            labels[: len(encoded_prompt)] = self.ignore_index
+            labels[:num_tokens_prompt] = self.ignore_index
 
-        token_counts = {"raw_plus_prompt_template": len(encoded_prompt_and_response)}
+        token_counts = {
+            "raw_plus_prompt_template": num_tokens_prompt + num_tokens_response
+        }
         raw_count = example.get("num_tokens_instruction")
         if (
             raw_count is None
             and self.transform is None
             and isinstance(self.prompt_style, Default)
         ):
-            raw_count = len(encoded_prompt)
+            raw_count = num_tokens_prompt
         if raw_count is not None:
-            token_counts["raw"] = raw_count + len(encoded_response)
+            token_counts["raw"] = raw_count + num_tokens_response
 
         result = {
             INPUT_IDS_NAME: encoded_prompt_and_response,
@@ -135,6 +150,32 @@ class SFTDataset(LongContextDataset):
         if self._retain_target_strings:
             result[TARGETS_STRINGS_NAME] = targets
         return result
+
+
+def sample_target_choice(
+    data: List[Dict[str, Any]],
+    generator: torch.Generator,
+) -> List[int]:
+    # For padding cases, we return 0 as target choice
+    num_choices = [
+        (
+            len(example["output"])
+            if not is_pad_datacase(example) and isinstance(example["output"], list)
+            else 1
+        )
+        for example in data
+    ]
+    num_data = len(data)
+    if all(x == num_choices[0] for x in num_choices):
+        return torch.randint(
+            0, num_choices[0], (num_data,), generator=generator
+        ).tolist()
+    else:
+        unif_random = torch.rand((num_data,), dtype=torch.float64, generator=generator)
+        return [
+            min(int(math.floor(u * mx)), mx - 1)
+            for u, mx in zip(unif_random.tolist(), num_choices)
+        ]
 
 
 def get_sft_collate_fn(pad_id: int = 0, ignore_index: int = -100):

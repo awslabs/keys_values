@@ -15,7 +15,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 import shutil
-from typing import Optional, Tuple, Literal, Dict, Any, Union
+from typing import Optional, Tuple, Literal, Dict, Any, Union, List
 
 import lightning as L
 from tokenizers import Tokenizer as HFTokenizer
@@ -133,6 +133,7 @@ def get_dataloaders(
     train: TrainArgs,
     eval: EvalArgs,
     fabric: Optional[L.Fabric] = None,
+    train_val_split_indices: Optional[Tuple[List[int], List[int]]] = None,
 ) -> Tuple[MyDataLoader, MyDataLoader]:
     num_devices = 1 if fabric is None else fabric.world_size
     rank = 0 if fabric is None else fabric.local_rank
@@ -144,6 +145,7 @@ def get_dataloaders(
         max_seq_length=train.max_seq_length,
         head_model=head_model,
         val_batch_size=eval.micro_batch_size,
+        train_val_split_indices=train_val_split_indices,
     )
     if fabric is not None:
         with fabric.rank_zero_first():
@@ -218,6 +220,23 @@ def load_model_checkpoint(
     checkpoint_dir: Path,
     resume_dir: Optional[Path] = None,
 ) -> None:
+    """
+    Loads weights of `model` from a model checkpoint. Depends on whether the
+    model is of LoRA type or not:
+
+    * Normal type (no LoRA): If `resume_dir` is given, weights are loaded from
+        there. Otherwise, weights are loaded from `checkpoint_dir`.
+    * LoRA: Base model weights are loaded from `checkpoint_dir`. Afterwards, if
+        `resume_dir` is given, LoRA weights are loaded from there. Otherwise,
+        LoRA weights are reset / initialized at random.
+
+    Args:
+        fabric: Fabric instance
+        model: Model to load weights into
+        checkpoint_dir: Base model checkpoint loaded from there
+        resume_dir: Optional. See above.
+
+    """
     is_lora = is_lora_model(model)
     file_path = checkpoint_dir / LIT_MODEL_FNAME
     if not is_lora and resume_dir is not None:

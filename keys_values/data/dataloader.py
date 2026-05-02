@@ -13,9 +13,10 @@
 # limitations under the License.
 from typing import Iterator, Dict, Any, List, Callable
 
+import torch
 from torch.utils.data import Dataset
 
-from keys_values.data.iterators import BatchSampler
+from keys_values.data.iterators import BatchSampler, SimilarSequenceLengthIterator
 
 Collator = Callable[[List[Dict[str, Any]]], Dict[str, Any]]
 
@@ -39,6 +40,16 @@ class MyDataLoaderIterator(Iterator[Dict[str, Any]]):
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         return self
 
+    def state_dict(self) -> Dict[str, torch.Tensor]:
+        if not isinstance(self._batch_iter, SimilarSequenceLengthIterator):
+            raise NotImplementedError("Only works for SimilarSequenceLengthIterator")
+        return self._batch_iter.state_dict()
+
+    def load_state_dict(self, state_dict: Dict[str, torch.Tensor]):
+        if not isinstance(self._batch_iter, SimilarSequenceLengthIterator):
+            raise NotImplementedError("Only works for SimilarSequenceLengthIterator")
+        self._batch_iter.load_state_dict(state_dict)
+
 
 class MyDataLoader:
     def __init__(
@@ -60,6 +71,8 @@ class MyDataLoader:
                 entries
 
         """
+        self.dataset = dataset
+        self.batch_sampler = batch_sampler
         self._iter_kwargs = {
             "dataset": dataset,
             "batch_sampler": batch_sampler,

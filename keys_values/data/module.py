@@ -14,7 +14,7 @@
 from typing import List, Optional, Dict, Any, Tuple, Union, Callable
 
 import torch
-from torch.utils.data import random_split
+from torch.utils.data import random_split, Subset
 
 from litgpt.data import DataModule
 from litgpt.prompts import Default
@@ -112,6 +112,7 @@ class SequenceLengthFilteredDataModule(DataModule):
         # Maintain sequence lengths (in tokens) for cases in training set.
         # This is used to support specialized data loaders.
         self._sequence_lengths = None
+        self._train_val_split_indices = None
 
     def connect(
         self,
@@ -130,6 +131,9 @@ class SequenceLengthFilteredDataModule(DataModule):
             Only if `test_set_tag` is given. Defaults to `val_batch_size`.
         - `eval_tasks`: Only if `test_set_tag` is given. See
             :meth:`test_dataloader`.
+        - `train_val_split_indices`: Contains `(train_ind, val_ind)`,
+            providing the split into training and validation set.
+            `val_split_fraction` is ignored then.
 
         Args:
             tokenizer: Tokenizer
@@ -165,6 +169,22 @@ class SequenceLengthFilteredDataModule(DataModule):
         if self.test_batch_size is None:
             self.test_batch_size = self.val_batch_size
         self._test_eval_tasks = kwargs.get("eval_tasks")
+        self._train_val_split_indices = kwargs.get("train_val_split_indices")
+        if self._train_val_split_indices is not None:
+            train_ind, val_ind = self._train_val_split_indices
+            # Workaround for early bug (TODO: Remove)
+            if len(train_ind) == len(val_ind) and train_ind == val_ind:
+                print(
+                    "Workaround for bug: train_data_index, val_data_index in training state are the same"
+                )
+                self._train_val_split_indices = train_ind, None
+            else:
+                total_len = len(train_ind) + len(val_ind)
+                assert all(
+                    0 <= x < total_len for ind in (train_ind, val_ind) for x in ind
+                )
+                combined = set(train_ind + val_ind)
+                assert len(combined) == total_len, (combined, train_ind, val_ind)
 
     def _get_dataset(self) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
         """
@@ -216,12 +236,26 @@ class SequenceLengthFilteredDataModule(DataModule):
 
         """
         data, test_data = self._get_dataset()
-        # Partition the dataset into train and test
-        train_data, val_data = random_split(
-            data,
-            [1.0 - self.val_split_fraction, self.val_split_fraction],
-            generator=torch.Generator().manual_seed(self.seed),
-        )
+        # Partition the dataset into train and validation
+        if self._train_val_split_indices is None:
+            train_data, val_data = random_split(
+                data,
+                [1.0 - self.val_split_fraction, self.val_split_fraction],
+                generator=torch.Generator().manual_seed(self.seed),
+            )
+            # Retain split indices
+            train_ind = [int(x) for x in train_data.indices]
+            val_ind = [int(x) for x in val_data.indices]
+            self._train_val_split_indices = (train_ind, val_ind)
+        else:
+            train_ind, val_ind = self._train_val_split_indices
+            # Workaround for early bug (TODO: Remove)
+            if val_ind is None:
+                print("Workaround for bug, part II")
+                debug_total_len = len(data)
+                val_ind = list(set(range(debug_total_len)).difference(train_ind))
+            train_data = Subset(data, train_ind)
+            val_data = Subset(data, val_ind)
         train_data, val_data = list(train_data), list(val_data)
         self._sequence_lengths = {
             "train": [record[NUM_TOKENS_NAME] for record in train_data],
@@ -272,6 +306,14 @@ class SequenceLengthFilteredDataModule(DataModule):
         else:
             test_kwargs = None
         self._create_datasets(train_kwargs, val_kwargs, test_kwargs)
+
+    def train_val_split_indices(self) -> Tuple[List[int], List[int]]:
+        if self._train_val_split_indices is None:
+            raise IndexError("Call `setup` first")
+        return (
+            self._train_val_split_indices[0].copy(),
+            self._train_val_split_indices[1].copy(),
+        )
 
     def _get_collate_fn(self) -> CollateFnType:
         """

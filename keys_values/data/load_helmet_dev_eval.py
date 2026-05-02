@@ -208,24 +208,24 @@ def load_helmet_dev_eval(
 
     Returns:
         A tuple of (dev_data, eval_data) datasets. Each data instance will contain at least "input", "output", "query_id", "max_length" fields.
+
     """
     dataset_parent_dir = Path(
         dataset_parent_dir
     ).expanduser()  # to ensure ~ can also exist in the given path
     source_data_dir = dataset_parent_dir.parent
-    # 1) If the source data does not exisit, download it first
+    # 1) If the source data does not exist, download it first
     if not os.path.exists(source_data_dir):
         download_source_data(source_data_dir)
 
-    cache_dir = os.path.join(
-        dataset_parent_dir.parent, f"longtrain/{dataset_key}_{max_length}"
-    )
+    cache_dir = dataset_parent_dir.parent / "longtrain" / f"{dataset_key}_{max_length}"
 
     # 2) If cached, load and return
     if os.path.isdir(cache_dir):
         dsd = load_from_disk(cache_dir)  # expects a DatasetDict with dev/val
         # Support either naming convention if you ever change it
         if "development" in dsd and "evaluation" in dsd:
+            print(f"Loaded cached datasets (development, evaluation) from {cache_dir}")
             return dsd["development"], dsd["evaluation"]
         raise ValueError(
             f"Cache found at {cache_dir}, but it doesn't contain expected splits."
