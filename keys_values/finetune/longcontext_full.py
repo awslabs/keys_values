@@ -644,7 +644,7 @@ def main(
             fabric,
             devices,
         )
-        # Depending on the cahe type `kv_cache.name`, the arguments
+        # Depending on the cache type `kv_cache.name`, the arguments
         # `kv_cache.cache_kwargs` are adjusted
         adjust_cache_kwargs(kv_cache, data, tokenizer)
         dtype = fabric_precision_to_dtype(fabric._precision.precision)
