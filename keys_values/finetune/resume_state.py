@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, Tuple, List
 
+import lightning as L
 import torch
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
@@ -21,6 +23,13 @@ from litgpt.utils import CycleIterator
 
 from keys_values.data.iterators import SimilarSequenceLengthIterator
 from keys_values.data.module import SequenceLengthFilteredDataModule
+
+
+TRAINSTATE_OPTIMIZER_FNAME = "training_state_optimizer.pth"
+
+TRAINSTATE_REST_FNAME = "training_state.pth"
+
+TRAINSTATE_ITERATOR_FNAME = "training_state_iterator_rank{rank}.pth"
 
 
 def get_iterator(cycle_iter: CycleIterator) -> SimilarSequenceLengthIterator:
@@ -58,6 +67,7 @@ class TrainingStateManager:
         self.dataset = dataset
         self._do_cpu_offload = None
         self._state_components = None
+        self._optimizer_names = None
         self._check_state()
 
     def _check_state(self):
@@ -67,12 +77,13 @@ class TrainingStateManager:
         optimizer = self.state.get("optimizer")
         if optimizer is not None:
             self._do_cpu_offload = False
+            opt_names = ("optimizer",)
             if not isinstance(optimizer, Optimizer):
                 raise ValueError("state['optimizer'] must be torch.optim.optimize.Optimizer")
+            sched_names = ("scheduler",)
             scheduler = self.state.get("scheduler")
             if scheduler is None or not isinstance(scheduler, LRScheduler):
                 raise ValueError("state['scheduler'] must be torch.optim.lr_scheduler.LRScheduler")
-            self._state_components = ("optimizer", "scheduler",)
         else:
             self._do_cpu_offload = True
             gpu_as_well = "gpu_optimizer" in self.state
@@ -92,7 +103,8 @@ class TrainingStateManager:
                 scheduler = self.state.get(name)
                 if scheduler is None or not isinstance(scheduler, LRScheduler):
                     raise ValueError(f"state['{name}'] must be torch.optim.lr_scheduler.LRScheduler")
-            self._state_components = opt_names + sched_names
+        self._state_components = opt_names + sched_names
+        self._optimizer_names = opt_names
 
     def _extract_training_state(self) -> Dict[str, Any]:
         train_ind, val_ind = self.dataset.train_val_split_indices()
@@ -110,3 +122,79 @@ class TrainingStateManager:
             }
         )
         return train_state
+
+    def save_training_state(
+        self,
+        fabric: L.Fabric,
+        file_dir: Path,
+    ) -> Tuple[Path, ...]:
+        train_state = self._extract_training_state()
+        optim_state = {k: train_state[k] for k in self._optimizer_names}
+        optim_path = file_dir / TRAINSTATE_OPTIMIZER_FNAME
+        fabric.save(optim_path, state=optim_state)
+        filter_names = self._optimizer_names
+        # This part depends on the rank
+        name = "train_iterator"
+        rank = fabric.local_rank
+        iter_state = {name: train_state[name]}
+        iter_path = file_dir / TRAINSTATE_ITERATOR_FNAME.format(rank=rank)
+        # Runs for all ranks, not just 0:
+        torch.save(iter_state, iter_path)
+        filter_names += (name,)
+        rest_state = {k: v for k, v in train_state.items() if k not in filter_names}
+        rest_path = file_dir / TRAINSTATE_REST_FNAME
+        fabric.save(rest_path, state=rest_state)
+        return optim_path, iter_path, rest_path
+
+
+def load_training_state(file_dir: Path, rank: int) -> Dict[str, Any]:
+    train_state = torch.load(file_dir / TRAINSTATE_OPTIMIZER_FNAME)
+    train_state.update(torch.load(file_dir / TRAINSTATE_ITERATOR_FNAME.format(rank=rank)))
+    train_state.update(torch.load(file_dir / TRAINSTATE_REST_FNAME))
+    return train_state
+
+
+_COMPONENT_NAMES = (
+    "optimizer",
+    "scheduler",
+    "cpu_optimizer",
+    "cpu_scheduler",
+    "gpu_optimizer",
+    "gpu_scheduler",
+)
+
+
+def restore_from_training_state(
+    state: Dict[str, Any],
+    train_iterator: CycleIterator,
+    train_state: Dict[str, Any],
+    rank: int,
+):
+    ts_rank = SimilarSequenceLengthIterator.rank_from_state_dict(train_state["train_iterator"])
+    if ts_rank != rank:
+        raise ValueError(f"train_state['train_iterator'] has rank {ts_rank}, but rank = {rank}")
+    if not isinstance(train_iterator, CycleIterator) or not isinstance(get_iterator(train_iterator), SimilarSequenceLengthIterator):
+        raise TypeError("train_iterator must be CycleIterator, wrapping a SimilarSequenceLengthIterator")
+    ts_len_train = train_state["train_data_index"].numel()
+    len_train = len(train_iterator.iterable)
+    if ts_len_train != len_train:
+        raise ValueError(f"train_state['train_data_index'] has length {ts_len_train}, but len(train_iterator.iterable) = {len_train}")
+    state["iter_num"] = train_state["iter_num"].item()
+    for name in _COMPONENT_NAMES:
+        if name in state:
+            if name not in train_state:
+                raise ValueError(f"{name}: Contained in state, but not in train_state")
+            state[name].load_state_dict(train_state[name])
+        elif name in train_state:
+            raise ValueError(f"{name}: Contained in train_state, but not in state")
+    # Reconstruct the training iterator
+    inner_iter = get_iterator(train_iterator)
+    inner_iter.load_state_dict(train_state["train_iterator"])
+    train_iterator._iterator = inner_iter
+
+
+def load_train_val_split_indices(file_dir: Path) -> Tuple[List[int], List[int]]:
+    rest_state = torch.load(file_dir / TRAINSTATE_REST_FNAME)
+    train_index = rest_state["train_data_index"].tolist()
+    val_index = rest_state["val_data_index"].tolist()
+    return train_index, val_index

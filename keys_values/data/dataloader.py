@@ -60,6 +60,8 @@ class MyDataLoader:
                 entries
 
         """
+        self.dataset = dataset
+        self.batch_sampler = batch_sampler
         self._iter_kwargs = {
             "dataset": dataset,
             "batch_sampler": batch_sampler,

@@ -220,6 +220,10 @@ class SimilarSequenceLengthIterator(Iterator[List[int]]):
         self._permutation = state_dict["permutation"].tolist()
         self._pos = pos
 
+    @staticmethod
+    def rank_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> int:
+        return state_dict["fingerprint"].tolist()[4]
+
 
 class SimilarSequenceLengthSampler(BatchSampler):
     """
