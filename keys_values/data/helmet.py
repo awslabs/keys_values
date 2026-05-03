@@ -90,7 +90,7 @@ class Helmet(SequenceLengthFilteredDataModule):
                 validation. The rest is used for training.
             ignore_index: Value used to mask prompt positions in the labels.
             max_seq_length: Sequences longer than this (in tokens) are filtered
-                out. Defaults to no filtering (``100000``).
+                out. Defaults to no filtering.
             seed: Random seed for the train/val split.
             metadata_dir: If given, sequence lengths for every case are stored
                 in a JSON metadata file in this directory so that subsequent
@@ -204,7 +204,7 @@ class Helmet(SequenceLengthFilteredDataModule):
                 new_seq_lengths.append(seq_length)
             else:
                 seq_length = seq_lengths[idx]
-            if seq_length > self.max_seq_length:
+            if self.max_seq_length is not None and seq_length > self.max_seq_length:
                 continue
             output = instance["output"]
             results.append(
@@ -215,10 +215,7 @@ class Helmet(SequenceLengthFilteredDataModule):
                 }
             )
         final_seq_lengths = new_seq_lengths if seq_lengths is None else seq_lengths
-        print(
-            f"Kept {len(results)} of {len(dataset)} {split} records "
-            f"(<= {self.max_seq_length} tokens)"
-        )
+        print(f"Kept {len(results)} of {len(dataset)} {split} records")
         return results, final_seq_lengths, needs_store
 
     def _get_seq_lengths(

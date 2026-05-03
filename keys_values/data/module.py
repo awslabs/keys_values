@@ -53,7 +53,6 @@ class SequenceLengthFilteredDataModule(DataModule):
     use a :class:`EvaluationDataLoader`, which returns batches coupled with
     tasks. Here, we try to form micro batches with sequences of similar length,
     but there is no concept of macro batches.
-
     """
 
     def __init__(
@@ -75,7 +74,7 @@ class SequenceLengthFilteredDataModule(DataModule):
             ignore_index: The index to use for elements to be ignored in the
                 label.
             max_seq_length: Sequences longer than this number of tokens are
-                filtered out. Defaults to 100000.
+                filtered out.
             seed: The random seed for creating the train/val splits and shuffling
                 the dataset.
             trainloader_longest_first: If set, :meth:`train_dataloader` returns
@@ -94,7 +93,7 @@ class SequenceLengthFilteredDataModule(DataModule):
         self.mask_prompt = mask_prompt
         self.val_split_fraction = val_split_fraction
         self.ignore_index = ignore_index
-        self.max_seq_length = 100000 if max_seq_length is None else max_seq_length
+        self.max_seq_length = max_seq_length
         self.seed = seed
         self.head_model = None
         self._is_sequence_classification = None
@@ -268,7 +267,7 @@ class SequenceLengthFilteredDataModule(DataModule):
                 ),
                 tokenizer=self.tokenizer,
                 prompt_style=Default(),
-                max_seq_length=-1,
+                max_seq_length=None,
             )
         else:
             test_kwargs = None

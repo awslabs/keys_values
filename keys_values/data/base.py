@@ -38,7 +38,6 @@ LORA_WEIGHTS_FNAME_OLD = "lit_model.pth.lora"
 class LongContextDataset(Dataset):
     """
     Base class for some datasets we define here.
-
     """
 
     def __init__(
@@ -46,7 +45,7 @@ class LongContextDataset(Dataset):
         data: List[Dict[str, str]],
         tokenizer: Tokenizer,
         prompt_style: Union[str, PromptStyle],
-        max_seq_length: int = -1,
+        max_seq_length: Optional[int] = None,
         transform: Optional[Callable[[Dict[str, str]], Dict[str, str]]] = None,
     ) -> None:
         self.data = data

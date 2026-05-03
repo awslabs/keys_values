@@ -55,7 +55,7 @@ class SFTDataset(LongContextDataset):
         data: List[Dict[str, str]],
         tokenizer: Tokenizer,
         prompt_style: Union[str, PromptStyle],
-        max_seq_length: int = -1,
+        max_seq_length: Optional[int] = None,
         mask_prompt: bool = True,
         ignore_index: int = -100,
         transform: Optional[Callable[[Dict[str, str]], Dict[str, str]]] = None,
@@ -84,9 +84,10 @@ class SFTDataset(LongContextDataset):
         if self.transform is not None:
             example = self.transform(example)
         prompt = self.prompt_style.apply(prompt=example["instruction"], **example)
+        max_length = -1 if self.max_seq_length is None else self.max_seq_length
         encoded_prompt = self.tokenizer.encode(
             prompt,
-            max_length=self.max_seq_length,
+            max_length=max_length,
         )
         targets = example["output"]
         if isinstance(targets, list):
@@ -99,15 +100,14 @@ class SFTDataset(LongContextDataset):
             _targets,
             bos=False,
             eos=True,
-            max_length=self.max_seq_length,
+            max_length=max_length,
         )
         encoded_prompt_and_response = torch.cat(
             (encoded_prompt, encoded_response)
         ).type(torch.int64)
-        msl = self.max_seq_length
-        if 0 < msl < len(encoded_prompt_and_response):
-            encoded_prompt_and_response = encoded_prompt_and_response[:msl]
-            encoded_prompt_and_response[msl - 1] = self.tokenizer.eos_id
+        if 0 < max_length < len(encoded_prompt_and_response):
+            encoded_prompt_and_response = encoded_prompt_and_response[:max_length]
+            encoded_prompt_and_response[max_length - 1] = self.tokenizer.eos_id
 
         # The labels are the full prompt with response, but with the prompt masked out
         labels = encoded_prompt_and_response.clone()

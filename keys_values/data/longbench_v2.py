@@ -83,7 +83,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         mask_prompt: bool = True,
         val_split_fraction: float = 0.1,
         ignore_index: int = -100,
-        max_seq_length: Optional[int] = None,
+        max_seq_length: Optional[int] = 100000,
         seed: int = 42,
         repo_id: str = "THUDM/LongBench-v2",
         access_token: Optional[str] = None,
@@ -388,7 +388,7 @@ PROMPTLINES_FINAL = {
 
 def filter_and_transform(
     dataset: Any,
-    max_seq_length: int,
+    max_seq_length: Optional[int],
     tokenizer: Tokenizer,
     seq_lengths: Optional[List[int]],
     head_model: str,
@@ -414,7 +414,10 @@ def filter_and_transform(
     test_results: RawDatasetType = []
     num_used = 0
     num_total = 0
-    print(f"\nProcessing dataset, filtering out records with > {max_seq_length} tokens")
+    if max_seq_length is not None:
+        print(f"\nProcessing dataset, filtering out records with > {max_seq_length} tokens")
+    else:
+        print(f"\nProcessing dataset")
     if seq_lengths is None:
         # Show progress bar: This takes a while
         data_iter = tqdm(dataset)
@@ -445,7 +448,7 @@ def filter_and_transform(
             new_seq_lengths.append(seq_length)
         else:
             seq_length = seq_lengths[idx]
-        if seq_length <= max_seq_length:
+        if max_seq_length is None or seq_length <= max_seq_length:
             num_used += 1
             train_results.append(
                 {
@@ -465,8 +468,8 @@ def filter_and_transform(
                     "num_tokens_instruction": seq_length,
                 }
             )
-    print(f"\nKept {num_used} of {num_total} records: {max_seq_length} tokens or less")
-    if test_set_tag == "rest":
+    print(f"\nKept {num_used} of {num_total} records")
+    if test_set_tag == "rest" and test_results:
         # Sort by increasing length
         test_results = sorted(
             test_results,
