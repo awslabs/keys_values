@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Dict
 
 import torch
 from torch.utils.data import Sampler
@@ -154,6 +154,71 @@ class SimilarSequenceLengthIterator(Iterator[List[int]]):
 
     def __iter__(self) -> Iterator[List[int]]:
         return self
+
+    def _fingerprint(self) -> List[int]:
+        return [
+            self._pos,
+            self.dataset_size,
+            self.num_next,
+            self.micro_batch_size,
+            self.num_devices,
+            self.rank,
+        ]
+
+    def _check_fingerprint(self, fp: List[int]) -> int:
+        if len(fp) != 6:
+            raise ValueError(f"fp = {fp}: Fingerprint has 6 entries")
+        fp_curr = self._fingerprint()
+        names = (
+            "dataset_size",
+            "num_next",
+            "micro_batch_size",
+            "num_devices",
+            "rank",
+        )
+        for name, elem, elem_curr in zip(names, fp[1:], fp_curr[1:]):
+            if elem != elem_curr:
+                raise ValueError(f"Entry {name} of fingerprint: {elem}, but must be {elem_curr}")
+        return fp[0]
+
+    def _encode_partition(self) -> List[int]:
+        partition_and_lengths = [
+            [len(part)] + part for part in self._partition
+        ]
+        return [x for part in partition_and_lengths for x in part]
+
+    def _decode_partition(self, encoded: List[int]):
+        pos = 0
+        enc_len = len(encoded)
+        decoded = []
+        while pos < enc_len:
+            sz_part = encoded[pos]
+            if not (0 < sz_part <= enc_len - pos - 1):
+                raise ValueError(
+                    "Invalid size entry in encoded partition: "
+                    f"pos = {pos}, sz_part = {sz_part}:\n{encoded}"
+                )
+            pos += 1
+            decoded.append(encoded[pos:(pos + sz_part)])
+            pos += sz_part
+        self._partition = decoded
+
+    def state_dict(self) -> Dict[str, torch.Tensor]:
+        kwargs = dict(dtype=torch.int64)
+        return {
+            "fingerprint": torch.tensor(self._fingerprint(), **kwargs),
+            "permutation": torch.tensor(self._permutation, **kwargs),
+            "partition": torch.tensor(self._encode_partition(), **kwargs),
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, torch.Tensor]):
+        for name in ("fingerprint", "permutation", "partition"):
+            if name not in state_dict:
+                raise ValueError(f"State dict has no key {name}")
+        pos = self._check_fingerprint(state_dict["fingerprint"].tolist())
+        self._decode_partition(state_dict["partition"].tolist())
+        self._permutation = state_dict["permutation"].tolist()
+        self._pos = pos
 
 
 class SimilarSequenceLengthSampler(BatchSampler):

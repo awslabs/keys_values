@@ -17,9 +17,21 @@ import torch
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
 
+from litgpt.utils import CycleIterator
+
 from keys_values.data.dataloader import MyDataLoader
+from keys_values.data.iterators import SimilarSequenceLengthIterator
 
 
+def get_iterator(cycle_iter: CycleIterator) -> SimilarSequenceLengthIterator:
+    if cycle_iter._iterator is not None:
+        return cycle_iter._iterator
+    else:
+        return iter(cycle_iter.iterable)
+
+
+# TODO: Currently, train_iterator and val_dataloader are highly specific.
+# Make this more general.
 class TrainingStateManager:
     """
     This class is responsible for extracting and storing the training state from
@@ -36,14 +48,18 @@ class TrainingStateManager:
     def __init__(
         self,
         state: Dict[str, Any],
+        train_iterator: CycleIterator,
         train_dataloader: MyDataLoader,
         val_dataloader: MyDataLoader,
     ):
+        if not isinstance(train_iterator, CycleIterator) or not isinstance(get_iterator(train_iterator), SimilarSequenceLengthIterator):
+            raise TypeError("train_iterator must be CycleIterator, wrapping a SimilarSequenceLengthIterator")
         self.state = state
+        self.train_iterator = train_iterator
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
         self._do_cpu_offload = None
-        self._components = None
+        self._state_components = None
         self._check_state()
 
     def _check_state(self):
@@ -58,7 +74,7 @@ class TrainingStateManager:
             scheduler = self.state.get("scheduler")
             if scheduler is None or not isinstance(scheduler, LRScheduler):
                 raise ValueError("state['scheduler'] must be torch.optim.lr_scheduler.LRScheduler")
-            self._components = ("optimizer", "scheduler",)
+            self._state_components = ("optimizer", "scheduler",)
         else:
             self._do_cpu_offload = True
             gpu_as_well = "gpu_optimizer" in self.state
@@ -78,13 +94,14 @@ class TrainingStateManager:
                 scheduler = self.state.get(name)
                 if scheduler is None or not isinstance(scheduler, LRScheduler):
                     raise ValueError(f"state['{name}'] must be torch.optim.lr_scheduler.LRScheduler")
-            self._components = opt_names + sched_names
+            self._state_components = opt_names + sched_names
 
     def _extract_training_state(self) -> Dict[str, Any]:
         train_state = {
             "iter_num": torch.tensor(self.state["iter_num"], dtype=torch.int64),
         }
-        for name in self._components:
+        for name in self._state_components:
             train_state[name] = getattr(self.state, name).state_dict()
+        train_state["train_iterator"] = get_iterator(self.train_iterator).state_dict()
         # TODO: train_dataloader, val_dataloader !!
         return train_state

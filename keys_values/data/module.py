@@ -14,7 +14,7 @@
 from typing import List, Optional, Dict, Any, Tuple, Union, Callable
 
 import torch
-from torch.utils.data import random_split
+from torch.utils.data import random_split, Subset
 
 from litgpt.data import DataModule
 from litgpt.prompts import Default
@@ -65,6 +65,7 @@ class SequenceLengthFilteredDataModule(DataModule):
         seed: int = 42,
         trainloader_longest_first: bool = False,
         trainloader_shortest_first: bool = False,
+        train_val_split_indices: Optional[Tuple[List[int], List[int]]] = None,
     ):
         """
         Args:
@@ -85,6 +86,9 @@ class SequenceLengthFilteredDataModule(DataModule):
                 likely to happen with the longest batch.
             trainloader_shortest_first: Same as `trainloader_longest_first`,
                 but the first batch contain the shortest sequences.
+            train_val_split_indices: If given, contains `(train_ind, val_ind)`,
+                providing the split into training and validation set.
+                `val_split_fraction` is ignored then.
 
         """
         if trainloader_longest_first and trainloader_shortest_first:
@@ -113,6 +117,13 @@ class SequenceLengthFilteredDataModule(DataModule):
         # Maintain sequence lengths (in tokens) for cases in training set.
         # This is used to support specialized data loaders.
         self._sequence_lengths = None
+        if train_val_split_indices is not None:
+            train_ind, val_ind = train_val_split_indices
+            total_len = len(train_ind) + len(val_ind)
+            assert all(0 <= x < total_len for ind in (train_ind, val_ind) for x in ind)
+            combined = set(train_ind + val_ind)
+            assert len(combined) == total_len
+        self._train_val_split_indices = train_val_split_indices
 
     def connect(
         self,
@@ -217,12 +228,21 @@ class SequenceLengthFilteredDataModule(DataModule):
 
         """
         data, test_data = self._get_dataset()
-        # Partition the dataset into train and test
-        train_data, val_data = random_split(
-            data,
-            [1.0 - self.val_split_fraction, self.val_split_fraction],
-            generator=torch.Generator().manual_seed(self.seed),
-        )
+        # Partition the dataset into train and validation
+        if self._train_val_split_indices is None:
+            train_data, val_data = random_split(
+                data,
+                [1.0 - self.val_split_fraction, self.val_split_fraction],
+                generator=torch.Generator().manual_seed(self.seed),
+            )
+            # Retain split indices
+            train_ind = [int(x) for x in train_data.indices]
+            val_ind = [int(x) for x in train_data.indices]
+            self._train_val_split_indices = (train_ind, val_ind)
+        else:
+            train_ind, val_ind = self._train_val_split_indices
+            train_data = Subset(data, train_ind)
+            val_data = Subset(data, val_ind)
         train_data, val_data = list(train_data), list(val_data)
         self._sequence_lengths = {
             "train": [record[NUM_TOKENS_NAME] for record in train_data],
@@ -273,6 +293,14 @@ class SequenceLengthFilteredDataModule(DataModule):
         else:
             test_kwargs = None
         self._create_datasets(train_kwargs, val_kwargs, test_kwargs)
+
+    def train_val_split_indices(self) -> Tuple[List[int], List[int]]:
+        if self._train_val_split_indices is None:
+            raise IndexError("Call `setup` first")
+        return (
+            self._train_val_split_indices[0].copy(),
+            self._train_val_split_indices[1].copy(),
+        )
 
     def _get_collate_fn(self) -> CollateFnType:
         """
