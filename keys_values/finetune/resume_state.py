@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import torch
 from torch.optim.lr_scheduler import LRScheduler
@@ -19,8 +19,8 @@ from torch.optim.optimizer import Optimizer
 
 from litgpt.utils import CycleIterator
 
-from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.iterators import SimilarSequenceLengthIterator
+from keys_values.data.module import SequenceLengthFilteredDataModule
 
 
 def get_iterator(cycle_iter: CycleIterator) -> SimilarSequenceLengthIterator:
@@ -30,7 +30,7 @@ def get_iterator(cycle_iter: CycleIterator) -> SimilarSequenceLengthIterator:
         return iter(cycle_iter.iterable)
 
 
-# TODO: Currently, train_iterator and val_dataloader are highly specific.
+# TODO: Currently, train_iterator and dataset treatment are highly specific.
 # Make this more general.
 class TrainingStateManager:
     """
@@ -49,15 +49,13 @@ class TrainingStateManager:
         self,
         state: Dict[str, Any],
         train_iterator: CycleIterator,
-        train_dataloader: MyDataLoader,
-        val_dataloader: MyDataLoader,
+        dataset: SequenceLengthFilteredDataModule,
     ):
         if not isinstance(train_iterator, CycleIterator) or not isinstance(get_iterator(train_iterator), SimilarSequenceLengthIterator):
             raise TypeError("train_iterator must be CycleIterator, wrapping a SimilarSequenceLengthIterator")
         self.state = state
         self.train_iterator = train_iterator
-        self.train_dataloader = train_dataloader
-        self.val_dataloader = val_dataloader
+        self.dataset = dataset
         self._do_cpu_offload = None
         self._state_components = None
         self._check_state()
@@ -97,11 +95,18 @@ class TrainingStateManager:
             self._state_components = opt_names + sched_names
 
     def _extract_training_state(self) -> Dict[str, Any]:
+        train_ind, val_ind = self.dataset.train_val_split_indices()
         train_state = {
-            "iter_num": torch.tensor(self.state["iter_num"], dtype=torch.int64),
+            name: getattr(self.state, name).state_dict()
+            for name in self._state_components
         }
-        for name in self._state_components:
-            train_state[name] = getattr(self.state, name).state_dict()
-        train_state["train_iterator"] = get_iterator(self.train_iterator).state_dict()
-        # TODO: train_dataloader, val_dataloader !!
+        kwargs = dict(dtype=torch.int64)
+        train_state.update(
+            {
+                "iter_num": torch.tensor(self.state["iter_num"], **kwargs),
+                "train_iterator": get_iterator(self.train_iterator).state_dict(),
+                "train_data_index": torch.tensor(train_ind, **kwargs),
+                "val_data_index": torch.tensor(val_ind, **kwargs),
+            }
+        )
         return train_state
