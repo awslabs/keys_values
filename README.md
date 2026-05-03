@@ -319,6 +319,21 @@ Basic arguments are:
   - `eval.micro_batch_size`: Local batch size to be bused for validation. Overrides
     `train.micro_batch_size`. This can often be larger, because evaluation needs
     less GPU memory than training.
+* `training_state_num`: Positive integer or `None`. If given, training states
+  are stored alongside this number of last recently stored checkpoints. A
+  stopped training run can be resumed from a checkpoint if the training state
+  is available as well. See `resume`.
+* `resume`: If given, contains directory name for checkpoint from which
+  training is to be resumed, such as "step-000100" or "final". You can only
+  resume training from a checkpoint for which a training state has been stored
+  as well, see `training_state_num`. Resuming a training run is not the same as
+  starting training from a checkpoint, in that the following are all restored
+  from the training state on top of the model weights:
+  - Optimizer state
+  - Learning rate scheduler state
+  - Iteration number
+  - Training/validation dataset split
+  - Training iterator state
 
 ### Full Fine-tuning or LoRA
 

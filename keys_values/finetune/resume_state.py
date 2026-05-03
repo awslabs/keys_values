@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from typing import Any, Dict, Tuple, List
+from typing import Any, Dict, Tuple, List, Optional
 
 import lightning as L
 import torch
@@ -39,8 +39,6 @@ def get_iterator(cycle_iter: CycleIterator) -> SimilarSequenceLengthIterator:
         return iter(cycle_iter.iterable)
 
 
-# TODO: Currently, train_iterator and dataset treatment are highly specific.
-# Make this more general.
 class TrainingStateManager:
     """
     This class is responsible for extracting and storing the training state from
@@ -57,18 +55,18 @@ class TrainingStateManager:
     def __init__(
         self,
         state: Dict[str, Any],
-        train_iterator: CycleIterator,
         dataset: SequenceLengthFilteredDataModule,
+        train_iterator: Optional[CycleIterator] = None,
     ):
-        if not isinstance(train_iterator, CycleIterator) or not isinstance(get_iterator(train_iterator), SimilarSequenceLengthIterator):
-            raise TypeError("train_iterator must be CycleIterator, wrapping a SimilarSequenceLengthIterator")
         self.state = state
-        self.train_iterator = train_iterator
+        self.train_iterator = None
         self.dataset = dataset
         self._do_cpu_offload = None
         self._state_components = None
         self._optimizer_names = None
         self._check_state()
+        if train_iterator is not None:
+            self.init_train_iterator(train_iterator)
 
     def _check_state(self):
         iter_num = self.state.get("iter_num")
@@ -106,6 +104,13 @@ class TrainingStateManager:
         self._state_components = opt_names + sched_names
         self._optimizer_names = opt_names
 
+    def init_train_iterator(self, train_iterator: CycleIterator):
+        if self.train_iterator is not None:
+            raise IndexError("train_iterator is already initialized")
+        if not isinstance(train_iterator, CycleIterator) or not isinstance(get_iterator(train_iterator), SimilarSequenceLengthIterator):
+            raise TypeError("train_iterator must be CycleIterator, wrapping a SimilarSequenceLengthIterator")
+        self.train_iterator = train_iterator
+
     def _extract_training_state(self) -> Dict[str, Any]:
         train_ind, val_ind = self.dataset.train_val_split_indices()
         train_state = {
@@ -128,6 +133,8 @@ class TrainingStateManager:
         fabric: L.Fabric,
         file_dir: Path,
     ) -> Tuple[Path, ...]:
+        if self.train_iterator is None:
+            raise ValueError("train_iterator must be initialized, call `init_train_iterator`")
         train_state = self._extract_training_state()
         optim_state = {k: train_state[k] for k in self._optimizer_names}
         optim_path = file_dir / TRAINSTATE_OPTIMIZER_FNAME

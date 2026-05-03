@@ -14,6 +14,7 @@
 # limitations under the License.
 import csv
 import dataclasses
+from dataclasses import dataclass
 import gc
 
 import os
@@ -38,7 +39,6 @@ from litgpt.utils import (
     check_valid_checkpoint_dir,
     copy_config_files,
     create_finetuning_performance_report,
-    find_resume_path,
     get_default_supported_precision,
     init_out_dir,
     instantiate_torch_optimizer,
@@ -70,6 +70,13 @@ from keys_values.finetune.args import (
 from keys_values.finetune.batch_transform import (
     BatchTransformFactory,
     BatchTransform,
+)
+from keys_values.finetune.resume_state import (
+    TrainingStateManager,
+    load_training_state,
+    load_train_val_split_indices,
+    restore_from_training_state,
+    TRAINSTATE_ITERATOR_FNAME,
 )
 from keys_values.finetune.utils import (
     print_but_limit_size,
@@ -140,7 +147,7 @@ def setup(
     out_dir: Path = Path(DEFAULT_OUT_DIR),
     precision: Optional[str] = None,
     devices: Union[int, str] = 1,
-    resume: Union[bool, Literal["auto"], Path] = False,
+    resume: Optional[str] = None,
     data: Optional[DataModule] = None,
     train: TrainArgs = TrainArgs(
         save_interval=50,
@@ -204,6 +211,7 @@ def setup(
         flex_extend_kv=False,
         flex_num_q_lens=4,
     ),
+    training_state_num: Optional[int] = 5,
     record_gpu_memory_snapshots: Optional[int] = None,
     record_gpu_memory_kind: int = 0,
     record_gpu_memory_period: int = 0,
@@ -223,14 +231,11 @@ def setup(
         out_dir: Directory in which to save checkpoints and logs. If running in a Lightning Studio Job, look for it in
             /teamspace/jobs/<job-name>/share.
         precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
-        devices: How many devices/GPUs to use
-        resume: Path to a checkpoint directory to resume from in case training
-            was interrupted, or ``True`` to resume from the latest checkpoint in
-            ``out_dir``. An error will be raised if no checkpoint is found. Passing
-            ``'auto'`` will resume from the latest checkpoint but not error if
-            no checkpoint exists.
-            Note: At present, we do not store the optimizer state as part of the
-            checkpoint, so fine-tuning is started from scratch from there.
+        devices: How many devices/GPUs to user
+        resume: Name of checkpoint directory from which training is to be
+            resumed, such as "step-000100" or "final". Training can only be
+            resumed from a checkpoint for which a training state is also
+            available, see `training_state_num`.
         data: Data-related arguments. If not provided, the default is
             ``keys_values.data.LongBenchV2``.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
@@ -278,6 +283,10 @@ def setup(
             `sdpa.flex_attention` to `True` to activate PyTorch
             `flex_attention`. Otherwise, the zero-padded query SDPA kernel is
             used.
+        training_state_num: If not `None`, training states are stored alongside
+            the `training_state_num` last recently stored checkpoints. A
+            training run can be resumed from a checkpoint plus training state.
+            Defaults to 5.
         record_gpu_memory_snapshots: If given, we record GPU memory traces in
             snapshots. This argument is the `max_entries` parameter, a good
             value is 50000 or 100000.
@@ -335,6 +344,7 @@ def setup(
         oom_error_recovery,
         yarn_rope,
         sdpa,
+        training_state_num,
         record_gpu_memory_snapshots,
         record_gpu_memory_kind,
         record_gpu_memory_period,
@@ -353,7 +363,7 @@ def setup_internal(
     out_dir: Path,
     precision: Optional[str],
     devices: Union[int, str],
-    resume: Union[bool, Literal["auto"], Path],
+    resume: Optional[str],
     data: Optional[DataModule],
     train: TrainArgs,
     lora: Optional[LoRAArgs],
@@ -372,6 +382,7 @@ def setup_internal(
     oom_error_recovery: bool,
     yarn_rope: bool,
     sdpa: SDPAArgs,
+    training_state_num: Optional[int],
     record_gpu_memory_snapshots: Optional[int],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
@@ -445,6 +456,8 @@ def setup_internal(
             "Warning: Device out of memory error recovery does not properly "
             "work at the moment."
         )
+    if training_state_num is not None and training_state_num <= 0:
+        raise ValueError(f"training_state_num = {training_state_num}, must be positive or None")
     # Legacy arguments
     if verbose is None:
         if kv_cache.verbose is not None:
@@ -491,7 +504,7 @@ def setup_internal(
         out_dir,
         name=f"finetune-{config.name}",
         use_fabric=True,
-        resume=bool(resume),
+        resume=resume is not None,
         log_interval=train.log_interval,
     )
 
@@ -539,6 +552,7 @@ def setup_internal(
         oom_error_recovery=oom_error_recovery,
         yarn_rope=yarn_rope,
         sdpa=sdpa,
+        training_state_num=training_state_num,
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
@@ -563,12 +577,37 @@ def create_gpt_model(
     return gpt_model
 
 
+@dataclass(frozen=True)
+class TrainingStateVars:
+    manager: TrainingStateManager
+    files: List[Tuple[Path, ...]]
+    training_state_num: int
+    devices: int
+
+    def save_state(
+        self,
+        fabric: L.Fabric,
+        file_dir: Path,
+    ):
+        print_message(f"Storing training state to {file_dir}", fabric)
+        new_files = self.manager.save_training_state(fabric, file_dir)
+        if fabric.global_rank == 0 and self.devices > 1:
+            # Add files written by other ranks: They are removed by rank 0 only
+            new_files += tuple(file_dir / TRAINSTATE_ITERATOR_FNAME.format(rank=rank) for rank in range(1, self.devices))
+        self.files.append(new_files)
+        if len(self.files) > self.training_state_num and fabric.global_rank == 0:
+            # Remove oldest files
+            rem_files = self.files.pop(0)
+            for path in rem_files:
+                path.unlink()
+
+
 def main(
     fabric: L.Fabric,
     do_cpu_offload: bool,
     original_setup: Callable,
     devices: int,
-    resume: Union[bool, Literal["auto"], Path],
+    resume: Optional[str],
     seed: int,
     config: Union[ConfigFull, ConfigLoRA],
     data: DataModule,
@@ -587,6 +626,7 @@ def main(
     oom_error_recovery: bool,
     yarn_rope: bool,
     sdpa: SDPAArgs,
+    training_state_num: Optional[int],
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
@@ -598,6 +638,14 @@ def main(
 ) -> None:
     validate_args(train, eval)
     is_lora = isinstance(config, ConfigLoRA)
+    if resume is not None:
+        resume_path = out_dir / resume
+        if not resume_path.exists():
+            raise ValueError(f"resume = {resume} invalid, since {resume_path} does not exist")
+        train_val_split_indices = load_train_val_split_indices(resume_path)
+    else:
+        resume_path = None
+        train_val_split_indices = None
 
     tokenizer = Tokenizer(checkpoint_dir)
     train_dataloader, val_dataloader = get_dataloaders(
@@ -607,6 +655,7 @@ def main(
         train=train,
         eval=eval,
         fabric=fabric,
+        train_val_split_indices=train_val_split_indices,
     )
     ignore_index = getattr(data, "ignore_index", -100)
     batch_transform = BatchTransformFactory.from_head_model(
@@ -781,12 +830,20 @@ def main(
         print("Evaluation metric: eval_loss (same as training loss)")
         evaluator = None
 
-    resume_dir = find_resume_path(resume, out_dir)
-    if not resume_dir:
-        resume_dir = None
-    elif isinstance(resume_dir, Path):
-        resume_dir = resume_dir.parent
-    load_model_checkpoint(fabric, model, checkpoint_dir, resume_dir)
+    if training_state_num is not None:
+        training_state = TrainingStateVars(
+            manager=TrainingStateManager(
+                state=state,
+                dataset=data,
+            ),
+            files=[],
+            training_state_num=training_state_num,
+            devices=devices,
+        )
+    else:
+        training_state = None
+
+    load_model_checkpoint(fabric, model, checkpoint_dir, resume_dir=resume_path)
     check_for_nan_module_weights(model.gpt_model)
 
     if profile_grad_times > 0 and fabric.global_rank == 0:
@@ -817,6 +874,8 @@ def main(
         data=data,
         evaluator=evaluator,
         tokenizer=tokenizer,
+        training_state=training_state,
+        resume_path=resume_path,
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
         record_gpu_memory_kind=record_gpu_memory_kind,
         record_gpu_memory_period=record_gpu_memory_period,
@@ -878,6 +937,8 @@ def main(
     # Save the final checkpoint at the end of training
     save_dir = out_dir / "final"
     save_model_checkpoint(fabric, model, save_dir)
+    if training_state is not None:
+        training_state.save_state(fabric, save_dir)
     if fabric.global_rank == 0:
         # Copy checkpoint files from original checkpoint dir
         copy_config_files(checkpoint_dir, save_dir)
@@ -1150,6 +1211,8 @@ def fit(
     data: DataModule,
     evaluator: Optional[SampleBasedMetricsEvaluator],
     tokenizer: Tokenizer,
+    training_state: Optional[TrainingStateVars],
+    resume_path: Optional[Path],
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
@@ -1194,90 +1257,111 @@ def fit(
             ),
         }
 
-        if record_gpu_memory_kind == 3:
-            path = out_dir / "gpu_memory_snapshots" / "snapshot_validation.pickle"
-            record_gpu_memory_snapshots = RecordGPUMemory(
-                path=str(path),
-                max_entries=record_gpu_memory_snapshots.max_entries,
-                verbose=VerbosityLevels.MORE,
-            )
-            record_gpu_memory_snapshots.start_recording()
-
         val_loss = "n/a"
-        if do_cpu_offloading:
-            valid_model = model.copy_model_for_evaluation()
-        else:
-            valid_model = model
-        if record_gpu_memory_kind == 3:
-            valid_model.set_record_gpu_memory(
-                record_gpu_memory_snapshots,
-                record_gpu_memory_kind,
-            )
-        if eval.initial_validation:
-            print_with_rank_and_timestamp(
-                "Starting validation evaluations.",
-                fabric.global_rank,
-            )
-            print_message(
-                f"\nInitial validation evaluation  (batch_size = {val_dataloader.batch_size}) ...",
-                fabric,
-            )
-            if generate_with_eval:
-                generate_example_kwargs = dict(
-                    tokenizer=tokenizer,
-                    data=data,
+        if resume_path is None:
+            if record_gpu_memory_kind == 3:
+                path = out_dir / "gpu_memory_snapshots" / "snapshot_validation.pickle"
+                record_gpu_memory_snapshots = RecordGPUMemory(
+                    path=str(path),
+                    max_entries=record_gpu_memory_snapshots.max_entries,
+                    verbose=VerbosityLevels.MORE,
                 )
+                record_gpu_memory_snapshots.start_recording()
+
+            if do_cpu_offloading:
+                valid_model = model.copy_model_for_evaluation()
             else:
-                generate_example_kwargs = None
-            metrics = validate_and_all_reduce(
-                model=valid_model,
-                evaluator=evaluator,
-                val_dataloader=val_dataloader,
-                eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
-                batch_transform=batch_transform,
-                generate_example_kwargs=generate_example_kwargs,
-                fabric=fabric,
-            )
-            val_loss = metrics[eval_metric_name]
-            print_message(
-                f"Initial evaluation          | "
-                + string_for_val_metrics(metrics, evaluator)
-                + f" | val_time: {metrics['val_time']:.3f} s",
-                fabric,
-            )
-        else:
-            print_message("Verifying settings ...", fabric)
-            with torch.no_grad():
-                if evaluator is None:
-                    validate(
-                        valid_model,
-                        val_dataloader,
-                        dataclasses.replace(eval, max_iters=1),
-                        batch_transform,
+                valid_model = model
+            if record_gpu_memory_kind == 3:
+                valid_model.set_record_gpu_memory(
+                    record_gpu_memory_snapshots,
+                    record_gpu_memory_kind,
+                )
+            if eval.initial_validation:
+                print_with_rank_and_timestamp(
+                    "Starting validation evaluations.",
+                    fabric.global_rank,
+                )
+                print_message(
+                    f"\nInitial validation evaluation  (batch_size = {val_dataloader.batch_size}) ...",
+                    fabric,
+                )
+                if generate_with_eval:
+                    generate_example_kwargs = dict(
+                        tokenizer=tokenizer,
+                        data=data,
                     )
                 else:
-                    validate_sample_metric(
-                        valid_model,
-                        evaluator,
-                        val_dataloader,
-                        dataclasses.replace(eval, max_iters=1),
-                        batch_transform,
-                    )
-        flush_io_streams()
-        if do_cpu_offloading:
-            deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
-            del valid_model
+                    generate_example_kwargs = None
+                metrics = validate_and_all_reduce(
+                    model=valid_model,
+                    evaluator=evaluator,
+                    val_dataloader=val_dataloader,
+                    eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
+                    batch_transform=batch_transform,
+                    generate_example_kwargs=generate_example_kwargs,
+                    fabric=fabric,
+                )
+                val_loss = metrics[eval_metric_name]
+                print_message(
+                    f"Initial evaluation          | "
+                    + string_for_val_metrics(metrics, evaluator)
+                    + f" | val_time: {metrics['val_time']:.3f} s",
+                    fabric,
+                )
+            else:
+                print_message("Verifying settings ...", fabric)
+                with torch.no_grad():
+                    if evaluator is None:
+                        validate(
+                            valid_model,
+                            val_dataloader,
+                            dataclasses.replace(eval, max_iters=1),
+                            batch_transform,
+                        )
+                    else:
+                        validate_sample_metric(
+                            valid_model,
+                            evaluator,
+                            val_dataloader,
+                            dataclasses.replace(eval, max_iters=1),
+                            batch_transform,
+                        )
+            flush_io_streams()
+            if do_cpu_offloading:
+                deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
+                del valid_model
 
-        if record_gpu_memory_kind == 3:
-            if record_gpu_memory_snapshots.is_recording:
-                record_gpu_memory_snapshots.store_current_snapshot()
-                record_gpu_memory_snapshots.stop_recording()
-            # Switch off from here on
-            record_gpu_memory_snapshots = None
-            record_gpu_memory_kind = 0
+            if record_gpu_memory_kind == 3:
+                if record_gpu_memory_snapshots.is_recording:
+                    record_gpu_memory_snapshots.store_current_snapshot()
+                    record_gpu_memory_snapshots.stop_recording()
+                # Switch off from here on
+                record_gpu_memory_snapshots = None
+                record_gpu_memory_kind = 0
 
+        # Prepare start of training loop
         max_steps = train.max_steps or float("inf")
         train_iterator = CycleIterator(train_dataloader)
+        if resume_path is not None:
+            # Restore from training state
+            print_message(
+                f"Resume training: Loading training state from {resume_path}",
+                fabric,
+            )
+            train_state = load_training_state(resume_path, fabric.global_rank)
+            restore_from_training_state(
+                state=state,
+                train_iterator=train_iterator,
+                train_state=train_state,
+                rank=fabric.global_rank,
+            )
+            print_message(
+                f"Resume training: Continue from iteration {state['iter_num']}",
+                fabric,
+            )
+        if training_state is not None:
+            training_state.manager.init_train_iterator(train_iterator)
         throughput = ThroughputMonitor(fabric, window_size=50)
         if size_log_quantiles is not None and fabric.global_rank == 0:
             print_message(
@@ -1645,6 +1729,7 @@ def fit(
                 train=train,
                 data=data,
                 original_setup=original_setup,
+                training_state=training_state,
             )
 
     except torch._dynamo.exc.FailOnRecompileLimitHit as ex:
@@ -1866,11 +1951,14 @@ def save_checkpoint_regular(
     train: TrainArgs,
     data: DataModule,
     original_setup: Callable,
+    training_state: Optional[TrainingStateVars],
 ):
     save_intermed = do_save(step, train, intermed=True)
     if save_intermed or do_save(step, train, intermed=False):
         interval_dir = out_dir / f"step-{step:06d}"
         save_model_checkpoint(fabric, model, interval_dir)
+        if training_state is not None:
+            training_state.save_state(fabric, interval_dir)
         if fabric.global_rank == 0:
             copy_config_files(checkpoint_dir, interval_dir)
             save_hyperparameters(original_setup, interval_dir)
@@ -1893,6 +1981,8 @@ def save_checkpoint_regular(
                         (root / name).rmdir()
                 if interval_dir.exists():
                     interval_dir.rmdir()
+
+
 
 
 # DEBUG: Code for comparison of gradients and loss value against naive

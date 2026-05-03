@@ -14,7 +14,7 @@
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Literal, Dict, Any, Union
+from typing import Optional, Tuple, Literal, Dict, Any, Union, List
 
 import lightning as L
 from tokenizers import Tokenizer as HFTokenizer
@@ -132,6 +132,7 @@ def get_dataloaders(
     train: TrainArgs,
     eval: EvalArgs,
     fabric: Optional[L.Fabric] = None,
+    train_val_split_indices: Optional[Tuple[List[int], List[int]]] = None,
 ) -> Tuple[MyDataLoader, MyDataLoader]:
     num_devices = 1 if fabric is None else fabric.world_size
     rank = 0 if fabric is None else fabric.local_rank
@@ -143,6 +144,7 @@ def get_dataloaders(
         max_seq_length=train.max_seq_length,
         head_model=head_model,
         val_batch_size=eval.micro_batch_size,
+        train_val_split_indices=train_val_split_indices,
     )
     if fabric is not None:
         with fabric.rank_zero_first():

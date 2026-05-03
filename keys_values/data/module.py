@@ -86,9 +86,6 @@ class SequenceLengthFilteredDataModule(DataModule):
                 likely to happen with the longest batch.
             trainloader_shortest_first: Same as `trainloader_longest_first`,
                 but the first batch contain the shortest sequences.
-            train_val_split_indices: If given, contains `(train_ind, val_ind)`,
-                providing the split into training and validation set.
-                `val_split_fraction` is ignored then.
 
         """
         if trainloader_longest_first and trainloader_shortest_first:
@@ -117,13 +114,7 @@ class SequenceLengthFilteredDataModule(DataModule):
         # Maintain sequence lengths (in tokens) for cases in training set.
         # This is used to support specialized data loaders.
         self._sequence_lengths = None
-        if train_val_split_indices is not None:
-            train_ind, val_ind = train_val_split_indices
-            total_len = len(train_ind) + len(val_ind)
-            assert all(0 <= x < total_len for ind in (train_ind, val_ind) for x in ind)
-            combined = set(train_ind + val_ind)
-            assert len(combined) == total_len
-        self._train_val_split_indices = train_val_split_indices
+        self._train_val_split_indices = None
 
     def connect(
         self,
@@ -142,6 +133,9 @@ class SequenceLengthFilteredDataModule(DataModule):
             Only if `test_set_tag` is given. Defaults to `val_batch_size`.
         - `eval_tasks`: Only if `test_set_tag` is given. See
             :meth:`test_dataloader`.
+        - `train_val_split_indices`: Contains `(train_ind, val_ind)`,
+            providing the split into training and validation set.
+            `val_split_fraction` is ignored then.
 
         Args:
             tokenizer: Tokenizer
@@ -177,6 +171,13 @@ class SequenceLengthFilteredDataModule(DataModule):
         if self.test_batch_size is None:
             self.test_batch_size = self.val_batch_size
         self._test_eval_tasks = kwargs.get("eval_tasks")
+        self._train_val_split_indices = kwargs.get("train_val_split_indices")
+        if self._train_val_split_indices is not None:
+            train_ind, val_ind = self._train_val_split_indices
+            total_len = len(train_ind) + len(val_ind)
+            assert all(0 <= x < total_len for ind in (train_ind, val_ind) for x in ind)
+            combined = set(train_ind + val_ind)
+            assert len(combined) == total_len
 
     def _get_dataset(self) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
         """
