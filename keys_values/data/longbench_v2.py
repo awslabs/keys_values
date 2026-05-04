@@ -415,7 +415,9 @@ def filter_and_transform(
     num_used = 0
     num_total = 0
     if max_seq_length is not None:
-        print(f"\nProcessing dataset, filtering out records with > {max_seq_length} tokens")
+        print(
+            f"\nProcessing dataset, filtering out records with > {max_seq_length} tokens"
+        )
     else:
         print(f"\nProcessing dataset")
     if seq_lengths is None:
