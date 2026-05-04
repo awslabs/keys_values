@@ -330,13 +330,13 @@ def _reorder(
 
 def reorder_key_value(
     key: torch.Tensor,
-    value: torch.Tensor,
+    value: Optional[torch.Tensor],
     token_positions: torch.Tensor,
     input_pos: int,
     q_len: int,
     sort_if_3d: bool = True,
     check_token_pos: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Dict[str, torch.Tensor]]:
     """
     Reorder `key, value` tensors using permutations (for each b, h) which, if
     applied to `token_positions`, place `input_pos:(input_pos + q_len)` at the
@@ -364,7 +364,7 @@ def reorder_key_value(
         extra_info = dict(index_gat=index_gat, index_scat=index_scat)
     return (
         reorder_buffer_given_extra_info(key, **extra_info),
-        reorder_buffer_given_extra_info(value, **extra_info),
+        None if value is None else reorder_buffer_given_extra_info(value, **extra_info),
         extra_info,
     )
 

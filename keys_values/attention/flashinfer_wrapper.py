@@ -160,6 +160,7 @@ def triton_score_sum(
     scale: float,
     n_kv_heads: int,
     group_size: int,
+    causal_masking: bool = True,
 ) -> torch.Tensor:
     """Compute attention weight sums using Triton (no V needed).
 
@@ -174,6 +175,8 @@ def triton_score_sum(
         scale: softmax scale factor (1/sqrt(head_size))
         n_kv_heads: number of KV heads
         group_size: GQA group size (n_head // n_kv_heads)
+        causal_masking: Whether to use causal attention mask or not. Defaults
+            to `True`
 
     Returns:
         W: [batch, n_kv_heads, kv_len] (fp32) attention weight sums
@@ -258,7 +261,7 @@ def triton_score_sum(
         BLOCK_Q=BLOCK_Q,
         HEAD_DIM=head_size,
         GROUP_SIZE=group_size,
-        HAS_CAUSAL=True,
+        HAS_CAUSAL=causal_masking,
         num_warps=NUM_WARPS,
         num_stages=NUM_STAGES,
     )

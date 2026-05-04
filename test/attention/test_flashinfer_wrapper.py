@@ -20,6 +20,10 @@ import torch
 
 from litgpt.utils import _RunIf
 
+from keys_values.attention.base import (
+    scaled_dot_product_attention_in_blocks,
+    DefaultKeysAndValues,
+)
 from keys_values.attention.flashinfer_wrapper import (
     FlashInferSDPA,
     get_flashinfer_sdpa,
@@ -199,6 +203,7 @@ class TestFlashInferSDPAInterface:
 
     def test_scaled_dot_product_attention_accepts_optional_parameters(self):
         """Test that scaled_dot_product_attention accepts optional parameters."""
+        torch.manual_seed(3141592)
         wrapper = FlashInferSDPA()
         max_batch_size = 2
         n_query_groups = 2
@@ -230,6 +235,7 @@ class TestFlashInferKernelWrapping:
 
     def test_flashinfer_sdpa_routes_to_chunk_processing(self):
         """Test that scaled_dot_product_attention routes to chunk processing for decode phase."""
+        torch.manual_seed(3141593)
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
@@ -250,6 +256,7 @@ class TestFlashInferKernelWrapping:
 
     def test_flashinfer_sdpa_routes_nonsquare_no_weights_to_standard(self):
         """Test that non-square attention without weights routes to standard prefill."""
+        torch.manual_seed(3141594)
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
@@ -274,6 +281,7 @@ class TestFlashInferKernelWrapping:
 
     def test_flashinfer_sdpa_routes_nonsquare_with_weights_to_fused_prefill(self):
         """Test that non-square attention with weights routes to fused_prefill."""
+        torch.manual_seed(3141595)
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
@@ -310,6 +318,7 @@ class TestFlashInferKernelWrapping:
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
+            torch.manual_seed(3141596)
             wrapper = FlashInferSDPA()
 
             params = KVCacheParams(
@@ -342,6 +351,7 @@ class TestFlashInferKernelWrapping:
 
     def test_parameter_translation_validates_gqa_divisibility(self):
         """Test that parameter translation validates GQA divisibility."""
+        torch.manual_seed(3141597)
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
@@ -362,6 +372,7 @@ class TestAttentionWeightsReturn:
 
     def test_attention_weights_shape_without_gqa(self):
         """Test that attention weights have correct shape without GQA."""
+        torch.manual_seed(3141598)
         wrapper = FlashInferSDPA()
 
         batch_size = 2
@@ -381,6 +392,7 @@ class TestAttentionWeightsReturn:
 
     def test_attention_weights_shape_with_gqa(self):
         """Test that attention weights have correct shape with GQA."""
+        torch.manual_seed(3141599)
         wrapper = FlashInferSDPA()
 
         batch_size = 2
@@ -407,6 +419,7 @@ class TestAttentionWeightsReturn:
 
     def test_attention_weights_are_valid_probabilities(self):
         """Test that attention weights are valid probability distributions."""
+        torch.manual_seed(3141600)
         wrapper = FlashInferSDPA()
 
         batch_size = 2
@@ -442,6 +455,7 @@ class TestAttentionWeightsReturn:
 
     def test_attention_weights_none_when_not_requested(self):
         """Test that attention weights are None when not requested."""
+        torch.manual_seed(3141601)
         wrapper = FlashInferSDPA()
 
         batch_size = 2
@@ -487,6 +501,7 @@ class TestAttentionWeightsProperties:
 
         **Validates: Requirements 2.1**
         """
+        torch.manual_seed(3141602)
         # Ensure n_query_groups divides n_head for valid GQA
         n_query_groups = max(1, n_head // max(1, n_head // 2))
         if n_head % n_query_groups != 0:
@@ -558,6 +573,7 @@ class TestAttentionWeightsProperties:
 
         **Validates: Requirements 2.2**
         """
+        torch.manual_seed(3141603)
         # Ensure n_query_groups divides n_head for valid GQA
         n_query_groups = max(1, n_head // max(1, n_head // 2))
         if n_head % n_query_groups != 0:
@@ -676,6 +692,7 @@ class TestBackendEquivalenceVerification:
 
     def test_check_numerical_equivalence_identical_tensors(self):
         """Test check_numerical_equivalence with identical tensors."""
+        torch.manual_seed(3141605)
         from keys_values.attention.flashinfer_verification import (
             check_numerical_equivalence,
         )
@@ -689,6 +706,7 @@ class TestBackendEquivalenceVerification:
 
     def test_check_numerical_equivalence_within_tolerance(self):
         """Test check_numerical_equivalence with tensors within tolerance."""
+        torch.manual_seed(3141606)
         from keys_values.attention.flashinfer_verification import (
             check_numerical_equivalence,
         )
@@ -711,6 +729,7 @@ class TestBackendEquivalenceVerification:
             check_numerical_equivalence,
         )
 
+        torch.manual_seed(3141607)
         tensor_a = torch.randn(2, 4, 8, 64)
         # Add large noise outside tolerance
         tensor_b = tensor_a + torch.ones_like(tensor_a) * 0.1
@@ -729,6 +748,7 @@ class TestBackendEquivalenceVerification:
             check_numerical_equivalence,
         )
 
+        torch.manual_seed(3141608)
         tensor_a = torch.randn(2, 4, 8, 64)
         tensor_b = torch.randn(2, 4, 16, 64)  # Different shape
 
@@ -741,6 +761,7 @@ class TestBackendEquivalenceVerification:
             verify_backend_equivalence,
         )
 
+        torch.manual_seed(3141609)
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=False
         ):
@@ -765,6 +786,7 @@ class TestBackendEquivalenceVerification:
             verify_backend_equivalence,
         )
 
+        torch.manual_seed(3141610)
         with patch.object(
             FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
         ):
@@ -815,6 +837,7 @@ class TestBackendEquivalenceVerification:
             verify_backend_equivalence_batch,
         )
 
+        torch.manual_seed(3141611)
         # Test case with missing required key
         test_cases = [
             {
@@ -840,6 +863,7 @@ class TestBackendEquivalenceVerificationIntegration:
     @_RunIf(min_cuda_gpus=1)
     def test_fallback_produces_consistent_results(self):
         """Test that fallback SDPA produces consistent results across calls."""
+        torch.manual_seed(3141612)
         wrapper = FlashInferSDPA()
 
         data = sample_random_args()
@@ -864,6 +888,7 @@ class TestBackendEquivalenceVerificationIntegration:
             check_numerical_equivalence,
         )
 
+        torch.manual_seed(3141613)
         tensor_a = torch.randn(2, 4, 8, 64)
         # Add noise of known magnitude
         noise = torch.randn_like(tensor_a) * 1e-5
@@ -922,6 +947,7 @@ class TestTwoPhaseWeightAccumulation:
 
     def test_fused_prefill_routing(self):
         """Test that non-square attention with weights + fp16 + input_pos>0 routes to fused prefill."""
+        torch.manual_seed(3141614)
         for dtype in (torch.float16, torch.bfloat16):
             with patch.object(
                 FlashInferSDPA, "_check_vendored_kernels_available", return_value=True
@@ -957,7 +983,6 @@ class TestTwoPhaseWeightAccumulation:
 
 
 @_RunIf(min_cuda_gpus=1)
-@pytest.mark.skip("To be fixed")
 class TestCausalMaskingCorrectness:
     """Verify causal masking in fused prefill matches eager fallback.
 
@@ -969,63 +994,57 @@ class TestCausalMaskingCorrectness:
 
     def _eager_reference(self, query, key, value, scale, input_pos, token_positions):
         """Compute reference O and W using eager SDPA with explicit causal mask."""
-        wrapper = FlashInferSDPA(use_fused_prefill=False)
-        wrapper.available = False  # force eager fallback
-        return wrapper.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            scale,
+        return scaled_dot_product_attention_in_blocks(
+            query=query,
+            k_and_v=DefaultKeysAndValues(key, value),
+            scale_factor=scale,
             return_attn_weights=True,
-            token_positions=token_positions,
             input_pos=input_pos,
+            token_positions=token_positions,
+            sliding_window_size=None,
         )
 
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     def test_fused_prefill_causal_masking_vs_eager(self, dtype):
         """Fused prefill output and weights must match eager with causal mask."""
-        batch_size = 2
-        n_head = 8
-        n_kv_heads = 2
+        torch.manual_seed(3141615)
         q_len = 64
+        max_batch_size = 2
+        n_query_groups = 2
         input_pos = 128
         kv_len = input_pos + q_len  # current chunk included in cache
         head_size = 128
-
-        torch.manual_seed(42)
-        query = torch.randn(
-            batch_size, n_head, q_len, head_size, device="cuda", dtype=dtype
-        )
-        key = torch.randn(
-            batch_size, n_kv_heads, kv_len, head_size, device="cuda", dtype=dtype
-        )
-        value = torch.randn(
-            batch_size, n_kv_heads, kv_len, head_size, device="cuda", dtype=dtype
-        )
         scale = 1.0 / (head_size**0.5)
-
-        # Contiguous positions: [0, 1, ..., kv_len-1]
-        token_positions = torch.arange(kv_len, device="cuda", dtype=torch.int32)
+        args = sample_random_args(
+            max_batch_size=max_batch_size,
+            n_query_groups=n_query_groups,
+            kv_len=kv_len,
+            head_size=head_size,
+        )
         token_positions = (
-            token_positions.view(1, 1, -1)
-            .expand(batch_size, n_kv_heads, -1)
-            .contiguous()
+            torch.arange(kv_len, device=args["query"].device)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .expand(max_batch_size, n_query_groups, -1)
         )
 
         # Eager reference
+        query = args["query"][:, :, :q_len, :]
         ref_output, ref_weights = self._eager_reference(
-            query, key, value, scale, input_pos, token_positions
+            query,
+            args["key"],
+            args["value"],
+            scale,
+            input_pos,
+            token_positions,
         )
 
         # Fused prefill path
-        wrapper = FlashInferSDPA(use_fused_prefill=True)
-        if not wrapper.available:
-            pytest.skip("FlashInfer kernels not available")
-
+        wrapper = FlashInferSDPA()
         fused_output, fused_weights = wrapper.scaled_dot_product_attention(
             query,
-            key,
-            value,
+            args["key"],
+            args["value"],
             scale,
             return_attn_weights=True,
             token_positions=token_positions,
@@ -1054,51 +1073,34 @@ class TestCausalMaskingCorrectness:
 
     def test_fused_prefill_weights_zero_for_future_positions(self):
         """Verify that attention weights for future KV positions are zero."""
-        batch_size = 1
+        torch.manual_seed(3141616)
+        max_batch_size = 1
         n_head = 4
-        n_kv_heads = 2
+        n_query_groups = 2
         q_len = 32
         input_pos = 64
         kv_len = input_pos + q_len
         head_size = 128
-
-        torch.manual_seed(123)
-        query = torch.randn(
-            batch_size, n_head, q_len, head_size, device="cuda", dtype=torch.float16
-        )
-        key = torch.randn(
-            batch_size,
-            n_kv_heads,
-            kv_len,
-            head_size,
-            device="cuda",
-            dtype=torch.float16,
-        )
-        value = torch.randn(
-            batch_size,
-            n_kv_heads,
-            kv_len,
-            head_size,
-            device="cuda",
-            dtype=torch.float16,
-        )
         scale = 1.0 / (head_size**0.5)
-
-        token_positions = torch.arange(kv_len, device="cuda", dtype=torch.int32)
+        args = sample_random_args(
+            max_batch_size=max_batch_size,
+            n_query_groups=n_query_groups,
+            kv_len=kv_len,
+            head_size=head_size,
+        )
         token_positions = (
-            token_positions.view(1, 1, -1)
-            .expand(batch_size, n_kv_heads, -1)
-            .contiguous()
+            torch.arange(kv_len, device=args["query"].device)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .expand(max_batch_size, n_query_groups, -1)
         )
 
-        wrapper = FlashInferSDPA(use_fused_prefill=True)
-        if not wrapper.available:
-            pytest.skip("FlashInfer kernels not available")
-
+        wrapper = FlashInferSDPA()
+        query = args["query"][:, :, :q_len, :]
         _, weights = wrapper.scaled_dot_product_attention(
             query,
-            key,
-            value,
+            args["key"],
+            args["value"],
             scale,
             return_attn_weights=True,
             token_positions=token_positions,
@@ -1122,6 +1124,7 @@ class TestCausalMaskingCorrectness:
         )
 
 
+# TODO: Not needed right now
 def _torch_attention_weights(query, key, scale, input_pos, token_positions):
     """Pure PyTorch reference: compute attention weight sums with causal mask.
 
@@ -1138,20 +1141,25 @@ def _torch_attention_weights(query, key, scale, input_pos, token_positions):
     batch, n_head, q_len, hd = query.shape
     _, n_kv_heads, kv_len, _ = key.shape
     group_size = n_head // n_kv_heads
+    assert group_size * n_kv_heads == n_head
 
     # Expand key for GQA: [batch, n_head, kv_len, hd]
-    key_expanded = key.unsqueeze(2).expand(-1, -1, group_size, -1, -1)
-    key_expanded = key_expanded.reshape(batch, n_head, kv_len, hd)
+    key_expanded = (
+        key.unsqueeze(2)
+        .expand(-1, -1, group_size, -1, -1)
+        .reshape(batch, n_head, kv_len, hd)
+    )
 
     # Scores: [batch, n_head, q_len, kv_len]
     scores = torch.matmul(query.float(), key_expanded.float().transpose(-1, -2)) * scale
 
     # Causal mask: query pos >= kv pos
     q_pos = torch.arange(input_pos, input_pos + q_len, device=query.device)  # [q_len]
-    kv_pos = token_positions[:, 0, :]  # [batch, kv_len] — same across heads
-    # mask[b, q, k] = True if q_pos[q] >= kv_pos[b, k]
-    mask = q_pos[None, :, None] >= kv_pos[:, None, :]  # [batch, q_len, kv_len]
-    scores.masked_fill_(~mask[:, None, :, :], float("-inf"))
+    # mask[b, h, q, k] = True if q_pos[q] >= token_positions[b, h, k]
+    mask = q_pos.view(1, 1, -1, 1) >= token_positions.unsqueeze(2).expand(
+        -1, -1, q_len, -1
+    )
+    scores.masked_fill_(~mask, float("-inf"))
 
     # Softmax over kv_len
     weights = torch.softmax(scores, dim=-1)  # [batch, n_head, q_len, kv_len]
@@ -1164,8 +1172,35 @@ def _torch_attention_weights(query, key, scale, input_pos, token_positions):
     return W.float()
 
 
+def compute_lse(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    scale: float,
+    causal_mask: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    batch, q_len, n_head, hd = query.shape
+    _, kv_len, n_kv, _ = key.shape
+    group_size = n_head // n_kv
+    Q_4d = query.permute(0, 2, 1, 3).float()
+    K_exp = (
+        key.permute(0, 2, 1, 3)
+        .unsqueeze(2)
+        .expand(-1, -1, group_size, -1, -1)
+        .reshape(batch, n_head, kv_len, hd)
+        .float()
+    )
+    # scores: (batch, n_head, q_len, kv_len)
+    scores = torch.matmul(Q_4d, K_exp.transpose(-1, -2)) * scale
+    if causal_mask:
+        q_pos = torch.arange(kv_len - q_len, kv_len, device="cuda")
+        kv_pos = torch.arange(kv_len, device="cuda")
+        mask = q_pos[:, None] >= kv_pos[None, :]  # [q_len, kv_len]
+        scores.masked_fill_(~mask[None, None, :, :], float("-inf"))
+    # lse: (batch, q_len, n_head)
+    return torch.logsumexp(scores, dim=-1).permute(0, 2, 1) / 0.6931471805599453, scores
+
+
 @_RunIf(min_cuda_gpus=1)
-@pytest.mark.skip("To be fixed")
 class TestTritonScoreSumKernel:
     """Test the Triton score-sum kernel directly."""
 
@@ -1178,22 +1213,12 @@ class TestTritonScoreSumKernel:
         group_size = n_head // n_kv
         scale = 1.0 / (hd**0.5)
 
-        torch.manual_seed(0)
+        torch.manual_seed(3141617)
         Q = torch.randn(batch, q_len, n_head, hd, device="cuda", dtype=torch.float16)
         K = torch.randn(batch, kv_len, n_kv, hd, device="cuda", dtype=torch.float16)
 
         # Compute LSE via PyTorch (no causal mask)
-        Q_4d = Q.permute(0, 2, 1, 3)  # [batch, n_head, q_len, hd]
-        # Expand K: each kv head repeated group_size times along head dim
-        # so heads 0..group_size-1 share kv_head_0, etc.
-        K_exp = K.permute(0, 2, 1, 3)  # [batch, n_kv, kv_len, hd]
-        K_exp = K_exp.unsqueeze(2).expand(-1, -1, group_size, -1, -1)
-        K_exp = K_exp.reshape(batch, n_head, kv_len, hd)
-        scores = torch.matmul(Q_4d.float(), K_exp.float().transpose(-1, -2)) * scale
-        lse = torch.logsumexp(scores, dim=-1) / 0.6931471805599453  # convert to log2
-        # lse: [batch, n_head, q_len] → transpose to [batch, q_len, n_head]
-        lse = lse.permute(0, 2, 1).float()
-
+        lse, scores = compute_lse(Q, K, scale, causal_mask=False)
         # Reference weights (no causal mask)
         weights_ref = torch.softmax(scores, dim=-1)
         W_ref = (
@@ -1202,11 +1227,19 @@ class TestTritonScoreSumKernel:
         )
 
         # Triton kernel (no causal)
-        W_triton = triton_score_sum(Q, K, lse, scale, n_kv, group_size)
+        W_triton = triton_score_sum(
+            Q,
+            K,
+            lse,
+            scale,
+            n_kv,
+            group_size,
+            causal_masking=False,
+        )
 
         torch.testing.assert_close(
             W_triton,
-            W_ref.float(),
+            W_ref,
             rtol=1e-2,
             atol=1e-2,
             msg="Triton score-sum without causal mask doesn't match PyTorch reference",
@@ -1222,27 +1255,14 @@ class TestTritonScoreSumKernel:
         group_size = n_head // n_kv
         scale = 1.0 / (hd**0.5)
 
-        torch.manual_seed(7)
+        torch.manual_seed(3141618)
         Q = torch.randn(batch, q_len, n_head, hd, device="cuda", dtype=torch.float16)
         K = torch.randn(batch, kv_len, n_kv, hd, device="cuda", dtype=torch.float16)
 
         # Compute LSE with causal mask via PyTorch
-        Q_4d = Q.permute(0, 2, 1, 3).float()
-        K_exp = K.permute(0, 2, 1, 3).unsqueeze(1).expand(-1, group_size, -1, -1, -1)
-        K_exp = K_exp.reshape(batch, n_head, kv_len, hd).float()
-        scores = torch.matmul(Q_4d, K_exp.transpose(-1, -2)) * scale
-        q_pos = torch.arange(input_pos, input_pos + q_len, device="cuda")
-        kv_pos = torch.arange(kv_len, device="cuda")
-        causal_mask = q_pos[:, None] >= kv_pos[None, :]  # [q_len, kv_len]
-        scores.masked_fill_(~causal_mask[None, None, :, :], float("-inf"))
-        lse = torch.logsumexp(scores, dim=-1) / 0.6931471805599453
-        lse = lse.permute(0, 2, 1).float()
+        lse, _ = compute_lse(Q, K, scale, causal_mask=True)
 
-        # Token positions: contiguous [0, 1, ..., kv_len-1]
-        tp = torch.arange(kv_len, device="cuda", dtype=torch.int32)
-        tp = tp.view(1, 1, -1).expand(batch, n_kv, -1).contiguous()
-
-        W = triton_score_sum(Q, K, lse, scale, n_kv, group_size, tp, input_pos)
+        W = triton_score_sum(Q, K, lse, scale, n_kv, group_size)
 
         # The LAST KV position (kv_len-1 = input_pos + q_len - 1) should only
         # receive weight from the last query. All prior queries can't attend to it.
@@ -1262,32 +1282,21 @@ class TestTritonScoreSumKernel:
         group_size = n_head // n_kv
         scale = 1.0 / (hd**0.5)
 
-        torch.manual_seed(42)
+        torch.manual_seed(3141619)
         Q = torch.randn(batch, q_len, n_head, hd, device="cuda", dtype=torch.float16)
         K = torch.randn(batch, kv_len, n_kv, hd, device="cuda", dtype=torch.float16)
 
-        query_4d = Q.permute(0, 2, 1, 3)  # [batch, n_head, q_len, hd]
-        key_4d = K.permute(0, 2, 1, 3)  # [batch, n_kv, kv_len, hd]
-
-        tp = torch.arange(kv_len, device="cuda", dtype=torch.int32)
-        tp = tp.view(1, 1, -1).expand(batch, n_kv, -1).contiguous()
-
-        # PyTorch reference
-        W_ref = _torch_attention_weights(query_4d, key_4d, scale, input_pos, tp)
-
         # Compute causal LSE via PyTorch
-        K_exp = key_4d.unsqueeze(2).expand(-1, -1, group_size, -1, -1)
-        K_exp = K_exp.reshape(batch, n_head, kv_len, hd)
-        scores = torch.matmul(query_4d.float(), K_exp.float().transpose(-1, -2)) * scale
-        q_pos = torch.arange(input_pos, input_pos + q_len, device="cuda")
-        kv_pos = torch.arange(kv_len, device="cuda")
-        causal = q_pos[:, None] >= kv_pos[None, :]
-        scores.masked_fill_(~causal[None, None, :, :], float("-inf"))
-        lse = torch.logsumexp(scores, dim=-1) / 0.6931471805599453
-        lse = lse.permute(0, 2, 1).float()
+        lse, scores = compute_lse(Q, K, scale, causal_mask=True)
+        # Reference weights
+        weights_ref = torch.softmax(scores, dim=-1)
+        W_ref = (
+            weights_ref.reshape(batch, n_kv, group_size, q_len, kv_len).sum(dim=(2, 3))
+            / group_size
+        )
 
         # Triton kernel
-        W_triton = triton_score_sum(Q, K, lse, scale, n_kv, group_size, tp, input_pos)
+        W_triton = triton_score_sum(Q, K, lse, scale, n_kv, group_size)
 
         torch.testing.assert_close(
             W_triton,
@@ -1295,192 +1304,4 @@ class TestTritonScoreSumKernel:
             rtol=1e-2,
             atol=1e-2,
             msg="Triton causal score-sum doesn't match PyTorch reference",
-        )
-
-    def test_noncontiguous_positions(self):
-        """Simulates H2O eviction: non-contiguous token_positions."""
-        from keys_values.attention.flashinfer_wrapper import triton_score_sum
-
-        batch, q_len, n_head, n_kv, hd = 1, 16, 4, 2, 128
-        kv_len = 64
-        input_pos = 100  # well past cache filling
-        group_size = n_head // n_kv
-        scale = 1.0 / (hd**0.5)
-
-        torch.manual_seed(99)
-        Q = torch.randn(batch, q_len, n_head, hd, device="cuda", dtype=torch.float16)
-        K = torch.randn(batch, kv_len, n_kv, hd, device="cuda", dtype=torch.float16)
-
-        # Non-contiguous positions: simulate evicted slots replaced with new positions
-        positions = list(range(kv_len))
-        # Slots 10, 20, 30 were evicted and now hold positions 100, 101, 102
-        positions[10] = 100
-        positions[20] = 101
-        positions[30] = 102
-        tp = torch.tensor(positions, device="cuda", dtype=torch.int32)
-        tp = tp.view(1, 1, -1).expand(batch, n_kv, -1).contiguous()
-
-        # PyTorch reference with this position mapping
-        query_4d = Q.permute(0, 2, 1, 3)
-        key_4d = K.permute(0, 2, 1, 3)
-        W_ref = _torch_attention_weights(query_4d, key_4d, scale, input_pos, tp)
-
-        # Compute LSE with the correct causal mask
-        K_exp = key_4d.unsqueeze(2).expand(-1, -1, group_size, -1, -1)
-        K_exp = K_exp.reshape(batch, n_head, kv_len, hd)
-        scores = torch.matmul(query_4d.float(), K_exp.float().transpose(-1, -2)) * scale
-        q_pos = torch.arange(input_pos, input_pos + q_len, device="cuda")
-        kv_pos = tp[0, 0, :]  # [kv_len]
-        causal = q_pos[:, None] >= kv_pos[None, :]
-        scores.masked_fill_(~causal[None, None, :, :], float("-inf"))
-        lse = torch.logsumexp(scores, dim=-1) / 0.6931471805599453
-        lse = lse.permute(0, 2, 1).float()
-
-        W_triton = triton_score_sum(Q, K, lse, scale, n_kv, group_size, tp, input_pos)
-
-        torch.testing.assert_close(
-            W_triton,
-            W_ref,
-            rtol=1e-2,
-            atol=1e-2,
-            msg="Triton score-sum with non-contiguous positions doesn't match reference",
-        )
-
-        # Specifically: slot 30 has position 102 > query positions [100..115],
-        # so only queries at pos 102..115 (14 queries) should attend to it.
-        # Slot 0 has position 0 <= all queries, so all 16 queries attend.
-        # Weight at slot 0 should be > weight at slot 30.
-        for h in range(n_kv):
-            assert W_triton[0, h, 0] > W_triton[0, h, 30], (
-                f"Head {h}: slot 0 (pos=0, all queries attend) should have more weight "
-                f"than slot 30 (pos=102, only 14 queries attend)"
-            )
-
-
-@_RunIf(min_cuda_gpus=1)
-@pytest.mark.skip("To be fixed")
-class TestFusedPrefillEndToEnd:
-    """End-to-end tests: fused prefill path vs eager fallback."""
-
-    def _run_both_paths(self, batch, n_head, n_kv, q_len, input_pos, hd, dtype):
-        """Run fused prefill and eager fallback, return both results."""
-        kv_len = input_pos + q_len
-        scale = 1.0 / (hd**0.5)
-
-        torch.manual_seed(42)
-        query = torch.randn(batch, n_head, q_len, hd, device="cuda", dtype=dtype)
-        key = torch.randn(batch, n_kv, kv_len, hd, device="cuda", dtype=dtype)
-        value = torch.randn(batch, n_kv, kv_len, hd, device="cuda", dtype=dtype)
-
-        tp = torch.arange(kv_len, device="cuda", dtype=torch.int32)
-        tp = tp.view(1, 1, -1).expand(batch, n_kv, -1).contiguous()
-
-        # Eager reference
-        eager = FlashInferSDPA(use_fused_prefill=False)
-        eager.available = False
-        ref_o, ref_w = eager.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            scale,
-            return_attn_weights=True,
-            token_positions=tp,
-            input_pos=input_pos,
-        )
-
-        # Fused prefill
-        fused = FlashInferSDPA(use_fused_prefill=True)
-        if not fused.available:
-            pytest.skip("FlashInfer not available")
-        fused_o, fused_w = fused.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            scale,
-            return_attn_weights=True,
-            token_positions=tp,
-            input_pos=input_pos,
-        )
-
-        return ref_o, ref_w, fused_o, fused_w
-
-    def test_small_config(self):
-        """Small config: 2 heads, 1 KV head, short sequences."""
-        ref_o, ref_w, fused_o, fused_w = self._run_both_paths(
-            batch=1,
-            n_head=2,
-            n_kv=1,
-            q_len=16,
-            input_pos=32,
-            hd=128,
-            dtype=torch.float16,
-        )
-        torch.testing.assert_close(fused_o.float(), ref_o.float(), rtol=1e-2, atol=1e-2)
-        torch.testing.assert_close(fused_w.float(), ref_w.float(), rtol=1e-2, atol=1e-2)
-
-    def test_qwen3_config(self):
-        """Qwen3-4B config: 32 heads, 8 KV heads, head_dim=128."""
-        ref_o, ref_w, fused_o, fused_w = self._run_both_paths(
-            batch=2,
-            n_head=32,
-            n_kv=8,
-            q_len=64,
-            input_pos=128,
-            hd=128,
-            dtype=torch.bfloat16,
-        )
-        torch.testing.assert_close(fused_o.float(), ref_o.float(), rtol=1e-2, atol=1e-2)
-        torch.testing.assert_close(fused_w.float(), ref_w.float(), rtol=1e-2, atol=1e-2)
-
-    def test_head_dim_64(self):
-        """Smaller head_dim=64 (different Triton block sizes)."""
-        ref_o, ref_w, fused_o, fused_w = self._run_both_paths(
-            batch=1,
-            n_head=8,
-            n_kv=2,
-            q_len=32,
-            input_pos=64,
-            hd=64,
-            dtype=torch.float16,
-        )
-        torch.testing.assert_close(fused_o.float(), ref_o.float(), rtol=1e-2, atol=1e-2)
-        torch.testing.assert_close(fused_w.float(), ref_w.float(), rtol=1e-2, atol=1e-2)
-
-    def test_weights_are_nonnegative(self):
-        """Attention weight sums must always be >= 0."""
-        _, _, _, fused_w = self._run_both_paths(
-            batch=2,
-            n_head=8,
-            n_kv=2,
-            q_len=64,
-            input_pos=128,
-            hd=128,
-            dtype=torch.bfloat16,
-        )
-        assert (fused_w >= 0).all(), "Attention weight sums must be non-negative"
-
-    def test_weights_monotonic_by_position(self):
-        """Earlier KV positions should have >= total weight than later ones.
-
-        This is because earlier positions are attended to by MORE queries
-        (all queries with position >= kv_pos can attend), while later
-        positions are only attended to by fewer queries.
-        """
-        _, _, _, fused_w = self._run_both_paths(
-            batch=1,
-            n_head=8,
-            n_kv=2,
-            q_len=64,
-            input_pos=128,
-            hd=128,
-            dtype=torch.bfloat16,
-        )
-        # Compare first quarter vs last quarter of the within-chunk region
-        w = fused_w[0]  # [n_kv, kv_len]
-        chunk_start = 128  # input_pos
-        first_quarter = w[:, chunk_start : chunk_start + 16].mean()
-        last_quarter = w[:, -16:].mean()
-        assert first_quarter > last_quarter, (
-            f"Earlier chunk positions ({first_quarter:.4f}) should have more weight "
-            f"than later ones ({last_quarter:.4f}) due to causal masking"
         )
