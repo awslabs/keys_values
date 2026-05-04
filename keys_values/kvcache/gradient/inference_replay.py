@@ -349,7 +349,13 @@ class InferenceSmartInitialLastRecentlyInsertedReplayCache(
     ):
         extra_kwargs = dict()
         # If args are not in `base_kwargs`, take them from `replay_log`
-        for name in ("tokenizer", "end_initial_regex", "max_initial_fraction", "include_end_string", "pad_id"):
+        for name in (
+            "tokenizer",
+            "end_initial_regex",
+            "max_initial_fraction",
+            "include_end_string",
+            "pad_id",
+        ):
             if name not in base_kwargs:
                 extra_kwargs[name] = getattr(replay_log, name)
         SmartInitialLastRecentlyInsertedKVCache.__init__(

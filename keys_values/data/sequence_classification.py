@@ -110,7 +110,10 @@ class SequenceClassificationDataset(LongContextDataset):
         prompt = self.prompt_style.apply(prompt=example["instruction"], **example)
         max_length = -1 if self.max_seq_length is None else self.max_seq_length
         encoded_prompt = self.tokenizer.encode(
-            prompt, bos=False, eos=True, max_length=max_length,
+            prompt,
+            bos=False,
+            eos=True,
+            max_length=max_length,
         )
         token_counts = {"raw_plus_prompt_template": len(encoded_prompt)}
         raw_count = example.get("num_tokens_instruction")
