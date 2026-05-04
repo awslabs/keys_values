@@ -146,6 +146,7 @@ def get_dataloaders(
         head_model=head_model,
         val_batch_size=eval.micro_batch_size,
         train_val_split_indices=train_val_split_indices,
+        debug_total_len=len(data),  # DEBUG!
     )
     if fabric is not None:
         with fabric.rank_zero_first():
