@@ -347,16 +347,17 @@ class InferenceSmartInitialLastRecentlyInsertedReplayCache(
         replay_log: SmartInitialLastRecentlyInsertedKVCacheReplayLog,
         **base_kwargs,
     ):
+        extra_kwargs = dict()
+        # If args are not in `base_kwargs`, take them from `replay_log`
+        for name in ("tokenizer", "end_initial_regex", "max_initial_fraction", "include_end_string", "pad_id"):
+            if name not in base_kwargs:
+                extra_kwargs[name] = getattr(replay_log, name)
         SmartInitialLastRecentlyInsertedKVCache.__init__(
             self,
             config=config,
             buffers=buffers,
             block_idx=block_idx,
-            tokenizer=replay_log.tokenizer,
-            end_initial_regex=replay_log.end_initial_regex,
-            max_initial_fraction=replay_log.max_initial_fraction,
-            include_end_string=replay_log.include_end_string,
-            pad_id=replay_log.pad_id,
+            **extra_kwargs,
             **base_kwargs,
         )
         InferenceReplayCacheMixin.__init__(self)
