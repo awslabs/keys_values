@@ -175,12 +175,12 @@ class SequenceLengthFilteredDataModule(DataModule):
             # DEBUG: Workaround for early bug
             if len(train_ind) == len(val_ind) and train_ind == val_ind:
                 print("Workaround for bug: train_data_index, val_data_index in training state were the same")
-                debug_total_len = kwargs["debug_total_len"]
-                val_ind = list(set(range(debug_total_len)).difference(train_ind))
-            total_len = len(train_ind) + len(val_ind)
-            assert all(0 <= x < total_len for ind in (train_ind, val_ind) for x in ind)
-            combined = set(train_ind + val_ind)
-            assert len(combined) == total_len, (combined, train_ind, val_ind)
+                self._train_val_split_indices = train_ind, None
+            else:
+                total_len = len(train_ind) + len(val_ind)
+                assert all(0 <= x < total_len for ind in (train_ind, val_ind) for x in ind)
+                combined = set(train_ind + val_ind)
+                assert len(combined) == total_len, (combined, train_ind, val_ind)
 
     def _get_dataset(self) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
         """
@@ -245,6 +245,12 @@ class SequenceLengthFilteredDataModule(DataModule):
             self._train_val_split_indices = (train_ind, val_ind)
         else:
             train_ind, val_ind = self._train_val_split_indices
+            # DEBUG:
+            if val_ind is None:
+                print("Workaround, part II")
+                debug_total_len = len(data)
+                val_ind = list(set(range(debug_total_len)).difference(train_ind))
+            # END DEBUG
             train_data = Subset(data, train_ind)
             val_data = Subset(data, val_ind)
         train_data, val_data = list(train_data), list(val_data)

@@ -24,6 +24,20 @@ class BatchSampler(Sampler[List[int]]):
         raise NotImplementedError
 
 
+FINGERPRINT_NAMES = (
+    "pos",
+    "dataset_size",
+    "num_next",
+    "micro_batch_size",
+    "num_devices",
+    "rank",
+)
+
+_FINGERPRINT_NAME_TO_POS = dict(
+    zip(FINGERPRINT_NAMES, range(len(FINGERPRINT_NAMES)))
+)
+
+
 class SimilarSequenceLengthIterator(Iterator[List[int]]):
     def __init__(
         self,
@@ -168,15 +182,9 @@ class SimilarSequenceLengthIterator(Iterator[List[int]]):
     def _check_fingerprint(self, fp: List[int]) -> int:
         if len(fp) != 6:
             raise ValueError(f"fp = {fp}: Fingerprint has 6 entries")
+        assert _FINGERPRINT_NAME_TO_POS["pos"] == 0
         fp_curr = self._fingerprint()
-        names = (
-            "dataset_size",
-            "num_next",
-            "micro_batch_size",
-            "num_devices",
-            "rank",
-        )
-        for name, elem, elem_curr in zip(names, fp[1:], fp_curr[1:]):
+        for name, elem, elem_curr in zip(FINGERPRINT_NAMES[1:], fp[1:], fp_curr[1:]):
             if elem != elem_curr:
                 raise ValueError(
                     f"Entry {name} of fingerprint: {elem}, but must be {elem_curr}"
@@ -222,7 +230,7 @@ class SimilarSequenceLengthIterator(Iterator[List[int]]):
 
     @staticmethod
     def rank_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> int:
-        return state_dict["fingerprint"].tolist()[4]
+        return state_dict["fingerprint"].tolist()[_FINGERPRINT_NAME_TO_POS["rank"]]
 
 
 class SimilarSequenceLengthSampler(BatchSampler):
