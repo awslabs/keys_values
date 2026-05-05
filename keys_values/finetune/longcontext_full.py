@@ -1362,6 +1362,7 @@ def fit(
                 train_iterator=train_iterator,
                 train_state=train_state,
                 rank=fabric.global_rank,
+                num_devices=devices,
             )
             print_message(
                 f"Resume training: Continue from iteration {state['iter_num']}",

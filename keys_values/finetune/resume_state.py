@@ -207,6 +207,7 @@ def restore_from_training_state(
     train_iterator: CycleIterator,
     train_state: Dict[str, Any],
     rank: int,
+    num_devices: int,
 ):
     ts_rank = SimilarSequenceLengthIterator.rank_from_state_dict(
         train_state["train_iterator"]
@@ -215,13 +216,14 @@ def restore_from_training_state(
         raise ValueError(
             f"train_state['train_iterator'] has rank {ts_rank}, but rank = {rank}"
         )
-    check_train_iterator(train_iterator)
-    ts_len_train = train_state["train_data_index"].numel()
-    len_train = len(train_iterator.iterable)
-    if ts_len_train != len_train:
+    ts_devices = SimilarSequenceLengthIterator.num_devices_from_state_dict(
+        train_state["train_iterator"]
+    )
+    if ts_devices != num_devices:
         raise ValueError(
-            f"train_state['train_data_index'] has length {ts_len_train}, but len(train_iterator.iterable) = {len_train}"
+            f"train_state['train_iterator'] has num_devices {ts_devices}, but num_devices = {num_devices}"
         )
+    check_train_iterator(train_iterator)
     state["iter_num"] = train_state["iter_num"].item()
     for name in _COMPONENT_NAMES:
         if name in state:

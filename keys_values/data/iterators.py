@@ -232,6 +232,10 @@ class SimilarSequenceLengthIterator(Iterator[List[int]]):
     def rank_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> int:
         return state_dict["fingerprint"].tolist()[_FINGERPRINT_NAME_TO_POS["rank"]]
 
+    @staticmethod
+    def num_devices_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> int:
+        return state_dict["fingerprint"].tolist()[_FINGERPRINT_NAME_TO_POS["num_devices"]]
+
 
 class SimilarSequenceLengthSampler(BatchSampler):
     """
