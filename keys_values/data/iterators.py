@@ -212,6 +212,13 @@ class SimilarSequenceLengthIterator(Iterator[List[int]]):
         self._partition = decoded
 
     def state_dict(self) -> Dict[str, torch.Tensor]:
+        # DEBUG
+        print(
+            f"\nDEBUG: state_dict: pos = {self._pos}\n"
+            f"permutation:\n{self._permutation}\n"
+            f"partition:\n{'\n'.join(str(x) for x in self._partition)}"
+        )
+        # END DEBUG
         kwargs = dict(dtype=torch.int64)
         return {
             "fingerprint": torch.tensor(self._fingerprint(), **kwargs),
@@ -227,6 +234,14 @@ class SimilarSequenceLengthIterator(Iterator[List[int]]):
         self._decode_partition(state_dict["partition"].tolist())
         self._permutation = state_dict["permutation"].tolist()
         self._pos = pos
+        # DEBUG
+        print(
+            f"\nDEBUG: load_state_dict: pos = {self._pos}\n"
+            f"permutation:\n{self._permutation}\n"
+            f"partition:\n{'\n'.join(str(x) for x in self._partition)}"
+        )
+        # END DEBUG
+
 
     @staticmethod
     def rank_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> int:
