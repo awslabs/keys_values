@@ -172,9 +172,9 @@ class SequenceLengthFilteredDataModule(DataModule):
         self._train_val_split_indices = kwargs.get("train_val_split_indices")
         if self._train_val_split_indices is not None:
             train_ind, val_ind = self._train_val_split_indices
-            # DEBUG: Workaround for early bug
+            # Workaround for early bug (TODO: Remove)
             if len(train_ind) == len(val_ind) and train_ind == val_ind:
-                print("Workaround for bug: train_data_index, val_data_index in training state were the same")
+                print("Workaround for bug: train_data_index, val_data_index in training state are the same")
                 self._train_val_split_indices = train_ind, None
             else:
                 total_len = len(train_ind) + len(val_ind)
@@ -245,12 +245,11 @@ class SequenceLengthFilteredDataModule(DataModule):
             self._train_val_split_indices = (train_ind, val_ind)
         else:
             train_ind, val_ind = self._train_val_split_indices
-            # DEBUG:
+            # Workaround for early bug (TODO: Remove)
             if val_ind is None:
-                print("Workaround, part II")
+                print("Workaround for bug, part II")
                 debug_total_len = len(data)
                 val_ind = list(set(range(debug_total_len)).difference(train_ind))
-            # END DEBUG
             train_data = Subset(data, train_ind)
             val_data = Subset(data, val_ind)
         train_data, val_data = list(train_data), list(val_data)
