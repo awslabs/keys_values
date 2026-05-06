@@ -163,24 +163,33 @@ Test the fstab entry without rebooting:
 sudo mount -fav
 ```
 
-Set Permissions (Optional)
+Set Permissions (optional):
 ```bash
 # Give your user ownership
 sudo chown -R ubuntu:ubuntu /mnt/efs
 ```
 
-Setup directories:
+Setup directories (for a new volume):
 ```bash
 cd /mnt/efs
 mkdir -p out/finetune
+mkdir -p helmet/longtrain
 cd out/finetune
 mkdir data
 mkdir neurips_exp
+```
+
+Setup symbolic links (for a new EC2 instance):
+```bash
 cd /home/ubuntu
 mkdir -p out/finetune
 cd out/finetune
 ln -s /mnt/efs/out/finetune/data data
 ln -s /mnt/efs/out/finetune/neurips_exp neurips_exp
+cd ../..
+mkdir -p .cache/huggingface/helmet
+cd .cache/huggingface/helmet
+ln -s /mnt/efs/helmet/longtrain longtrain
 ```
 
 ## Clone Repository, Install Virtual Environment
