@@ -41,13 +41,13 @@ class MyDataLoaderIterator(Iterator[Dict[str, Any]]):
         )
         print(
             "\n".join(
-                f"{idx}: input_ids {self.dataset[idx]['input_ids'].shape}, labels {self.dataset[idx]['labels'].shape}, token_counts {self.dataset[idx]['token_counts']}"
+                f"{idx}: input_ids {self.dataset[idx]['input_ids'].shape}, labels {self.dataset[idx]['labels'].shape}"
                 for idx in inds
             )
         )
         # END DEBUG
         result = self.collate_fn([self.dataset[idx] for idx in inds])
-        print(f"collate_fn: inputs_ids {result['inputs_ids'].shape}")  # DEBUG
+        print(f"collate_fn: inputs_ids {result['input_ids'].shape}")  # DEBUG
         return result
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
