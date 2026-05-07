@@ -406,9 +406,8 @@ class TrainArgs:
     """
     Modified training-related arguments in :class:`litgpt.args.TrainArgs`.
 
-    Here, `global_batch_size` does not have a default value. If not given,
-    it should be set to the product of `micro_batch_size` and the number of
-    devices, unless sequential gradient averaging is desired.
+    `global_batch_size` is a legacy argument, which must be equal to the
+    product of `micro_batch_size` and the number of devices, if given.
 
     Storing intermediate checkpoints: Normal checkpoints are stored whenever
     `state["step_count"] % train.save_interval == 0`. If
@@ -421,6 +420,15 @@ class TrainArgs:
     Args:
         intermed_save_interval: See above
         intermed_save_num: See above
+        max_grad_norm: If not `None`, we use gradient clipping (so
+            `torch.nn.utils.clip_grad_norm_`) with this maximum norm.
+            Defaults to 1.0.
+        average_loss_per_batch: If `True`, the sum of loss values for a batch
+            is normalized by the number of non-masked target tokens in that
+            batch. Otherwise (`False`, the default), we average the sum of loss
+            values per data case (by the number of non-masked target tokens),
+            then use the uniform average over the batch.
+            Defaults to `True`.
     """
 
     save_interval: Optional[int] = 1000
@@ -428,7 +436,7 @@ class TrainArgs:
     log_interval: int = 1
     """Number of iterations between logging calls"""
     global_batch_size: Optional[int] = None
-    """Number of samples between optimizer steps across data-parallel ranks"""
+    """Legacy argument: Do not use"""
     micro_batch_size: int = 4
     """Number of samples per data-parallel rank"""
     lr_warmup_steps: Optional[int] = 100
@@ -450,6 +458,8 @@ class TrainArgs:
     """Whether to tie the embedding weights with the language modeling head weights"""
     intermed_save_interval: Optional[int] = None
     intermed_save_num: Optional[int] = None
+    max_grad_norm: Optional[float] = 1.0
+    average_loss_per_batch: Optional[bool] = True
 
     def __post_init__(self) -> None:
         if self.lr_warmup_fraction and self.lr_warmup_steps:
@@ -492,23 +502,8 @@ class TrainArgs:
             raise ValueError(
                 "intermed_save_num only needed if intermed_save_interval is given"
             )
-
-    def gradient_accumulation_iters(self, devices: int, num_nodes: int = 1) -> int:
-        """Number of iterations between gradient synchronizations"""
-        gradient_accumulation_iters = (
-            self.batch_size(devices, num_nodes) // self.micro_batch_size
-        )
-        assert gradient_accumulation_iters > 0
-        return gradient_accumulation_iters
-
-    def batch_size(self, devices: int, num_nodes: int = 1) -> int:
-        """Number of samples between optimizer steps per data-parallel rank"""
-        if self.global_batch_size is None:
-            batch_size = self.micro_batch_size
-        else:
-            batch_size = self.global_batch_size // (devices * num_nodes)
-        assert batch_size > 0
-        return batch_size
+        if self.max_grad_norm is not None and self.max_grad_norm <= 0:
+            raise ValueError("max_grad_norm must be positive (or `None` to disable)")
 
     def warmup_iters(
         self, devices: int, num_nodes: int, max_iters: int, train_dataloader
@@ -519,11 +514,7 @@ class TrainArgs:
                 max_iters, math.ceil(self.lr_warmup_fraction * len(train_dataloader))
             )
         if self.lr_warmup_steps:
-            return min(
-                max_iters,
-                self.lr_warmup_steps
-                * self.gradient_accumulation_iters(devices, num_nodes),
-            )
+            return min(max_iters, self.lr_warmup_steps)
         return 0
 
 
@@ -590,7 +581,8 @@ class SDPAArgs:
             being faster overall.
         use_flex_for_attn_weights: If `False`, we do not use the FlexAttention
             baseline to compute SDPA with summed attention weights. This is
-            slower.
+            slower. If `True`, the baseline is used unless a faster CUDA kernel
+            is available.
         dynamo_cache_size_limit: Value for `torch._dynamo.config.cache_size_limit`.
             Defaults to 32. The built-in default 8 is too small for our purposes.
         fused_rope: If `True`, replace the eager rotary position embedding
@@ -613,6 +605,10 @@ class SDPAArgs:
             kernel instead of two eager kernels. Falls back to eager when
             inputs are not on CUDA or dtypes mismatch. Correctness verified
             against an fp64 reference. See `keys_values/fused_swiglu.py`.
+        flashinfer_attention: If `True` and FlashInfer is available, we use
+            FlashInfer SDPA if summed attention weights are required. If
+            `flex_attention == False`, this kernel is also used if attention
+            weights are not needed.
     """
 
     flex_attention: bool = True
@@ -624,6 +620,7 @@ class SDPAArgs:
     fused_rope: bool = False
     fused_rmsnorm: bool = False
     fused_swiglu: bool = False
+    flashinfer_attention: bool = True
 
     def __post_init__(self):
         if self.flex_num_q_lens is not None and self.flex_num_q_lens <= 0:

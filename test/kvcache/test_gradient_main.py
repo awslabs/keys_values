@@ -25,7 +25,7 @@ from keys_values.finetune.utils import (
     may_match_twice_flex_attention_sdpa,
     may_match_twice_fused_eager_sdpa,
 )
-from keys_values.flex_attention import FlexAttentionArgs
+from keys_values.attention.flex_attention import FlexAttentionArgs
 from keys_values.head_model import CrossEntropyOnLogits, SequenceClassification
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams

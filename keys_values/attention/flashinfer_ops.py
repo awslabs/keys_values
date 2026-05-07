@@ -247,7 +247,7 @@ def sdpa_decode(
             "Vendored FlashInfer kernels are not available. " f"Error: {_load_error}"
         )
 
-    return _ops.sdpa_decode(
+    attn_outputs, attn_weights = _ops.sdpa_decode(
         query,
         key,
         value,
@@ -258,6 +258,13 @@ def sdpa_decode(
         True,  # causal
         return_weights,
     )
+    if return_weights:
+        attn_weights = attn_weights.to(dtype=torch.float32)
+        q_per_kv = query.shape[-2] // key.shape[-2]
+        if q_per_kv > 1:
+            attn_weights /= q_per_kv
+
+    return attn_outputs, attn_weights
 
 
 def sdpa_prefill(

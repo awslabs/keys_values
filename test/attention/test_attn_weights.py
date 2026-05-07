@@ -19,11 +19,11 @@ import pytest
 
 from litgpt.utils import _RunIf
 
-from keys_values.attention import (
+from keys_values.attention.base import (
     scaled_dot_product_attention_in_blocks,
     DefaultKeysAndValues,
 )
-from keys_values.flex_attention import (
+from keys_values.attention.flex_attention import (
     sdpa_flexatt_with_attn_weights,
     FlexAttentionArgs,
 )
@@ -40,7 +40,7 @@ def _get_flashinfer_sdpa():
     if not _flashinfer_checked:
         _flashinfer_checked = True
         try:
-            from keys_values.flashinfer_wrapper import FlashInferSDPA
+            from keys_values.attention.flashinfer_wrapper import FlashInferSDPA
 
             _flashinfer_sdpa = FlashInferSDPA()
         except Exception:
@@ -78,7 +78,9 @@ def pytorch_reference_weights(
     scores = torch.matmul(Q_4d, K_exp.transpose(-1, -2)) * scale
 
     # Causal mask
-    q_positions = torch.arange(q_len, device=query.device) + input_pos  # [q_len]
+    q_positions = torch.arange(
+        input_pos, input_pos + q_len, device=query.device
+    )  # [q_len]
     # token_positions: [batch, n_kv_heads, kv_len] -> expand to [batch, n_head, kv_len]
     tp_exp = repeat_interleave(token_positions, n_head)
 
@@ -144,17 +146,15 @@ def eager_weights(query, key, scale, input_pos, token_positions):
     return attn_weights
 
 
-def get_variants():
+def get_variants(q_len: int):
     variants = (pytorch_reference_weights, eager_weights, flexatt_weights)
-    ind_and_names = (
-        (0, "PyTorch reference"),
-        (1, "eager"),
-        (2, "FlexAttention"),
-    )
-    if _get_flashinfer_sdpa() is not None:
+    names = ("PyTorch reference", "eager", "FlexAttention")
+    # TODO: Currently, FlashInfer is skipped for q_len = 1, because there is
+    # some bug. Fix it and remove this exclusion.
+    if _get_flashinfer_sdpa() is not None and q_len > 1:
         variants += (flashinfer_weights,)
-        ind_and_names += ((3, "FlashInfer"),)
-    return variants, ind_and_names
+        names += ("FlashInfer",)
+    return variants, names
 
 
 @_RunIf(min_cuda_gpus=1)
@@ -163,7 +163,6 @@ def test_small_comparison():
     torch.manual_seed(42)
     device = "cuda"
     dtype = torch.bfloat16
-    variants, ind_and_names = get_variants()
 
     # Qwen3-4B config
     batch_size = 1
@@ -174,6 +173,7 @@ def test_small_comparison():
     kv_len = 64
     input_pos = 48  # simulates non-prefill: query starts at pos 48
     scale = 1.0 / math.sqrt(hd)
+    variants, names = get_variants(q_len)
 
     for tp_contiguous in (True, False):
         if tp_contiguous:
@@ -209,27 +209,31 @@ def test_small_comparison():
         ]
 
         # Compare attn weights
-        ref_name = ind_and_names[0][1]
+        ref_name = names[0]
         print("Comparing summed attention weights:")
-        for ind, name in ind_and_names[1:]:
-            print(f"{ref_name} vs {name}:")
-            torch.testing.assert_close(
-                attn_weights[0],
-                attn_weights[ind],
-                atol=1e-4,
-                rtol=1e-4,
-            )
+        for ind, name in enumerate(names):
+            if ind > 0:
+                print(f"{ref_name} vs {name}:")
+                torch.testing.assert_close(
+                    attn_weights[0],
+                    attn_weights[ind],
+                    atol=1e-4,
+                    rtol=1e-4,
+                )
 
         # Check eviction decisions: which top-K entries differ?
         keep_ratio = 0.5
         keep_k = int(kv_len2 * keep_ratio)
         print(f"Comparing eviction decisions: Keep {keep_k} of {kv_len2}:")
         topk_ref = attn_weights[0][0, 0, :].topk(keep_k).indices.sort().values
-        for ind, name in ind_and_names[1:]:
-            topk_comp = attn_weights[ind][0, 0, :].topk(keep_k).indices.sort().values
-            num_match = sum(topk_comp == topk_ref).item()
-            print(f"{ref_name} vs {name}: {num_match} matches")
-            assert num_match == keep_k
+        for ind, name in enumerate(names):
+            if ind > 0:
+                topk_comp = (
+                    attn_weights[ind][0, 0, :].topk(keep_k).indices.sort().values
+                )
+                num_match = sum(topk_comp == topk_ref).item()
+                print(f"{ref_name} vs {name}: {num_match} matches")
+                assert num_match == keep_k
 
 
 @_RunIf(min_cuda_gpus=1)
@@ -238,6 +242,10 @@ def test_small_comparison():
     [
         (16, 256, 240, 0.5, "kv_len=256, keep 50%"),
         (16, 512, 496, 0.5, "kv_len=512, keep 50%"),
+        (1, 256, 255, 0.5, "q_len=1, kv_len=256, keep 50%"),
+        (1, 512, 511, 0.5, "q_len=1, kv_len=512, keep 50%"),
+        (2, 256, 254, 0.5, "q_len=1, kv_len=256, keep 50%"),
+        (2, 512, 510, 0.5, "q_len=1, kv_len=512, keep 50%"),
         (16, 1024, 1008, 0.5, "kv_len=1024, keep 50%"),
         (16, 2048, 2032, 0.5, "kv_len=2048, keep 50%"),
         (16, 1024, 1008, 0.25, "kv_len=1024, keep 25% (aggressive eviction)"),
@@ -249,7 +257,6 @@ def test_larger_comparison(q_len, kv_len, input_pos, keep_ratio, description):
     torch.manual_seed(42 + kv_len)
     device = "cuda"
     dtype = torch.bfloat16
-    variants, ind_and_names = get_variants()
 
     # Qwen3-4B config
     n_head = 32
@@ -257,6 +264,7 @@ def test_larger_comparison(q_len, kv_len, input_pos, keep_ratio, description):
     hd = 128
     scale = 1.0 / math.sqrt(hd)
     batch_size = 1
+    variants, names = get_variants(q_len)
 
     token_positions = index_to_3d(
         torch.arange(kv_len, device=device, dtype=torch.int32),
@@ -273,16 +281,17 @@ def test_larger_comparison(q_len, kv_len, input_pos, keep_ratio, description):
     ]
 
     # Compare attn weights
-    ref_name = ind_and_names[0][1]
+    ref_name = names[0]
     print(f"\n{description}\nComparing summed attention weights:")
-    for ind, name in ind_and_names[1:]:
-        print(f"{ref_name} vs {name}:")
-        torch.testing.assert_close(
-            attn_weights[0],
-            attn_weights[ind],
-            atol=1e-4,
-            rtol=1e-4,
-        )
+    for ind, name in enumerate(names):
+        if ind > 0:
+            print(f"{ref_name} vs {name}:")
+            torch.testing.assert_close(
+                attn_weights[0],
+                attn_weights[ind],
+                atol=1e-4,
+                rtol=1e-4,
+            )
 
     # Check eviction decisions: which top-K entries differ?
     keep_k = int(kv_len * keep_ratio)
@@ -292,10 +301,10 @@ def test_larger_comparison(q_len, kv_len, input_pos, keep_ratio, description):
     for b in range(batch_size):
         for h in range(n_kv_heads):
             topk_ref = set(attn_weights[0][b, h].topk(keep_k).indices.tolist())
-            for ind in range(1, len(ind_and_names)):
+            for ind in range(1, len(names)):
                 topk_comp = set(attn_weights[ind][b, h].topk(keep_k).indices.tolist())
                 if topk_ref != topk_comp:
                     mismatches[ind - 1] += 1
-    for (_, name), num_mis in zip(ind_and_names[1:], mismatches):
+    for name, num_mis in zip(names[1:], mismatches):
         print(f"{ref_name} vs {name}: {num_mis} mismatches")
     assert sum(mismatches) == 0

@@ -22,6 +22,10 @@ from keys_values.attention import (
     KeysAndValues,
     DefaultKeysAndValues,
 )
+from keys_values.attention.sdpa_op import (
+    KVCacheCatUpdateAndSDPAFunction,
+    KVCacheScatterUpdateAndSDPAFunction,
+)
 from keys_values.kvcache.attn_weights import (
     update_token_positions,
     UpdateTokenPositionsGracePeriod,
@@ -32,10 +36,6 @@ from keys_values.kvcache.gradient.annotation import (
     NodeAnnotation,
     create_random_index,
     MAX_DELTA_TRANS_LENGTH,
-)
-from keys_values.kvcache.gradient.sdpa_op import (
-    KVCacheCatUpdateAndSDPAFunction,
-    KVCacheScatterUpdateAndSDPAFunction,
 )
 from keys_values.tools.debug_utils import for_debug
 from keys_values.utils import (

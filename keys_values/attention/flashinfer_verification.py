@@ -18,11 +18,11 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-from keys_values.attention import (
+from keys_values.attention.base import (
     eager_scaled_dot_product_attention,
     DefaultKeysAndValues,
 )
-from keys_values.flashinfer_wrapper import get_flashinfer_sdpa
+from keys_values.attention.flashinfer_wrapper import get_flashinfer_sdpa
 
 # =============================================================================
 # Backend Equivalence Verification Utilities

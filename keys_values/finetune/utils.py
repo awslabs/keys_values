@@ -14,9 +14,11 @@
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Literal, Dict, Any
+import shutil
+from typing import Optional, Tuple, Literal, Dict, Any, Union, List
 
 import lightning as L
+from tokenizers import Tokenizer as HFTokenizer
 import torch
 
 from keys_values.kvcache.smart_lastrec import SmartInitialInformation
@@ -131,6 +133,7 @@ def get_dataloaders(
     train: TrainArgs,
     eval: EvalArgs,
     fabric: Optional[L.Fabric] = None,
+    train_val_split_indices: Optional[Tuple[List[int], List[int]]] = None,
 ) -> Tuple[MyDataLoader, MyDataLoader]:
     num_devices = 1 if fabric is None else fabric.world_size
     rank = 0 if fabric is None else fabric.local_rank
@@ -142,6 +145,7 @@ def get_dataloaders(
         max_seq_length=train.max_seq_length,
         head_model=head_model,
         val_batch_size=eval.micro_batch_size,
+        train_val_split_indices=train_val_split_indices,
     )
     if fabric is not None:
         with fabric.rank_zero_first():
@@ -216,6 +220,23 @@ def load_model_checkpoint(
     checkpoint_dir: Path,
     resume_dir: Optional[Path] = None,
 ) -> None:
+    """
+    Loads weights of `model` from a model checkpoint. Depends on whether the
+    model is of LoRA type or not:
+
+    * Normal type (no LoRA): If `resume_dir` is given, weights are loaded from
+        there. Otherwise, weights are loaded from `checkpoint_dir`.
+    * LoRA: Base model weights are loaded from `checkpoint_dir`. Afterwards, if
+        `resume_dir` is given, LoRA weights are loaded from there. Otherwise,
+        LoRA weights are reset / initialized at random.
+
+    Args:
+        fabric: Fabric instance
+        model: Model to load weights into
+        checkpoint_dir: Base model checkpoint loaded from there
+        resume_dir: Optional. See above.
+
+    """
     is_lora = is_lora_model(model)
     file_path = checkpoint_dir / LIT_MODEL_FNAME
     if not is_lora and resume_dir is not None:
@@ -424,12 +445,15 @@ def fix_dtype_of_score_buffers(gpt_model: GPT):
             cache.fix_dtype_of_score_buffers()
 
 
-def _get_smart_lastrec_info(data: DataModule) -> SmartInitialInformation:
+def _get_smart_lastrec_info(
+    data: DataModule,
+    tokenizer: HFTokenizer,
+) -> SmartInitialInformation:
     from keys_values.data.longbench_v2 import LongBenchV2
     from keys_values.data.helmet import Helmet
 
     if isinstance(data, LongBenchV2) or isinstance(data, Helmet):
-        return data.smart_lastrec_info()
+        return data.smart_lastrec_info(tokenizer)
     else:
         raise ValueError(
             f"data of type {type(data)} does not provide SmartInitialInformation. Implement `data.smart_lastrec_info`"
@@ -439,7 +463,7 @@ def _get_smart_lastrec_info(data: DataModule) -> SmartInitialInformation:
 def adjust_cache_kwargs(
     kv_cache: KVCacheArgs,
     data: DataModule,
-    tokenizer: Tokenizer,
+    tokenizer: Union[HFTokenizer, Tokenizer],
 ):
     """
     Called before :func:`wrap_gpt_model`. Sets fields in
@@ -450,19 +474,42 @@ def adjust_cache_kwargs(
     not to the KV cache type.
 
     """
-    if kv_cache.name == "smart-lastrec":
+    if kv_cache.name.startswith("smart-lastrec"):
         cache_kwargs = kv_cache.cache_kwargs
         if cache_kwargs is None:
             cache_kwargs = dict()
+        if isinstance(tokenizer, Tokenizer):
+            tokenizer = tokenizer.processor
+        assert isinstance(
+            tokenizer, HFTokenizer
+        ), f"type(tokenizer) = {type(tokenizer)} not supported"
         cache_kwargs["tokenizer"] = tokenizer
         smart_lastrec_info = None
         for name in (
             "end_initial_regex",
             "max_initial_fraction",
-            "include_end_initial_regex",
+            "include_end_string",
         ):
             if name not in cache_kwargs:
+                print(f"adjust_cache_kwargs: Setting {name} from data module")
                 if smart_lastrec_info is None:
-                    smart_lastrec_info = _get_smart_lastrec_info(data)
+                    smart_lastrec_info = _get_smart_lastrec_info(data, tokenizer)
                 cache_kwargs[name] = getattr(smart_lastrec_info, name)
         kv_cache.cache_kwargs = cache_kwargs
+
+
+def copy_config_files(
+    source_dir: Path,
+    out_dir: Path,
+    include_tokenizer_files: bool = False,
+) -> None:
+    """Copies the specified configuration and tokenizer files into the output directory."""
+
+    all_files = ("config.json", "generation_config.json", "model_config.yaml")
+    if include_tokenizer_files:
+        all_files += ("tokenizer.json", "tokenizer.model", "tokenizer_config.json")
+
+    for file_name in all_files:
+        src_path = source_dir / file_name
+        if src_path.exists():
+            shutil.copy(src_path, out_dir)

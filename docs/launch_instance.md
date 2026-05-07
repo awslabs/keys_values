@@ -17,7 +17,7 @@ ssh -i "matthis_deeplearning_uswest2.pem" ubuntu@ec2-35-85-224-176.us-west-2.com
 
 ### Instance `P4Research2`
 
-* Instance ID: `??`
+* Instance ID: `i-01dee00f42a643ea7`
 * File system ID: `fs-0186b686e7dffc35b`
 * VPC: `vpc-0619b17e`
 * Subnet ID: `subnet-124f5848`
@@ -27,6 +27,20 @@ ssh -i "matthis_deeplearning_uswest2.pem" ubuntu@ec2-35-85-224-176.us-west-2.com
 ssh -i "matthis_deeplearning_uswest2.pem" ubuntu@ec2-34-209-209-37.us-west-2.compute.amazonaws.com
 ```
 
+### Instance `P4Research3`
+
+Note: `P4Research2` and `P4Research2` share the same EFS volume.
+
+* Instance ID: `i-0eb0cdd4eb6d6a6e3`
+* File system ID: `fs-0186b686e7dffc35b`
+* VPC: `vpc-0619b17e`
+* Subnet ID: `subnet-124f5848`
+* AZ: `us-west-2c`
+
+```bash
+ssh -i "matthis_deeplearning_uswest2.pem" ubuntu@ec2-16-147-216-186.us-west-2.compute.amazonaws.com
+```
+
 
 ## Launch and start instance
 
@@ -34,6 +48,7 @@ ssh -i "matthis_deeplearning_uswest2.pem" ubuntu@ec2-34-209-209-37.us-west-2.com
 * AMI: `Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 24.04)`
 * Volume size: 180 GiB
 * Security group: `sg-0b00b6174eab4d62b (launch-wizard-16)`
+* VPC: `vpc-0619b17e`
 
 
 ## Create EFS volume
@@ -148,24 +163,33 @@ Test the fstab entry without rebooting:
 sudo mount -fav
 ```
 
-Set Permissions (Optional)
+Set Permissions (optional):
 ```bash
 # Give your user ownership
 sudo chown -R ubuntu:ubuntu /mnt/efs
 ```
 
-Setup directories:
+Setup directories (for a new volume):
 ```bash
 cd /mnt/efs
 mkdir -p out/finetune
+mkdir -p helmet/longtrain
 cd out/finetune
 mkdir data
 mkdir neurips_exp
+```
+
+Setup symbolic links (for a new EC2 instance):
+```bash
 cd /home/ubuntu
 mkdir -p out/finetune
 cd out/finetune
 ln -s /mnt/efs/out/finetune/data data
 ln -s /mnt/efs/out/finetune/neurips_exp neurips_exp
+cd ../..
+mkdir -p .cache/huggingface/helmet
+cd .cache/huggingface/helmet
+ln -s /mnt/efs/helmet/longtrain longtrain
 ```
 
 ## Clone Repository, Install Virtual Environment

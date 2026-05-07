@@ -32,8 +32,6 @@ REGEX_TASKNAME = re.compile(r"step-[0-9]{6}|final")
 _REQUIRED_FILES = [
     "hyperparameters.yaml",
     "model_config.yaml",
-    "tokenizer.json",
-    "tokenizer_config.json",
 ]
 
 REQUIRED_FILES = {
@@ -60,6 +58,8 @@ class EvaluationTasks:
         tasks: Optional[List[str]] = None,
         collect_results: bool = False,
     ):
+        if isinstance(out_dir, str):
+            out_dir = Path(out_dir)
         self._out_dir = out_dir
         self.model_type = model_type
         self._tasks = tasks.copy() if tasks is not None else None
@@ -125,27 +125,39 @@ class EvaluationTasks:
         else:
             return True
 
-    def eval_result_files(self) -> Iterable[Tuple[str, List[Path]]]:
+    def eval_result_files(
+        self,
+        return_incompletes: bool = False,
+    ) -> Iterable[Tuple[str, List[Path]]]:
         """
+        Args:
+            return_incompletes: If `True`, we return the complete lock files.
+                Defaults to `False`, so lock files are filtered out.
         Yields:
             `(task_name, result_file_paths)`, where `result_file_paths`
             is list of paths of evaluation result files for this task name.
             These files are filtered to not contain incomplete lock files.
+            But if `return_incompletes == True`, only incomplete files are
+            returned.
 
         """
         for task_name in self._tasks:
             result_file_paths = self._filter_incomplete_files(
-                (self._out_dir / task_name).glob(EVAL_METRICS_GLOB)
+                (self._out_dir / task_name).glob(EVAL_METRICS_GLOB),
+                return_incompletes=return_incompletes,
             )
             if result_file_paths:
                 yield task_name, result_file_paths
 
     @staticmethod
-    def _filter_incomplete_files(paths: Iterable[Path]) -> List[Path]:
+    def _filter_incomplete_files(
+        paths: Iterable[Path],
+        return_incompletes: bool = False,
+    ) -> List[Path]:
         result = []
         for path in paths:
             with path.open("r") as fp:
-                if not fp.readline().startswith(FILE_LOCK_TEXT):
+                if fp.readline().startswith(FILE_LOCK_TEXT) == return_incompletes:
                     result.append(path)
         return result
 

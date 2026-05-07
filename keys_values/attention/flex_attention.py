@@ -23,7 +23,7 @@ from torch.nn.attention.flex_attention import (
     AuxRequest,
 )
 
-from keys_values.sdpa_wrapper import (
+from keys_values.attention.sdpa_wrapper import (
     sdpa_check_args,
     reorder_key_value,
     reorder_inverse,
@@ -681,9 +681,10 @@ def scaled_dot_product_attention_flexatt(
         # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
         query = zeropad_query_on_left(query, q_len_tr - q_len)
     # Deal with non-standard `scale_factor`
-    diff = scale_factor * math.sqrt(head_size)
-    if not (0.999 < diff < 1.001):
-        query = query * diff
+    if scale_factor is not None:
+        diff = scale_factor * math.sqrt(head_size)
+        if not (0.999 < diff < 1.001):
+            query = query * diff
     if annotation_callback is not None:
         annotation_callback(key, value, extra_info, extend_kv)
 
@@ -852,9 +853,10 @@ def sdpa_flexatt_with_attn_weights(
         # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
         query = zeropad_query_on_left(query, q_len_tr - q_len)
     # Deal with non-standard `scale_factor`
-    diff = scale_factor * math.sqrt(head_size)
-    if not (0.999 < diff < 1.001):
-        query = query * diff
+    if scale_factor is not None:
+        diff = scale_factor * math.sqrt(head_size)
+        if not (0.999 < diff < 1.001):
+            query = query * diff
     attn_output, aux = attn_fn(
         query=query,
         key=key,

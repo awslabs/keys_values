@@ -65,7 +65,7 @@ from litgpt.scripts.convert_hf_checkpoint import (
 from litgpt.scripts.convert_lit_checkpoint import qkv_reassemble as make_qkv_interleaved
 from litgpt.utils import _RunIf
 
-from keys_values.attention import (
+from keys_values.attention.base import (
     DefaultKeysAndValues,
     SDPA_IMPL_PYTORCH,
     SDPA_IMPL_EAGER_NO_BLOCKS,

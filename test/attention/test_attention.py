@@ -29,20 +29,20 @@ from litgpt.model import (
 from litgpt.utils import _RunIf
 
 from keys_values.array_limit import TemporaryArrayLimit
-from keys_values.attention import (
-    DefaultKeysAndValues,
-    MultiHeadSelfAttention,
-    do_softcapping,
-    eager_scaled_dot_product_attention,
-)
-from keys_values.attention_utils import (
+from keys_values.attention.attention_utils import (
     build_mask_cache,
     build_mask_slice,
     sample_token_positions,
     ENTRIES_PER_GB,
 )
+from keys_values.attention.base import (
+    DefaultKeysAndValues,
+    MultiHeadSelfAttention,
+    do_softcapping,
+    eager_scaled_dot_product_attention,
+)
+from keys_values.attention.flex_attention import FlexAttentionArgs
 from keys_values.config import Config
-from keys_values.flex_attention import FlexAttentionArgs
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCache, KVCacheParams, DefaultKVCache
@@ -925,6 +925,7 @@ def test_mha_is_passed_on(device):
         get_inputs_slice=get_inputs_slice,
         write_head_gradients_slice=write_head_gradients_slice,
         targets=targets,
+        average_loss_per_batch=False,
     )
     # Note: Must call `accumulator._create_inference_replay_caches` for
     # single-layer shards only

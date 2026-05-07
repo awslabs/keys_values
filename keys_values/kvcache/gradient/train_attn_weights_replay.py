@@ -19,13 +19,18 @@ import torch
 
 from keys_values.config import Config
 
-from keys_values.attention import (
+from keys_values.attention.base import (
     KeysAndValues,
     DefaultKeysAndValues,
     SDPA_IMPL_QPADDED_PYTORCH,
     SDPA_IMPL_EAGER_BLOCKS,
     SDPA_IMPL_FLEXATTENTION,
 )
+from keys_values.attention.sdpa_op import (
+    scatter_on_buffers,
+    cat_on_buffers,
+)
+from keys_values.attention.sdpa_wrapper import ReorderAnnotationCallback
 from keys_values.kvcache.attn_weights import (
     update_token_positions,
     UpdateTokenPositionsGracePeriod,
@@ -38,11 +43,6 @@ from keys_values.kvcache.gradient.annotation import (
     MAX_DELTA_TRANS_LENGTH,
     create_ext_annotations,
 )
-from keys_values.kvcache.gradient.sdpa_op import (
-    scatter_on_buffers,
-    cat_on_buffers,
-)
-from keys_values.sdpa_wrapper import ReorderAnnotationCallback
 from keys_values.tools.debug_utils import for_debug
 from keys_values.utils import (
     expand_index,

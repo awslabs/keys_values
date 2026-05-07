@@ -50,7 +50,7 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
 
     try:
-        from keys_values.flashinfer_wrapper import FlashInferSDPA
+        from keys_values.attention.flashinfer_wrapper import FlashInferSDPA
 
         wrapper = FlashInferSDPA()
         print(f"FlashInfer available: {wrapper.available}")

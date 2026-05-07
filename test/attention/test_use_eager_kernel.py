@@ -17,7 +17,7 @@ from typing import List, Tuple
 import numpy as np
 import pytest
 
-from keys_values.use_eager_kernel import (
+from keys_values.attention.use_eager_kernel import (
     linear_interpolation,
     DATA_KV_LEN,
     DefaultUseEagerKernel,

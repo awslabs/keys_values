@@ -30,14 +30,14 @@ from torch.linalg import vector_norm
 from keys_values.config import Config
 from litgpt.scripts.convert_hf_checkpoint import qkv_reassemble
 
-from keys_values.attention import (
+from keys_values.attention.base import (
     DefaultKeysAndValues,
     MultiHeadSelfAttention,
     do_softcapping,
 )
+from keys_values.attention.use_eager_kernel import transform_mha_kwargs
 from keys_values.kvcache.base import KVCacheParams, KVCache
 from keys_values.kvcache.basics import KVCacheWithBuffers
-from keys_values.use_eager_kernel import transform_mha_kwargs
 from keys_values.utils import copy_parameters
 
 # See `GPT.set_start_of_layer_hook`. A start of layer hook is called just before

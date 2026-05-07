@@ -13,11 +13,12 @@
 # limitations under the License.
 
 import logging
+import math
 from typing import Optional, Tuple
 
 import torch
 
-from keys_values.sdpa_wrapper import (
+from keys_values.attention.sdpa_wrapper import (
     sdpa_check_args,
     reorder_key_value,
     reorder_inverse,
@@ -344,7 +345,7 @@ class FlashInferSDPA:
             True if vendored kernels are available and compatible, False otherwise
         """
         try:
-            from keys_values import flashinfer_ops
+            from keys_values.attention import flashinfer_ops
 
             available = flashinfer_ops.is_available()
             if available:
@@ -360,36 +361,12 @@ class FlashInferSDPA:
             logger.debug(f"Error checking vendored kernel availability: {e}")
             return False
 
-    # TODO: Needed??
-    def _should_use_chunk_processing(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-    ) -> bool:
-        """
-        Determine if decode-kernel processing should be used.
-
-        Returns True only for single-token decode (q_len == 1, kv_len > 1).
-        For non-square attention with q_len > 1 (e.g., chunked prefill),
-        the prefill kernel is used instead.
-
-        Args:
-            query: Query tensor, shape (batch_size, n_head, q_len, head_size)
-            key: Key tensor, shape (batch_size, n_query_groups, kv_len, head_size)
-
-        Returns:
-            True if decode-kernel processing should be used, False otherwise
-        """
-        q_len = query.shape[2]
-        kv_len = key.shape[2]
-        return q_len == 1 and kv_len > 1
-
     def scaled_dot_product_attention(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        scale_factor: float,
+        scale_factor: Optional[float],
         input_pos: int,
         token_positions: Optional[torch.Tensor],
         return_attn_weights: bool = False,
@@ -438,6 +415,8 @@ class FlashInferSDPA:
             raise ValueError(
                 f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
             )
+        if scale_factor is None:
+            scale_factor = 1.0 / math.sqrt(head_size)
 
         # Check if FlashInfer fast prefill can be used
         if return_attn_weights and not _triton_available:
@@ -522,7 +501,7 @@ class FlashInferSDPA:
             attn_weights = None
 
         if head_size_diff is not None:
-            attn_outputs = attn_outputs[..., :head_size]
+            attn_outputs = attn_outputs[:, :, :, :head_size]
         if not output_transposed:
             attn_outputs = attn_outputs.transpose(1, 2).contiguous()
         return attn_outputs, attn_weights
@@ -547,7 +526,7 @@ class FlashInferSDPA:
             Attention outputs, shape `(batch_size, q_len, n_head, head_size)`
 
         """
-        from keys_values import flashinfer_ops
+        from keys_values.attention import flashinfer_ops
 
         # Transform tensors to vendored kernel format
         # Vendored kernel expects:
@@ -598,7 +577,7 @@ class FlashInferSDPA:
             Tuple of (attention_output, attention_weights)
 
         """
-        from keys_values import flashinfer_ops
+        from keys_values.attention import flashinfer_ops
 
         n_head = query.shape[1]
         n_kv_heads = key.shape[1]
@@ -675,29 +654,27 @@ class FlashInferSDPA:
         Returns:
             Tuple of (attention_output, attention_weights)
         """
-        from keys_values import flashinfer_ops
+        from keys_values.attention import flashinfer_ops
 
         q_len = query.shape[2]
         assert q_len == 1, f"Need q_len == 1, but got {q_len}"
 
         # Transform key and value to vendored kernel format
         # From (batch_size, n_query_groups, kv_len, head_size) to (batch_size, kv_len, n_query_groups, head_size)
-        query = query.contiguous()
+        query = query.squeeze(2).contiguous()
         key_transformed = key.transpose(1, 2).contiguous()
         value_transformed = value.transpose(1, 2).contiguous()
 
         # Call vendored decode kernel
         # Expected query shape: [batch_size, num_qo_heads, head_size]
         output_token, attn_weights = flashinfer_ops.sdpa_decode(
-            query=query.squeeze(2),
+            query=query,
             key=key_transformed,
             value=value_transformed,
             scale=scale_factor,
             return_weights=return_attn_weights,
         )
         attn_outputs = output_token.unsqueeze(1)
-        if return_attn_weights:
-            attn_weights = attn_weights.to(dtype=torch.float32)
 
         return attn_outputs, attn_weights
 

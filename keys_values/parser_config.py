@@ -23,6 +23,7 @@ from litgpt.parser_config import (
 def parser_commands() -> List[str]:
     return parser_commands_litgpt() + [
         "eval_long",
+        "eval_long_ext",
         "finetune_long_full",
         "finetune_long_lora",
         "finetune_offload_full",

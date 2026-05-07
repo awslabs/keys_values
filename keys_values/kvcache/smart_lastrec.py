@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import re
 from typing import Optional, Tuple, Dict, List, Any, Union
 
-from tokenizers import Tokenizer
+from tokenizers import Tokenizer as HFTokenizer
 import torch
 
 from keys_values.attention import KeysAndValues
@@ -34,7 +34,7 @@ from keys_values.kvcache.buffers import (
     positions_wrap_around,
 )
 from keys_values.config import Config
-from keys_values.utils import bits_for_torch_dtype, bitsize_of
+from keys_values.utils import bits_for_torch_dtype, bitsize_of, encode
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,6 @@ class SmartInitialInformation:
         max_initial_fraction: Fraction of cache length initial parts can
             occupy at most
         include_end_string: Include end of init sequence in initial part?
-
     """
 
     end_initial_regex: Union[str, re.Pattern]
@@ -70,10 +69,13 @@ class SmartInitialInformation:
 
 def end_initial_regex_from_string(
     s: str,
-    tokenizer: Tokenizer,
+    tokenizer: HFTokenizer,
     do_escape: bool = True,
 ) -> str:
-    result = tokenizer.decode(tokenizer.encode(s), skip_special_tokens=True)
+    result = tokenizer.decode(
+        encode(tokenizer, s),
+        skip_special_tokens=True,
+    )
     if do_escape:
         result = re.escape(result)
     return result
@@ -89,7 +91,7 @@ class SmartInitialLastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
         token_chunks: List[torch.Tensor],
         cache_length: int,
         n_query_groups: int,
-        tokenizer: Tokenizer,
+        tokenizer: HFTokenizer,
         end_initial_regex: Union[str, re.Pattern],
         max_initial_fraction: float,
         include_end_string: bool,
@@ -206,7 +208,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         config: Config,
         buffers: KVCacheBuffers,
         block_idx: int,
-        tokenizer: Tokenizer,
+        tokenizer: HFTokenizer,
         end_initial_regex: Union[str, re.Pattern],
         max_initial_fraction: float,
         include_end_string: bool = True,
@@ -258,7 +260,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         max_batch_size: int,
         cache_length: int,
         block_idx: int,
-        tokenizer: Tokenizer,
+        tokenizer: HFTokenizer,
         end_initial_regex: Union[str, re.Pattern],
         max_initial_fraction: float,
         include_end_string: bool = True,
@@ -268,6 +270,9 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
     ) -> "SmartInitialLastRecentlyInsertedKVCache":
         """
         Creates KV cache with default buffers.
+
+        `tokenizer` is the Hugging Face object, not the LitGPT wrapper, pass
+        `tokenizer.processor` if you have the latter.
 
         Args:
             config: Model config
@@ -401,7 +406,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
             match = re.search(self.end_initial_regex, decoded)
             if match is not None:
                 raw_length = match.end(0) if self.include_end_string else match.start(0)
-                init_encoded = self.tokenizer.encode(decoded[:raw_length])
+                init_encoded = encode(self.tokenizer, decoded[:raw_length])
                 new_length = len(init_encoded)
                 try:
                     diff_pos = next(

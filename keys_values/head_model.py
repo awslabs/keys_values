@@ -52,6 +52,10 @@ class HeadModel(torch.nn.Module):
         This is called sequentially over chunks, from left to right, and
         `input_pos=0` starts a new batch.
 
+        Note that loss values are sums over entries of the final dimension
+        of `targets`, there is no normalization. :meth:`num_target_entries`
+        can be used to do the normalization,
+
         Args:
             model_outputs: Logits over vocabulary if `needs_logits` returns
                 `True`, otherwise final layer outputs
@@ -63,32 +67,25 @@ class HeadModel(torch.nn.Module):
                 computation.
 
         Returns:
-            Loss function values, one entry per batch dimension. If the loss
-            is normalized over number of targets, the value just considers
-            the length of `targets`. If loss values over chunks are added
-            up, the appropriate weighting needs to be applied.
+            Loss function values, one entry per batch dimension. Loss values
+            are not normalized w.r.t. number of targets.
 
         """
         raise NotImplementedError()
 
-    def num_target_entries(self, targets: Optional[torch.Tensor]) -> Optional[int]:
+    def num_target_entries(self, targets: torch.Tensor) -> Optional[torch.Tensor]:
         """
-        This is used in order to ensure correct combination of the loss value
-        parts returned by :meth:`forward` over all chunks. Namely, if
-        `loss[j] = forward(chunk[j])`, `num[j] = num_target_entries(chunk[j])` over
-        all chunks `j`, the combined loss value is
-        `sum(num * loss) / sum(num)`.
+        Can be used to normalize a loss value summed over all chunks by the
+        number of non-masked target entries. If `None` is returned, the loss
+        value need not be normalized.
 
-        For some loss functions, the loss parts are simply summed up, in which
-        case this method returns `None` for all chunks.
+        Args:
+            targets: Targets, 1D or 2D
 
-        For loss functions which are token-averaged (the default), this
-        returns the number of non-masked target tokens for this chunk. For a
-        chunk not containing target entries (i.e., a prompt chunk), this is 0.
-        The sum of these values across all chunks gives the number of
-        non-masked target tokens for the whole batch. When using gradient
-        averaging over several micro-batches, the reduction must be weighted
-        using these sums.
+        Returns:
+            Number of non-masked target entries, scalar or 1D. For some loss
+            functions, the loss parts are simply summed up, in which case
+            we return `None`
 
         """
         raise NotImplementedError()
@@ -200,13 +197,7 @@ class CrossEntropyOnLogits(HeadModel):
                 ignore_index=self._ignore_index,
                 reduction="none",
             )
-            denom = (
-                (targets != self._ignore_index)
-                .sum(dim=-1)
-                .to(dtype=logits.dtype)
-                .clamp(min=1e-6)
-            )
-            return losses.view(*logits.shape[:2]).sum(dim=-1) / denom
+            return losses.view(*logits.shape[:2]).sum(dim=-1)
         else:
             return torch.zeros(
                 model_outputs.shape[0],
@@ -214,14 +205,13 @@ class CrossEntropyOnLogits(HeadModel):
                 dtype=model_outputs.dtype,
             )
 
-    def num_target_entries(self, targets: Optional[torch.Tensor]) -> Optional[int]:
+    def num_target_entries(self, targets: torch.Tensor) -> Optional[torch.Tensor]:
         """
         This is the sum of entries not equal to `_ignore_index`.
 
         """
-        return (
-            0 if targets is None else int(targets.ne(self._ignore_index).sum().item())
-        )
+        assert 1 <= targets.ndim <= 2
+        return targets.ne(self._ignore_index).to(dtype=torch.int32).sum(dim=-1)
 
     def _empty_clone(self, device: Optional[torch.device] = None) -> "HeadModel":
         config = Config()
@@ -302,12 +292,12 @@ class SequenceClassificationOnLogits(HeadModel):
             )
         if targets.shape[-1] != 1:
             raise ValueError(f"targets.length = {targets.shape[-1]}, must be 1")
-        diff = self._check_model_outputs_targets(
+        self._check_model_outputs_targets(
             model_outputs,
             targets,
             final_dim=self._vocab_size,
         )
-        selected_logits = model_outputs[:, diff:, self.class_label_tokens]
+        selected_logits = model_outputs[:, (-1):, self.class_label_tokens]
         losses = F.cross_entropy(
             selected_logits.reshape(-1, self.num_classes),
             targets.reshape(-1),
@@ -315,7 +305,7 @@ class SequenceClassificationOnLogits(HeadModel):
         )
         return losses.view(*selected_logits.shape[:2]).mean(dim=-1)
 
-    def num_target_entries(self, targets: Optional[torch.Tensor]) -> Optional[int]:
+    def num_target_entries(self, targets: torch.Tensor) -> Optional[torch.Tensor]:
         return None
 
     def _empty_clone(self, device: Optional[torch.device] = None) -> "HeadModel":
@@ -419,7 +409,7 @@ class SequenceClassification(HeadModel):
         )
         return losses.view(*logits.shape[:2]).mean(dim=-1)
 
-    def num_target_entries(self, targets: Optional[torch.Tensor]) -> Optional[int]:
+    def num_target_entries(self, targets: torch.Tensor) -> Optional[torch.Tensor]:
         return None
 
     def _empty_clone(self, device: Optional[torch.device] = None) -> "HeadModel":
