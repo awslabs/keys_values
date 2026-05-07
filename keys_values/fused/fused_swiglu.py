@@ -11,24 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Fused Triton kernel for SwiGLU (silu(a) * b).
-
-Replaces the eager LLaMAMLP inner sequence `F.silu(x_fc_1) * x_fc_2`
-(2 kernels: silu + elementwise multiply) with a single Triton kernel.
-Forward and backward are both implemented as torch.autograd.Function so
-the training cell loop's saved_tensors_hooks see a normal autograd
-function.
-
-Math:
-  silu(a) = a * sigmoid(a)
-  y = silu(a) * b
-
-Backward (with s = sigmoid(a), f = silu(a) = a * s):
-  dL/da = dL/dy * b * s * (1 + a * (1 - s))
-        = dL/dy * b * (s + f * (1 - s))
-  dL/db = dL/dy * f
-"""
-
 import torch
 
 _triton_available = False
@@ -91,22 +73,26 @@ if _triton_available:
         tl.store(GradB_ptr + offsets, gb.to(B_ptr.dtype.element_ty), mask=mask)
 
 
-def can_use_fused_swiglu(a: torch.Tensor, b: torch.Tensor) -> bool:
-    """Check if `fused_swiglu` can handle these inputs."""
-    if not _triton_available:
-        return False
-    if not a.is_cuda:
-        return False
-    if a.shape != b.shape:
-        return False
-    if a.dtype != b.dtype:
-        return False
-    if a.dtype not in (torch.float32, torch.float16, torch.bfloat16):
-        return False
-    return True
+class FusedSwiGLU(torch.autograd.Function):
+    """Fused Triton kernel for SwiGLU (silu(a) * b).
 
+    Replaces the eager LLaMAMLP inner sequence `F.silu(x_fc_1) * x_fc_2`
+    (2 kernels: silu + elementwise multiply) with a single Triton kernel.
+    Forward and backward are both implemented as torch.autograd.Function so
+    the training cell loop's saved_tensors_hooks see a normal autograd
+    function.
 
-class _FusedSwiGLU(torch.autograd.Function):
+    Math:
+      silu(a) = a * sigmoid(a)
+      y = silu(a) * b
+
+    Backward (with s = sigmoid(a), f = silu(a) = a * s):
+      dL/da = dL/dy * b * s * (1 + a * (1 - s))
+            = dL/dy * b * (s + f * (1 - s))
+      dL/db = dL/dy * f
+
+    """
+
     @staticmethod
     def forward(ctx, a, b):
         if not can_use_fused_swiglu(a, b):
@@ -154,6 +140,21 @@ class _FusedSwiGLU(torch.autograd.Function):
         return grad_a, grad_b
 
 
+def can_use_fused_swiglu(a: torch.Tensor, b: torch.Tensor) -> bool:
+    """Check if `fused_swiglu` can handle these inputs."""
+    if not _triton_available:
+        return False
+    if not a.is_cuda:
+        return False
+    if a.shape != b.shape:
+        return False
+    if a.dtype != b.dtype:
+        return False
+    if a.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+        return False
+    return True
+
+
 def fused_swiglu(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Fused SwiGLU: drop-in replacement for `F.silu(a) * b`.
 
@@ -164,13 +165,14 @@ def fused_swiglu(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     Returns:
         Tensor `silu(a) * b`, same shape and dtype as inputs.
     """
-    return _FusedSwiGLU.apply(a, b)
+    return FusedSwiGLU.apply(a, b)
 
 
 # Module-level flag + monkey-patch machinery, following the same pattern as
 # fused_rmsnorm. When enabled, patches LLaMAMLP.forward to use the fused
 # kernel for the silu-mul step.
 _USE_FUSED_SWIGLU = False
+
 _ORIGINAL_FORWARDS = {}
 
 
@@ -190,9 +192,9 @@ def set_fused_swiglu_enabled(enabled: bool):
 
 def _install_or_restore_hooks(install: bool):
     from keys_values.lora import LLaMAMLP as LLaMAMLPLoRA
-    from litgpt.model import LLaMAMLP as LLaMAMLPLitgpt
+    from litgpt.model import LLaMAMLP as LLaMAMLPFull
 
-    classes = [LLaMAMLPLoRA, LLaMAMLPLitgpt]
+    classes = [LLaMAMLPLoRA, LLaMAMLPFull]
 
     if install:
         for cls in classes:

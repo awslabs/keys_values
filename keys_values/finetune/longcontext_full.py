@@ -94,6 +94,10 @@ from keys_values.finetune.utils import (
     adjust_cache_kwargs,
     copy_config_files,
 )
+from keys_values.fused import (
+    set_fused_swiglu_enabled,
+    set_fused_rmsnorm_enabled,
+)
 from keys_values.generate.base import generate
 from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import HeadModel, CrossEntropyOnLogits
@@ -122,7 +126,10 @@ from keys_values.model import GPT as GPTFull
 from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.optimize.model_factory import BlockComponentName
 from keys_values.parser_config import save_hyperparameters
-from keys_values.pos_encoding import position_encoding_factory
+from keys_values.pos_encoding import (
+    position_encoding_factory,
+    set_fused_rope_enabled,
+)
 from keys_values.tools.size_log import (
     SizeWeightsGradientsLog,
     SizeLogMapper,
@@ -689,6 +696,10 @@ def main(
     else:
         cpu_offload_device = None
         optim_device = fabric.device
+    # Enable/disable fused operators
+    set_fused_rope_enabled(sdpa.fused_rope)
+    set_fused_rmsnorm_enabled(sdpa.fused_rmsnorm)
+    set_fused_swiglu_enabled(sdpa.fused_swiglu)
 
     if fabric.global_rank == 0:
         os.makedirs(out_dir, exist_ok=True)
@@ -985,15 +996,6 @@ def get_mha_and_cache_kwargs(
         init_val=limit_gb,
         name="attention_forward_temp_size_gb",
     )
-    from keys_values.pos_encoding import set_fused_rope_enabled
-
-    set_fused_rope_enabled(sdpa.fused_rope)
-    from keys_values.fused_rmsnorm import set_fused_rmsnorm_enabled
-
-    set_fused_rmsnorm_enabled(sdpa.fused_rmsnorm)
-    from keys_values.fused_swiglu import set_fused_swiglu_enabled
-
-    set_fused_swiglu_enabled(sdpa.fused_swiglu)
     mha_kwargs: Dict[str, Any] = dict(
         tmp_array_limit_gb=tmp_array_limit_forward,
         pos_encoding=position_encoding_factory(config, do_yarn=yarn_rope),

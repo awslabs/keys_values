@@ -12,7 +12,7 @@
 * AZ: `us-west-2b`
 
 ```bash
-ssh -i "matthis_deeplearning_uswest2.pem" ubuntu@ec2-35-85-224-176.us-west-2.compute.amazonaws.com
+ssh -i "~/matthis_deeplearning_uswest2.pem" ubuntu@ec2-35-85-224-176.us-west-2.compute.amazonaws.com
 ```
 
 ### Instance `P4Research2`
@@ -24,7 +24,7 @@ ssh -i "matthis_deeplearning_uswest2.pem" ubuntu@ec2-35-85-224-176.us-west-2.com
 * AZ: `us-west-2c`
 
 ```bash
-ssh -i "matthis_deeplearning_uswest2.pem" ubuntu@ec2-34-209-209-37.us-west-2.compute.amazonaws.com
+ssh -i "~/matthis_deeplearning_uswest2.pem" ubuntu@ec2-34-209-209-37.us-west-2.compute.amazonaws.com
 ```
 
 ### Instance `P4Research3`
@@ -38,7 +38,7 @@ Note: `P4Research2` and `P4Research2` share the same EFS volume.
 * AZ: `us-west-2c`
 
 ```bash
-ssh -i "matthis_deeplearning_uswest2.pem" ubuntu@ec2-16-147-216-186.us-west-2.compute.amazonaws.com
+ssh -i "~/matthis_deeplearning_uswest2.pem" ubuntu@ec2-16-147-216-186.us-west-2.compute.amazonaws.com
 ```
 
 
