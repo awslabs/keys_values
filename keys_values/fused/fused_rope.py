@@ -11,23 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Fused Triton kernel for rotary position embedding (RoPE).
-
-Replaces the eager apply_rope() sequence (slice + negate + cat + mul + mul +
-add + to-dtype = ~5-6 kernels) with a single Triton kernel. Forward and
-backward are both implemented as torch.autograd.Function, so the training
-cell loop's saved_tensors_hooks see normal autograd functions and continue
-to work unchanged.
-
-Forward:
-  y = x * cos + rot(x) * sin
-where rot(x) = cat(-x[..., half:], x[..., :half], dim=-1).
-
-Backward (see pos_encoding.py derivation):
-  dL/dx_j for j < half = dL/dy_j * cos_j + dL/dy_{j+half} * sin_{j+half}
-  dL/dx_j for j >= half = dL/dy_j * cos_j - dL/dy_{j-half} * sin_{j-half}
-"""
-
 from typing import Tuple
 
 import torch
@@ -186,33 +169,6 @@ if _triton_available:
         tl.store(GradX_ptr + gx_offsets, gx, mask=t_mask[:, None])
 
 
-def can_use_fused_rope(
-    x: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> bool:
-    """Check if `fused_apply_rope` can handle this input."""
-    if not _triton_available:
-        return False
-    if not x.is_cuda:
-        return False
-    if x.dtype not in (torch.float32, torch.float16, torch.bfloat16):
-        return False
-    if x.dim() < 2:
-        return False
-    D = x.shape[-1]
-    if D % 2 != 0:
-        return False
-    if cos.shape != sin.shape:
-        return False
-    if cos.shape[-1] != D:
-        return False
-    T = x.shape[-2]
-    if cos.numel() != T * D:
-        return False
-    return True
-
-
 def _reshape_inputs(
     x: torch.Tensor,
     cos: torch.Tensor,
@@ -230,7 +186,25 @@ def _reshape_inputs(
     return x_view, cos_view, sin_view, BH, T, D, original_shape
 
 
-class _FusedRope(torch.autograd.Function):
+class FusedRoPE(torch.autograd.Function):
+    """Fused Triton kernel for rotary position embedding (RoPE).
+
+    Replaces the eager apply_rope() sequence (slice + negate + cat + mul + mul +
+    add + to-dtype = ~5-6 kernels) with a single Triton kernel. Forward and
+    backward are both implemented as torch.autograd.Function, so the training
+    cell loop's saved_tensors_hooks see normal autograd functions and continue
+    to work unchanged.
+
+    Forward:
+      y = x * cos + rot(x) * sin
+    where rot(x) = cat(-x[..., half:], x[..., :half], dim=-1).
+
+    Backward (see pos_encoding.py derivation):
+      dL/dx_j for j < half = dL/dy_j * cos_j + dL/dy_{j+half} * sin_{j+half}
+      dL/dx_j for j >= half = dL/dy_j * cos_j - dL/dy_{j-half} * sin_{j-half}
+
+    """
+
     @staticmethod
     def forward(ctx, x, cos, sin):
         if not can_use_fused_rope(x, cos, sin):
@@ -309,6 +283,33 @@ class _FusedRope(torch.autograd.Function):
         return grad_x.view(ctx.original_shape), None, None
 
 
+def can_use_fused_rope(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> bool:
+    """Check if `fused_apply_rope` can handle this input."""
+    if not _triton_available:
+        return False
+    if not x.is_cuda:
+        return False
+    if x.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+        return False
+    if x.dim() < 2:
+        return False
+    D = x.shape[-1]
+    if D % 2 != 0:
+        return False
+    if cos.shape != sin.shape:
+        return False
+    if cos.shape[-1] != D:
+        return False
+    T = x.shape[-2]
+    if cos.numel() != T * D:
+        return False
+    return True
+
+
 def fused_apply_rope(
     x: torch.Tensor,
     cos: torch.Tensor,
@@ -324,4 +325,4 @@ def fused_apply_rope(
     Returns:
         RoPE-transformed tensor, same shape and dtype as x.
     """
-    return _FusedRope.apply(x, cos, sin)
+    return FusedRoPE.apply(x, cos, sin)

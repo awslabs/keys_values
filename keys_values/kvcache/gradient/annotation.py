@@ -175,26 +175,16 @@ def create_random_index(
     # Batched random permutation: draw uniform random values of shape
     # (batch, n_heads, length), argsort along the last dim to produce
     # independent permutations per (b, h), then slice to `num`.
-    # This replaces a Python `for b, h: torch.randperm(length)` loop — on CUDA
-    # each randperm launches ~7 small kernels, so the loop produced
-    # batch * n_heads * 7 kernel launches; this path produces a handful.
-    if device.type == "cuda":
-        rand_vals = torch.rand(
-            shape[0], shape[1], length, device=device, dtype=torch.float32
-        )
-        # argsort returns int64; cast to the requested dtype below
-        perms = rand_vals.argsort(dim=-1)
-        if num < length:
-            perms = perms[..., :num]
-        result = perms.to(dtype=dtype)
-    else:
-        # CPU fallback: keep the original loop — randperm on CPU is a single
-        # call and this path isn't perf-critical anyway.
-        index_kwargs = dict(dtype=dtype, device=device)
-        result = torch.empty(shape[:-1], **index_kwargs)
-        for b in range(shape[0]):
-            for h in range(shape[1]):
-                result[b, h, :] = torch.randperm(length, **index_kwargs)[:num]
+    # Replaced a Python nested for loop over b and h, which launched a large
+    # number of CUDA kernels.
+    rand_vals = torch.rand(
+        shape[0], shape[1], length, device=device, dtype=torch.float32
+    )
+    # argsort returns int64; cast to the requested dtype below
+    result = rand_vals.argsort(dim=-1)
+    if num < length:
+        result = result[..., :num]
+    result = result.to(dtype=dtype)
     return expand_index(result, shape[-1])
 
 

@@ -14,10 +14,11 @@
 import math
 from typing import Optional, Dict, Any
 
-from keys_values.config import Config
+import torch
+
 from litgpt.model import build_rope_cache, apply_rope
 
-import torch
+from keys_values.config import Config
 
 # Opt-in fused Triton RoPE. Toggled via `set_fused_rope_enabled(True)` during
 # model setup (see `SDPAArgs.fused_rope`). Falls back to eager apply_rope if
@@ -32,7 +33,7 @@ def set_fused_rope_enabled(enabled: bool):
 
 def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     if _USE_FUSED_ROPE:
-        from keys_values.fused_rope import fused_apply_rope, can_use_fused_rope
+        from keys_values.fused.fused_rope import fused_apply_rope, can_use_fused_rope
 
         if can_use_fused_rope(x, cos, sin):
             return fused_apply_rope(x, cos, sin)

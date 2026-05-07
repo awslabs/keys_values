@@ -1203,7 +1203,6 @@ class LongContextGradientModel(LongContextInferenceModel):
                 snapshots = self._record_gpu_memory_snapshots
             else:
                 snapshots = None
-            torch.cuda.nvtx.range_push(f"accumulator_run_{first_layer_idx}")
             self.accumulator.run(
                 model_part=model_part,
                 get_inputs_slice=partial(get_inputs_slice, layer_idx=first_layer_idx),
@@ -1211,7 +1210,6 @@ class LongContextGradientModel(LongContextInferenceModel):
                 write_head_gradients_slice=write_head_gradients_slice,
                 record_gpu_memory_snapshots=snapshots,
             )
-            torch.cuda.nvtx.range_pop()
             if self.offload_device is not None:
                 module_pairs = [
                     (

@@ -11,24 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Fused Triton kernel for RMSNorm.
-
-Replaces the eager RMSNorm forward (x.float() + x*x + mean + rsqrt + x*rsqrt
-+ mul weight + cast = ~5-6 kernels) with a single Triton kernel. Similarly
-for backward. Implemented as torch.autograd.Function so the training cell
-loop's saved_tensors_hooks see a normal autograd function.
-
-Forward:
-  y = (x / sqrt(mean(x**2) + eps)) * weight        (add_unit_offset=False)
-  y = (x / sqrt(mean(x**2) + eps)) * (1 + weight)  (add_unit_offset=True)
-
-Backward (per row, with w' = weight or 1+weight):
-  r = rsqrt(mean_sq + eps)
-  dL/dw = sum_over_batch( dL/dy * x * r )   (in fp32, reduced across all rows)
-  dL/dx = r * w' * dL/dy - (r**3 / D) * (sum_j(dL/dy_j * w'_j * x_j)) * x
-where D is the norm dim size (last dim).
-"""
-
 import torch
 
 _triton_available = False
@@ -227,33 +209,6 @@ if _triton_available:
         tl.store(GradW_ptr + d_offsets, acc, mask=d_mask)
 
 
-def can_use_fused_rmsnorm(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    dim: int,
-) -> bool:
-    """Check if `fused_rmsnorm` can handle this input."""
-    if not _triton_available:
-        return False
-    if not x.is_cuda:
-        return False
-    if x.dtype not in (torch.float32, torch.float16, torch.bfloat16):
-        return False
-    if x.dim() < 2:
-        return False
-    # Only support reducing along the last dim (the common case)
-    if dim != -1 and dim != x.dim() - 1:
-        return False
-    D = x.shape[-1]
-    if weight.numel() != D:
-        return False
-    # Triton block size must fit the hidden dim; cap at 16384 to stay within
-    # shared memory budgets
-    if D > 16384:
-        return False
-    return True
-
-
 def _next_power_of_two(n: int) -> int:
     p = 1
     while p < n:
@@ -261,7 +216,26 @@ def _next_power_of_two(n: int) -> int:
     return p
 
 
-class _FusedRMSNorm(torch.autograd.Function):
+class FusedRMSNorm(torch.autograd.Function):
+    """Fused Triton kernel for RMSNorm.
+
+    Replaces the eager RMSNorm forward (x.float() + x*x + mean + rsqrt + x*rsqrt
+    + mul weight + cast = ~5-6 kernels) with a single Triton kernel.
+    Implemented as torch.autograd.Function so the training cell
+    loop's saved_tensors_hooks see a normal autograd function.
+
+    Forward:
+      y = (x / sqrt(mean(x**2) + eps)) * weight        (add_unit_offset=False)
+      y = (x / sqrt(mean(x**2) + eps)) * (1 + weight)  (add_unit_offset=True)
+
+    Backward (per row, with w' = weight or 1+weight):
+      r = rsqrt(mean_sq + eps)
+      dL/dw = sum_over_batch( dL/dy * x * r )   (in fp32, reduced across all rows)
+      dL/dx = r * w' * dL/dy - (r**3 / D) * (sum_j(dL/dy_j * w'_j * x_j)) * x
+    where D is the norm dim size (last dim).
+
+    """
+
     @staticmethod
     def forward(ctx, x, weight, eps, add_unit_offset):
         if not can_use_fused_rmsnorm(x, weight, -1):
@@ -397,6 +371,33 @@ class _FusedRMSNorm(torch.autograd.Function):
         return grad_x.view(ctx.original_shape), grad_w, None, None
 
 
+def can_use_fused_rmsnorm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    dim: int,
+) -> bool:
+    """Check if `fused_rmsnorm` can handle this input."""
+    if not _triton_available:
+        return False
+    if not x.is_cuda:
+        return False
+    if x.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+        return False
+    if x.dim() < 2:
+        return False
+    # Only support reducing along the last dim (the common case)
+    if dim != -1 and dim != x.dim() - 1:
+        return False
+    D = x.shape[-1]
+    if weight.numel() != D:
+        return False
+    # Triton block size must fit the hidden dim; cap at 16384 to stay within
+    # shared memory budgets
+    if D > 16384:
+        return False
+    return True
+
+
 def fused_rmsnorm(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -414,7 +415,7 @@ def fused_rmsnorm(
     Returns:
         Normalized tensor, same shape and dtype as x.
     """
-    return _FusedRMSNorm.apply(x, weight, eps, add_unit_offset)
+    return FusedRMSNorm.apply(x, weight, eps, add_unit_offset)
 
 
 # Module-level flag controlling whether RMSNorm classes are patched to use the
