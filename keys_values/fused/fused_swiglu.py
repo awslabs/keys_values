@@ -172,6 +172,7 @@ def fused_swiglu(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # fused_rmsnorm. When enabled, patches LLaMAMLP.forward to use the fused
 # kernel for the silu-mul step.
 _USE_FUSED_SWIGLU = False
+
 _ORIGINAL_FORWARDS = {}
 
 
@@ -191,9 +192,9 @@ def set_fused_swiglu_enabled(enabled: bool):
 
 def _install_or_restore_hooks(install: bool):
     from keys_values.lora import LLaMAMLP as LLaMAMLPLoRA
-    from litgpt.model import LLaMAMLP as LLaMAMLPLitgpt
+    from litgpt.model import LLaMAMLP as LLaMAMLPFull
 
-    classes = [LLaMAMLPLoRA, LLaMAMLPLitgpt]
+    classes = [LLaMAMLPLoRA, LLaMAMLPFull]
 
     if install:
         for cls in classes:

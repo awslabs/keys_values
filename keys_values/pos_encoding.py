@@ -16,7 +16,7 @@ from typing import Optional, Dict, Any
 
 import torch
 
-from litgpt.model import build_rope_cache, apply_rope
+from litgpt.model import build_rope_cache, apply_rope as apply_rope_litgpt
 
 from keys_values.config import Config
 
@@ -31,13 +31,15 @@ def set_fused_rope_enabled(enabled: bool):
     _USE_FUSED_ROPE = enabled
 
 
-def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+def apply_rope(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+) -> torch.Tensor:
     if _USE_FUSED_ROPE:
         from keys_values.fused.fused_rope import fused_apply_rope, can_use_fused_rope
 
         if can_use_fused_rope(x, cos, sin):
             return fused_apply_rope(x, cos, sin)
-    return apply_rope(x=x, cos=cos, sin=sin)
+    return apply_rope_litgpt(x=x, cos=cos, sin=sin)
 
 
 class PositionEncoding:
@@ -231,7 +233,7 @@ class LinearPositionEncoding(PositionEncoding):
                 value=sin,
                 postfix="_rope_sin",
             )
-        return _apply_rope(x=x, cos=cos, sin=sin)
+        return apply_rope(x=x, cos=cos, sin=sin)
 
 
 DEFAULT_YARN_ALPHA = 1.0
