@@ -15,7 +15,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 import shutil
-from typing import Optional, Tuple, Literal, Dict, Any, Union, List
+from typing import Optional, Tuple, Literal, Dict, Any, Union
 
 import lightning as L
 from tokenizers import Tokenizer as HFTokenizer
@@ -36,6 +36,7 @@ from keys_values.data.base import (
     LORA_WEIGHTS_FNAME,
 )
 from keys_values.data.dataloader import MyDataLoader
+from keys_values.data.trainstate import DataTrainState
 from keys_values.finetune.args import (
     TrainArgs,
     EvalArgs,
@@ -133,7 +134,7 @@ def get_dataloaders(
     train: TrainArgs,
     eval: EvalArgs,
     fabric: Optional[L.Fabric] = None,
-    train_val_split_indices: Optional[Tuple[List[int], List[int]]] = None,
+    training_state: Optional[DataTrainState] = None,
 ) -> Tuple[MyDataLoader, MyDataLoader]:
     num_devices = 1 if fabric is None else fabric.world_size
     rank = 0 if fabric is None else fabric.local_rank
@@ -145,7 +146,7 @@ def get_dataloaders(
         max_seq_length=train.max_seq_length,
         head_model=head_model,
         val_batch_size=eval.micro_batch_size,
-        train_val_split_indices=train_val_split_indices,
+        training_state=training_state,
     )
     if fabric is not None:
         with fabric.rank_zero_first():

@@ -27,7 +27,8 @@ Backward (see pos_encoding.py derivation):
   dL/dx_j for j < half = dL/dy_j * cos_j + dL/dy_{j+half} * sin_{j+half}
   dL/dx_j for j >= half = dL/dy_j * cos_j - dL/dy_{j-half} * sin_{j-half}
 """
-from typing import Optional, Tuple
+
+from typing import Tuple
 
 import torch
 
@@ -45,13 +46,18 @@ if _triton_available:
 
     @triton.jit
     def _fused_rope_fwd_kernel(
-        X_ptr,       # [BH, T, D] element type = bf16/fp16/fp32
-        Cos_ptr,     # [T, D]
-        Sin_ptr,     # [T, D]
-        Out_ptr,     # [BH, T, D]
-        x_stride_bh, x_stride_t, x_stride_d,
-        o_stride_bh, o_stride_t, o_stride_d,
-        cs_stride_t, cs_stride_d,
+        X_ptr,  # [BH, T, D] element type = bf16/fp16/fp32
+        Cos_ptr,  # [T, D]
+        Sin_ptr,  # [T, D]
+        Out_ptr,  # [BH, T, D]
+        x_stride_bh,
+        x_stride_t,
+        x_stride_d,
+        o_stride_bh,
+        o_stride_t,
+        o_stride_d,
+        cs_stride_t,
+        cs_stride_d,
         T,
         D: tl.constexpr,
         HALF: tl.constexpr,
@@ -86,9 +92,7 @@ if _triton_available:
         x_rot = tl.load(X_ptr + x_rot_offsets, mask=t_mask[:, None], other=0.0)
 
         # Load cos, sin (shared across BH dimension)
-        cs_offsets = (
-            t_offsets[:, None] * cs_stride_t + d_offsets[None, :] * cs_stride_d
-        )
+        cs_offsets = t_offsets[:, None] * cs_stride_t + d_offsets[None, :] * cs_stride_d
         cos = tl.load(Cos_ptr + cs_offsets, mask=t_mask[:, None], other=0.0)
         sin = tl.load(Sin_ptr + cs_offsets, mask=t_mask[:, None], other=0.0)
 
@@ -109,13 +113,18 @@ if _triton_available:
 
     @triton.jit
     def _fused_rope_bwd_kernel(
-        GradOut_ptr,   # [BH, T, D]
-        Cos_ptr,       # [T, D]
-        Sin_ptr,       # [T, D]
-        GradX_ptr,     # [BH, T, D]
-        go_stride_bh, go_stride_t, go_stride_d,
-        gx_stride_bh, gx_stride_t, gx_stride_d,
-        cs_stride_t, cs_stride_d,
+        GradOut_ptr,  # [BH, T, D]
+        Cos_ptr,  # [T, D]
+        Sin_ptr,  # [T, D]
+        GradX_ptr,  # [BH, T, D]
+        go_stride_bh,
+        go_stride_t,
+        go_stride_d,
+        gx_stride_bh,
+        gx_stride_t,
+        gx_stride_d,
+        cs_stride_t,
+        cs_stride_d,
         T,
         D: tl.constexpr,
         HALF: tl.constexpr,
@@ -205,7 +214,9 @@ def can_use_fused_rope(
 
 
 def _reshape_inputs(
-    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, torch.Size]:
     """Reshape x to [BH, T, D] contiguous and cos/sin to [T, D] contiguous."""
     original_shape = x.shape
@@ -237,12 +248,22 @@ class _FusedRope(torch.autograd.Function):
         grid = (BH, triton.cdiv(T, BLOCK_T))
 
         _fused_rope_fwd_kernel[grid](
-            x_view, cos_view, sin_view, out_flat,
-            x_view.stride(0), x_view.stride(1), x_view.stride(2),
-            out_flat.stride(0), out_flat.stride(1), out_flat.stride(2),
-            cos_view.stride(0), cos_view.stride(1),
+            x_view,
+            cos_view,
+            sin_view,
+            out_flat,
+            x_view.stride(0),
+            x_view.stride(1),
+            x_view.stride(2),
+            out_flat.stride(0),
+            out_flat.stride(1),
+            out_flat.stride(2),
+            cos_view.stride(0),
+            cos_view.stride(1),
             T,
-            D=D, HALF=HALF, BLOCK_T=BLOCK_T,
+            D=D,
+            HALF=HALF,
+            BLOCK_T=BLOCK_T,
         )
 
         ctx.save_for_backward(cos_view, sin_view)
@@ -267,12 +288,22 @@ class _FusedRope(torch.autograd.Function):
         grid = (BH, triton.cdiv(T, BLOCK_T))
 
         _fused_rope_bwd_kernel[grid](
-            grad_out_view, cos, sin, grad_x,
-            grad_out_view.stride(0), grad_out_view.stride(1), grad_out_view.stride(2),
-            grad_x.stride(0), grad_x.stride(1), grad_x.stride(2),
-            cos.stride(0), cos.stride(1),
+            grad_out_view,
+            cos,
+            sin,
+            grad_x,
+            grad_out_view.stride(0),
+            grad_out_view.stride(1),
+            grad_out_view.stride(2),
+            grad_x.stride(0),
+            grad_x.stride(1),
+            grad_x.stride(2),
+            cos.stride(0),
+            cos.stride(1),
             T,
-            D=D, HALF=HALF, BLOCK_T=BLOCK_T,
+            D=D,
+            HALF=HALF,
+            BLOCK_T=BLOCK_T,
         )
 
         return grad_x.view(ctx.original_shape), None, None

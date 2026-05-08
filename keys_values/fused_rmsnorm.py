@@ -28,7 +28,6 @@ Backward (per row, with w' = weight or 1+weight):
   dL/dx = r * w' * dL/dy - (r**3 / D) * (sum_j(dL/dy_j * w'_j * x_j)) * x
 where D is the norm dim size (last dim).
 """
-from typing import Tuple
 
 import torch
 
@@ -46,12 +45,14 @@ if _triton_available:
 
     @triton.jit
     def _fused_rmsnorm_fwd_kernel(
-        X_ptr,       # [M, D]
-        W_ptr,       # [D]
-        Out_ptr,     # [M, D]
-        Rsqrt_ptr,   # [M]  — saved for backward (fp32)
-        x_stride_m, x_stride_d,
-        o_stride_m, o_stride_d,
+        X_ptr,  # [M, D]
+        W_ptr,  # [D]
+        Out_ptr,  # [M, D]
+        Rsqrt_ptr,  # [M]  — saved for backward (fp32)
+        x_stride_m,
+        x_stride_d,
+        o_stride_m,
+        o_stride_d,
         eps,
         add_unit_offset: tl.constexpr,
         D: tl.constexpr,
@@ -89,14 +90,17 @@ if _triton_available:
 
     @triton.jit
     def _fused_rmsnorm_bwd_dx_kernel(
-        X_ptr,         # [M, D]
-        W_ptr,         # [D]
-        GradOut_ptr,   # [M, D]
-        Rsqrt_ptr,     # [M]
-        GradX_ptr,     # [M, D]
-        x_stride_m, x_stride_d,
-        go_stride_m, go_stride_d,
-        gx_stride_m, gx_stride_d,
+        X_ptr,  # [M, D]
+        W_ptr,  # [D]
+        GradOut_ptr,  # [M, D]
+        Rsqrt_ptr,  # [M]
+        GradX_ptr,  # [M, D]
+        x_stride_m,
+        x_stride_d,
+        go_stride_m,
+        go_stride_d,
+        gx_stride_m,
+        gx_stride_d,
         add_unit_offset: tl.constexpr,
         D: tl.constexpr,
         BLOCK_D: tl.constexpr,
@@ -137,13 +141,16 @@ if _triton_available:
 
     @triton.jit
     def _fused_rmsnorm_bwd_dw_partial_kernel(
-        X_ptr,         # [M, D]
-        GradOut_ptr,   # [M, D]
-        Rsqrt_ptr,     # [M]
-        Partial_ptr,   # [n_m_blocks, D]  (fp32 partial sums)
-        x_stride_m, x_stride_d,
-        go_stride_m, go_stride_d,
-        p_stride_mb, p_stride_d,
+        X_ptr,  # [M, D]
+        GradOut_ptr,  # [M, D]
+        Rsqrt_ptr,  # [M]
+        Partial_ptr,  # [n_m_blocks, D]  (fp32 partial sums)
+        x_stride_m,
+        x_stride_d,
+        go_stride_m,
+        go_stride_d,
+        p_stride_mb,
+        p_stride_d,
         M,
         M_PER_PROGRAM: tl.constexpr,
         D: tl.constexpr,
@@ -177,7 +184,9 @@ if _triton_available:
                 other=0.0,
             ).to(tl.float32)
             go_tile = tl.load(
-                GradOut_ptr + m_off[:, None] * go_stride_m + d_offsets[None, :] * go_stride_d,
+                GradOut_ptr
+                + m_off[:, None] * go_stride_m
+                + d_offsets[None, :] * go_stride_d,
                 mask=m_mask[:, None] & d_mask[None, :],
                 other=0.0,
             ).to(tl.float32)
@@ -194,9 +203,10 @@ if _triton_available:
 
     @triton.jit
     def _fused_rmsnorm_bwd_dw_reduce_kernel(
-        Partial_ptr,   # [n_m_blocks, D]
-        GradW_ptr,     # [D]
-        p_stride_mb, p_stride_d,
+        Partial_ptr,  # [n_m_blocks, D]
+        GradW_ptr,  # [D]
+        p_stride_mb,
+        p_stride_d,
         N_MB: tl.constexpr,
         D: tl.constexpr,
         BLOCK_D: tl.constexpr,
@@ -273,12 +283,18 @@ class _FusedRMSNorm(torch.autograd.Function):
         BLOCK_D = _next_power_of_two(D)
 
         _fused_rmsnorm_fwd_kernel[(M,)](
-            x_view, w_contig, out, rsqrt,
-            x_view.stride(0), x_view.stride(1),
-            out.stride(0), out.stride(1),
+            x_view,
+            w_contig,
+            out,
+            rsqrt,
+            x_view.stride(0),
+            x_view.stride(1),
+            out.stride(0),
+            out.stride(1),
             eps,
             add_unit_offset=bool(add_unit_offset),
-            D=D, BLOCK_D=BLOCK_D,
+            D=D,
+            BLOCK_D=BLOCK_D,
         )
 
         ctx.save_for_backward(x_view, w_contig, rsqrt)
@@ -305,12 +321,20 @@ class _FusedRMSNorm(torch.autograd.Function):
 
         # dL/dx
         _fused_rmsnorm_bwd_dx_kernel[(M,)](
-            x_view, weight, grad_out_view, rsqrt, grad_x,
-            x_view.stride(0), x_view.stride(1),
-            grad_out_view.stride(0), grad_out_view.stride(1),
-            grad_x.stride(0), grad_x.stride(1),
+            x_view,
+            weight,
+            grad_out_view,
+            rsqrt,
+            grad_x,
+            x_view.stride(0),
+            x_view.stride(1),
+            grad_out_view.stride(0),
+            grad_out_view.stride(1),
+            grad_x.stride(0),
+            grad_x.stride(1),
             add_unit_offset=add_unit_offset,
-            D=D, BLOCK_D=BLOCK_D,
+            D=D,
+            BLOCK_D=BLOCK_D,
         )
 
         # dL/dw: split-K reduction.
@@ -331,7 +355,8 @@ class _FusedRMSNorm(torch.autograd.Function):
         m_per_program = max(
             BLOCK_M,
             ((M + target_n_m_blocks - 1) // target_n_m_blocks + BLOCK_M - 1)
-            // BLOCK_M * BLOCK_M,
+            // BLOCK_M
+            * BLOCK_M,
         )
         n_m_blocks = (M + m_per_program - 1) // m_per_program
 
@@ -340,20 +365,31 @@ class _FusedRMSNorm(torch.autograd.Function):
         )
 
         _fused_rmsnorm_bwd_dw_partial_kernel[(n_col_blocks, n_m_blocks)](
-            x_view, grad_out_view, rsqrt, partial,
-            x_view.stride(0), x_view.stride(1),
-            grad_out_view.stride(0), grad_out_view.stride(1),
-            partial.stride(0), partial.stride(1),
+            x_view,
+            grad_out_view,
+            rsqrt,
+            partial,
+            x_view.stride(0),
+            x_view.stride(1),
+            grad_out_view.stride(0),
+            grad_out_view.stride(1),
+            partial.stride(0),
+            partial.stride(1),
             M,
             M_PER_PROGRAM=m_per_program,
-            D=D, BLOCK_M=BLOCK_M, BLOCK_D=BLOCK_D_REDUCE,
+            D=D,
+            BLOCK_M=BLOCK_M,
+            BLOCK_D=BLOCK_D_REDUCE,
         )
 
         _fused_rmsnorm_bwd_dw_reduce_kernel[(n_col_blocks,)](
-            partial, grad_w_fp32,
-            partial.stride(0), partial.stride(1),
+            partial,
+            grad_w_fp32,
+            partial.stride(0),
+            partial.stride(1),
             N_MB=n_m_blocks,
-            D=D, BLOCK_D=BLOCK_D_REDUCE,
+            D=D,
+            BLOCK_D=BLOCK_D_REDUCE,
         )
 
         grad_w = grad_w_fp32.to(weight.dtype)

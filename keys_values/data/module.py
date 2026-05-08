@@ -27,6 +27,7 @@ from keys_values.data.evaluation import (
     SimilarSequenceLengthWithTasksSampler,
     EvaluationDataLoader,
 )
+from keys_values.data.trainstate import DataTrainState
 
 METADATA_SEQ_LENGTHS_KEY = "sequence_lengths"
 
@@ -37,6 +38,75 @@ RawDatasetType = List[Dict[str, str]]
 CollateFnType = Callable[[List[Dict[str, Any]]], Dict[str, Any]]
 
 NUM_TOKENS_NAME = "num_tokens_instruction"
+
+
+class SequenceLengthFilteredDataTrainState(DataTrainState):
+    """
+    Contains the training and validation set indexes from the split of the
+    development dataset.
+    """
+
+    def __init__(self):
+        self._train_data_index = None
+        self._val_data_index = None
+
+    def initialize(
+        self,
+        train_ind: List[int],
+        val_ind: List[int],
+    ):
+        self._check_indexes(train_ind, val_ind)
+        self._train_data_index = train_ind.copy()
+        self._val_data_index = val_ind.copy()
+
+    def _check_indexes(self, train_ind: List[int], val_ind: List[int]):
+        total_len = len(train_ind) + len(val_ind)
+        if not all(0 <= x < total_len for ind in (train_ind, val_ind) for x in ind):
+            raise ValueError(
+                f"Entries in train_ind, val_ind must be in [0, {total_len})"
+            )
+        combined = set(train_ind + val_ind)
+        if len(combined) != total_len:
+            raise ValueError(
+                f"Entries in train_ind, val_ind must be unique and disjoint"
+            )
+
+    def _assert_is_initialized(self):
+        if self._train_data_index is None or self._val_data_index is None:
+            raise IndexError(
+                "State is not initialized. Call `initialize` or `load_state_dict`"
+            )
+
+    @property
+    def train_data_index(self) -> List[int]:
+        self._assert_is_initialized()
+        return self._train_data_index
+
+    @property
+    def val_data_index(self) -> List[int]:
+        self._assert_is_initialized()
+        return self._val_data_index
+
+    def state_dict(self) -> Dict[str, torch.Tensor]:
+        self._assert_is_initialized()
+        kwargs = dict(dtype=torch.int64)
+        return {
+            "train_data_index": torch.tensor(self.train_data_index, **kwargs),
+            "val_data_index": torch.tensor(self.val_data_index, **kwargs),
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, torch.Tensor]):
+        train_ind = state_dict.get("train_data_index")
+        val_ind = state_dict.get("val_data_index")
+        if train_ind is None or val_ind is None:
+            raise ValueError(
+                "state_dict must contain both 'train_data_index' and 'val_data_index'"
+            )
+        train_ind = train_ind.tolist()
+        val_ind = val_ind.tolist()
+        self._check_indexes(train_ind, val_ind)
+        self._train_data_index = train_ind
+        self._val_data_index = val_ind
 
 
 class SequenceLengthFilteredDataModule(DataModule):
@@ -112,7 +182,7 @@ class SequenceLengthFilteredDataModule(DataModule):
         # Maintain sequence lengths (in tokens) for cases in training set.
         # This is used to support specialized data loaders.
         self._sequence_lengths = None
-        self._train_val_split_indices = None
+        self.training_state = None
 
     def connect(
         self,
@@ -131,9 +201,8 @@ class SequenceLengthFilteredDataModule(DataModule):
             Only if `test_set_tag` is given. Defaults to `val_batch_size`.
         - `eval_tasks`: Only if `test_set_tag` is given. See
             :meth:`test_dataloader`.
-        - `train_val_split_indices`: Contains `(train_ind, val_ind)`,
-            providing the split into training and validation set.
-            `val_split_fraction` is ignored then.
+        - `training_state`: Contains object of type
+            :class:`SequenceLengthFilteredDataTrainState` (or subclass).
 
         Args:
             tokenizer: Tokenizer
@@ -169,22 +238,14 @@ class SequenceLengthFilteredDataModule(DataModule):
         if self.test_batch_size is None:
             self.test_batch_size = self.val_batch_size
         self._test_eval_tasks = kwargs.get("eval_tasks")
-        self._train_val_split_indices = kwargs.get("train_val_split_indices")
-        if self._train_val_split_indices is not None:
-            train_ind, val_ind = self._train_val_split_indices
-            # Workaround for early bug (TODO: Remove)
-            if len(train_ind) == len(val_ind) and train_ind == val_ind:
-                print(
-                    "Workaround for bug: train_data_index, val_data_index in training state are the same"
+        self.training_state = kwargs.get("training_state")
+        if self.training_state is not None:
+            if not isinstance(
+                self.training_state, SequenceLengthFilteredDataTrainState
+            ):
+                raise ValueError(
+                    f"training_state must be an instance of SequenceLengthFilteredDataTrainState, but is {type(self.training_state)}"
                 )
-                self._train_val_split_indices = train_ind, None
-            else:
-                total_len = len(train_ind) + len(val_ind)
-                assert all(
-                    0 <= x < total_len for ind in (train_ind, val_ind) for x in ind
-                )
-                combined = set(train_ind + val_ind)
-                assert len(combined) == total_len, (combined, train_ind, val_ind)
 
     def _get_dataset(self) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
         """
@@ -236,8 +297,9 @@ class SequenceLengthFilteredDataModule(DataModule):
 
         """
         data, test_data = self._get_dataset()
-        # Partition the dataset into train and validation
-        if self._train_val_split_indices is None:
+        # Partition the dataset into train and validation. If a training
+        # state is given, this is part of it
+        if self.training_state is None:
             train_data, val_data = random_split(
                 data,
                 [1.0 - self.val_split_fraction, self.val_split_fraction],
@@ -246,16 +308,19 @@ class SequenceLengthFilteredDataModule(DataModule):
             # Retain split indices
             train_ind = [int(x) for x in train_data.indices]
             val_ind = [int(x) for x in val_data.indices]
-            self._train_val_split_indices = (train_ind, val_ind)
+            self.training_state = SequenceLengthFilteredDataTrainState()
+            self.training_state.initialize(train_ind, val_ind)
+            print(
+                f"Split development set into training ({len(train_ind)}) and validation ({len(val_ind)})"
+            )
         else:
-            train_ind, val_ind = self._train_val_split_indices
-            # Workaround for early bug (TODO: Remove)
-            if val_ind is None:
-                print("Workaround for bug, part II")
-                debug_total_len = len(data)
-                val_ind = list(set(range(debug_total_len)).difference(train_ind))
+            train_ind = self.training_state.train_ind
+            val_ind = self.training_state.val_ind
             train_data = Subset(data, train_ind)
             val_data = Subset(data, val_ind)
+            print(
+                f"Development set split loaded from training state: training ({len(train_ind)}) and validation ({len(val_ind)})"
+            )
         train_data, val_data = list(train_data), list(val_data)
         self._sequence_lengths = {
             "train": [record[NUM_TOKENS_NAME] for record in train_data],
@@ -306,14 +371,6 @@ class SequenceLengthFilteredDataModule(DataModule):
         else:
             test_kwargs = None
         self._create_datasets(train_kwargs, val_kwargs, test_kwargs)
-
-    def train_val_split_indices(self) -> Tuple[List[int], List[int]]:
-        if self._train_val_split_indices is None:
-            raise IndexError("Call `setup` first")
-        return (
-            self._train_val_split_indices[0].copy(),
-            self._train_val_split_indices[1].copy(),
-        )
 
     def _get_collate_fn(self) -> CollateFnType:
         """
@@ -395,3 +452,8 @@ class SequenceLengthFilteredDataModule(DataModule):
                 eval_tasks=self._test_eval_tasks,
                 delay_tokenization=True,
             )
+
+    def load_training_state(self, state_dict: Dict[str, torch.Tensor]):
+        if self.training_state is None:
+            self.training_state = SequenceLengthFilteredDataTrainState()
+        self.training_state.load_state_dict(state_dict)
