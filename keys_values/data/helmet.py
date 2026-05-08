@@ -362,6 +362,13 @@ class Helmet(SequenceLengthFilteredDataModule):
                 self.training_state.val_data_index,
             )
             self.training_state = new_training_state
+        else:
+            for name, value in zip(
+                ("train", "val", "test"),
+                (self.training_state.train_target_choice, self.training_state.val_target_choice, self.training_state.test_target_choice),
+            ):
+                if value is not None:
+                    print(f"Loaded {name}_target_choice ({len(value)}) from training state")
         target_choice = self.training_state.train_target_choice
         self.train_dataset = SFTDataset(
             **train_kwargs,
@@ -371,6 +378,7 @@ class Helmet(SequenceLengthFilteredDataModule):
             seed=self.seed,
         )
         if target_choice is None:
+            print(f"Sampled train_target_choice ({len(self.train_dataset.target_choice)})")
             self.training_state.train_target_choice = self.train_dataset.target_choice
         target_choice = self.training_state.val_target_choice
         self.val_dataset = SFTDataset(
@@ -381,6 +389,7 @@ class Helmet(SequenceLengthFilteredDataModule):
             seed=self.seed,
         )
         if target_choice is None:
+            print(f"Sampled val_target_choice ({len(self.val_dataset.target_choice)})")
             self.training_state.val_target_choice = self.val_dataset.target_choice
         if test_kwargs is not None:
             target_choice = self.training_state.test_target_choice
@@ -392,6 +401,7 @@ class Helmet(SequenceLengthFilteredDataModule):
                 seed=self.seed,
             )
             if target_choice is None:
+                print(f"Sampled test_target_choice ({len(self.test_dataset.target_choice)})")
                 self.training_state.test_target_choice = self.test_dataset.target_choice
 
     def _get_collate_fn(self) -> MyDataLoader:

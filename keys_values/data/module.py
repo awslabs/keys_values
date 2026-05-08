@@ -310,9 +310,13 @@ class SequenceLengthFilteredDataModule(DataModule):
             val_ind = [int(x) for x in val_data.indices]
             self.training_state = SequenceLengthFilteredDataTrainState()
             self.training_state.initialize(train_ind, val_ind)
+            print(f"Split development set into training ({len(train_ind)}) and validation ({len(val_ind)})")
         else:
-            train_data = Subset(data, self.training_state.train_ind)
-            val_data = Subset(data, self.training_state.val_ind)
+            train_ind = self.training_state.train_ind
+            val_ind = self.training_state.val_ind
+            train_data = Subset(data, train_ind)
+            val_data = Subset(data, val_ind)
+            print(f"Development set split loaded from training state: training ({len(train_ind)}) and validation ({len(val_ind)})")
         train_data, val_data = list(train_data), list(val_data)
         self._sequence_lengths = {
             "train": [record[NUM_TOKENS_NAME] for record in train_data],
