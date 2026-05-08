@@ -61,9 +61,10 @@ class HelmetDataTrainState(SequenceLengthFilteredDataTrainState):
 
     @train_target_choice.setter
     def train_target_choice(self, value: Optional[List[int]]) -> None:
-        if len(value) != len(self.train_data_index):
+        # `>` is OK, as dataset may be padded after splitting
+        if len(value) < len(self.train_data_index):
             raise ValueError(
-                f"len(train_target_choice) = {len(value)} != {len(self.train_data_index)} = len(self.train_data_index)"
+                f"len(train_target_choice) = {len(value)} < {len(self.train_data_index)} = len(self.train_data_index)"
             )
         if not all(x >= 0 for x in value):
             raise ValueError("All entries of train_target_choice must be >= 0")
@@ -75,9 +76,10 @@ class HelmetDataTrainState(SequenceLengthFilteredDataTrainState):
 
     @val_target_choice.setter
     def val_target_choice(self, value: Optional[List[int]]) -> None:
-        if len(value) != len(self.val_data_index):
+        # `>` is OK, as dataset may be padded after splitting
+        if len(value) < len(self.val_data_index):
             raise ValueError(
-                f"len(val_target_choice) = {len(value)} != {len(self.val_data_index)} = len(self.val_data_index)"
+                f"len(val_target_choice) = {len(value)} < {len(self.val_data_index)} = len(self.val_data_index)"
             )
         if not all(x >= 0 for x in value):
             raise ValueError("All entries of val_target_choice must be >= 0")
