@@ -171,7 +171,8 @@ def create_random_index(
     assert len(shape) == 4
     if dtype is None:
         dtype = torch.int64
-    num = min(shape[2], length)
+    num = shape[2]
+    assert num <= length, (shape, length)
     # DEBUG: Old code:
     #index_kwargs = dict(dtype=dtype, device=device)
     #result = torch.empty(shape[:-1], **index_kwargs)
@@ -190,8 +191,6 @@ def create_random_index(
     if num < length:
         result = result[..., :num]
     result = result.to(dtype=dtype)
-    if num < shape[2]:
-        print(f"WTF!! {shape}, num={num}")
     return expand_index(result, shape[-1])
 
 
