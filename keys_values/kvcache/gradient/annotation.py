@@ -173,23 +173,23 @@ def create_random_index(
         dtype = torch.int64
     num = min(shape[2], length)
     # DEBUG: Old code:
-    index_kwargs = dict(dtype=dtype, device=device)
-    result = torch.empty(shape[:-1], **index_kwargs)
-    for b in range(shape[0]):
-        for h in range(shape[1]):
-            result[b, h, :] = torch.randperm(length, **index_kwargs)[:num]
+    #index_kwargs = dict(dtype=dtype, device=device)
+    #result = torch.empty(shape[:-1], **index_kwargs)
+    #for b in range(shape[0]):
+    #    for h in range(shape[1]):
+    #        result[b, h, :] = torch.randperm(length, **index_kwargs)[:num]
     # END DEBUG
     # Batched random permutation: draw uniform random values of shape
     # (batch, n_heads, length), argsort along the last dim to produce
     # independent permutations per (b, h), then slice to `num`.
     # Replaced a Python nested for loop over b and h, which launched a large
     # number of CUDA kernels.
-    #result = torch.rand(
-    #    shape[0], shape[1], length, device=device, dtype=torch.float32
-    #).argsort(dim=-1)
-    #if num < length:
-    #    result = result[..., :num]
-    #result = result.to(dtype=dtype)
+    result = torch.rand(
+        shape[0], shape[1], length, device=device, dtype=torch.float32
+    ).argsort(dim=-1)
+    if num < length:
+        result = result[..., :num]
+    result = result.to(dtype=dtype)
     return expand_index(result, shape[-1])
 
 
