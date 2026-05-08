@@ -28,8 +28,6 @@ Backward (with s = sigmoid(a), f = silu(a) = a * s):
         = dL/dy * b * (s + f * (1 - s))
   dL/db = dL/dy * f
 """
-from typing import Tuple
-
 import torch
 
 _triton_available = False
@@ -46,9 +44,9 @@ if _triton_available:
 
     @triton.jit
     def _swiglu_fwd_kernel(
-        A_ptr,       # [N]  (flattened)
-        B_ptr,       # [N]
-        Out_ptr,     # [N]
+        A_ptr,  # [N]  (flattened)
+        B_ptr,  # [N]
+        Out_ptr,  # [N]
         N,
         BLOCK: tl.constexpr,
     ):
@@ -64,11 +62,11 @@ if _triton_available:
 
     @triton.jit
     def _swiglu_bwd_kernel(
-        A_ptr,        # [N]
-        B_ptr,        # [N]
+        A_ptr,  # [N]
+        B_ptr,  # [N]
         GradOut_ptr,  # [N]
-        GradA_ptr,    # [N]
-        GradB_ptr,    # [N]
+        GradA_ptr,  # [N]
+        GradB_ptr,  # [N]
         N,
         BLOCK: tl.constexpr,
     ):
@@ -143,7 +141,13 @@ class _FusedSwiGLU(torch.autograd.Function):
         BLOCK = 1024
         grid = (triton.cdiv(N, BLOCK),)
         _swiglu_bwd_kernel[grid](
-            a, b, grad_out_contig, grad_a, grad_b, N, BLOCK=BLOCK,
+            a,
+            b,
+            grad_out_contig,
+            grad_a,
+            grad_b,
+            N,
+            BLOCK=BLOCK,
         )
 
         return grad_a, grad_b
