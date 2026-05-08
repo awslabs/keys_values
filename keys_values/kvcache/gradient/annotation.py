@@ -185,11 +185,16 @@ def create_random_index(
     # Replaced a Python nested for loop over b and h, which launched a large
     # number of CUDA kernels.
     result = torch.rand(
-        shape[0], shape[1], length, device=device, dtype=torch.float32
+        *shape[:2], length, device=device, dtype=torch.float32
     ).argsort(dim=-1)
     if num < length:
         result = result[..., :num]
     result = result.to(dtype=dtype)
+    if num < shape[2]:
+        right_pad = torch.zeros((1, 1, 1), device=device, dtype=dtype).expand(
+            *shape[:2], shape[2] - num,
+        )
+        result = torch.cat((result, right_pad), dim=-1)
     return expand_index(result, shape[-1])
 
 
