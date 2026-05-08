@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from typing import Any, Dict, Tuple, List, Optional
+from typing import Any, Dict, Tuple, Optional
 
 import lightning as L
 import torch
@@ -140,17 +140,15 @@ class TrainingStateManager:
         self.train_iterator = train_iterator
 
     def _extract_training_state(self) -> Dict[str, Any]:
-        train_ind, val_ind = self.dataset.train_val_split_indices()
         train_state = {
             name: self.state[name].state_dict() for name in self._state_components
         }
         kwargs = dict(dtype=torch.int64)
         train_state.update(
             {
+                "data_state": self.dataset.training_state.state_dict(),
                 "iter_num": torch.tensor(self.state["iter_num"], **kwargs),
                 "train_iterator": get_iterator(self.train_iterator).state_dict(),
-                "train_data_index": torch.tensor(train_ind, **kwargs),
-                "val_data_index": torch.tensor(val_ind, **kwargs),
             }
         )
         return train_state
@@ -209,6 +207,20 @@ def restore_from_training_state(
     rank: int,
     num_devices: int,
 ):
+    """
+    Restores components of `state` and `train_iterator` from training state
+    `train_state`. This excludes the data part of the training state, which
+    must be used elsewhere to restore the dataset (see
+    :func:`restore_dataset_from_training_state`).
+
+    Args:
+        state: Components relevant for training
+        train_iterator: Training iterator
+        train_state: Training state to read from
+        rank: Rank of device
+        num_devices: Number of devices
+
+    """
     ts_rank = SimilarSequenceLengthIterator.rank_from_state_dict(
         train_state["train_iterator"]
     )
@@ -238,8 +250,9 @@ def restore_from_training_state(
     train_iterator._iterator = inner_iter
 
 
-def load_train_val_split_indices(file_dir: Path) -> Tuple[List[int], List[int]]:
+def restore_dataset_from_training_state(
+    dataset: SequenceLengthFilteredDataModule,
+    file_dir: Path,
+):
     rest_state = torch.load(file_dir / TRAINSTATE_REST_FNAME)
-    train_index = rest_state["train_data_index"].tolist()
-    val_index = rest_state["val_data_index"].tolist()
-    return train_index, val_index
+    dataset.load_training_state(rest_state["data_state"])

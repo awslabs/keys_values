@@ -73,7 +73,7 @@ from keys_values.finetune.batch_transform import (
 from keys_values.finetune.resume_state import (
     TrainingStateManager,
     load_training_state,
-    load_train_val_split_indices,
+    restore_dataset_from_training_state,
     restore_from_training_state,
     TRAINSTATE_ITERATOR_FNAME,
 )
@@ -649,10 +649,13 @@ def main(
             raise ValueError(
                 f"resume = {resume} invalid, since {resume_path} does not exist"
             )
-        train_val_split_indices = load_train_val_split_indices(resume_path)
+        data_train_state = restore_dataset_from_training_state(
+            data,
+            resume_path,
+        )
     else:
         resume_path = None
-        train_val_split_indices = None
+        data_train_state = None
 
     tokenizer = Tokenizer(checkpoint_dir)
     train_dataloader, val_dataloader = get_dataloaders(
@@ -662,7 +665,7 @@ def main(
         train=train,
         eval=eval,
         fabric=fabric,
-        train_val_split_indices=train_val_split_indices,
+        training_state=data_train_state,
     )
     ignore_index = getattr(data, "ignore_index", -100)
     batch_transform = BatchTransformFactory.from_head_model(
