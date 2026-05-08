@@ -191,10 +191,7 @@ def create_random_index(
         result = result[..., :num]
     result = result.to(dtype=dtype)
     if num < shape[2]:
-        right_pad = torch.zeros((1, 1, 1), device=device, dtype=dtype).expand(
-            *shape[:2], shape[2] - num,
-        )
-        result = torch.cat((result, right_pad), dim=-1)
+        print(f"WTF!! {shape}, num={num}")
     return expand_index(result, shape[-1])
 
 
