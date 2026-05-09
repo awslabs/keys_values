@@ -28,7 +28,7 @@ from keys_values.utils import (
 # `(batch_size, n_query_groups, MAX_DELTA_TRANS_LENGTH, head_size)`. Making
 # this smaller increases the probability of false matches, but speeds up the
 # matching.
-MAX_DELTA_TRANS_LENGTH = 32
+MAX_DELTA_TRANS_LENGTH = 36
 
 _ANNOTATION_KIND_TO_SHORT = {
     "cat-key": "c-k",
@@ -174,9 +174,9 @@ def create_random_index(
     num = shape[2]
     assert num <= length, (shape, length)
     # DEBUG: Old code:
-    #index_kwargs = dict(dtype=dtype, device=device)
-    #result = torch.empty(shape[:-1], **index_kwargs)
-    #for b in range(shape[0]):
+    # index_kwargs = dict(dtype=dtype, device=device)
+    # result = torch.empty(shape[:-1], **index_kwargs)
+    # for b in range(shape[0]):
     #    for h in range(shape[1]):
     #        result[b, h, :] = torch.randperm(length, **index_kwargs)[:num]
     # END DEBUG
@@ -185,9 +185,9 @@ def create_random_index(
     # independent permutations per (b, h), then slice to `num`.
     # Replaced a Python nested for loop over b and h, which launched a large
     # number of CUDA kernels.
-    result = torch.rand(
-        *shape[:2], length, device=device, dtype=torch.float32
-    ).argsort(dim=-1)
+    result = torch.rand(*shape[:2], length, device=device, dtype=torch.float32).argsort(
+        dim=-1
+    )
     if num < length:
         result = result[..., :num]
     result = result.to(dtype=dtype)
@@ -223,7 +223,8 @@ def create_ext_annotations(
     for buffer, name in ((key, "key"), (value, "value")):
         kind = "ext-" + name
         shape = shape_to_tuple(buffer)
-        index_shape = shape[:2] + (MAX_DELTA_TRANS_LENGTH, shape[-1])
+        ind_shape2 = min(MAX_DELTA_TRANS_LENGTH, shape[2])
+        index_shape = shape[:2] + (ind_shape2, shape[-1])
         index = create_random_index(
             shape=index_shape,
             length=shape[2],

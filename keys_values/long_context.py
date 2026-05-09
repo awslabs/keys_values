@@ -949,7 +949,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     # ordering. A `cuda.synchronize()` here would only block
                     # the CPU thread, not add any GPU-level ordering.
                     # DEBUG: Old code:
-                    #if self._do_checkpoint_layer_input() and torch.cuda.is_available():
+                    # if self._do_checkpoint_layer_input() and torch.cuda.is_available():
                     #    torch.cuda.synchronize()
                     # END DEBUG
                     del embeddings

@@ -498,7 +498,12 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
             print(f"Create {str(annotation)}")
 
     def _random_index(self, num: int) -> torch.Tensor:
-        shape = (self.batch_size, self.n_query_groups, num, self.head_size)
+        shape = (
+            self.batch_size,
+            self.n_query_groups,
+            min(num, self.current_length),
+            self.head_size,
+        )
         return create_random_index(
             shape=shape,
             length=self.current_length,

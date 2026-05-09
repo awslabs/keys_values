@@ -32,7 +32,9 @@ def set_fused_rope_enabled(enabled: bool):
 
 
 def apply_rope(
-    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> torch.Tensor:
     if _USE_FUSED_ROPE:
         from keys_values.fused.fused_rope import fused_apply_rope, can_use_fused_rope
