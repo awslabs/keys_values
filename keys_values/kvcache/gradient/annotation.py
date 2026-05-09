@@ -28,7 +28,7 @@ from keys_values.utils import (
 # `(batch_size, n_query_groups, MAX_DELTA_TRANS_LENGTH, head_size)`. Making
 # this smaller increases the probability of false matches, but speeds up the
 # matching.
-MAX_DELTA_TRANS_LENGTH = 32
+MAX_DELTA_TRANS_LENGTH = 48
 
 _ANNOTATION_KIND_TO_SHORT = {
     "cat-key": "c-k",
