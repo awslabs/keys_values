@@ -67,9 +67,14 @@ from keys_values.finetune.utils import (
     print_with_rank_and_timestamp,
     adjust_cache_kwargs,
 )
+from keys_values.fused import (
+    set_fused_swiglu_enabled,
+    set_fused_rmsnorm_enabled,
+)
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.long_context import LongContextInferenceModel
 from keys_values.lora import Config as ConfigLoRA
+from keys_values.pos_encoding import set_fused_rope_enabled
 from keys_values.utils import (
     flush_io_streams,
     VerbosityLevels,
@@ -371,6 +376,11 @@ def main(
                 raise ValueError(f"Data class path {_data_class_path} is not supported")
             data_class_path = _data_class_path
             data_init_args = _data_init_args
+
+        # Enable/disable fused operators
+        set_fused_rope_enabled(sdpa.fused_rope)
+        set_fused_rmsnorm_enabled(sdpa.fused_rmsnorm)
+        set_fused_swiglu_enabled(sdpa.fused_swiglu)
 
         # Create model
         is_lora = model_type == "lora"

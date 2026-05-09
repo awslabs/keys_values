@@ -948,6 +948,9 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     # quantizer buffer) via the default stream's natural
                     # ordering. A `cuda.synchronize()` here would only block
                     # the CPU thread, not add any GPU-level ordering.
+                    # Old code:
+                    # if self._do_checkpoint_layer_input() and torch.cuda.is_available():
+                    #    torch.cuda.synchronize()
                     del embeddings
                     embeddings = torch.cat(new_embed_parts, dim=1)
                     assert embeddings.shape[1] == end - start, (

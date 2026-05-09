@@ -28,7 +28,7 @@ from keys_values.utils import (
 # `(batch_size, n_query_groups, MAX_DELTA_TRANS_LENGTH, head_size)`. Making
 # this smaller increases the probability of false matches, but speeds up the
 # matching.
-MAX_DELTA_TRANS_LENGTH = 32
+MAX_DELTA_TRANS_LENGTH = 48
 
 _ANNOTATION_KIND_TO_SHORT = {
     "cat-key": "c-k",
@@ -171,14 +171,30 @@ def create_random_index(
     assert len(shape) == 4
     if dtype is None:
         dtype = torch.int64
-    num = min(shape[2], length)
-    # Keep the original loop — randperm on CPU is a single
-    # call and this path isn't perf-critical anyway.
-    index_kwargs = dict(dtype=dtype, device=device)
-    result = torch.empty(shape[:-1], **index_kwargs)
-    for b in range(shape[0]):
-        for h in range(shape[1]):
-            result[b, h, :] = torch.randperm(length, **index_kwargs)[:num]
+    num = shape[2]
+    assert num <= length, (shape, length)
+    # Old code:
+    # index_kwargs = dict(dtype=dtype, device=device)
+    # result = torch.empty(shape[:-1], **index_kwargs)
+    # for b in range(shape[0]):
+    #    for h in range(shape[1]):
+    #        result[b, h, :] = torch.randperm(length, **index_kwargs)[:num]
+    # Batched random permutation: draw uniform random values of shape
+    # (batch, n_heads, length), topk or argsort along the last dim to produce
+    # independent permutations per (b, h).
+    # Replaced a Python nested for loop over b and h, which launched a large
+    # number of CUDA kernels.
+    if num < length:
+        result = (
+            torch.rand(*shape[:2], length, device=device, dtype=torch.float32)
+            .topk(num, dim=-1)
+            .indices
+        )
+    else:
+        result = torch.rand(
+            *shape[:2], length, device=device, dtype=torch.float32
+        ).argsort(dim=-1)
+    result = result.to(dtype=dtype)
     return expand_index(result, shape[-1])
 
 
@@ -211,7 +227,8 @@ def create_ext_annotations(
     for buffer, name in ((key, "key"), (value, "value")):
         kind = "ext-" + name
         shape = shape_to_tuple(buffer)
-        index_shape = shape[:2] + (MAX_DELTA_TRANS_LENGTH, shape[-1])
+        ind_shape2 = min(MAX_DELTA_TRANS_LENGTH, shape[2])
+        index_shape = shape[:2] + (ind_shape2, shape[-1])
         index = create_random_index(
             shape=index_shape,
             length=shape[2],
