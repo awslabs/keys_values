@@ -663,7 +663,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         token_idx: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], Optional[UpdateTokenPositionsGracePeriod]]:
         """
-         Processes token chunk, comparing `token_idx` against the current chunk
+        Processes token chunk, comparing `token_idx` against the current chunk
         in the replay log, and advancing `token_chunk_pos`. We also update
         `_token_positions`.
 

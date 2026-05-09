@@ -28,7 +28,7 @@ from keys_values.utils import (
 # `(batch_size, n_query_groups, MAX_DELTA_TRANS_LENGTH, head_size)`. Making
 # this smaller increases the probability of false matches, but speeds up the
 # matching.
-MAX_DELTA_TRANS_LENGTH = 36
+MAX_DELTA_TRANS_LENGTH = 32
 
 _ANNOTATION_KIND_TO_SHORT = {
     "cat-key": "c-k",
@@ -185,11 +185,14 @@ def create_random_index(
     # independent permutations per (b, h), then slice to `num`.
     # Replaced a Python nested for loop over b and h, which launched a large
     # number of CUDA kernels.
-    result = torch.rand(*shape[:2], length, device=device, dtype=torch.float32).argsort(
-        dim=-1
-    )
     if num < length:
-        result = result[..., :num]
+        result = torch.rand(
+            *shape[:2], length, device=device, dtype=torch.float32
+        ).topk(num, dim=-1)
+    else:
+        result = torch.rand(
+            *shape[:2], length, device=device, dtype=torch.float32
+        ).argsort(dim=-1)
     result = result.to(dtype=dtype)
     return expand_index(result, shape[-1])
 
