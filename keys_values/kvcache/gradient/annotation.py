@@ -188,7 +188,7 @@ def create_random_index(
     if num < length:
         result = torch.rand(
             *shape[:2], length, device=device, dtype=torch.float32
-        ).topk(num, dim=-1)
+        ).topk(num, dim=-1).indices
     else:
         result = torch.rand(
             *shape[:2], length, device=device, dtype=torch.float32
