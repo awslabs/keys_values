@@ -147,3 +147,66 @@ differences of 0.015 are too large.
 
 The root cause was that the Triton kernel and the eager reference both compute in float32 internally, but with random independent cos/sin (which can be large, e.g. O(1) from randn), the intermediate products x * cos and rot_x * sin can be large enough that adding them produces bf16 rounding differences of ~0.015. Since real RoPE always satisfies cos² + sin² = 1, the values are bounded in [-1, 1], keeping all intermediate products close to the magnitude of x and eliminating the cancellation. The fix replaces torch.randn cos/sin with proper unit-circle values built from random angles.
 
+## Comment
+
+Next I ran:
+```bash
+pytest test/fused/test_fused_ops.py -k test_fused_apply_rope_backward
+```
+
+All configurations fail. For example:
+```text
+_________________________________________________ test_fused_apply_rope_backward[4-33-64-dtype18] _________________________________________________
+
+BH = 4, T = 33, D = 64, dtype = torch.float32
+
+    @_RunIf(min_cuda_gpus=1)
+    @pytest.mark.parametrize("BH, T, D, dtype", _ROPE_PARAMS_3D)
+    def test_fused_apply_rope_backward(BH, T, D, dtype):
+        seed = 31415927
+        torch.manual_seed(seed)
+        device = torch.device("cuda", 0)
+
+        _x = torch.randn(BH, T, D, device=device, dtype=dtype)
+        cos, sin = _build_cos_sin(T, D, device)
+        cos, sin = cos.to(dtype), sin.to(dtype)
+
+        def _run(fn):
+            x = _copy_with_grad(_x)
+            _random_linear_loss(fn(x)).backward()
+            return x.grad
+
+        grad_fused = _run(lambda x: fused_apply_rope(x, cos, sin))
+        references = {
+            "eager": _run(lambda x: _rope_eager(x, cos, sin)),
+            "litgpt.apply_rope": _run(lambda x: _rope_via_litgpt(x, cos, sin)),
+        }
+
+        print(f"rope bwd 3D: BH={BH}, T={T}, D={D}, dtype={dtype}")
+        atol, rtol = _tolerances(dtype)
+        for name, grad_ref in references.items():
+>           torch.testing.assert_close(grad_fused, grad_ref, atol=atol, rtol=rtol)
+E           AssertionError: Tensor-likes are not close!
+E
+E           Mismatched elements: 8448 / 8448 (100.0%)
+E           Greatest absolute difference: 6.446865081787109 at index (3, 8, 20) (up to 0.0001 allowed)
+E           Greatest relative difference: 17691.923828125 at index (1, 23, 15) (up to 0.0001 allowed)
+
+test/fused/test_fused_ops.py:300: AssertionError
+-------------------------------------------------------------- Captured stdout call ---------------------------------------------------------------
+rope bwd 3D: BH=4, T=33, D=64, dtype=torch.float32
+```
+
+I think the problem may be you call `_run` twice, and different linear combinations
+are used, because `_random_linear_loss` is called twice. I think you need to fix
+the random combination and use the same. Can you try and fix this?
+
+Note that also all other "backward" tests fail. This could be the same reason.
+Could you rework all of them?
+
+### Answer of Claude Code
+
+Good — no remaining _random_linear_loss calls (the grep exit code 1 means no matches found), and all 210 tests still collect.
+
+The fix applied uniformly across all backward tests: instead of calling torch.randn_like(y) inside the loss function on each invocation (which produces a different random tensor every time), each test now generates one coeff = torch.randn(output_shape, device=device) before any forward/backward run, and passes it explicitly to _linear_loss. Every run in the loop then differentiates exactly the same scalar function, making the gradient comparison meaningful.
+

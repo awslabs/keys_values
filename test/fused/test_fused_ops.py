@@ -39,9 +39,8 @@ from keys_values.fused.fused_swiglu import fused_swiglu
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _random_linear_loss(y: torch.Tensor) -> torch.Tensor:
-    """Scalar loss = random linear combination of the output elements."""
-    coeff = torch.randn_like(y)
+def _linear_loss(y: torch.Tensor, coeff: torch.Tensor) -> torch.Tensor:
+    """Scalar loss = fixed linear combination of the output elements."""
     return (y * coeff).sum()
 
 
@@ -146,12 +145,13 @@ def test_fused_rmsnorm_backward(batch_dims, D, dtype, add_unit_offset):
     shape = (*batch_dims, D)
     _x = torch.randn(shape, device=device, dtype=dtype)
     _w = torch.randn(D, device=device, dtype=dtype) * 0.1
+    coeff = torch.randn(shape, device=device)
 
     # Collect gradients from fused op and each reference
     def _run(fn):
         x = _copy_with_grad(_x)
         w = _copy_with_grad(_w)
-        _random_linear_loss(fn(x, w)).backward()
+        _linear_loss(fn(x, w), coeff).backward()
         return {"x": x.grad, "w": w.grad}
 
     grads_fused = _run(lambda x, w: fused_rmsnorm(x, w, eps, add_unit_offset))
@@ -282,10 +282,11 @@ def test_fused_apply_rope_backward(BH, T, D, dtype):
     _x = torch.randn(BH, T, D, device=device, dtype=dtype)
     cos, sin = _build_cos_sin(T, D, device)
     cos, sin = cos.to(dtype), sin.to(dtype)
+    coeff = torch.randn(BH, T, D, device=device)
 
     def _run(fn):
         x = _copy_with_grad(_x)
-        _random_linear_loss(fn(x)).backward()
+        _linear_loss(fn(x), coeff).backward()
         return x.grad
 
     grad_fused = _run(lambda x: fused_apply_rope(x, cos, sin))
@@ -333,10 +334,11 @@ def test_fused_apply_rope_nd_backward(B, n_head, T, D, dtype):
     _x = torch.randn(B, n_head, T, D, device=device, dtype=dtype)
     cos, sin = _build_cos_sin(T, D, device)
     cos, sin = cos.to(dtype), sin.to(dtype)
+    coeff = torch.randn(B, n_head, T, D, device=device)
 
     def _run(fn):
         x = _copy_with_grad(_x)
-        _random_linear_loss(fn(x)).backward()
+        _linear_loss(fn(x), coeff).backward()
         return x.grad
 
     grad_fused = _run(lambda x: fused_apply_rope(x, cos, sin))
@@ -408,11 +410,12 @@ def test_fused_swiglu_backward(shape, dtype):
 
     _a = torch.randn(shape, device=device, dtype=dtype)
     _b = torch.randn(shape, device=device, dtype=dtype)
+    coeff = torch.randn(shape, device=device)
 
     def _run(fn):
         a = _copy_with_grad(_a)
         b = _copy_with_grad(_b)
-        _random_linear_loss(fn(a, b)).backward()
+        _linear_loss(fn(a, b), coeff).backward()
         return {"a": a.grad, "b": b.grad}
 
     grads_fused = _run(fused_swiglu)
@@ -519,6 +522,11 @@ def test_fused_swiglu_llamamlp_backward(shape_cfg, dtype):
     ):
         mlp = mlp_class(cfg).to(device=device, dtype=dtype)
 
+        # Run eager once to determine output shape, then fix the coefficient.
+        with torch.no_grad():
+            y_shape = mlp(_x).shape
+        coeff = torch.randn(y_shape, device=device)
+
         grads = {}
         for kind in ("eager", "fused"):
             x = _copy_with_grad(_x)
@@ -529,7 +537,7 @@ def test_fused_swiglu_llamamlp_backward(shape_cfg, dtype):
             finally:
                 if kind == "fused":
                     set_fused_swiglu_enabled(False)
-            _random_linear_loss(y).backward()
+            _linear_loss(y, coeff).backward()
             grads[kind] = x.grad
 
         print(
