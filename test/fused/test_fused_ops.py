@@ -216,6 +216,19 @@ _ROPE_PARAMS_4D = [
 ]
 
 
+def _build_cos_sin(T: int, D: int, device: torch.device) -> tuple:
+    """Build a realistic (cos, sin) pair in float32 from random phase angles.
+
+    cos² + sin² = 1 elementwise, which keeps intermediate products O(1) and
+    avoids the large cancellation errors that occur when cos and sin are
+    sampled independently with torch.randn.
+    """
+    theta = torch.rand(T, D // 2, device=device) * 2 * torch.pi
+    cos = torch.cat([theta.cos(), theta.cos()], dim=-1)
+    sin = torch.cat([theta.sin(), theta.sin()], dim=-1)
+    return cos, sin
+
+
 def _rope_eager(
     x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> torch.Tensor:
@@ -244,8 +257,8 @@ def test_fused_apply_rope_forward(BH, T, D, dtype):
     device = torch.device("cuda", 0)
 
     x = torch.randn(BH, T, D, device=device, dtype=dtype)
-    cos = torch.randn(T, D, device=device, dtype=dtype)
-    sin = torch.randn(T, D, device=device, dtype=dtype)
+    cos, sin = _build_cos_sin(T, D, device)
+    cos, sin = cos.to(dtype), sin.to(dtype)
 
     out_fused = fused_apply_rope(x, cos, sin)
 
@@ -267,8 +280,8 @@ def test_fused_apply_rope_backward(BH, T, D, dtype):
     device = torch.device("cuda", 0)
 
     _x = torch.randn(BH, T, D, device=device, dtype=dtype)
-    cos = torch.randn(T, D, device=device, dtype=dtype)
-    sin = torch.randn(T, D, device=device, dtype=dtype)
+    cos, sin = _build_cos_sin(T, D, device)
+    cos, sin = cos.to(dtype), sin.to(dtype)
 
     def _run(fn):
         x = _copy_with_grad(_x)
@@ -295,8 +308,8 @@ def test_fused_apply_rope_nd_forward(B, n_head, T, D, dtype):
     device = torch.device("cuda", 0)
 
     x = torch.randn(B, n_head, T, D, device=device, dtype=dtype)
-    cos = torch.randn(T, D, device=device, dtype=dtype)
-    sin = torch.randn(T, D, device=device, dtype=dtype)
+    cos, sin = _build_cos_sin(T, D, device)
+    cos, sin = cos.to(dtype), sin.to(dtype)
 
     out_fused = fused_apply_rope(x, cos, sin)
 
@@ -318,8 +331,8 @@ def test_fused_apply_rope_nd_backward(B, n_head, T, D, dtype):
     device = torch.device("cuda", 0)
 
     _x = torch.randn(B, n_head, T, D, device=device, dtype=dtype)
-    cos = torch.randn(T, D, device=device, dtype=dtype)
-    sin = torch.randn(T, D, device=device, dtype=dtype)
+    cos, sin = _build_cos_sin(T, D, device)
+    cos, sin = cos.to(dtype), sin.to(dtype)
 
     def _run(fn):
         x = _copy_with_grad(_x)
