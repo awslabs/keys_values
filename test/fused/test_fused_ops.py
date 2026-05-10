@@ -100,12 +100,17 @@ def _rmsnorm_via_module(
     eps: float,
     add_unit_offset: bool,
 ) -> torch.Tensor:
-    """Run RMSNorm through an nn.Module instance, sharing the given weight."""
+    """Run RMSNorm through an nn.Module instance using the provided weight tensor.
+
+    We remove the module's own nn.Parameter and replace it with `weight.float()`
+    so that autograd routes gradients back to `weight` (via the float() cast when
+    dtype != float32, directly otherwise).  Both module classes use self.weight
+    as a plain attribute in their forward, so this is safe.
+    """
     D = x.shape[-1]
     m = module_class(D, eps=eps, add_unit_offset=add_unit_offset).to(x.device)
-    with torch.no_grad():
-        # Both module classes store weight as float32; cast to match.
-        m.weight.copy_(weight.float())
+    del m._parameters["weight"]
+    m.weight = weight.float()
     return m(x)
 
 

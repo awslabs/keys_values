@@ -210,3 +210,72 @@ Good — no remaining _random_linear_loss calls (the grep exit code 1 means no m
 
 The fix applied uniformly across all backward tests: instead of calling torch.randn_like(y) inside the loss function on each invocation (which produces a different random tensor every time), each test now generates one coeff = torch.randn(output_shape, device=device) before any forward/backward run, and passes it explicitly to _linear_loss. Every run in the loop then differentiates exactly the same scalar function, making the gradient comparison meaningful.
 
+## Comment
+
+Now, `test_fused_rmsnorm_backward` fails. Here is the output for one config:
+```text
+____________________________________________ test_fused_rmsnorm_backward[batch_dims41-32-dtype41-True] ____________________________________________
+
+batch_dims = (16,), D = 32, dtype = torch.bfloat16, add_unit_offset = True
+
+    @_RunIf(min_cuda_gpus=1)
+    @pytest.mark.parametrize("batch_dims, D, dtype, add_unit_offset", _RMSNORM_PARAMS)
+    def test_fused_rmsnorm_backward(batch_dims, D, dtype, add_unit_offset):
+        seed = 31415927
+        torch.manual_seed(seed)
+        device = torch.device("cuda", 0)
+        eps = 1e-5
+
+        shape = (*batch_dims, D)
+        _x = torch.randn(shape, device=device, dtype=dtype)
+        _w = torch.randn(D, device=device, dtype=dtype) * 0.1
+        coeff = torch.randn(shape, device=device)
+
+        # Collect gradients from fused op and each reference
+        def _run(fn):
+            x = _copy_with_grad(_x)
+            w = _copy_with_grad(_w)
+            _linear_loss(fn(x, w), coeff).backward()
+            return {"x": x.grad, "w": w.grad}
+
+        grads_fused = _run(lambda x, w: fused_rmsnorm(x, w, eps, add_unit_offset))
+        references = {
+            "eager": _run(lambda x, w: _rmsnorm_eager(x, w, eps, add_unit_offset)),
+            "kv_model.RMSNorm": _run(
+                lambda x, w: _rmsnorm_via_module(kv_model.RMSNorm, x, w, eps, add_unit_offset)
+            ),
+            "litgpt.RMSNorm": _run(
+                lambda x, w: _rmsnorm_via_module(litgpt_model.RMSNorm, x, w, eps, add_unit_offset)
+            ),
+        }
+
+        atol, rtol = _tolerances(dtype)
+        for ref_name, grads_ref in references.items():
+            for param_name in ("x", "w"):
+                print(
+                    f"rmsnorm bwd: shape={shape}, dtype={dtype},"
+                    f" add_unit_offset={add_unit_offset}, ref={ref_name}, grad[{param_name}]"
+                )
+>               torch.testing.assert_close(
+                    grads_fused[param_name],
+                    grads_ref[param_name],
+                    atol=atol,
+                    rtol=rtol,
+                )
+E               AssertionError: None mismatch: tensor([ 1.6016,  2.2656,  4.3438, -4.0938,  0.4160, -1.0156, -0.9570,  1.7266,
+E                        3.7969,  3.5469,  6.6250, -2.6875, -2.5156, -0.0199,  6.2812, -3.9375,
+E                        4.5312,  4.7188,  2.4531, -4.5000, -1.4844,  4.0000, -8.5000,  1.8125,
+E                       -1.9375, -7.9688, -4.6250,  4.8750,  5.1562,  4.7188, -5.3125,  5.0312],
+E                      device='cuda:0', dtype=torch.bfloat16) is not None
+
+test/fused/test_fused_ops.py:175: AssertionError
+-------------------------------------------------------------- Captured stdout call ---------------------------------------------------------------
+rmsnorm bwd: shape=(16, 32), dtype=torch.bfloat16, add_unit_offset=True, ref=eager, grad[x]
+rmsnorm bwd: shape=(16, 32), dtype=torch.bfloat16, add_unit_offset=True, ref=eager, grad[w]
+rmsnorm bwd: shape=(16, 32), dtype=torch.bfloat16, add_unit_offset=True, ref=kv_model.RMSNorm, grad[x]
+rmsnorm bwd: shape=(16, 32), dtype=torch.bfloat16, add_unit_offset=True, ref=kv_model.RMSNorm, grad[w]
+```
+
+### Answer Claude Code:
+
+The root cause: _rmsnorm_via_module was doing m.weight.copy_(weight.float()), which copies data into the module's own nn.Parameter. During backward, gradients accumulate in m.weight.grad, not in weight.grad, so weight.grad stayed None. The fix is to delete the parameter and set m.weight = weight.float() as a plain tensor. Since float() returns a new tensor (when dtype isn't float32), autograd will propagate the gradient through that cast back to the original weight tensor.
