@@ -92,6 +92,7 @@ def main():
                     "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
                     "-U__CUDA_NO_HALF2_OPERATORS__",
                     "-gencode=arch=compute_80,code=sm_80",
+                    "-gencode=arch=compute_90,code=sm_90",
                 ],
             },
         )
