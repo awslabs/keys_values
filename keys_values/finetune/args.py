@@ -171,9 +171,7 @@ class KVCacheArgs:
             New :class:`KVCacheArgs` object with `cache_kwargs` updated.
 
         """
-        new_cache_kwargs = {
-            name: getattr(self, name) for name in _CACHE_KWARGS_NAMES
-        }
+        new_cache_kwargs = {name: getattr(self, name) for name in _CACHE_KWARGS_NAMES}
         new_cache_kwargs.update(self.cache_kwargs)
         return replace(self, cache_kwargs=new_cache_kwargs)
 
