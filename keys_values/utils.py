@@ -145,6 +145,10 @@ def randint_torch(a: int, b: int) -> int:
     return torch.randint(a, b + 1, (1,)).item()
 
 
+def randchoice_torch(choices: Union[list, tuple]) -> Any:
+    return choices[randint_torch(0, len(choices) - 1)]
+
+
 def check_for_nan(
     x: torch.Tensor,
     meth_name: str,

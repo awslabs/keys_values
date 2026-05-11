@@ -12,51 +12,34 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import csv
 import dataclasses
-from dataclasses import dataclass
 import gc
 
 import os
 import time
 from pathlib import Path
 from pprint import pprint
-from typing import Dict, Literal, Optional, Union, Any, Tuple, List, Callable
+from typing import Dict, Literal, Optional, Union, Any, Callable, Tuple
 
 import lightning as L
 from lightning.fabric.strategies import DDPStrategy
-from lightning.fabric.utilities import ThroughputMonitor
 import torch
-from torchmetrics import RunningMean
 
 from litgpt.data import DataModule
-from litgpt.prompts import save_prompt_style
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     CycleIterator,
     auto_download_checkpoint,
     check_nvlink_connectivity,
     check_valid_checkpoint_dir,
-    create_finetuning_performance_report,
     get_default_supported_precision,
     init_out_dir,
     instantiate_torch_optimizer,
-    num_parameters,
     parse_devices,
-    select_sft_generate_example,
-)
-
-from keys_values.array_limit import TemporaryArrayLimit
-from keys_values.attention.attention_utils import (
-    DEFAULT_TMP_ARRAY_LIMIT_GB,
-    SDPA_KERNELS_BEST_ORDERING,
 )
 from keys_values.config import Config as ConfigFull
 from keys_values.data import Helmet, LongBenchV2, MyDataLoader
-from keys_values.data.base import INPUT_IDS_NAME, TARGETS_STRINGS_NAME
-from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
-from keys_values.attention.flashinfer_wrapper import get_flashinfer_sdpa
-from keys_values.attention.flex_attention import FlexAttentionArgs, choose_q_lens
+from keys_values.data.base import INPUT_IDS_NAME
 from keys_values.finetune.args import (
     TrainArgs,
     EvalArgs,
@@ -70,13 +53,6 @@ from keys_values.finetune.batch_transform import (
     BatchTransformFactory,
     BatchTransform,
 )
-from keys_values.finetune.resume_state import (
-    TrainingStateManager,
-    load_training_state,
-    restore_dataset_from_training_state,
-    restore_from_training_state,
-    TRAINSTATE_ITERATOR_FNAME,
-)
 from keys_values.finetune.longcontext_full import (
     create_gpt_model,
     wrap_gpt_model,
@@ -84,72 +60,34 @@ from keys_values.finetune.longcontext_full import (
     validate,
 )
 from keys_values.finetune.utils import (
-    print_but_limit_size,
     get_lr_scheduler,
     get_dataloaders,
     validate_args,
-    save_model_checkpoint,
     load_model_checkpoint,
     choose_logger,
     adapt_requires_grad,
-    print_with_rank_and_timestamp,
-    print_message,
     check_kv_cache,
     create_optimizer,
-    may_match_twice_factory,
     adjust_cache_kwargs,
-    copy_config_files,
 )
+from keys_values.finetune.resume_state import get_iterator
 from keys_values.fused import (
     set_fused_swiglu_enabled,
     set_fused_rmsnorm_enabled,
 )
-from keys_values.generate.base import generate
-from keys_values.gpu_memory import RecordGPUMemory
-from keys_values.head_model import HeadModel, CrossEntropyOnLogits
+from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.consts import split_name
-from keys_values.kvcache.factory import (
-    KVCacheFactory,
-    deallocate_kv_cache_buffers_of_model,
-    cleanup_cache_kwargs,
-)
-from keys_values.kvcache.gradient.main import (
-    LongContextGradientModel,
-    NaiveGPTAndHeadModel,
-)
-from keys_values.kvcache.offloading import KVCacheOffloader
-from keys_values.long_context import (
-    GPTAndHeadModel,
-    LongContextInferenceModel,
-)
-from keys_values.lora import (
-    GPT as GPTLoRA,
-    Config as ConfigLoRA,
-    mark_only_lora_as_trainable,
-)
-from keys_values.model import GPT as GPTFull
-from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
+from keys_values.kvcache.factory import deallocate_kv_cache_buffers_of_model
+from keys_values.lora import Config as ConfigLoRA
 from keys_values.optimize.model_factory import BlockComponentName
-from keys_values.parser_config import save_hyperparameters
-from keys_values.pos_encoding import (
-    position_encoding_factory,
-    set_fused_rope_enabled,
-)
-from keys_values.tools.size_log import (
-    SizeWeightsGradientsLog,
-    SizeLogMapper,
-    SizeLogMapperRule,
-    StoreWeightsRule,
-    get_match_for_store_rule,
-)
+from keys_values.pos_encoding import set_fused_rope_enabled
 from keys_values.utils import (
     flush_io_streams,
     VerbosityLevels,
     fabric_precision_to_dtype,
-    message_memory_all_devices,
-    log_memory_all_devices,
     check_for_nan_module_weights,
+    randchoice_torch,
 )
 
 DEFAULT_OUT_DIR = "out/finetune/autotune_full"
@@ -162,25 +100,11 @@ def setup(
     devices: Union[int, str] = 1,
     data: Optional[DataModule] = None,
     train: TrainArgs = TrainArgs(
-        save_interval=50,
-        log_interval=1,
-        global_batch_size=None,
         micro_batch_size=2,
-        lr_warmup_steps=None,
-        lr_warmup_fraction=0.15,
-        epochs=5,
-        max_seq_length=None,
-        intermed_save_interval=None,
-        intermed_save_num=None,
         max_grad_norm=1.0,
         average_loss_per_batch=True,
     ),
     eval: EvalArgs = EvalArgs(
-        interval=600,
-        max_new_tokens=100,
-        max_iters=100,
-        initial_validation=None,  # Default set below
-        final_validation=True,
         micro_batch_size=None,
         use_sample_metric=False,
     ),
@@ -215,7 +139,6 @@ def setup(
     verbose: Optional[str] = None,
     attention_forward_temp_size_gb: Optional[float] = None,
     attention_backward_temp_size_gb: Optional[float] = None,
-    oom_error_recovery: bool = False,
     yarn_rope: bool = True,
     sdpa: SDPAArgs = SDPAArgs(
         flex_attention=True,
@@ -267,10 +190,6 @@ def setup(
         attention_backward_temp_size_gb: Size of GPU memory buffers (in GB) used
             in naive SDPA during backward computations. At present, naive SDPA
             is used in backward if `grad.use_old_cache == True`.
-        oom_error_recovery: If `True`, we try to recover from device out of
-            memory errors by lowering `attention_forward_temp_size_gb`,
-            `attention_backward_temp_size_gb` and trying again.
-            NOTE: This feature does not properly work at the moment!
         yarn_rope: Should YaRN be used to adjust RoPE (position encoding) to the
             sequence length for each batch? Defaults to `True`. If not, RoPE is
             determined by the model configuration, and is static (no dependence
@@ -305,7 +224,6 @@ def setup(
         verbose,
         attention_forward_temp_size_gb,
         attention_backward_temp_size_gb,
-        oom_error_recovery,
         yarn_rope,
         sdpa,
     )
@@ -333,7 +251,6 @@ def setup_internal(
     verbose: Optional[str],
     attention_forward_temp_size_gb: Optional[float],
     attention_backward_temp_size_gb: Optional[float],
-    oom_error_recovery: bool,
     yarn_rope: bool,
     sdpa: SDPAArgs,
 ) -> None:
@@ -382,11 +299,6 @@ def setup_internal(
     if train.global_batch_size != global_batch_size:
         print(f"train.global_batch_size not supported, set to {global_batch_size}")
         train.global_batch_size = global_batch_size
-    if oom_error_recovery:
-        print(
-            "Warning: Device out of memory error recovery does not properly "
-            "work at the moment."
-        )
     # Legacy arguments
     if verbose is None:
         if kv_cache.verbose is not None:
@@ -456,7 +368,6 @@ def setup_internal(
     fabric.launch(
         main,
         do_cpu_offload=do_cpu_offload,
-        original_setup=original_setup,
         devices=devices,
         seed=seed,
         config=config,
@@ -473,25 +384,43 @@ def setup_internal(
         verbose=verbose,
         attention_forward_temp_size_gb=attention_forward_temp_size_gb,
         attention_backward_temp_size_gb=attention_backward_temp_size_gb,
-        oom_error_recovery=oom_error_recovery,
         yarn_rope=yarn_rope,
         sdpa=sdpa,
     )
 
 
-# TODO:
-# - Worker which runs one job after the next
-# - For now: Iterate over jobs sampled at random
+VARIABLE_CHOICES = {
+    "kv_cache:buffer_name": (
+        "default",
+        "torch-quantized8",
+        "torch-quantized4",
+    ),
+    "kv_cache:cache_length": (32768, 34816, 36864, 40960),
+    "kv_cache:chunk_size": (1024, 2048, 4096),
+    "kv_cache:cpu_offload": (True, False),
+    "grad:layers_per_cell": (1, 2),
+    "grad:chunks_per_cell_multiplier": (0.75, 1, 1.25, 1.5),
+    "grad:layercp_qname": (
+        "default",
+        "torch-quantized8",
+    ),
+    "grad:cachecp_qname": (
+        "default",
+        "torch-quantized8",
+    )
+}
+
+
 def main(
     fabric: L.Fabric,
     do_cpu_offload: bool,
-    original_setup: Callable,
     devices: int,
     seed: int,
     config: Union[ConfigFull, ConfigLoRA],
     data: DataModule,
     checkpoint_dir: Path,
     out_dir: Path,
+    time_budget: float,
     train: TrainArgs,
     eval: EvalArgs,
     optimizer: OptimizerArgs,
@@ -502,36 +431,34 @@ def main(
     verbose: VerbosityLevels,
     attention_forward_temp_size_gb: float,
     attention_backward_temp_size_gb: float,
-    oom_error_recovery: bool,
     yarn_rope: bool,
     sdpa: SDPAArgs,
+    num_train_steps: int,
+    num_valid_steps: int,
+    num_warmup_steps: int,
 ) -> None:
     validate_args(train, eval)
-    is_lora = isinstance(config, ConfigLoRA)
 
     tokenizer = Tokenizer(checkpoint_dir)
-    train_dataloader, val_dataloader = get_dataloaders(
-        data=data,
+    # Create them here to obtain the data training state
+    dataloaders_kwargs = dict(
         tokenizer=tokenizer,
         head_model=head_model_name,
         train=train,
         eval=eval,
         fabric=fabric,
     )
+    train_dataloader, _ = get_dataloaders(**dataloaders_kwargs)
+    train_state = {
+        "data_state": data.training_state.state_dict(),
+        "train_iterator": iter(train_dataloader).state_dict(),
+    }
     ignore_index = getattr(data, "ignore_index", -100)
     batch_transform = BatchTransformFactory.from_head_model(
         head_model=head_model_name,
         pad_id=0,
         eos_id=tokenizer.eos_id,
         ignore_index=ignore_index,
-    )
-    steps_per_epoch = len(train_dataloader)
-    lr_max_steps = min(
-        train.epochs * steps_per_epoch, (train.max_steps or float("inf"))
-    )
-    print_message(
-        f"\nNumber of optimizer steps per epoch: {lr_max_steps}",
-        fabric,
     )
     fabric.seed_everything(seed)
     if do_cpu_offload:
@@ -548,233 +475,92 @@ def main(
     if fabric.global_rank == 0:
         os.makedirs(out_dir, exist_ok=True)
 
-    with fabric.init_module(empty_init=(fabric.world_size > 1)):
-        # Updates `kv_cache.cache_kwargs` from other args:
-        kv_cache = kv_cache.update_cache_kwargs()
-        # Set `mha_kwargs`, update kv_cache.cache_kwargs` with that as well:
-        mha_kwargs = get_mha_and_cache_kwargs(
-            attention_forward_temp_size_gb,
-            config,
-            kv_cache,
-            sdpa,
-            yarn_rope,
-            fabric,
-            devices,
-        )
-        # Depending on the cache type `kv_cache.name`, the arguments
-        # `kv_cache.cache_kwargs` are adjusted
-        adjust_cache_kwargs(kv_cache, data, tokenizer)
-        dtype = fabric_precision_to_dtype(fabric._precision.precision)
-        torch.set_default_dtype(dtype)
-        if do_cpu_offload:
-            # We create the GPT model on the device, then copy. This is faster
-            with torch.device(cpu_offload_device):
-                gpt_model = create_gpt_model(config, **mha_kwargs)
-                head_model = HeadModelFactory.create(
-                    name=head_model_name,
-                    config=config,
-                    data=data,
-                    **head_model_kwargs,
-                )
-            gpt_model = gpt_model.to(optim_device)
-            wrap_kwargs = dict(
-                cpu_offload_device=cpu_offload_device,
-                offload_num_devices=devices,
-            )
-        else:
-            gpt_model = create_gpt_model(config, **mha_kwargs)
-            head_model = HeadModelFactory.create(
-                name=head_model_name,
-                config=config,
-                data=data,
-                **head_model_kwargs,
-            )
-            wrap_kwargs = dict()
-        adapt_requires_grad(gpt_model, head_model)
-        batch_size = train.micro_batch_size
-        if eval.micro_batch_size is not None:
-            batch_size = max(batch_size, eval.micro_batch_size)
-        model, cache_offloader = wrap_gpt_model(
-            gpt_model=gpt_model,
-            head_model=head_model,
-            kv_cache=kv_cache,
-            grad=grad,
-            verbose=verbose,
-            attention_backward_temp_size_gb=attention_backward_temp_size_gb,
-            max_batch_size=batch_size,
-            dtype=dtype,
-            average_loss_per_batch=train.average_loss_per_batch,
-            profile_grad_times=profile_grad_times > 0,
-            profile_parts=profile_parts,
-            fabric=fabric,
-            debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
-            oom_error_recovery=oom_error_recovery,
-            **wrap_kwargs,
-        )
-
-    num_trainable_params = num_parameters(model, requires_grad=True)
-    print_message(
-        f"\nNumber of trainable parameters: {num_trainable_params:,}",
-        fabric,
-    )
-    if is_lora:
-        print_message(
-            f"Number of non-trainable parameters: {num_parameters(model, requires_grad=False):,}",
-            fabric,
-        )
-
-    if do_cpu_offload:
-        # We use a optimizer on CPU for all parameters of `gpt_model`. If
-        # `head_model` has parameters, we use another optimizer on GPU for them.
-        gpt_param_prefixes = tuple(
-            BlockComponentName.h(layer_idx) for layer_idx in range(config.n_layer)
-        ) + (
-            BlockComponentName.wte(),
-            BlockComponentName.ln_f(),
-        )
-        if head_model.needs_logits():
-            gpt_param_prefixes += (BlockComponentName.lm_head(),)
-        cpu_optimizer = create_optimizer(
-            optim_args=optimizer,
-            gpt_model=gpt_model,
-            gpt_param_prefixes=gpt_param_prefixes,
-        )
-        cpu_scheduler = get_lr_scheduler(
-            cpu_optimizer,
-            train_args=train,
-            max_steps=lr_max_steps,
-        )
-        state = {
-            "model": model,
-            "cache_offloader": cache_offloader,
-            "cpu_optimizer": cpu_optimizer,
-            "cpu_scheduler": cpu_scheduler,
-            "iter_num": 0,
-        }
-        head_model_params = list(head_model.parameters())
-        if head_model_params:
-            state["gpu_optimizer"] = instantiate_torch_optimizer(
-                optimizer.name,
-                head_model_params,
-                **optimizer.optimizer_kwargs(),
-            )
-            state["gpu_scheduler"] = get_lr_scheduler(
-                state["gpu_optimizer"],
-                train_args=train,
-                max_steps=lr_max_steps,
-            )
-    else:
-        # Note: We do not wrap `model` or `optimizer` in `fabric`, since we do
-        # not use their abstraction (which creates endless trouble with DDP,
-        # such as autograd graphs not being deallocated)
-        optimizer = instantiate_torch_optimizer(
-            optimizer.name,
-            model.parameters(),
-            **optimizer.optimizer_kwargs(),
-        )
-        scheduler = get_lr_scheduler(
-            optimizer, train_args=train, max_steps=lr_max_steps
-        )
-        state = {
-            "model": model,
-            "cache_offloader": cache_offloader,
-            "optimizer": optimizer,
-            "scheduler": scheduler,
-            "iter_num": 0,
-        }
-
-    if eval.use_sample_metric:
-        assert isinstance(data, Helmet)
-        evaluator = SampleBasedMetricsEvaluator(
-            metrics=[
-                SampleBasedMetricsEvaluator.metric_for_helmet_task(data.dataset_key)
-            ],
-            max_generated_tokens=eval.sample_metric_max_generated_tokens,
-            tokenizer=tokenizer,
-            sample_kwargs=eval.sample_metric_kwargs,
-        )
-        print(f"Evaluation metric: {evaluator.metrics[0]}")
-    else:
-        print("Evaluation metric: eval_loss (same as training loss)")
-        evaluator = None
-
-    load_model_checkpoint(fabric, model, checkpoint_dir)
-    check_for_nan_module_weights(model.gpt_model)
-
-    train_time = time.perf_counter()
-    token_counts = fit(
+    # Loop over randomly drawn configurations until time budget is spent
+    fixed_kwargs = dict(
         fabric=fabric,
-        original_setup=original_setup,
-        state=state,
-        train_dataloader=train_dataloader,
-        val_dataloader=val_dataloader,
+        data=data,
+        num_train_steps=num_train_steps,
+        num_valid_steps=num_valid_steps,
+        num_warmup_steps=num_warmup_steps,
         batch_transform=batch_transform,
+        kv_cache=kv_cache,
+        grad=grad,
         devices=devices,
         checkpoint_dir=checkpoint_dir,
-        out_dir=out_dir,
         train=train,
         eval=eval,
-        data=data,
-        evaluator=evaluator,
+        optimizer=optimizer,
+        do_cpu_offload=do_cpu_offload,
+        config=config,
+        head_model_name=head_model_name,
+        head_model_kwargs=head_model_kwargs,
+        verbose=verbose,
+        attention_forward_temp_size_gb=attention_forward_temp_size_gb,
+        attention_backward_temp_size_gb=attention_backward_temp_size_gb,
+        yarn_rope=yarn_rope,
+        sdpa=sdpa,
         tokenizer=tokenizer,
+        cpu_offload_device=cpu_offload_device,
+        optim_device=optim_device,
     )
-    training_time = time.perf_counter() - train_time
-    output = create_finetuning_performance_report(
-        training_time,
-        token_counts,
-        fabric.device.type,
-    )
-    print_message(output, fabric)
-
-    # Final evaluation
-    if eval.final_validation:
-        print_with_rank_and_timestamp(
-            "Starting validation evaluations.",
-            fabric.global_rank,
+    total_time_t0 = time.perf_counter()
+    while time.perf_counter() < total_time_t0 + time_budget:
+        # Sample variables uniformly at random
+        variables = {
+            name: randchoice_torch(choices)
+            for name, choices in VARIABLE_CHOICES.items()
+        }
+        this_kv_cache, this_grad = update_args(kv_cache, grad, variables)
+        # Data access must be the same for each configuration
+        data.training_state.load_state_dict(train_state["data_state"])
+        train_dataloader, val_dataloader = get_dataloaders(
+            **dataloaders_kwargs,
+            training_state=data.training_state,
         )
-        print_message(
-            f"\nFinal validation evaluation (batch_size = {val_dataloader.batch_size}) ...",
-            fabric,
-        )
-        if do_cpu_offload:
-            valid_model = model.copy_model_for_evaluation()
-        else:
-            valid_model = model
-        metrics = validate_and_all_reduce(
-            model=valid_model,
-            evaluator=evaluator,
+        train_iterator = CycleIterator(train_dataloader)
+        inner_iter = get_iterator(train_iterator)
+        inner_iter.load_state_dict(train_state["train_iterator"])
+        train_iterator._iterator = inner_iter
+        # Run evaluation for this configuration
+        results = eval_autotune_metrics(
+            **fixed_kwargs,
+            train_iterator=train_iterator,
             val_dataloader=val_dataloader,
-            eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
-            batch_transform=batch_transform,
-            log_metrics=False,
-            fabric=fabric,
+            kv_cache=this_kv_cache,
+            grad=this_grad,
         )
-        fabric.log_dict(metrics, step=state["iter_num"])
-        print_message(
-            f"Final evaluation            | "
-            + string_for_val_metrics(metrics, evaluator)
-            + f" | val_time: {metrics['val_time']:.3f} s",
-            fabric,
+        print(
+            f"\nTime spent: {time.perf_counter() - total_time_t0}\n"
+            f"\nEvaluated {variables}:\n"
+            f"Results: {results}"
         )
-        flush_io_streams()
-        if do_cpu_offload:
-            deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
-            del valid_model
 
-    # Save the final checkpoint at the end of training
-    save_dir = out_dir / "final"
-    save_model_checkpoint(fabric, model, save_dir)
-    if fabric.global_rank == 0:
-        # Copy checkpoint files from original checkpoint dir
-        copy_config_files(checkpoint_dir, save_dir)
-        save_hyperparameters(original_setup, save_dir)
-        if hasattr(data, "prompt_style"):
-            save_prompt_style(data.prompt_style, save_dir)
+
+def update_args(
+    kv_cache: KVCacheArgs,
+    grad: GradientArgs,
+    variables: Dict[str, Any],
+) -> Tuple[KVCacheArgs, GradientArgs]:
+    extra_args = [
+        {
+            k[len(prefix):]: v
+            for k, v in variables.items()
+            if k.startswith(prefix) and not k.endswith("buffer_name")
+        }
+        for prefix in ("kv_cache:", "grad:")
+    ]
+    name = "kv_cache:buffer_name"
+    if name in variables:
+        cache_name = split_name(kv_cache.name)[0]
+        extra_args[0]["name"] = cache_name + "-" + variables[name]
+    return tuple(
+        dataclasses.replace(original, **kwargs)
+        for original, kwargs in zip((kv_cache, grad), extra_args)
+    )
 
 
 def eval_autotune_metrics(
     fabric: L.Fabric,
-    original_setup: Callable,
     data: DataModule,
     train_iterator: CycleIterator,
     val_dataloader: MyDataLoader,
@@ -786,7 +572,6 @@ def eval_autotune_metrics(
     grad: GradientArgs,
     devices: int,
     checkpoint_dir: Path,
-    out_dir: Path,
     train: TrainArgs,
     eval: EvalArgs,
     optimizer: OptimizerArgs,
@@ -800,7 +585,6 @@ def eval_autotune_metrics(
     yarn_rope: bool,
     sdpa: SDPAArgs,
     tokenizer: Tokenizer,
-    do_cpu_offloading: bool,
     cpu_offload_device: torch.device,
     optim_device: torch.device,
 ) -> Dict[str, Any]:
@@ -864,12 +648,15 @@ def eval_autotune_metrics(
             fabric=fabric,
             **wrap_kwargs,
         )
+    load_model_checkpoint(fabric, model, checkpoint_dir)
+    check_for_nan_module_weights(model.gpt_model)
+
     # Create optimizer(s)
     cpu_optimizer = None
     cpu_scheduler = None
     gpu_optimizer = None
     gpu_scheduler = None
-    if do_cpu_offloading:
+    if do_cpu_offload:
         # We use a optimizer on CPU for all parameters of `gpt_model`. If
         # `head_model` has parameters, we use another optimizer on GPU for them.
         gpt_param_prefixes = tuple(
@@ -915,7 +702,7 @@ def eval_autotune_metrics(
             gpu_optimizer, train_args=train, max_steps=100
         )
 
-    result_metrics = {
+    result_metrics: Dict[str, Any] = {
         "out_of_memory": False,
         "runtime_exception": False,
     }
@@ -923,7 +710,7 @@ def eval_autotune_metrics(
     try:
 
         # Run some evaluation steps
-        if do_cpu_offloading:
+        if do_cpu_offload:
             valid_model = model.copy_model_for_evaluation()
         else:
             valid_model = model
@@ -947,7 +734,7 @@ def eval_autotune_metrics(
         result_metrics["time_eval"] = time_eval
         print(f"Validation: val_loss = {avg_loss:.2f}, time = {time_eval:.3f} secs")
         flush_io_streams()
-        if do_cpu_offloading:
+        if do_cpu_offload:
             deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
             del valid_model
 
