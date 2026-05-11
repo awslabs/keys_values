@@ -314,8 +314,8 @@ class SequenceLengthFilteredDataModule(DataModule):
                 f"Split development set into training ({len(train_ind)}) and validation ({len(val_ind)})"
             )
         else:
-            train_ind = self.training_state.train_ind
-            val_ind = self.training_state.val_ind
+            train_ind = self.training_state.train_data_index
+            val_ind = self.training_state.val_data_index
             train_data = Subset(data, train_ind)
             val_data = Subset(data, val_ind)
             print(

@@ -166,7 +166,7 @@ def validate_args(train: TrainArgs, eval: EvalArgs) -> None:
                 issues.append(
                     f"{__file__} doesn't support the {name!r} argument. This is set in {args}"
                 )
-    required = [(train, ["epochs"]), (eval, ["max_new_tokens"])]
+    required = [(train, ["epochs"])]
     for args, names in required:
         for name in names:
             if getattr(args, name) is None:

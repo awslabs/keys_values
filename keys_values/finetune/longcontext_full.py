@@ -1875,8 +1875,8 @@ def validate(
         if k >= eval.max_iters:
             break
         batch = batch_transform(batch)
-        sum_loss += model(batch[INPUT_IDS_NAME], batch["targets"]).mean().item()
         num_entries += 1
+        sum_loss += model(batch[INPUT_IDS_NAME], batch["targets"]).mean().item()
     model.train()
     return sum_loss / num_entries, num_entries
 
@@ -1939,7 +1939,10 @@ def generate_example(
         raise IndexError("model.gpt_model must have KV caches assigned")
     model.eval()
 
-    max_returned_tokens = len(encoded) + eval.max_new_tokens
+    max_returned_tokens = eval.max_new_tokens
+    if max_returned_tokens is None:
+        max_returned_tokens = 50
+    max_returned_tokens += len(encoded)
 
     if max_returned_tokens < gpt_model.max_seq_length:
         output = generate(

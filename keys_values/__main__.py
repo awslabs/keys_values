@@ -21,6 +21,8 @@ from jsonargparse import auto_cli, set_config_read_mode, set_docstring_parse_opt
 
 from litgpt.__main__ import PARSER_DATA as PARSER_DATA_LITGPT
 
+from keys_values.autotune.autotune_full import setup as autotune_full_fn
+from keys_values.autotune.autotune_lora import setup as autotune_lora_fn
 from keys_values.finetune.longcontext_eval import setup as eval_long_fn
 from keys_values.finetune.longcontext_eval_ext import setup as eval_long_ext_fn
 from keys_values.finetune.longcontext_full import setup as finetune_long_full_fn
@@ -36,6 +38,8 @@ ENV_VAR_LOG_DIR_LEGACY = "VALKEYRIE_LOG_DIR"
 
 PARSER_DATA = {
     **PARSER_DATA_LITGPT,
+    "autotune_full": autotune_full_fn,
+    "autotune_lora": autotune_lora_fn,
     "eval_long": eval_long_fn,
     "eval_long_ext": eval_long_ext_fn,
     "finetune_long_full": finetune_long_full_fn,
