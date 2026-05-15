@@ -24,6 +24,7 @@ from litgpt.utils import CycleIterator
 from keys_values.data.dataloader import MyDataLoaderIterator
 from keys_values.data.iterators import SimilarSequenceLengthIterator
 from keys_values.data.module import SequenceLengthFilteredDataModule
+from keys_values.data.trainstate import DataTrainState
 
 TRAINSTATE_OPTIMIZER_FNAME = "training_state_optimizer.pth"
 
@@ -259,6 +260,7 @@ def restore_from_training_state(
 def restore_dataset_from_training_state(
     dataset: SequenceLengthFilteredDataModule,
     file_dir: Path,
-):
+) -> DataTrainState:
     rest_state = torch.load(file_dir / TRAINSTATE_REST_FNAME)
     dataset.load_training_state(rest_state["data_state"])
+    return dataset.training_state
