@@ -116,12 +116,14 @@ class HelmetDataTrainState(SequenceLengthFilteredDataTrainState):
 
     def load_state_dict(self, state_dict: Dict[str, torch.Tensor]):
         super().load_state_dict(state_dict)
-        train_ind = state_dict.get("train_target_choice")
-        val_ind = state_dict.get("val_target_choice")
-        test_ind = state_dict.get("test_target_choice")
-        self.train_target_choice = None if train_ind is None else train_ind.tolist()
-        self.val_target_choice = None if val_ind is None else val_ind.tolist()
-        self.test_target_choice = None if test_ind is None else test_ind.tolist()
+        train_choice = state_dict.get("train_target_choice")
+        val_choice = state_dict.get("val_target_choice")
+        test_choice = state_dict.get("test_target_choice")
+        self.train_target_choice = (
+            None if train_choice is None else train_choice.tolist()
+        )
+        self.val_target_choice = None if val_choice is None else val_choice.tolist()
+        self.test_target_choice = None if test_choice is None else test_choice.tolist()
 
 
 class Helmet(SequenceLengthFilteredDataModule):
