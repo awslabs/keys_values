@@ -22,12 +22,30 @@ def _short_task(task: str) -> str:
     return "fin" if task == "final" else task[-3:]
 
 
+def _sort_entries(entries):
+    non_fin = sorted([(st, v) for st, v in entries if st != "fin"], key=lambda x: int(x[0]))
+    return non_fin + [(st, v) for st, v in entries if st == "fin"]
+
+
+def _format_cell(entries):
+    if not entries:
+        return ""
+    if len(entries) == 1:
+        st, v = entries[0]
+        return r"{\small " + f"{st}:{v:.4f}" + "}"
+    rows = r" \\ ".join(f"{st} & :{v:.4f}" for st, v in entries)
+    return r"{\small\begin{tabular}[t]{@{}l@{}l@{}}" + rows + r"\end{tabular}}"
+
+
 def main(datasets, cases, result_path):
     base_path = result_path.parent
-    col_labels = [d.removeprefix("helmet_").replace("_", r"\_") for d in datasets]
+    col_labels = [
+        d.removeprefix("helmet_").rsplit("_", 1)[0].replace("_", r"\_")
+        for d in datasets
+    ]
     case_labels = [x[1].replace("_", r"\_") for x in cases]
 
-    # table[i][j] = list of "short_task:avg" strings (empty list if no file)
+    # table[i][j] = sorted list of (short_task, avg_value) tuples (empty if no file)
     table = []
     for case_key, _ in cases:
         row = []
@@ -38,7 +56,7 @@ def main(datasets, cases, result_path):
             else:
                 df = pd.read_csv(csv_path)
                 avg = df.groupby("task")["sub_exact_match"].mean()
-                row.append([f"{_short_task(t)}:{v:.4f}" for t, v in avg.items()])
+                row.append(_sort_entries([(_short_task(t), v) for t, v in avg.items()]))
         table.append(row)
 
     col_spec = "l" + "c" * len(datasets)
@@ -46,19 +64,14 @@ def main(datasets, cases, result_path):
         r"\begin{tabular}{" + col_spec + "}",
         r"\hline",
         " & ".join([""] + col_labels) + r" \\",
-        r"\hline",
+        r"\hline\hline",
+        r"\noalign{\smallskip}",
     ]
     for i, case_label in enumerate(case_labels):
-        cells = [case_label]
-        for cell_lines in table[i]:
-            if not cell_lines:
-                cells.append("")
-            elif len(cell_lines) == 1:
-                cells.append(cell_lines[0])
-            else:
-                cells.append(r"\makecell{" + r" \\ ".join(cell_lines) + "}")
+        cells = [r"\makecell[lt]{" + case_label + "}"] + [_format_cell(e) for e in table[i]]
         tex_lines.append(" & ".join(cells) + r" \\")
-    tex_lines += [r"\hline", r"\end{tabular}"]
+        tex_lines.append(r"\hline")
+    tex_lines.append(r"\end{tabular}")
 
     result_path.write_text("\n".join(tex_lines) + "\n")
 

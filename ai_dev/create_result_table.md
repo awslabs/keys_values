@@ -48,3 +48,30 @@ The column and row labels may contain "_", which you need to change to "\_" in L
 ### Answer
 
 Fixed — underscores in both column and row labels are now escaped as \_.
+
+
+## Comment
+
+I'd like to have a few changes:
+
+* Rows (for `case` values) should be separated by horizontal lines. The top row
+  with labels should be separated from the others by a double horizontal line, and
+  some space below this double line.
+* For the column labels, please also strip away f"_{dataset_size}" from the right.
+* The multi-row content of a cell should not be centered, but aligned on top, the
+  same for the row labels.
+* The different rows in a cell should be aligned. Both values before and after ":"
+  should be aligned on the left. Also, the row with "fin" should always be last, and
+  others should be sorted by the number before ":"
+* Please use a smaller fontsize for text in cells than for the row and column labels.
+
+### Answer
+
+Here's what changed:
+
+* Row separators: each data row is followed by \hline; the header is separated by \hline\hline with \noalign{\smallskip} below it for extra space.
+* Column label stripping: uses rsplit("_", 1)[0] to remove the trailing _{dataset_size} suffix before also removing the helmet_ prefix.
+* Top alignment: row labels use \makecell[lt]{...} (top-left); multi-row cells use \begin{tabular}[t]{...} (top-aligned).
+* Cell alignment: multi-row cells render as a nested tabular with two columns (@{}l@{}l@{}), so the short task keys and the :value parts are left-aligned independently.
+* Sort order: non-fin entries are sorted numerically by their 3-digit suffix; fin is always last.
+* Font size: cell content is wrapped in {\small ...} while labels remain at normal size.
