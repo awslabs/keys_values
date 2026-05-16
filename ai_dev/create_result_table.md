@@ -75,3 +75,22 @@ Here's what changed:
 * Cell alignment: multi-row cells render as a nested tabular with two columns (@{}l@{}l@{}), so the short task keys and the :value parts are left-aligned independently.
 * Sort order: non-fin entries are sorted numerically by their 3-digit suffix; fin is always last.
 * Font size: cell content is wrapped in {\small ...} while labels remain at normal size.
+
+
+## Comment
+
+Just a few extra changes:
+
+* Add some space above and below each horizontal line.
+* Multiply each average value (number after ":") by 100, so they become percentages.
+  The format should be f"{avg_sub_exact_match:.2f}"
+* For the rows in cells, insert a small space before and after the ":"
+
+### Answer
+
+
+Three changes made:
+
+* Spacing around \hline: every rule is now wrapped with \noalign{\smallskip} on both sides; the double rule after the header keeps the same pattern.
+* Percentages: values are multiplied by 100 and formatted as :.2f.
+* Space around :: single-entry cells use " : ", and multi-row cells use { : } (braces prevent LaTeX from treating it as a column separator inside the nested tabular).

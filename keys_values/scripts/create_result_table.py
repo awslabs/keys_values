@@ -32,8 +32,8 @@ def _format_cell(entries):
         return ""
     if len(entries) == 1:
         st, v = entries[0]
-        return r"{\small " + f"{st}:{v:.4f}" + "}"
-    rows = r" \\ ".join(f"{st} & :{v:.4f}" for st, v in entries)
+        return r"{\small " + f"{st} : {v * 100:.2f}" + "}"
+    rows = r" \\ ".join(f"{st} & {{ : }}{v * 100:.2f}" for st, v in entries)
     return r"{\small\begin{tabular}[t]{@{}l@{}l@{}}" + rows + r"\end{tabular}}"
 
 
@@ -62,15 +62,14 @@ def main(datasets, cases, result_path):
     col_spec = "l" + "c" * len(datasets)
     tex_lines = [
         r"\begin{tabular}{" + col_spec + "}",
-        r"\hline",
+        r"\noalign{\smallskip}\hline\noalign{\smallskip}",
         " & ".join([""] + col_labels) + r" \\",
-        r"\hline\hline",
-        r"\noalign{\smallskip}",
+        r"\noalign{\smallskip}\hline\hline\noalign{\smallskip}",
     ]
     for i, case_label in enumerate(case_labels):
         cells = [r"\makecell[lt]{" + case_label + "}"] + [_format_cell(e) for e in table[i]]
         tex_lines.append(" & ".join(cells) + r" \\")
-        tex_lines.append(r"\hline")
+        tex_lines.append(r"\noalign{\smallskip}\hline\noalign{\smallskip}")
     tex_lines.append(r"\end{tabular}")
 
     result_path.write_text("\n".join(tex_lines) + "\n")
