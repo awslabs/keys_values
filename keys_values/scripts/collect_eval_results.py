@@ -18,6 +18,10 @@ from typing import List, Optional
 
 from keys_values.evaluation.tasks import EvaluationTasks
 
+EVAL_METRICS_ALL_FILENAME = "eval_metrics_all.csv"
+
+SWEEP_TAR_FILENAME = "eval_metrics_transfer_{dataset_size}.tgz"
+
 
 def main(
     out_dir: Path,
@@ -53,16 +57,20 @@ def main(
         print(f"    {column_names[-1]} = {(sum_vals / num_vals):.3f}")
 
     print(f"Total number of records: {len(all_data)}")
-    combined_path = out_dir / "eval_metrics_all.csv"
-    with open(combined_path, "w") as fp:
-        writer = csv.writer(fp, delimiter=",")
-        writer.writerow(column_names)
-        for row in sorted(all_data, key=lambda x: (x[1], int(x[0]))):
-            writer.writerow(row)
+    if all_data:
+        combined_path = out_dir / EVAL_METRICS_ALL_FILENAME
+        with open(combined_path, "w") as fp:
+            writer = csv.writer(fp, delimiter=",")
+            writer.writerow(column_names)
+            for row in sorted(all_data, key=lambda x: (x[1], int(x[0]))):
+                writer.writerow(row)
 
 
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
+
+    mode = "collect"
+    # mode = "sweep"
     dataset_size = "64k"
     datasets = [
         f"helmet_nq_{dataset_size}",
@@ -74,12 +82,30 @@ if __name__ == "__main__":
         "lr_4gpu_cs2048_lr5",
         "h2o_4gpu_cs2048_lr5",
         "slr_4gpu_cs2048_lr5",
-        #    "qh2o_4gpu_cs2048_lr5",
-        #    "h2onorm_4gpu_cs2048_lr5",
-        #    "qh2onorm_4gpu_cs2048_lr5",
+        "qh2o_4gpu_cs2048_lr5",
+        "h2onorm_4gpu_cs2048_lr5",
+        "qh2onorm_4gpu_cs2048_lr5",
+        "lr_4gpu_cs1024_lr5",
+        "h2o_4gpu_cs1024_lr5",
     ]
     model_type = "lora"
-    for dataset, case in product(datasets, cases):
-        out_dir = base_path / dataset / case
-        if out_dir.exists():
-            main(out_dir, model_type)
+    if mode == "collect":
+        for dataset, case in product(datasets, cases):
+            out_dir = base_path / dataset / case
+            if out_dir.exists():
+                main(out_dir, model_type)
+            else:
+                print(f"\nResults for {dataset}/{case} do not exist")
+    elif mode == "sweep":
+        names = []
+        for dataset, case in product(datasets, cases):
+            name = "/".join((dataset, case, EVAL_METRICS_ALL_FILENAME))
+            if (base_path / name).exists():
+                names.append(name)
+        print(
+            f"\nCollected {len(names)} result files. Run at {base_path}:\n"
+            + "tar cfz " + SWEEP_TAR_FILENAME.format(dataset_size=dataset_size) + " "
+            + " ".join(names)
+        )
+    else:
+        raise NotImplementedError(f"Unknown mode: {mode}")
