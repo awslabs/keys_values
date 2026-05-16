@@ -71,7 +71,8 @@ if __name__ == "__main__":
 
     mode = "collect"
     # mode = "sweep"
-    dataset_size = "64k"
+    # dataset_size = "64k"
+    dataset_size = "128k"
     datasets = [
         f"helmet_nq_{dataset_size}",
         f"helmet_trivia_qa_{dataset_size}",
@@ -82,11 +83,11 @@ if __name__ == "__main__":
         "lr_4gpu_cs2048_lr5",
         "h2o_4gpu_cs2048_lr5",
         "slr_4gpu_cs2048_lr5",
-        "qh2o_4gpu_cs2048_lr5",
-        "h2onorm_4gpu_cs2048_lr5",
-        "qh2onorm_4gpu_cs2048_lr5",
-        "lr_4gpu_cs1024_lr5",
-        "h2o_4gpu_cs1024_lr5",
+        # "qh2o_4gpu_cs2048_lr5",
+        # "h2onorm_4gpu_cs2048_lr5",
+        # "qh2onorm_4gpu_cs2048_lr5",
+        # "lr_4gpu_cs1024_lr5",
+        # "h2o_4gpu_cs1024_lr5",
     ]
     model_type = "lora"
     if mode == "collect":
