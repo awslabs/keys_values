@@ -27,16 +27,6 @@ def _sort_entries(entries):
     return non_fin + [(st, v) for st, v in entries if st == "fin"]
 
 
-def _format_cell(entries):
-    if not entries:
-        return ""
-    if len(entries) == 1:
-        st, v = entries[0]
-        return r"{\small " + f"{st} : {v * 100:.2f}" + "}"
-    rows = r" \\ ".join(f"{st} & {{ : }}{v * 100:.2f}" for st, v in entries)
-    return r"{\small\begin{tabular}[t]{@{}l@{}l@{}}" + rows + r"\end{tabular}}"
-
-
 def main(datasets, cases, result_path):
     base_path = result_path.parent
     col_labels = [
@@ -59,16 +49,36 @@ def main(datasets, cases, result_path):
                 row.append(_sort_entries([(_short_task(t), v) for t, v in avg.items()]))
         table.append(row)
 
-    col_spec = "l" + "c" * len(datasets)
+    # Each dataset gets 2 sub-columns (l for task, r for value) for cross-cell alignment.
+    N = len(datasets)
+    col_spec = "l" + "lr" * N
     tex_lines = [
         r"\begin{tabular}{" + col_spec + "}",
         r"\noalign{\smallskip}\hline\noalign{\smallskip}",
-        " & ".join([""] + col_labels) + r" \\",
+        " & ".join([""] + [r"\multicolumn{2}{c}{" + lbl + "}" for lbl in col_labels]) + r" \\",
         r"\noalign{\smallskip}\hline\hline\noalign{\smallskip}",
     ]
     for i, case_label in enumerate(case_labels):
-        cells = [r"\makecell[lt]{" + case_label + "}"] + [_format_cell(e) for e in table[i]]
-        tex_lines.append(" & ".join(cells) + r" \\")
+        row_entries = table[i]
+        max_rows = max((len(e) for e in row_entries), default=0)
+        max_rows = max(max_rows, 1)
+        for k in range(max_rows):
+            if k == 0 and max_rows > 1:
+                label_cell = r"\multirow{" + str(max_rows) + r"}{*}{" + case_label + "}"
+            elif k == 0:
+                label_cell = case_label
+            else:
+                label_cell = ""
+            cells = [label_cell]
+            for entries in row_entries:
+                if k < len(entries):
+                    st, v = entries[k]
+                    cells.append(r"{\small " + st + "}")
+                    cells.append(r"{\small\,:\," + f"{v * 100:.2f}" + "}")
+                else:
+                    cells.append("")
+                    cells.append("")
+            tex_lines.append(" & ".join(cells) + r" \\")
         tex_lines.append(r"\noalign{\smallskip}\hline\noalign{\smallskip}")
     tex_lines.append(r"\end{tabular}")
 

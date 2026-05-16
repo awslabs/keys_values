@@ -88,9 +88,30 @@ Just a few extra changes:
 
 ### Answer
 
-
 Three changes made:
 
 * Spacing around \hline: every rule is now wrapped with \noalign{\smallskip} on both sides; the double rule after the header keeps the same pattern.
 * Percentages: values are multiplied by 100 and formatted as :.2f.
 * Space around :: single-entry cells use " : ", and multi-row cells use { : } (braces prevent LaTeX from treating it as a column separator inside the nested tabular).
+
+
+## Comment
+
+One more change would be great.
+
+Each cell has rows such as "fin : 45.10" or "100 : 9.95".
+
+* I'd like the first values (before ":") to be left-aligned, the second values
+  (after ":") to be right-aligned.
+* Can you ensure that these alignments extend across cells? So that ALL first
+  values in all cells of a column are left-aligned, and ALL second values in all
+  cells of a column are right-aligned?
+
+### Answer
+
+The approach:
+
+* Each dataset column is now two outer-table columns (l for task, r for value), with the header spanned via \multicolumn{2}{c}{...}.
+* Each (case, dataset) cell's task rows become separate outer-table rows, so l/r alignment is shared across all cells in the same column.
+* Case labels spanning multiple sub-rows use \multirow{n}{*}{...} (requires \usepackage{multirow}).
+* The : separator is rendered as \,:\, (thin spaces) inside each value cell, keeping it visually between the two aligned columns.
