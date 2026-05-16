@@ -24,8 +24,8 @@ def _short_task(task: str) -> str:
 
 def main(datasets, cases, result_path):
     base_path = result_path.parent
-    col_labels = [d.removeprefix("helmet_") for d in datasets]
-    case_labels = [x[1] for x in cases]
+    col_labels = [d.removeprefix("helmet_").replace("_", r"\_") for d in datasets]
+    case_labels = [x[1].replace("_", r"\_") for x in cases]
 
     # table[i][j] = list of "short_task:avg" strings (empty list if no file)
     table = []

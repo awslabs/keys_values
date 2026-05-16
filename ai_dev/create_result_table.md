@@ -39,3 +39,12 @@ Done. The main function:
 * Maps task names via _short_task: "final" → "fin", others → last 3 digits
 * Uses `\makecell{...}` for cells with multiple task rows (requires \usepackage{makecell} in the LaTeX preamble)
 * Writes the full `tabular` environment to `result_path`
+
+
+## Comment
+
+The column and row labels may contain "_", which you need to change to "\_" in LaTeX. Could you please fix this?
+
+### Answer
+
+Fixed — underscores in both column and row labels are now escaped as \_.
