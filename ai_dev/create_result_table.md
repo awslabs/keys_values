@@ -115,3 +115,17 @@ The approach:
 * Each (case, dataset) cell's task rows become separate outer-table rows, so l/r alignment is shared across all cells in the same column.
 * Case labels spanning multiple sub-rows use \multirow{n}{*}{...} (requires \usepackage{multirow}).
 * The : separator is rendered as \,:\, (thin spaces) inside each value cell, keeping it visually between the two aligned columns.
+
+
+## Comment:
+
+* Now, rows "fin : 45.10" are formatted by grouping "fin" and ":45.10". Can you
+  change this so that the grouping is "fin:" and "45.10", so the space is between
+  ":" and the right value?
+* Also, please shrink the amount of space between first and second values in a cell.
+  It should be quite a bit less than the space between different columns.
+
+### Answer
+
+The : moves to the end of the left cell (st:) and the right cell starts with \! (a negative thin space), pulling the number close to the colon while the normal inter-column gap still separates adjacent dataset pairs.
+

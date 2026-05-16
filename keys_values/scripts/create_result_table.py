@@ -73,8 +73,8 @@ def main(datasets, cases, result_path):
             for entries in row_entries:
                 if k < len(entries):
                     st, v = entries[k]
-                    cells.append(r"{\small " + st + "}")
-                    cells.append(r"{\small\,:\," + f"{v * 100:.2f}" + "}")
+                    cells.append(r"{\small " + st + r":}")
+                    cells.append(r"{\small\!" + f"{v * 100:.2f}" + "}")
                 else:
                     cells.append("")
                     cells.append("")
