@@ -36,6 +36,8 @@ def setup(
     use_sample_metric: bool = True,
     sample_metric_max_generated_tokens: int = 20,
     sample_metric_kwargs: Optional[Dict[str, Any]] = None,
+    num_store_generated_samples: Optional[int] = None,
+    skip_eval: bool = False,
 ) -> None:
     """Evaluate a range of model checkpoints on a test set
 
@@ -101,6 +103,15 @@ def setup(
             for sample-based metric evaluation
         sample_metric_kwargs: Keyword arguments for token sampling (params
             can be "temperature", "top_k", "top_p")
+        num_store_generated_samples: If given and positive, we write files
+            containing the generated sequences along with SFT targets and raw
+            targets. These files are written alongside metric files, using the
+            same naming convention. They are written for the initial test set
+            batches, until `num_store_generated_samples` cases are covered
+            (rounded up to a multiple of `batch_size`). Must have
+            `use_sample_metric == True`.
+        skip_eval: If `True`, we skip evaluations and only write files related
+            to `num_store_generated_samples`.
 
     """
     entry = {
@@ -124,4 +135,6 @@ def setup(
         use_sample_metric=use_sample_metric,
         sample_metric_max_generated_tokens=sample_metric_max_generated_tokens,
         sample_metric_kwargs=sample_metric_kwargs,
+        num_store_generated_samples=num_store_generated_samples,
+        skip_eval=skip_eval,
     )

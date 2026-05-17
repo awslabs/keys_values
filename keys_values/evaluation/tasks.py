@@ -14,7 +14,7 @@
 from filelock import FileLock, Timeout
 from pathlib import Path
 import re
-from typing import List, Dict, Any, Optional, Iterable, Tuple
+from typing import List, Dict, Any, Optional, Iterable, Tuple, Literal
 
 from keys_values.data.base import (
     LIT_MODEL_FNAME,
@@ -24,8 +24,6 @@ from keys_values.data.base import (
 from keys_values.data.evaluation import ORIG_IDX_NAME, TASK_NAME
 
 EVAL_METRICS_FNAME = "eval/eval_metrics_{}.csv"
-
-EVAL_METRICS_GLOB = EVAL_METRICS_FNAME.replace("{}", "*")
 
 REGEX_TASKNAME = re.compile(r"step-[0-9]{6}|final")
 
@@ -57,12 +55,17 @@ class EvaluationTasks:
         model_type: str,
         tasks: Optional[List[str]] = None,
         collect_results: bool = False,
+        eval_metrics_filename: Optional[str] = None,
     ):
         if isinstance(out_dir, str):
             out_dir = Path(out_dir)
         self._out_dir = out_dir
         self.model_type = model_type
         self._tasks = tasks.copy() if tasks is not None else None
+        if eval_metrics_filename is None:
+            eval_metrics_filename = EVAL_METRICS_FNAME
+        self._eval_metrics_filename = eval_metrics_filename
+        self._eval_metrics_glob = eval_metrics_filename.replace("{}", "*")
         self._init_task_names(collect_results)
 
     def _init_task_names(self, collect_results: bool):
@@ -100,9 +103,8 @@ class EvaluationTasks:
                 elif self._num_result_files(path) == 0:
                     raise ValueError(f"{path} contains no evaluation result files")
 
-    @staticmethod
-    def _num_result_files(path: Path) -> int:
-        return len(list(path.glob(EVAL_METRICS_GLOB)))
+    def _num_result_files(self, path: Path) -> int:
+        return len(list(path.glob(self._eval_metrics_glob)))
 
     @property
     def tasks(self) -> List[str]:
@@ -127,24 +129,26 @@ class EvaluationTasks:
 
     def eval_result_files(
         self,
-        return_incompletes: bool = False,
+        mode: Literal["non-lock", "lock", "all"] = "non-lock",
     ) -> Iterable[Tuple[str, List[Path]]]:
         """
         Args:
-            return_incompletes: If `True`, we return the complete lock files.
-                Defaults to `False`, so lock files are filtered out.
+            mode: For "non-lock", we return complete files (not locks). For
+                "lock", we return incomplete lock files. For "all", we
+                return all files.
         Yields:
             `(task_name, result_file_paths)`, where `result_file_paths`
             is list of paths of evaluation result files for this task name.
-            These files are filtered to not contain incomplete lock files.
-            But if `return_incompletes == True`, only incomplete files are
-            returned.
+            This list is filtered depending on `mode`.
 
         """
+        choices = ("non-lock", "lock", "all")
+        if mode not in choices:
+            raise ValueError(f"Invalid mode = {mode}, must be in {choices}")
         for task_name in self._tasks:
             result_file_paths = self._filter_incomplete_files(
-                (self._out_dir / task_name).glob(EVAL_METRICS_GLOB),
-                return_incompletes=return_incompletes,
+                (self._out_dir / task_name).glob(self._eval_metrics_glob),
+                mode=mode,
             )
             if result_file_paths:
                 yield task_name, result_file_paths
@@ -152,12 +156,17 @@ class EvaluationTasks:
     @staticmethod
     def _filter_incomplete_files(
         paths: Iterable[Path],
-        return_incompletes: bool = False,
+        mode: Literal["non-lock", "lock", "all"],
     ) -> List[Path]:
         result = []
+        return_all = mode == "all"
+        return_incompletes = mode == "lock"
         for path in paths:
             with path.open("r") as fp:
-                if fp.readline().startswith(FILE_LOCK_TEXT) == return_incompletes:
+                if (
+                    return_all
+                    or fp.readline().startswith(FILE_LOCK_TEXT) == return_incompletes
+                ):
                     result.append(path)
         return result
 
@@ -172,11 +181,19 @@ class EvaluationWithTasksHelper:
     dataloader we use.
     """
 
-    def __init__(self, out_dir: Path, tag: Optional[str] = None):
+    def __init__(
+        self,
+        out_dir: Path,
+        tag: Optional[str] = None,
+        eval_metrics_filename: Optional[str] = None,
+    ):
         self._out_dir = out_dir
         if tag is None:
             tag = ""
         self._tag = tag
+        if eval_metrics_filename is None:
+            eval_metrics_filename = EVAL_METRICS_FNAME
+        self._eval_metrics_filename = eval_metrics_filename
 
     def evaluation_metrics_path(self, batch: Dict[str, Any]) -> Path:
         """
@@ -197,7 +214,7 @@ class EvaluationWithTasksHelper:
                 f"batch[{TASK_NAME}] = {task}."
             )
         suffix = self._tag + str(orig_idxs[0])
-        fname = EVAL_METRICS_FNAME.format(suffix)
+        fname = self._eval_metrics_filename.format(suffix)
         return self._out_dir / task / fname
 
     def get_lock(self, batch: Dict[str, Any]) -> Optional[Path]:

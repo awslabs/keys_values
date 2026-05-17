@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict, Optional, List, Union
+from typing import Any, Dict, Optional, List, Union, Tuple
 
 import torch
 
@@ -129,7 +129,8 @@ class SampleBasedMetricsEvaluator:
         model: LongContextInferenceModel,
         prompts: torch.Tensor,
         targets: List[TargetType],
-    ) -> Dict[str, torch.Tensor]:
+        return_samples: bool = False,
+    ) -> Tuple[Dict[str, torch.Tensor], Optional[List[str]]]:
         """
         Computes metric values for data case `(input_ids, targets)`. The
         metrics to be computed are in `metrics`.
@@ -141,11 +142,15 @@ class SampleBasedMetricsEvaluator:
             targets: List of targets of length `batch_size`. Each entry is a
                 string or list of strings. Some metrics allow for lists of
                 strings, others require a single string
+            return_samples: If `True`, we also return a list of generated
+                sequences (of length `batch_size`)
 
         Returns:
             Dictionary with entries `{name: values}`, where `name in self.metrics`
             and `values.shape = (batch_size,)`, the metric values for each
             entry in the batch.
+            If `return_samples == True`, we also return a list of generated
+            sequences.
 
         """
         assert prompts.ndim == 2
@@ -186,4 +191,4 @@ class SampleBasedMetricsEvaluator:
                 device=prompts.device,
             )
             for metric in self.metrics
-        }
+        }, (outputs if return_samples else None)

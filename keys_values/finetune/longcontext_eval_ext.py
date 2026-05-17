@@ -17,11 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from pprint import pprint
 from typing import Dict, Optional, Union, Any, List, Tuple
+import yaml
 
 import lightning as L
 import torch
 from lightning.fabric.strategies import DDPStrategy
-import yaml
 
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
@@ -44,7 +44,10 @@ from keys_values.data.base import (
     LORA_WEIGHTS_FNAME,
     LORA_WEIGHTS_FNAME_OLD,
 )
-from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
+from keys_values.evaluation.evaluator import (
+    SampleBasedMetricsEvaluator,
+    TargetType,
+)
 from keys_values.evaluation.tasks import (
     EvaluationTasks,
     EvaluationWithTasksHelper,
@@ -81,6 +84,8 @@ from keys_values.utils import (
     fabric_precision_to_dtype,
     remove_keys,
 )
+
+GENERATED_SAMPLES_FILENAME = "generated_samples_{}.yaml"
 
 
 @dataclass
@@ -126,6 +131,8 @@ def setup(
     use_sample_metric: bool = True,
     sample_metric_max_generated_tokens: int = 20,
     sample_metric_kwargs: Optional[Dict[str, Any]] = None,
+    num_store_generated_samples: Optional[int] = None,
+    skip_eval: bool = False,
 ) -> None:
     """Evaluate a range of checkpoints for several models on a test set
 
@@ -162,6 +169,15 @@ def setup(
             for sample-based metric evaluation
         sample_metric_kwargs: Keyword arguments for token sampling (params
             can be "temperature", "top_k", "top_p")
+        num_store_generated_samples: If given and positive, we write files
+            containing the generated sequences along with SFT targets and raw
+            targets. These files are written alongside metric files, using the
+            same naming convention. They are written for the initial test set
+            batches, until `num_store_generated_samples` cases are covered
+            (rounded up to a multiple of `batch_size`). Must have
+            `use_sample_metric == True`.
+        skip_eval: If `True`, we skip evaluations and only write files related
+            to `num_store_generated_samples`.
 
     """
     devices = parse_devices(devices)
@@ -193,6 +209,8 @@ def setup(
         use_sample_metric,
         sample_metric_max_generated_tokens,
         sample_metric_kwargs,
+        num_store_generated_samples,
+        skip_eval,
     )
 
 
@@ -208,7 +226,22 @@ def setup_internal(
     use_sample_metric: bool,
     sample_metric_max_generated_tokens: int,
     sample_metric_kwargs: Optional[Dict[str, Any]],
+    num_store_generated_samples: Optional[int],
+    skip_eval: bool,
 ) -> None:
+    if num_store_generated_samples is None and skip_eval:
+        raise ValueError(
+            "If skip_eval is True, num_store_generated_samples must be given"
+        )
+    if num_store_generated_samples is not None:
+        if num_store_generated_samples <= 0:
+            raise ValueError(
+                f"num_store_generated_samples = {num_store_generated_samples}, must be positive"
+            )
+        if not use_sample_metric:
+            raise ValueError(
+                f"num_store_generated_samples can only be used if use_sample_metric is True"
+            )
     # Need to obtain `precision` from hyperparameters of first setup
     out_dir = Path(setups[0]["out_dir"])
     model_type = setups[0]["model_type"]
@@ -248,6 +281,8 @@ def setup_internal(
         sample_metric_kwargs=sample_metric_kwargs,
         lora_dropout=lora_dropout,
         access_token=access_token,
+        num_store_generated_samples=num_store_generated_samples,
+        skip_eval=skip_eval,
     )
 
 
@@ -264,6 +299,8 @@ def main(
     sample_metric_kwargs: Dict[str, Any],
     lora_dropout: Optional[float],
     access_token: Optional[str],
+    num_store_generated_samples: Optional[int],
+    skip_eval: bool,
 ) -> None:
     fabric.seed_everything(seed)
 
@@ -388,7 +425,6 @@ def main(
         set_fused_swiglu_enabled(sdpa.fused_swiglu)
 
         # Create model
-        is_lora = model_type == "lora"
         if torch.cuda.is_available():
             device = torch.device("cuda", fabric.local_rank)
         else:
@@ -440,6 +476,20 @@ def main(
             load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
         # Evaluation over tasks and batches
+        # `num_store_generated_batches` is the number of batches for which
+        # generated samples are written out
+        if num_store_generated_samples is not None:
+            num_store_generated_batches = (
+                num_store_generated_samples // batch_size
+                + int(num_store_generated_samples % batch_size > 0)
+            )
+            if devices > 1:
+                num_store_generated_batches = (
+                    num_store_generated_batches // devices
+                    + int(fabric.local_rank < num_store_generated_batches % devices)
+                )
+        else:
+            num_store_generated_batches = None
         eval_for_setup(
             fabric,
             model,
@@ -454,6 +504,8 @@ def main(
             use_sample_metric,
             sample_metric_max_generated_tokens,
             sample_metric_kwargs,
+            num_store_generated_batches,
+            skip_eval,
         )
 
 
@@ -471,9 +523,11 @@ def eval_for_setup(
     use_sample_metric: bool,
     sample_metric_max_generated_tokens,
     sample_metric_kwargs: Dict[str, Any],
+    num_store_generated_batches: Optional[int],
+    skip_eval: bool,
 ) -> None:
-    # Test dataloader is over cross product of test dataset and evaluation
-    # tasks
+    # Test dataloader is over cross product of test dataset batches and
+    # evaluation tasks
     test_dataloader = get_dataloader(
         data=data,
         tokenizer=tokenizer,
@@ -511,6 +565,8 @@ def eval_for_setup(
         model_type,
         model_config,
         devices,
+        num_store_generated_batches,
+        skip_eval,
         ignore_index,
     )
 
@@ -526,6 +582,8 @@ def eval_for_setup_internal(
     model_type: str,
     model_config: ModelConfiguration,
     devices: int,
+    num_store_generated_batches: Optional[int],
+    skip_eval: bool,
     ignore_index: int = -100,
 ) -> None:
     # Loop over test set batches
@@ -542,18 +600,44 @@ def eval_for_setup_internal(
         tag = data.test_set_tag
     else:
         tag = None
-    tasks_helper = EvaluationWithTasksHelper(out_dir, tag)
+    # Note: If `skip_eval == True`, we assume that the eval metrics files are
+    # already present, and we use the generated samples files for locking
+    if skip_eval:
+        fname = "eval/" + GENERATED_SAMPLES_FILENAME
+    else:
+        fname = None
+    tasks_helper = EvaluationWithTasksHelper(
+        out_dir,
+        tag=tag,
+        eval_metrics_filename=fname,
+    )
     current_task = None
     test_dataiter = iter(test_dataloader)
     if devices > 1:
         # Ensure that lock for first batch is not checked at exactly the same
         # time by all devices
         time.sleep(0.05 * fabric.global_rank)
+    batch_idx = 0  # Batch counter per task
+    skip_until_next_task = False
     for batch in test_dataiter:
         if not batch:
             print("Empty batch: Continue")
             continue
+        if skip_until_next_task:
+            if batch[TASK_NAME] == current_task:
+                continue
+            skip_until_next_task = False
+        store_generated_batch = (
+            num_store_generated_batches is not None
+            and batch_idx < num_store_generated_batches
+        )
         task = batch[TASK_NAME]
+        if skip_eval and not store_generated_batch and task == current_task:
+            print(
+                f"Wrote out generated samples for {num_store_generated_batches} batches: Skipping remaining ones for this task"
+            )
+            skip_until_next_task = True
+            continue
         orig_idxs = batch[ORIG_IDX_NAME]
         eval_metrics_path = tasks_helper.get_lock(batch)
         if eval_metrics_path is None:
@@ -578,6 +662,7 @@ def eval_for_setup_internal(
                     fabric=fabric,
                 )
                 current_task = task
+                batch_idx = 0  # Reset
 
             t0 = time.perf_counter()
             # One entry per batch dimension:
@@ -587,20 +672,54 @@ def eval_for_setup_internal(
                 with torch.no_grad():
                     metric_values = model(input_ids, targets)
                 metric_name = "eval_loss"
+                generated_samples = None
+                raw_targets = None
             else:
                 metric_name = evaluator.metrics[0]
                 prompt_len = input_ids.shape[1] - targets.shape[1] + 1
                 prompts = input_ids[:, :prompt_len]
                 raw_targets = batch[TARGETS_STRINGS_NAME]
-                metric_values = evaluator(model, prompts, raw_targets)[metric_name]
+                metric_values, generated_samples = evaluator(
+                    model,
+                    prompts,
+                    raw_targets,
+                    return_samples=store_generated_batch,
+                )
+                metric_values = metric_values[metric_name]
             eval_time = time.perf_counter() - t0
             print_with_rank_and_timestamp(
                 f"Batch {task}, {orig_idxs}: {metric_name} = {metric_values.mean().item():.3f}, eval_time = {eval_time * 1000:.2f} ms",
                 fabric.global_rank,
             )
             flush_io_streams()
-            print(f"Storing to {eval_metrics_path}")
-            store_eval_metrics(metric_name, metric_values, batch, eval_metrics_path)
+            if not skip_eval:
+                print(f"Storing to {eval_metrics_path}")
+                store_eval_metrics(metric_name, metric_values, batch, eval_metrics_path)
+            if store_generated_batch:
+                if skip_eval:
+                    result_path = eval_metrics_path
+                else:
+                    eval_fname = eval_metrics_path.stem
+                    suffix = "_".split(eval_fname)[-1]
+                    result_path = (
+                        eval_metrics_path.parent
+                        / GENERATED_SAMPLES_FILENAME.format(suffix)
+                    )
+                print(f"Storing generated samples to {result_path}")
+                store_generated_samples(
+                    metric_name=metric_name,
+                    metric_values=metric_values,
+                    batch=batch,
+                    generated_samples=generated_samples,
+                    targets=targets,
+                    raw_targets=raw_targets,
+                    tokenizer=tokenizer,
+                    result_path=result_path,
+                    ignore_index=ignore_index,
+                )
+            # Only count a batch if it was not skipped:
+            batch_idx += 1
+
         except Exception as ex:
             print("Caught exception during evaluation:\n" + str(ex))
             eval_metrics_path.unlink(missing_ok=True)
@@ -614,7 +733,7 @@ def get_dataloader(
     head_model: str,
     batch_size: int,
     devices: int,
-    fabric: Optional[L.Fabric] = None,
+    fabric: Optional[L.Fabric],
 ) -> EvaluationDataLoader:
     """
     Creates data loader for cross product of test dataset with evaluation
@@ -737,3 +856,34 @@ def store_eval_metrics(
         writer.writerow(fieldnames)
         for idx, loss in zip(batch[ORIG_IDX_NAME], metric_values):
             writer.writerow([idx, task, loss.item()])
+
+
+def store_generated_samples(
+    metric_name: str,
+    metric_values: torch.Tensor,
+    batch: dict[str, Any],
+    generated_samples: List[str],
+    targets: torch.Tensor,
+    raw_targets: List[TargetType],
+    tokenizer: Tokenizer,
+    result_path: Path,
+    ignore_index: int,
+):
+    entries = [
+        {
+            "idx": idx,
+            metric_name: metric_val.item(),
+            "output": output,
+            "raw_target": raw_target,
+            "sft_target": tokenizer.decode(target[target != ignore_index]),
+        }
+        for idx, metric_val, output, raw_target, target in zip(
+            batch[ORIG_IDX_NAME],
+            metric_values,
+            generated_samples,
+            raw_targets,
+            targets,
+        )
+    ]
+    with result_path.open("w") as fp:
+        yaml.safe_dump(entries, fp)
