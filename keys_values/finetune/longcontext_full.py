@@ -1900,7 +1900,7 @@ def validate_sample_metric(
         raw_targets = batch[TARGETS_STRINGS_NAME]
         prompt_len = input_ids.shape[1] - batch["targets"].shape[1] + 1
         prompts = input_ids[:, :prompt_len]
-        metric_vals = evaluator(model, prompts, raw_targets)
+        metric_vals = evaluator(model, prompts, raw_targets)[0]
         sum_metric_values += metric_vals[evaluator.metrics[0]].sum().item()
         num_entries += 1
     model.train()

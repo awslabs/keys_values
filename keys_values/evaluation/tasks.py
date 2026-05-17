@@ -25,8 +25,6 @@ from keys_values.data.evaluation import ORIG_IDX_NAME, TASK_NAME
 
 EVAL_METRICS_FNAME = "eval/eval_metrics_{}.csv"
 
-EVAL_METRICS_GLOB = EVAL_METRICS_FNAME.replace("{}", "*")
-
 REGEX_TASKNAME = re.compile(r"step-[0-9]{6}|final")
 
 _REQUIRED_FILES = [
@@ -57,12 +55,17 @@ class EvaluationTasks:
         model_type: str,
         tasks: Optional[List[str]] = None,
         collect_results: bool = False,
+        eval_metrics_filename: Optional[str] = None,
     ):
         if isinstance(out_dir, str):
             out_dir = Path(out_dir)
         self._out_dir = out_dir
         self.model_type = model_type
         self._tasks = tasks.copy() if tasks is not None else None
+        if eval_metrics_filename is None:
+            eval_metrics_filename = EVAL_METRICS_FNAME
+        self._eval_metrics_filename = eval_metrics_filename
+        self._eval_metrics_glob = eval_metrics_filename.replace("{}", "*")
         self._init_task_names(collect_results)
 
     def _init_task_names(self, collect_results: bool):
@@ -100,9 +103,8 @@ class EvaluationTasks:
                 elif self._num_result_files(path) == 0:
                     raise ValueError(f"{path} contains no evaluation result files")
 
-    @staticmethod
-    def _num_result_files(path: Path) -> int:
-        return len(list(path.glob(EVAL_METRICS_GLOB)))
+    def _num_result_files(self, path: Path) -> int:
+        return len(list(path.glob(self._eval_metrics_glob)))
 
     @property
     def tasks(self) -> List[str]:
@@ -143,7 +145,7 @@ class EvaluationTasks:
         """
         for task_name in self._tasks:
             result_file_paths = self._filter_incomplete_files(
-                (self._out_dir / task_name).glob(EVAL_METRICS_GLOB),
+                (self._out_dir / task_name).glob(self._eval_metrics_glob),
                 return_incompletes=return_incompletes,
             )
             if result_file_paths:
@@ -172,11 +174,19 @@ class EvaluationWithTasksHelper:
     dataloader we use.
     """
 
-    def __init__(self, out_dir: Path, tag: Optional[str] = None):
+    def __init__(
+        self,
+        out_dir: Path,
+        tag: Optional[str] = None,
+        eval_metrics_filename: Optional[str] = None,
+    ):
         self._out_dir = out_dir
         if tag is None:
             tag = ""
         self._tag = tag
+        if eval_metrics_filename is None:
+            eval_metrics_filename = EVAL_METRICS_FNAME
+        self._eval_metrics_filename = eval_metrics_filename
 
     def evaluation_metrics_path(self, batch: Dict[str, Any]) -> Path:
         """
@@ -197,7 +207,7 @@ class EvaluationWithTasksHelper:
                 f"batch[{TASK_NAME}] = {task}."
             )
         suffix = self._tag + str(orig_idxs[0])
-        fname = EVAL_METRICS_FNAME.format(suffix)
+        fname = self._eval_metrics_filename.format(suffix)
         return self._out_dir / task / fname
 
     def get_lock(self, batch: Dict[str, Any]) -> Optional[Path]:
