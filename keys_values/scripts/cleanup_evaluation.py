@@ -25,7 +25,7 @@ def main(
 ):
     total_removed = 0
     eval_tasks = EvaluationTasks(out_dir, model_type)
-    print("")
+    print(f"Removing files for {out_dir}")
     for task_name, incomplete_file_paths in eval_tasks.eval_result_files(mode):
         print(f"{task_name}: Removing {len(incomplete_file_paths)} files (type {mode})")
         for path in incomplete_file_paths:
@@ -36,8 +36,8 @@ def main(
 
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
-    dataset_size = "64k"
-    # dataset_size = "128k"
+    # dataset_size = "64k"
+    dataset_size = "128k"
     datasets = [
         f"helmet_nq_{dataset_size}",
         f"helmet_trivia_qa_{dataset_size}",
@@ -45,6 +45,9 @@ if __name__ == "__main__":
         f"helmet_pop_qa_{dataset_size}",
     ]
     cases = [
+        "lr_4gpu_cs2048_lr5",
+        "lr_4gpu_cs1024_lr5",
+        "slr_4gpu_cs2048_lr5",
         "h2o_4gpu_cs2048_lr5",
         "qh2o_4gpu_cs2048_lr5",
         "h2onorm_4gpu_cs2048_lr5",
