@@ -700,7 +700,7 @@ def eval_for_setup_internal(
                     result_path = eval_metrics_path
                 else:
                     eval_fname = eval_metrics_path.stem
-                    suffix = "_".split(eval_fname)[-1]
+                    suffix = eval_fname.split("_")[-1]
                     result_path = (
                         eval_metrics_path.parent
                         / GENERATED_SAMPLES_FILENAME.format(suffix)

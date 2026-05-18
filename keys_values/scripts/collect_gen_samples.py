@@ -56,6 +56,8 @@ def main(
     print(f"Total number of records: {num_total}")
     if all_data:
         combined_path = out_dir / GENERATED_SAMPLES_ALL_FILENAME
+        if combined_path.exists():
+            combined_path.unlink()
         with open(combined_path, "w") as fp:
             yaml.safe_dump(all_data, fp)
 
@@ -82,6 +84,8 @@ if __name__ == "__main__":
         "qh2onorm_4gpu_cs2048_lr5",
         "lr_4gpu_cs1024_lr5",
         "h2o_4gpu_cs1024_lr5",
+        "slr_4gpu_cs1024_lr5",
+        "h2onorm_4gpu_cs1024_lr5",
     ]
     model_type = "lora"
     if mode == "collect":
