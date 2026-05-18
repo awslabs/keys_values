@@ -14,7 +14,7 @@
 from filelock import FileLock, Timeout
 from pathlib import Path
 import re
-from typing import List, Dict, Any, Optional, Iterable, Tuple
+from typing import List, Dict, Any, Optional, Iterable, Tuple, Literal
 
 from keys_values.data.base import (
     LIT_MODEL_FNAME,
@@ -129,24 +129,26 @@ class EvaluationTasks:
 
     def eval_result_files(
         self,
-        return_incompletes: bool = False,
+        mode: Literal["non-lock", "lock", "all"] = "non-lock",
     ) -> Iterable[Tuple[str, List[Path]]]:
         """
         Args:
-            return_incompletes: If `True`, we return the complete lock files.
-                Defaults to `False`, so lock files are filtered out.
+            mode: For "non-lock", we return complete files (not locks). For
+                "lock", we return incomplete lock files. For "all", we
+                return all files.
         Yields:
             `(task_name, result_file_paths)`, where `result_file_paths`
             is list of paths of evaluation result files for this task name.
-            These files are filtered to not contain incomplete lock files.
-            But if `return_incompletes == True`, only incomplete files are
-            returned.
+            This list is filtered depending on `mode`.
 
         """
+        choices = ("non-lock", "lock", "all")
+        if mode not in choices:
+            raise ValueError(f"Invalid mode = {mode}, must be in {choices}")
         for task_name in self._tasks:
             result_file_paths = self._filter_incomplete_files(
                 (self._out_dir / task_name).glob(self._eval_metrics_glob),
-                return_incompletes=return_incompletes,
+                mode=mode,
             )
             if result_file_paths:
                 yield task_name, result_file_paths
@@ -154,12 +156,14 @@ class EvaluationTasks:
     @staticmethod
     def _filter_incomplete_files(
         paths: Iterable[Path],
-        return_incompletes: bool = False,
+        mode: Literal["non-lock", "lock", "all"],
     ) -> List[Path]:
         result = []
+        return_all = mode == "all"
+        return_incompletes = mode == "lock"
         for path in paths:
             with path.open("r") as fp:
-                if fp.readline().startswith(FILE_LOCK_TEXT) == return_incompletes:
+                if return_all or fp.readline().startswith(FILE_LOCK_TEXT) == return_incompletes:
                     result.append(path)
         return result
 

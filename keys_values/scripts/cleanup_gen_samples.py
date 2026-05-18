@@ -35,6 +35,6 @@ def main(control_file: Path):
 
 if __name__ == "__main__":
     dataset_size = "64k"
-    control_file = Path.home() / "sync" / "keys_values" / f"eval_inst1_{dataset_size}.yaml"
-    # control_file = Path.home() / "git" / "keys_values" / f"eval_inst2_3_{dataset_size}.yaml"
+    # control_file = Path.home() / "sync" / "keys_values" / f"eval_inst1_{dataset_size}_h2o.yaml"
+    control_file = Path.home() / "git" / "keys_values" / f"eval_inst2_3_{dataset_size}_h2o.yaml"
     main(control_file)
