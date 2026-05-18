@@ -80,18 +80,31 @@ if __name__ == "__main__":
         f"helmet_pop_qa_{dataset_size}",
     ]
     cases = [
-        "lr_4gpu_cs2048_lr5",
+    #    "lr_4gpu_cs2048_lr5",
         "h2o_4gpu_cs2048_lr5",
-        "slr_4gpu_cs2048_lr5",
+    #    "slr_4gpu_cs2048_lr5",
         "qh2o_4gpu_cs2048_lr5",
         "h2onorm_4gpu_cs2048_lr5",
         "qh2onorm_4gpu_cs2048_lr5",
-        "lr_4gpu_cs1024_lr5",
+    #    "lr_4gpu_cs1024_lr5",
         "h2o_4gpu_cs1024_lr5",
     ]
     model_type = "lora"
+    debug_do_these = [
+        "helmet_trivia_qa_64k/h2o_4gpu_cs2048_lr5",
+        "helmet_trivia_qa_64k/qh2o_4gpu_cs2048_lr5",
+        "helmet_trivia_qa_64k/qh2onorm_4gpu_cs2048_lr5",
+        "helmet_hotpot_qa_64k/qh2o_4gpu_cs2048_lr5",
+        "helmet_nq_64k/h2o_4gpu_cs2048_lr5",
+        "helmet_nq_64k/h2o_4gpu_cs1024_lr5",
+        "helmet_nq_64k/qh2o_4gpu_cs2048_lr5",
+        "helmet_nq_64k/h2onorm_4gpu_cs2048_lr5",
+        "helmet_nq_64k/qh2onorm_4gpu_cs2048_lr5",
+    ]
     if mode == "collect":
         for dataset, case in product(datasets, cases):
+            if f"{dataset}/{case}" not in debug_do_these:
+                continue
             out_dir = base_path / dataset / case
             if out_dir.exists():
                 main(out_dir, model_type)
