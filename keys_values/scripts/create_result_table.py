@@ -74,26 +74,44 @@ def main(datasets, cases, result_path, final_table: bool):
                         [
                             (_short_task(t), v)
                             for t, v in avg.items()
-                            if not final_table or _filter_dataset_case(dataset, case_key, _short_task(t))
+                            if not final_table
+                            or _filter_dataset_case(dataset, case_key, _short_task(t))
                         ]
                     )
                 )
         table.append(row)
 
-    # Each dataset gets 2 sub-columns (l for task, r for value) for cross-cell alignment.
+    # - final_table == False:
+    #   Each dataset gets 2 sub-columns (l for task, r for value) for cross-cell alignment.
+    # - final_table == True:
+    #   Each dataset column features a single entry (r for value)
     N = len(datasets)
-    col_spec = "l" + "lr" * N
-    tex_lines = [
-        r"\begin{tabular}{" + col_spec + "}",
-        r"\noalign{\smallskip}\hline\noalign{\smallskip}",
-        " & ".join([""] + [r"\multicolumn{2}{c}{" + lbl + "}" for lbl in col_labels])
-        + r" \\",
-        r"\noalign{\smallskip}\hline\hline\noalign{\smallskip}",
-    ]
-    for i, case_label in enumerate(case_labels):
-        row_entries = table[i]
+    if final_table:
+        col_spec = "l" + "r" * N
+        tex_lines = [
+            r"\begin{tabular}{" + col_spec + "}",
+            r"\noalign{\smallskip}\hline\noalign{\smallskip}",
+            " & ".join([""] + col_labels) + r" \\",
+            r"\noalign{\smallskip}\hline\hline\noalign{\smallskip}",
+        ]
+    else:
+        col_spec = "l" + "lr" * N
+        tex_lines = [
+            r"\begin{tabular}{" + col_spec + "}",
+            r"\noalign{\smallskip}\hline\noalign{\smallskip}",
+            " & ".join(
+                [""] + [r"\multicolumn{2}{c}{" + lbl + "}" for lbl in col_labels]
+            )
+            + r" \\",
+            r"\noalign{\smallskip}\hline\hline\noalign{\smallskip}",
+        ]
+    for case_label, row_entries in zip(case_labels, table):
         max_rows = max((len(e) for e in row_entries), default=0)
         max_rows = max(max_rows, 1)
+        if final_table and max_rows > 1:
+            print(
+                f"{case_label}: max_rows = {max_rows} > 1, must not happen for final_table=True"
+            )
         for k in range(max_rows):
             if k == 0 and max_rows > 1:
                 label_cell = r"\multirow{" + str(max_rows) + r"}{*}{" + case_label + "}"
@@ -105,10 +123,12 @@ def main(datasets, cases, result_path, final_table: bool):
             for entries in row_entries:
                 if k < len(entries):
                     st, v = entries[k]
-                    cells.append(r"{\small " + st + r":}")
+                    if not final_table:
+                        cells.append(r"{\small " + st + r":}")
                     cells.append(r"{\small\!" + f"{v * 100:.2f}" + "}")
                 else:
-                    cells.append("")
+                    if not final_table:
+                        cells.append("")
                     cells.append("")
             tex_lines.append(" & ".join(cells) + r" \\")
         tex_lines.append(r"\noalign{\smallskip}\hline\noalign{\smallskip}")
@@ -145,4 +165,4 @@ if __name__ == "__main__":
     # final_table = False
     final_table = True
 
-    main(datasets, cases, result_path ,final_table)
+    main(datasets, cases, result_path, final_table)
