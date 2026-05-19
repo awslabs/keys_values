@@ -29,7 +29,25 @@ def _sort_entries(entries):
     return non_fin + [(st, v) for st, v in entries if st == "fin"]
 
 
-def main(datasets, cases, result_path):
+# We ran evaluations for more than the task for which evaluation loss was
+# lowest. With this predicate, we filter for the winning tasks only.
+def _filter_dataset_case(
+    dataset: str,
+    case: str,
+    task: str,
+) -> bool:
+    if dataset.endswith("_128k"):
+        # Not yet implemented!!
+        return True
+    if task == "fin":
+        # Only those for which "fin" is the only result
+        return dataset.startswith("helmet_pop_qa") and (
+            case.startswith("slr") or case.startswith("h2onorm")
+        )
+    return task != "010"
+
+
+def main(datasets, cases, result_path, final_table: bool):
     base_path = result_path.parent
     col_labels = [
         d.removeprefix("helmet_").rsplit("_", 1)[0].replace("_", r"\_")
@@ -48,7 +66,15 @@ def main(datasets, cases, result_path):
             else:
                 df = pd.read_csv(csv_path)
                 avg = df.groupby("task")["sub_exact_match"].mean()
-                row.append(_sort_entries([(_short_task(t), v) for t, v in avg.items()]))
+                row.append(
+                    _sort_entries(
+                        [
+                            (_short_task(t), v)
+                            for t, v in avg.items()
+                            if not final_table or _filter_dataset_case(dataset, case_key, _short_task(t))
+                        ]
+                    )
+                )
         table.append(row)
 
     # Each dataset gets 2 sub-columns (l for task, r for value) for cross-cell alignment.
@@ -112,5 +138,7 @@ if __name__ == "__main__":
         ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
     ]
     result_path = base_path / f"results_{dataset_size}.tex"
+    # final_table = False
+    final_table = True
 
-    main(datasets, cases, result_path)
+    main(datasets, cases, result_path ,final_table)
