@@ -84,6 +84,8 @@ if __name__ == "__main__":
         "qh2onorm_4gpu_cs2048_lr5",
         "lr_4gpu_cs1024_lr5",
         "h2o_4gpu_cs1024_lr5",
+        "slr_4gpu_cs1024_lr5",
+        "h2onorm_4gpu_cs1024_lr5",
     ]
     model_type = "lora"
     if mode == "collect":
