@@ -39,10 +39,13 @@ def _filter_dataset_case(
     if dataset.endswith("_128k"):
         # Not yet implemented!!
         return True
+    # Filter out error in results:
+    if task == "380" and case.startswith("lr_") and dataset.startswith("helmet_trivia"):
+        return False
     if task == "fin":
         # Only those for which "fin" is the only result
-        return dataset.startswith("helmet_pop_qa") and (
-            case.startswith("slr") or case.startswith("h2onorm")
+        return dataset.startswith("helmet_pop") and (
+            case.startswith("slr_") or case.startswith("h2onorm_")
         )
     return task != "010"
 
@@ -116,6 +119,7 @@ def main(datasets, cases, result_path, final_table: bool):
     result_path.write_text("\n".join(tex_lines) + "\n")
 
 
+# TODO: If `final_table = True`, do not print the task ID, just the metric value
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
@@ -129,8 +133,8 @@ if __name__ == "__main__":
     ]
     cases = [
         ("lr_4gpu_cs2048_lr5", "lr_2048"),
-        ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
         ("slr_4gpu_cs2048_lr5", "slr_2048"),
+        ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
         ("qh2o_4gpu_cs2048_lr5", "qh2o_2048"),
         ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
         ("qh2onorm_4gpu_cs2048_lr5", "qh2onorm_2048"),
