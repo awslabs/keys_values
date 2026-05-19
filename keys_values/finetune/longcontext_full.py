@@ -1663,6 +1663,11 @@ def fit(
             num_tokens = batch[INPUT_IDS_NAME].numel()
             token_counts["raw_tokens_plus_prompt_template_and_padding"] += num_tokens
 
+            # DEBUG
+            print("Done one training step. Stopping.")
+            exit(0)
+            # END DEBUG
+
             total_lengths += num_tokens
             if state["iter_num"] % train.log_interval == 0:
                 loss = running_loss.compute().item()

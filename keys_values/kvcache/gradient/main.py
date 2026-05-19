@@ -30,7 +30,10 @@ from keys_values.kvcache.consts import SUPPORTED_QUANTIZERS
 from keys_values.kvcache.factory import (
     deallocate_kv_cache_buffers_of_model,
 )
-from keys_values.kvcache.gradient.accumulate import GradientAccumulator
+from keys_values.kvcache.gradient.accumulate import (
+    GradientAccumulator,
+    stream_decorator,
+)
 from keys_values.kvcache.gradient.autograd_hooks import (
     CellComputationAutogradHooks,
     CleanupArraysAutogradHooks,
@@ -231,6 +234,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         cache_kwargs: Optional[Dict[str, Any]] = None,
         train_cache_kwargs: Optional[Dict[str, Any]] = None,
         backward_tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        async_cpu_transfer: bool = False,
         layercp_pin_memory: bool = False,
         cachecp_pin_memory: bool = False,
         autograd_hooks_kwargs: Optional[Dict[str, Any]] = None,
@@ -296,6 +300,11 @@ class LongContextGradientModel(LongContextInferenceModel):
             backward_tmp_array_limit_gb: Same role as `tmp_array_limit_gb`, but
                 for backward computations. Overrides "tmp_array_limit_gb"
                 entries in `cache_kwargs`, `train_cache_kwargs`.
+            async_cpu_transfer: If `True`, we run the GPU to CPU transfer for
+                layer input checkpointing on a separate stream from GPU
+                computation. Otherwise, this transfer blocks the GPU from doing
+                work until it is done. Must have `layercp_pin_memory=True` and
+                `cachecp_pin_memory=True`.
             layercp_pin_memory: If `True`, the CPU memory pages for layer input
                 checkpoints are pinned. This can run faster, but also needs more
                 real CPU memory.
@@ -385,6 +394,17 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._autograd_hooks_kwargs = autograd_hooks_kwargs
         # Device memory limit for backward computations:
         self._backward_tmp_array_limit_gb = backward_tmp_array_limit_gb
+        if async_cpu_transfer and not (layercp_pin_memory and cachecp_pin_memory):
+            raise ValueError("async_cpu_transfer=True requires layercp_pin_memory=True and cachecp_pin_memory=True")
+        if async_cpu_transfer:
+            # This stream will be used for GPU -> CPU transfer
+            self.device_to_host_stream = torch.cuda.Stream()
+            # This stream will be used for CPU -> GPU transfer
+            self.host_to_device_stream = torch.cuda.Stream()
+        else:
+            self.device_to_host_stream = None
+            self.host_to_device_stream = None
+        self._cuda_d2h_copy_event = None
         self.layercp_pin_memory = layercp_pin_memory
         self.cachecp_pin_memory = cachecp_pin_memory
         self._debug_dont_use_autograd_hooks = debug_dont_use_autograd_hooks
@@ -792,22 +812,60 @@ class LongContextGradientModel(LongContextInferenceModel):
         self,
         x: torch.Tensor,
         layer_idx: int,
+        **kwargs,
     ):
+        """
+        How do :meth:`_checkpoint_layer_input` and :meth:`_checkpoint_layer_input_sync`
+        work together if `self.training and self.device_to_host_stream is not None`?
+
+        - Run `self.layer_checkpoints.set_checkpoint(...)`, copy GPU -> CPU, on
+          separate stream `self.device_to_host_stream`. Set event
+          `self._cuda_d2h_copy_event` at the end.
+        - Synchronize the two streams in :meth:`_checkpoint_layer_input_sync`. Note
+          that GPU computation is happening on the current stream.
+
+        We follow:
+        https://docs.pytorch.org/tutorials/intermediate/pinmem_nonblock.html
+
+        """
         if self.training:
+            # DEBUG (profile)
             input_pos = self._layer_cp_input_pos.get(layer_idx)
-            self.layer_checkpoints.set_checkpoint(
-                layer_idx=layer_idx,
-                buffers=x,
-                input_pos=0 if input_pos is None else input_pos,
-            )
+            parts = ["forward", str(layer_idx)]
+            if "start" in kwargs:
+                parts.insert(1, str(kwargs["start"]))
+            torch.cuda.nvtx.range_push(":".join(parts))
+            # END DEBUG
+            with stream_decorator(self.device_to_host_stream):
+                self.layer_checkpoints.set_checkpoint(
+                    layer_idx=layer_idx,
+                    buffers=x,
+                    input_pos=0 if input_pos is None else input_pos,
+                )
+                if self.device_to_host_stream is not None:
+                    # Event at end of copy operation
+                    self._cuda_d2h_copy_event = (
+                        self.device_to_host_stream.record_event()
+                    )
             # Need to track `input_pos` separately for each `layer_idx` for which
             # a checkpoint is stored. This works because checkpoints during the
             # forward pass are written left to right.
             if input_pos is not None:
                 self._layer_cp_input_pos[layer_idx] += x.shape[1]
 
-    def _do_checkpoint_layer_input(self) -> bool:
-        return self.training
+    def _checkpoint_layer_input_sync(
+        self,
+        layer_idx: int,
+    ):
+        if self.training:
+            if self.device_to_host_stream is not None:
+                # Event at end of compute operation (on main device thread)
+                cuda_d2h_compute_event = torch.cuda.current_stream().record_event()
+                self._cuda_d2h_copy_event.synchronize()
+                cuda_d2h_compute_event.synchronize()
+                self._cuda_d2h_copy_event = None
+            # DEBUG (profile):
+            torch.cuda.nvtx.range_pop()
 
     def _inference_forward_pass(
         self,
@@ -1208,6 +1266,8 @@ class LongContextGradientModel(LongContextInferenceModel):
                 get_inputs_slice=partial(get_inputs_slice, layer_idx=first_layer_idx),
                 get_head_gradients_slice=get_head_gradients_slice,
                 write_head_gradients_slice=write_head_gradients_slice,
+                device_to_host_stream=self.device_to_host_stream,
+                host_to_device_stream=self.host_to_device_stream,
                 record_gpu_memory_snapshots=snapshots,
             )
             if self.offload_device is not None:

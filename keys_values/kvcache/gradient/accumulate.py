@@ -78,6 +78,61 @@ def copy_requires_grad(x: torch.Tensor) -> torch.Tensor:
     return x.clone().detach().requires_grad_(True)
 
 
+class DoubleBuffer:
+    """
+    Maintains two `torch.Tensor` objects, where in each cycle, one of them
+    is read, the other is written. With :meth:`flip`, the cycle is switched, so
+    that write becomes read and vice versa. An object is first written, then read
+    after the flip, then overwritten after the next flip.
+
+    If `single_only=True`, we only maintain one object. This is a dummy to be
+    used if no double buffering is needed.
+    """
+
+    def __init__(self, single_only: bool = False):
+        self._buffers: List[Optional[torch.Tensor]] = (
+            [None] if single_only else [None, None]
+        )
+        self._write_pos = 0
+        self._single_only = single_only
+
+    def write(self, x: torch.Tensor):
+        self._buffers[self._write_pos] = x
+
+    def read(self) -> Optional[torch.Tensor]:
+        return self._buffers[0 if self._single_only else 1 - self._write_pos]
+
+    def flip(self):
+        if not self._single_only:
+            self._write_pos = 1 - self._write_pos
+
+
+def stream_decorator(s: Optional[torch.cuda.Stream]) -> Any:
+    return torch.cuda.stream(s) if s is not None else contextlib.nullcontext()
+
+
+def flip_all(
+    pair_cell_inputs: DoubleBuffer,
+    pair_head_gradients_top: DoubleBuffer,
+    pair_head_gradients_bottom: DoubleBuffer,
+    pair_k_buffers: List[DoubleBuffer],
+    pair_v_buffers: List[DoubleBuffer],
+):
+    pair_cell_inputs.flip()
+    pair_head_gradients_top.flip()
+    pair_head_gradients_bottom.flip()
+    for elem in pair_k_buffers:
+        elem.flip()
+    for elem in pair_v_buffers:
+        elem.flip()
+
+
+def sync_all(events_to_sync: List[torch.Event]):
+    for event in events_to_sync:
+        event.synchronize()
+    events_to_sync.clear()
+
+
 class GradientAccumulator:
     """
     Implements gradient accumulation for shards of a model, using activation
@@ -449,12 +504,70 @@ class GradientAccumulator:
         else:
             return None
 
+    def _load_from_cpu(
+        self,
+        col_idx: int,
+        host_to_device_stream: Optional[torch.cuda.Stream],
+        pair_cell_inputs: DoubleBuffer,
+        pair_head_gradients_top: DoubleBuffer,
+        pair_k_buffers: List[DoubleBuffer],
+        pair_v_buffers: List[DoubleBuffer],
+        events_for_sync: List[torch.Event],
+        get_inputs_slice: GetInputSlice,
+        get_head_gradients_slice: GetInputSlice,
+        infer_replay_caches: List[KVCacheWithBuffers],
+        chunk_idxs: List[int],
+    ):
+        if col_idx > 0:
+            # Prefetching
+            start, end = self.inputs_ranges[col_idx - 1]
+            with stream_decorator(host_to_device_stream):
+                pair_cell_inputs.write(get_inputs_slice(start, end))
+                pair_head_gradients_top.write(
+                    get_head_gradients_slice(start, end)
+                )
+                if col_idx > 1:
+                    k_buffs, v_buffs = self._get_checkpoints(
+                        infer_replay_caches,
+                        chunk_idx=chunk_idxs[col_idx - 1],
+                    )
+                    for trg, src in zip(pair_k_buffers, k_buffs):
+                        trg.write(src)
+                    for trg, src in zip(pair_v_buffers, v_buffs):
+                        trg.write(src)
+                if host_to_device_stream is not None:
+                    events_for_sync.append(
+                        host_to_device_stream.record_event()
+                    )
+
+    def _write_to_cpu(
+        self,
+        col_idx: int,
+        device_to_host_stream: Optional[torch.cuda.Stream],
+        pair_head_gradients_bottom: DoubleBuffer,
+        events_for_sync: List[torch.Event],
+        write_head_gradients_slice: WriteOutputsSlice,
+    ):
+        if col_idx < len(self.inputs_ranges) - 1:
+            # Write back bottom head gradient
+            start, _ = self.inputs_ranges[col_idx + 1]
+            with stream_decorator(device_to_host_stream):
+                write_head_gradients_slice(
+                    start, pair_head_gradients_bottom.read()
+                )
+                if device_to_host_stream is not None:
+                    events_for_sync.append(
+                        device_to_host_stream.record_event()
+                    )
+
     def run(
         self,
         model_part: CellBlocks,
         get_inputs_slice: GetInputSlice,
         get_head_gradients_slice: GetInputSlice,
         write_head_gradients_slice: WriteOutputsSlice,
+        device_to_host_stream: Optional[torch.cuda.Stream] = None,
+        host_to_device_stream: Optional[torch.cuda.Stream] = None,
         record_gpu_memory_snapshots: Optional[RecordGPUMemory] = None,
     ):
         """
@@ -470,6 +583,17 @@ class GradientAccumulator:
         to the same checkpoint object. We guarantee that any slice is read
         before it is written to.
 
+        If `device_to_host_stream` and `host_to_device_stream` are provided,
+        we try to run CPU -> GPU (`host_to_device_stream`) and GPU -> CPU
+        (`device_to_host_stream`) transfer in parallel with GPU computation
+        (main stream). This is done using double buffering. Loads from CPU
+        are prefetched, saves to CPU are delayed. This works only if all CPU
+        buffers written to or read from are pinned.
+
+        TODO: Could also use `device_to_host_stream` for writing KV cache
+        checkpoints to CPU in :meth:`_compute_checkpoints`. This is currently
+        not implemented.
+
         Args:
             model_part: Represents layers of model for the cell
             get_inputs_slice: Function `f(start, end)` which returns a slice
@@ -480,12 +604,22 @@ class GradientAccumulator:
             write_head_gradients_slice: Function `f(start, value)` which writes
                 a slice `range(start, end)` of the head gradients for output
                 of layer `first_layer_idx - 1`.
+            device_to_host_stream: See above.
+            host_to_device_stream: See above.
 
         """
         assert self.replay_logs is not None, "Call 'run_head_model' for a new batch"
         assert self._batch_size is not None
+        use_multi_streams = device_to_host_stream is not None
+        if (use_multi_streams and host_to_device_stream is None) or (
+            not use_multi_streams and host_to_device_stream is not None
+        ):
+            raise ValueError(
+                "Either both or none of device_to_host_stream, host_to_device_stream must be provided"
+            )
         first_layer_idx = model_part.first_layer_idx
         num_layers = model_part.num_layers
+        num_cells = len(self.chunks_per_cell)
         self._check_run_args(first_layer_idx, num_layers)
         if self._hooks_for_cell_computation() is not None:
             self._annotation_usage_logs = dict()  # Reset
@@ -504,6 +638,8 @@ class GradientAccumulator:
             if self._verbose_more:
                 print("Forward pass to store KV cache checkpoints")
             infer_replay_caches = self._create_inference_replay_caches(model_part)
+            # TODO: Use `device_to_host_stream` in order to write KV cache checkpoints
+            # to CPU in parallel with their computation.
             self._compute_checkpoints(
                 model_part,
                 infer_replay_caches,
@@ -548,31 +684,98 @@ class GradientAccumulator:
             if self._verbose_more:
                 print(f"Process row of {len(chunk_idxs)} cells in reverse order")
 
-            for col_idx, (first_chunk_idx, num_chunks, (start, end)) in reversed(
-                list(
-                    enumerate(zip(chunk_idxs, self.chunks_per_cell, self.inputs_ranges))
-                )
+            # Use double buffering with multiple streams
+            # Buffers are used for (1) inputs to gradient computation, loaded from
+            # CPU by `_load_from_cpu`, and (2) outputs from gradient computation,
+            # written to CPU by `_write_to_cpu`.
+            # The cycle of (1) buffers is opposite to the cycle of (2) buffers.
+            torch.cuda.nvtx.range_push(f"init_from_cpu:{first_layer_idx}")  # DEBUG
+            pair_cell_inputs = DoubleBuffer(single_only=not use_multi_streams)
+            pair_head_gradients_top = DoubleBuffer(single_only=not use_multi_streams)
+            num_rows = len(infer_replay_caches)
+            pair_k_buffers = [
+                DoubleBuffer(single_only=not use_multi_streams) for _ in range(num_rows)
+            ]
+            pair_v_buffers = [
+                DoubleBuffer(single_only=not use_multi_streams) for _ in range(num_rows)
+            ]
+            pair_head_gradients_bottom = DoubleBuffer(single_only=not use_multi_streams)
+            events_for_sync = []
+            self._load_from_cpu(
+                num_cells,
+                host_to_device_stream,
+                pair_cell_inputs,
+                pair_head_gradients_top,
+                pair_k_buffers,
+                pair_v_buffers,
+                events_for_sync,
+                get_inputs_slice,
+                get_head_gradients_slice,
+                infer_replay_caches,
+                chunk_idxs,
+            )
+            sync_all(events_for_sync)
+            flip_all(
+                pair_cell_inputs,
+                pair_head_gradients_top,
+                pair_head_gradients_bottom,
+                pair_k_buffers,
+                pair_v_buffers,
+            )
+            # Cycle of `_write_to_cpu` state must be opposite to cycle of
+            # `_load_from_cpu` state
+            pair_head_gradients_bottom.flip()
+            torch.cuda.nvtx.range_pop()  # DEBUG
+
+
+            # Loop over cells (in reverse order)
+            for col_idx, (first_chunk_idx, num_chunks) in reversed(
+                list(enumerate(zip(chunk_idxs, self.chunks_per_cell)))
             ):
+                torch.cuda.nvtx.range_push(f"backward:{first_layer_idx}:{first_chunk_idx}")  # DEBUG
+                # For multiple streams: Call this here, so it runs in parallel
+                # with the main stream.
+                # TODO: Check whether putting it below also works!
+                if use_multi_streams:
+                    self._load_from_cpu(
+                        col_idx,
+                        host_to_device_stream,
+                        pair_cell_inputs,
+                        pair_head_gradients_top,
+                        pair_k_buffers,
+                        pair_v_buffers,
+                        events_for_sync,
+                        get_inputs_slice,
+                        get_head_gradients_slice,
+                        infer_replay_caches,
+                        chunk_idxs,
+                    )
+
+                self._write_to_cpu(
+                    col_idx,
+                    device_to_host_stream,
+                    pair_head_gradients_bottom,
+                    events_for_sync,
+                    write_head_gradients_slice,
+                )
+
                 # Gather inputs and head gradients:
                 # - Inputs bottom:   cell_inputs
                 # - Inputs left:     k_buffers, v_buffers
                 # - Gradients top:   head_gradients_top
                 # - Gradients right: head_gradients_k, head_gradients_v
-                cell_inputs = copy_requires_grad(get_inputs_slice(start, end))
-                head_gradients_top = get_head_gradients_slice(start, end)
+                cell_inputs = copy_requires_grad(pair_cell_inputs.read())
+                head_gradients_top = pair_head_gradients_top.read()
                 if col_idx == 0:
                     k_buffers = None
                     v_buffers = None
                 else:
-                    # Note: It is `chunk_idxs[col_idx]`, not
-                    # `chunk_idxs[col_idx - 1]`, because `chunk_idxs[0] == 0` is a
-                    # dummy entry
-                    k_buffers, v_buffers = self._get_checkpoints(
-                        infer_replay_caches,
-                        chunk_idx=chunk_idxs[col_idx],
-                    )
-                    k_buffers = [copy_requires_grad(x) for x in k_buffers]
-                    v_buffers = [copy_requires_grad(x) for x in v_buffers]
+                    k_buffers = [
+                        copy_requires_grad(k_buff.read()) for k_buff in pair_k_buffers
+                    ]
+                    v_buffers = [
+                        copy_requires_grad(v_buff.read()) for v_buff in pair_v_buffers
+                    ]
 
                 # Forward-backward, using the autograd hooks (if given)
                 scalar_output = None
@@ -598,10 +801,41 @@ class GradientAccumulator:
                         )
 
                     scalar_output.backward()
-                    write_head_gradients_slice(start, cell_inputs.grad)
                     if col_idx > 0:
                         head_gradients_k = [x.grad for x in k_buffers]
                         head_gradients_v = [x.grad for x in v_buffers]
+                    pair_head_gradients_bottom.write(cell_inputs.grad)
+                    if use_multi_streams:
+                        events_for_sync.append(
+                            torch.cuda.current_stream().record_event()
+                        )
+
+                    # For single stream: Have to call this after the computation
+                    if not use_multi_streams:
+                        self._load_from_cpu(
+                            col_idx,
+                            host_to_device_stream,
+                            pair_cell_inputs,
+                            pair_head_gradients_top,
+                            pair_k_buffers,
+                            pair_v_buffers,
+                            events_for_sync,
+                            get_inputs_slice,
+                            get_head_gradients_slice,
+                            infer_replay_caches,
+                            chunk_idxs,
+                        )
+
+                    # Sync all streams and flip double buffers
+                    sync_all(events_for_sync)
+                    flip_all(
+                        pair_cell_inputs,
+                        pair_head_gradients_top,
+                        pair_head_gradients_bottom,
+                        pair_k_buffers,
+                        pair_v_buffers,
+                    )
+                    torch.cuda.nvtx.range_pop()  # DEBUG
                 finally:
                     del scalar_output
                     del cell_inputs
@@ -636,6 +870,18 @@ class GradientAccumulator:
                                 f"\nAnnotation usage log [{part}; chunks {first_chunk_idx} to {first_chunk_idx + num_chunks - 1}]"
                             )
                             print(self._annotation_usage_logs[first_chunk_idx].report())
+
+            # Write back bottom head gradient for first cell
+            torch.cuda.nvtx.range_push(f"final_to_cpu:{first_layer_idx}")  # DEBUG
+            self._write_to_cpu(
+                -1,
+                device_to_host_stream,
+                pair_head_gradients_bottom,
+                events_for_sync,
+                write_head_gradients_slice,
+            )
+            sync_all(events_for_sync)
+            torch.cuda.nvtx.range_pop()  # DEBUG
 
         finally:
             self._deallocate_buffers(infer_replay_caches)
