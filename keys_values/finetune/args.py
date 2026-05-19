@@ -217,6 +217,9 @@ class GradientArgs:
             after this number of :meth:`pack_hook` calls. This avoids running
             up costs trying to match pack args over and over, which can be
             significant.
+        async_cpu_transfer: If `True`, we run GPU to CPU transfer for layer
+            input checkpointing on a different stream than the computation.
+            This can run faster.
         layercp_pin_memory: If `True`, the CPU memory pages for layer input
             checkpoints are pinned. This can run faster, but also needs more
             real CPU memory.
@@ -235,6 +238,7 @@ class GradientArgs:
     single_tokens_for_targets: bool = False
     use_old_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
+    async_cpu_transfer: bool = False
     layercp_pin_memory: bool = True
     cachecp_pin_memory: bool = True
     debug_print_annotations: bool = False
@@ -254,6 +258,10 @@ class GradientArgs:
         elif self.cachecp_qname not in SUPPORTED_QUANTIZERS:
             raise ValueError(
                 f"cachecp_qname = {self.cachecp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}"
+            )
+        if self.async_cpu_transfer and not (self.layercp_pin_memory and self.cachecp_pin_memory):
+            raise ValueError(
+                "Must have layercp_pin_memory=True and cachecp_pin_memory=True if async_cpu_transfer=True"
             )
         _check_int(self.max_match_trials_pack_arg, "max_match_trials_pack_arg")
 

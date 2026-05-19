@@ -763,6 +763,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self,
         x: torch.Tensor,
         layer_idx: int,
+        **kwargs,
     ):
         """
         Implemented in subclasses which need layer input checkpointing.
@@ -775,14 +776,22 @@ class LongContextInferenceModel(GPTAndHeadModel):
         """
         pass
 
-    def _do_checkpoint_layer_input(self) -> bool:
+    def _checkpoint_layer_input_sync(
+        self,
+        layer_idx: int,
+    ):
         """
-        Returns:
-            `True` if :meth:`_checkpoint_layer_input` transfers memory
-            from GPU to CPU
+        Callback which can be used together with :meth:`_checkpoint_layer_input`.
+        While the latter is called before the input (all chunks of the current
+        cell) is processed for layer `layer_idx`, this method is called after
+        this processing. Can be used to synchronize streams which have been
+        running in parallel.
+
+        Args:
+            layer_idx: Index of layer which has just been processed
 
         """
-        return False
+        pass
 
     def _forward_internal(
         self,
@@ -895,6 +904,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     self._checkpoint_layer_input(
                         x=embeddings.detach(),
                         layer_idx=block_idx,
+                        start=start,
                     )
                     if self.gpt_model.start_of_layer_hook is not None:
                         self.gpt_model.start_of_layer_hook(
@@ -941,6 +951,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         if not compute_loss and is_final_chunk and is_final_layer:
                             # We need the final layer output for the last chunk
                             logits_final_position = y[:, -1:, :].detach()
+                    # Callback which may deal with stream synchronization:
+                    self._checkpoint_layer_input_sync(block_idx)
                     del embeddings
                     embeddings = torch.cat(new_embed_parts, dim=1)
                     assert embeddings.shape[1] == end - start, (
@@ -953,6 +965,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 self._checkpoint_layer_input(
                     x=embeddings.detach(),
                     layer_idx=self.config.n_layer,
+                    start=start,
                 )
                 if self.gpt_model.start_of_layer_hook is not None:
                     self.gpt_model.start_of_layer_hook(
@@ -1000,6 +1013,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         logits_final_position = self.gpt_model.lm_head(
                             logits_final_position
                         )
+                self._checkpoint_layer_input_sync(self.config.n_layer)
 
         if compute_loss:
             if num_target_entries is not None:
