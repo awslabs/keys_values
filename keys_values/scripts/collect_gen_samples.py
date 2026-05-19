@@ -56,6 +56,8 @@ def main(
     print(f"Total number of records: {num_total}")
     if all_data:
         combined_path = out_dir / GENERATED_SAMPLES_ALL_FILENAME
+        if combined_path.exists():
+            combined_path.unlink()
         with open(combined_path, "w") as fp:
             yaml.safe_dump(all_data, fp)
 
