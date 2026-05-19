@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Dict, Tuple, List
+from typing import Optional, Dict, Tuple, List, Iterable, Any
 
 import torch
 
@@ -134,6 +134,19 @@ def check_replay_log(
             pass
 
 
+def get_extra_kwargs(
+    replay_log: KVCacheReplayLog,
+    names: Iterable[str],
+    **base_kwargs,
+) -> Dict[str, Any]:
+    extra_kwargs = dict()
+    # If args are not in `base_kwargs`, take them from `replay_log`
+    for name in names:
+        if name not in base_kwargs:
+            extra_kwargs[name] = getattr(replay_log, name)
+    return extra_kwargs
+
+
 class InferenceAttnWeightsReplayCache(AttnWeightsKVCache, InferenceReplayCacheMixin):
     def __init__(
         self,
@@ -143,16 +156,17 @@ class InferenceAttnWeightsReplayCache(AttnWeightsKVCache, InferenceReplayCacheMi
         replay_log: AttnWeightsReplayLog,
         **base_kwargs,
     ):
-        if "grace_period" not in base_kwargs:
-            base_kwargs = {
-                **base_kwargs,
-                "grace_period": replay_log.grace_period,
-            }
+        extra_kwargs = get_extra_kwargs(
+            replay_log=replay_log,
+            names = ("grace_period",),
+            **base_kwargs,
+        )
         AttnWeightsKVCache.__init__(
             self,
             config=config,
             buffers=buffers,
             block_idx=block_idx,
+            **extra_kwargs,
             **base_kwargs,
         )
         InferenceReplayCacheMixin.__init__(self)
@@ -291,12 +305,17 @@ class InferenceLastRecentlyInsertedReplayCache(
         replay_log: LastRecentlyInsertedKVCacheReplayLog,
         **base_kwargs,
     ):
+        extra_kwargs = get_extra_kwargs(
+            replay_log=replay_log,
+            names = ("init_grace_tokens",),
+            **base_kwargs,
+        )
         LastRecentlyInsertedKVCache.__init__(
             self,
             config=config,
             buffers=buffers,
             block_idx=block_idx,
-            init_grace_tokens=replay_log.init_grace_tokens,
+            **extra_kwargs,
             **base_kwargs,
         )
         InferenceReplayCacheMixin.__init__(self)
@@ -351,17 +370,17 @@ class InferenceSmartInitialLastRecentlyInsertedReplayCache(
         replay_log: SmartInitialLastRecentlyInsertedKVCacheReplayLog,
         **base_kwargs,
     ):
-        extra_kwargs = dict()
-        # If args are not in `base_kwargs`, take them from `replay_log`
-        for name in (
-            "tokenizer",
-            "end_initial_regex",
-            "max_initial_fraction",
-            "include_end_string",
-            "pad_id",
-        ):
-            if name not in base_kwargs:
-                extra_kwargs[name] = getattr(replay_log, name)
+        extra_kwargs = get_extra_kwargs(
+            replay_log=replay_log,
+            names = (
+                "tokenizer",
+                "end_initial_regex",
+                "max_initial_fraction",
+                "include_end_string",
+                "pad_id",
+            ),
+            **base_kwargs,
+        )
         SmartInitialLastRecentlyInsertedKVCache.__init__(
             self,
             config=config,
