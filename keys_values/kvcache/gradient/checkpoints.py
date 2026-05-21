@@ -490,6 +490,10 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
                 torch.zeros(self._shape, **self._kwargs, pin_memory=pm)
                 for pm in pin_memory[(-num_to_create):]
             ]
+            # DEBUG
+            if not all(pin_memory[(-num_to_create):]):
+                print(f"UUUPS: KVCacheBuffersDefaultCheckpoints.set_chunk_numbers: pin_memory = {pin_memory[(-num_to_create):]}")
+            # END DEBUG
         else:
             new_k = []
             new_v = []

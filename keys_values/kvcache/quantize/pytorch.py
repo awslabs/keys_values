@@ -583,6 +583,10 @@ class TorchBasicQuantizerState(QuantizerState):
             self.cache_length,
             quantizer._quant_shape[2],
         )
+        # DEBUG
+        if not pin_memory:
+            print("UUPS: TorchBasicQuantizerState.__init__: pin_memory = False")
+        # END DEBUG
         self.quant_buffer = torch.zeros(
             shape,
             dtype=quantizer._quant_buffer_dtype,
