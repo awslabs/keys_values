@@ -172,7 +172,10 @@ class KVCacheArgs:
 
         """
         new_cache_kwargs = {name: getattr(self, name) for name in _CACHE_KWARGS_NAMES}
-        new_cache_kwargs.update(self.cache_kwargs)
+        if self.cache_kwargs is not None:
+            new_cache_kwargs.update(self.cache_kwargs)
+        elif not new_cache_kwargs:
+            new_cache_kwargs = None
         return replace(self, cache_kwargs=new_cache_kwargs)
 
 
@@ -550,6 +553,13 @@ class TrainArgs:
         return 0
 
 
+_SAMPLE_METRIC_KWARGS_NAMES = (
+    "temperature",
+    "top_k",
+    "top_p",
+)
+
+
 @dataclass
 class EvalArgs(_EvalArgs):
     """
@@ -563,6 +573,9 @@ class EvalArgs(_EvalArgs):
             training
         sample_metric_max_generated_tokens: Maximum number of tokens
             generated for sample based metric evaluation
+        sample_metric_temperature: Parameter for token generation
+        sample_metric_top_k: Parameter for token generation
+        sample_metric_top_p: Parameter for token generation
         sample_metric_kwargs: Keyword arguments for token sampling (params
             can be "temperature", "top_k", "top_p")
     """
@@ -570,17 +583,44 @@ class EvalArgs(_EvalArgs):
     micro_batch_size: Optional[int] = None
     use_sample_metric: bool = False
     sample_metric_max_generated_tokens: int = 20
+    sample_metric_temperature: Optional[float] = None
+    sample_metric_top_k: Optional[int] = None
+    sample_metric_top_p: Optional[float] = None
     sample_metric_kwargs: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         if self.micro_batch_size is not None:
             assert self.micro_batch_size > 0
         assert self.sample_metric_max_generated_tokens > 0
+        assert (
+            self.sample_metric_temperature is None or self.sample_metric_temperature > 0
+        )
+        assert self.sample_metric_top_k is None or self.sample_metric_top_k > 0
+        assert self.sample_metric_top_p is None or 0 <= self.sample_metric_top_p <= 1
         if self.sample_metric_kwargs is not None:
             assert isinstance(self.sample_metric_kwargs, dict)
             assert set(self.sample_metric_kwargs.keys()).issubset(
                 {"temperature", "top_k", "top_p"}
             )
+
+    def update_sample_metric_kwargs(self) -> "EvalArgs":
+        """
+        Copies values of args used for token generation into `sample_metric_kwargs`,
+        unless the respective field is already set.
+
+        Returns:
+            New :class:`EvalArgs` object with `cache_kwargs` updated.
+
+        """
+        new_kwargs = {
+            name: getattr(self, "sample_metric_" + name)
+            for name in _SAMPLE_METRIC_KWARGS_NAMES
+        }
+        if self.sample_metric_kwargs is not None:
+            new_kwargs.update(self.sample_metric_kwargs)
+        elif not new_kwargs:
+            new_kwargs = None
+        return replace(self, sample_metric_kwargs=new_kwargs)
 
 
 @dataclass

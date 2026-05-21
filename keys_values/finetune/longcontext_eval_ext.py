@@ -57,7 +57,7 @@ from keys_values.data.evaluation import (
     ORIG_IDX_NAME,
     TASK_NAME,
 )
-from keys_values.finetune.args import KVCacheArgs, SDPAArgs
+from keys_values.finetune.args import KVCacheArgs, SDPAArgs, EvalArgs
 from keys_values.finetune.batch_transform import BatchTransformFactory
 from keys_values.finetune.longcontext_full import (
     wrap_gpt_model,
@@ -69,6 +69,7 @@ from keys_values.finetune.utils import (
     adapt_requires_grad,
     print_with_rank_and_timestamp,
     adjust_cache_kwargs,
+    load_generation_config,
 )
 from keys_values.fused import (
     set_fused_swiglu_enabled,
@@ -130,7 +131,9 @@ def setup(
     lora_dropout: Optional[float] = None,
     use_sample_metric: bool = True,
     sample_metric_max_generated_tokens: int = 20,
-    sample_metric_kwargs: Optional[Dict[str, Any]] = None,
+    sample_metric_temperature: Optional[float] = None,
+    sample_metric_top_k: Optional[int] = None,
+    sample_metric_top_p: Optional[float] = None,
     num_store_generated_samples: Optional[int] = None,
     skip_eval: bool = False,
 ) -> None:
@@ -167,8 +170,12 @@ def setup(
             as used for training
         sample_metric_max_generated_tokens: Maximum number of tokens sampled
             for sample-based metric evaluation
-        sample_metric_kwargs: Keyword arguments for token sampling (params
-            can be "temperature", "top_k", "top_p")
+        sample_metric_temperature: Parameter for token generation. Overrides
+            what comes with the checkpoint.
+        sample_metric_top_k: Parameter for token generation. Overrides
+            what comes with the checkpoint.
+        sample_metric_top_p: Parameter for token generation. Overrides
+            what comes with the checkpoint.
         num_store_generated_samples: If given and positive, we write files
             containing the generated sequences along with SFT targets and raw
             targets. These files are written alongside metric files, using the
@@ -188,8 +195,14 @@ def setup(
             )
     elif devices != 1:
         raise ValueError("CUDA is not available, can only do devices = 1")
-    if sample_metric_kwargs is None:
-        sample_metric_kwargs = dict()
+    sample_metric_kwargs = dict()
+    if sample_metric_temperature is not None:
+        sample_metric_kwargs["temperature"] = sample_metric_temperature
+    if sample_metric_top_k is not None:
+        sample_metric_kwargs["top_k"] = sample_metric_top_k
+    if sample_metric_top_p is not None:
+        sample_metric_kwargs["top_p"] = sample_metric_top_p
+
     pprint(locals())
 
     # Load setups file
@@ -225,7 +238,7 @@ def setup_internal(
     lora_dropout: Optional[float],
     use_sample_metric: bool,
     sample_metric_max_generated_tokens: int,
-    sample_metric_kwargs: Optional[Dict[str, Any]],
+    sample_metric_kwargs: Dict[str, Any],
     num_store_generated_samples: Optional[int],
     skip_eval: bool,
 ) -> None:
@@ -388,6 +401,19 @@ def main(
         if yarn_rope is None:
             yarn_rope = True
         check_valid_checkpoint_dir(checkpoint_dir)
+        # If the checkpoint contains generation_config.json, load sample args. But
+        # the args provided in
+        eval_args = load_generation_config(checkpoint_dir, EvalArgs())
+        if eval_args.sample_metric_kwargs is not None:
+            sample_metric_kwargs = eval_args.sample_metric_kwargs.update(
+                sample_metric_kwargs
+            )
+        print(
+            "Token generation parameters:\n"
+            f"temperature: {sample_metric_kwargs['temperature']}\n"
+            f"top_k:       {sample_metric_kwargs['top_k']}\n"
+            f"top_p:       {sample_metric_kwargs['top_p']}\n"
+        )
 
         # Dataset
         _data_class_path = hyp_pars["data"]["class_path"]

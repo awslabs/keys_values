@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from dataclasses import replace
 from datetime import datetime
+import json
 from pathlib import Path
 import shutil
 from typing import Optional, Tuple, Literal, Dict, Any, Union
@@ -514,3 +516,35 @@ def copy_config_files(
         src_path = source_dir / file_name
         if src_path.exists():
             shutil.copy(src_path, out_dir)
+
+
+_GENERATION_CONFIG_KEYS = (
+    "temperature",
+    "top_k",
+    "top_p",
+)
+
+
+def load_generation_config(
+    checkpoint_dir: Path,
+    eval_args: EvalArgs,
+) -> EvalArgs:
+    path = checkpoint_dir / "generation_config.json"
+    generation_config = None
+    if path.exists():
+        with open(path, "r") as fp:
+            generation_config = {
+                k: v for k, v in json.load(fp) if k in _GENERATION_CONFIG_KEYS
+            }
+        if not generation_config:
+            generation_config = None
+        else:
+            print(f"Loaded generation config from {path}")
+    if generation_config is not None:
+        sample_kwargs = (
+            generation_config
+            if eval_args.sample_metric_kwargs is None
+            else eval_args.sample_metric_kwargs.update(generation_config)
+        )
+        eval_args = replace(eval_args, sample_metric_kwargs=sample_kwargs)
+    return eval_args

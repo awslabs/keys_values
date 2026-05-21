@@ -158,7 +158,7 @@ class InferenceAttnWeightsReplayCache(AttnWeightsKVCache, InferenceReplayCacheMi
     ):
         extra_kwargs = get_extra_kwargs(
             replay_log=replay_log,
-            names = ("grace_period",),
+            names=("grace_period",),
             **base_kwargs,
         )
         AttnWeightsKVCache.__init__(
@@ -307,7 +307,7 @@ class InferenceLastRecentlyInsertedReplayCache(
     ):
         extra_kwargs = get_extra_kwargs(
             replay_log=replay_log,
-            names = ("init_grace_tokens",),
+            names=("init_grace_tokens",),
             **base_kwargs,
         )
         LastRecentlyInsertedKVCache.__init__(
@@ -372,7 +372,7 @@ class InferenceSmartInitialLastRecentlyInsertedReplayCache(
     ):
         extra_kwargs = get_extra_kwargs(
             replay_log=replay_log,
-            names = (
+            names=(
                 "tokenizer",
                 "end_initial_regex",
                 "max_initial_fraction",

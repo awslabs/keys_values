@@ -93,6 +93,7 @@ from keys_values.finetune.utils import (
     may_match_twice_factory,
     adjust_cache_kwargs,
     copy_config_files,
+    load_generation_config,
 )
 from keys_values.fused import (
     set_fused_swiglu_enabled,
@@ -505,6 +506,8 @@ def setup_internal(
             lora_head=lora.head,
             lora_kind=lora.kind,
         )
+    # If the checkpoint contains generation_config.json, load it here
+    eval = load_generation_config(checkpoint_dir, eval)
 
     precision = precision or get_default_supported_precision(training=True)
     logger = choose_logger(

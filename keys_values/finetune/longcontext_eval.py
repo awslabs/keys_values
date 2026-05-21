@@ -13,7 +13,7 @@
 # limitations under the License.
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, Literal, Optional, Union, Any
+from typing import Literal, Optional, Union
 
 from keys_values.finetune.args import KVCacheArgs, SDPAArgs
 from keys_values.finetune.longcontext_eval_ext import setup_internal
@@ -35,7 +35,9 @@ def setup(
     lora_dropout: Optional[float] = None,
     use_sample_metric: bool = True,
     sample_metric_max_generated_tokens: int = 20,
-    sample_metric_kwargs: Optional[Dict[str, Any]] = None,
+    sample_metric_temperature: Optional[float] = None,
+    sample_metric_top_k: Optional[int] = None,
+    sample_metric_top_p: Optional[float] = None,
     num_store_generated_samples: Optional[int] = None,
     skip_eval: bool = False,
 ) -> None:
@@ -101,8 +103,12 @@ def setup(
             as used for training
         sample_metric_max_generated_tokens: Maximum number of tokens sampled
             for sample-based metric evaluation
-        sample_metric_kwargs: Keyword arguments for token sampling (params
-            can be "temperature", "top_k", "top_p")
+        sample_metric_temperature: Parameter for token generation. Overrides
+            what comes with the checkpoint.
+        sample_metric_top_k: Parameter for token generation. Overrides
+            what comes with the checkpoint.
+        sample_metric_top_p: Parameter for token generation. Overrides
+            what comes with the checkpoint.
         num_store_generated_samples: If given and positive, we write files
             containing the generated sequences along with SFT targets and raw
             targets. These files are written alongside metric files, using the
@@ -123,18 +129,26 @@ def setup(
         entry["kv_cache"] = asdict(kv_cache)
     if sdpa is not None:
         entry["sdpa"] = asdict(sdpa)
+    sample_metric_kwargs = dict()
+    if sample_metric_temperature is not None:
+        sample_metric_kwargs["temperature"] = sample_metric_temperature
+    if sample_metric_top_k is not None:
+        sample_metric_kwargs["top_k"] = sample_metric_top_k
+    if sample_metric_top_p is not None:
+        sample_metric_kwargs["top_p"] = sample_metric_top_p
+
     setup_internal(
-        setups=[entry],
-        devices=devices,
-        seed=seed,
-        access_token=access_token,
-        batch_size=batch_size,
-        verbose=verbose,
-        attention_forward_temp_size_gb=attention_forward_temp_size_gb,
-        lora_dropout=lora_dropout,
-        use_sample_metric=use_sample_metric,
-        sample_metric_max_generated_tokens=sample_metric_max_generated_tokens,
-        sample_metric_kwargs=sample_metric_kwargs,
-        num_store_generated_samples=num_store_generated_samples,
-        skip_eval=skip_eval,
+        [entry],
+        devices,
+        seed,
+        access_token,
+        batch_size,
+        verbose,
+        attention_forward_temp_size_gb,
+        lora_dropout,
+        use_sample_metric,
+        sample_metric_max_generated_tokens,
+        sample_metric_kwargs,
+        num_store_generated_samples,
+        skip_eval,
     )
