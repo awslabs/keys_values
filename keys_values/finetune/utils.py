@@ -534,7 +534,7 @@ def load_generation_config(
     if path.exists():
         with open(path, "r") as fp:
             generation_config = {
-                k: v for k, v in json.load(fp) if k in _GENERATION_CONFIG_KEYS
+                k: v for k, v in json.load(fp).items() if k in _GENERATION_CONFIG_KEYS
             }
         if not generation_config:
             generation_config = None
