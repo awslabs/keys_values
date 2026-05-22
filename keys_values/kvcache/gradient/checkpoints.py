@@ -398,8 +398,8 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         self.quant_buffers.drop_association()
         keys, values = self.quant_buffers.get_slots((input_pos, input_pos + num))
         if device is not None:
-            keys = keys.to(device)
-            values = values.to(device)
+            keys = keys.to(device, non_blocking=True)
+            values = values.to(device, non_blocking=True)
         return DefaultKeysAndValues(keys, values)
 
 
