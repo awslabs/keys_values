@@ -15,7 +15,7 @@ from collections import Counter
 import contextlib
 from functools import partial
 from itertools import accumulate
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Iterable
 
 import torch
 
@@ -127,10 +127,21 @@ def flip_all(
         elem.flip()
 
 
-def sync_all(events_to_sync: List[torch.Event]):
-    for event in events_to_sync:
-        event.synchronize()
-    events_to_sync.clear()
+def main_stream_waits_for_events(events: List[torch.Event]):
+    for event in events:
+        torch.cuda.current_stream().wait_event(event)
+    events.clear()
+
+
+def streams_wait_for_event(
+    streams: Iterable[torch.cuda.Stream],
+    event: Optional[torch.Event],
+):
+    if event is not None:
+        # Streams need to wait for GPU computation from previous
+        # iteration to finish
+        for s in streams:
+            s.wait_event(event)
 
 
 class GradientAccumulator:
@@ -645,10 +656,6 @@ class GradientAccumulator:
                 infer_replay_caches,
                 get_inputs_slice,
             )
-            if torch.cuda.is_available():
-                # Synchronize here to make sure the checkpoints are properly
-                # written to CPU (host), before they are read below
-                torch.cuda.synchronize()
             # We could delete `infer_replay_caches` here. But we still use their
             # buffers to de-quantize checkpoints below
         else:
@@ -700,7 +707,8 @@ class GradientAccumulator:
                 DoubleBuffer(single_only=not use_multi_streams) for _ in range(num_rows)
             ]
             pair_head_gradients_bottom = DoubleBuffer(single_only=not use_multi_streams)
-            events_for_sync = []
+            events_for_wait: List[torch.Event] = []
+            main_event: Optional[torch.Event] = None
             self._load_from_cpu(
                 num_cells,
                 host_to_device_stream,
@@ -708,13 +716,13 @@ class GradientAccumulator:
                 pair_head_gradients_top,
                 pair_k_buffers,
                 pair_v_buffers,
-                events_for_sync,
+                events_for_wait,
                 get_inputs_slice,
                 get_head_gradients_slice,
                 infer_replay_caches,
                 chunk_idxs,
             )
-            sync_all(events_for_sync)
+            main_stream_waits_for_events(events_for_wait)
             flip_all(
                 pair_cell_inputs,
                 pair_head_gradients_top,
@@ -727,7 +735,6 @@ class GradientAccumulator:
             pair_head_gradients_bottom.flip()
             torch.cuda.nvtx.range_pop()  # DEBUG
 
-
             # Loop over cells (in reverse order)
             for col_idx, (first_chunk_idx, num_chunks) in reversed(
                 list(enumerate(zip(chunk_idxs, self.chunks_per_cell)))
@@ -736,6 +743,11 @@ class GradientAccumulator:
                 # For multiple streams: Call this here, so it runs in parallel
                 # with the main stream.
                 # TODO: Check whether putting it below also works!
+                streams_wait_for_event(
+                    (host_to_device_stream, device_to_host_stream),
+                    main_event,
+                )
+                main_event = None
                 if use_multi_streams:
                     self._load_from_cpu(
                         col_idx,
@@ -744,7 +756,7 @@ class GradientAccumulator:
                         pair_head_gradients_top,
                         pair_k_buffers,
                         pair_v_buffers,
-                        events_for_sync,
+                        events_for_wait,
                         get_inputs_slice,
                         get_head_gradients_slice,
                         infer_replay_caches,
@@ -755,7 +767,7 @@ class GradientAccumulator:
                     col_idx,
                     device_to_host_stream,
                     pair_head_gradients_bottom,
-                    events_for_sync,
+                    events_for_wait,
                     write_head_gradients_slice,
                 )
 
@@ -806,9 +818,7 @@ class GradientAccumulator:
                         head_gradients_v = [x.grad for x in v_buffers]
                     pair_head_gradients_bottom.write(cell_inputs.grad)
                     if use_multi_streams:
-                        events_for_sync.append(
-                            torch.cuda.current_stream().record_event()
-                        )
+                        main_event = torch.cuda.current_stream().record_event()
 
                     # For single stream: Have to call this after the computation
                     if not use_multi_streams:
@@ -819,15 +829,16 @@ class GradientAccumulator:
                             pair_head_gradients_top,
                             pair_k_buffers,
                             pair_v_buffers,
-                            events_for_sync,
+                            events_for_wait,
                             get_inputs_slice,
                             get_head_gradients_slice,
                             infer_replay_caches,
                             chunk_idxs,
                         )
 
-                    # Sync all streams and flip double buffers
-                    sync_all(events_for_sync)
+                    # Main stream waits for two others to finish
+                    # host <-> device transfer
+                    main_stream_waits_for_events(events_for_wait)
                     flip_all(
                         pair_cell_inputs,
                         pair_head_gradients_top,
@@ -872,15 +883,16 @@ class GradientAccumulator:
                             print(self._annotation_usage_logs[first_chunk_idx].report())
 
             # Write back bottom head gradient for first cell
+            streams_wait_for_event((device_to_host_stream,), main_event)
             torch.cuda.nvtx.range_push(f"final_to_cpu:{first_layer_idx}")  # DEBUG
             self._write_to_cpu(
                 -1,
                 device_to_host_stream,
                 pair_head_gradients_bottom,
-                events_for_sync,
+                events_for_wait,
                 write_head_gradients_slice,
             )
-            sync_all(events_for_sync)
+            main_stream_waits_for_events(events_for_wait)
             torch.cuda.nvtx.range_pop()  # DEBUG
 
         finally:
@@ -993,8 +1005,8 @@ class GradientAccumulator:
             checkpoints.get_checkpoint(chunk_idx=chunk_idx, out=buffers)
             # Dequantize
             k_and_v = buffers.get_keys_values()
-            k_buffers.append(k_and_v.keys().clone())
-            v_buffers.append(k_and_v.values().clone())
+            k_buffers.append(k_and_v.keys())
+            v_buffers.append(k_and_v.values())
         return k_buffers, v_buffers
 
     def run_input_embeddings(

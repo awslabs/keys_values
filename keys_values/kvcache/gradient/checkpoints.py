@@ -984,11 +984,10 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
         if buffers.shape != shape:
             raise ValueError(f"buffers.shape = {buffers.shape}, must be {shape}")
         ne2 = self.n_embd // 2
-        device = torch.device("cpu")
         return cp_int.set_checkpoint_slice(
             chunk_idx=layer_idx,
-            key=buffers[:, None, :, :ne2].to(device=device),
-            value=buffers[:, None, :, ne2:].to(device=device),
+            key=buffers[:, None, :, :ne2],
+            value=buffers[:, None, :, ne2:],
             input_pos=rstart,
         )
 
