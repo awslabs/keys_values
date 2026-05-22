@@ -405,9 +405,10 @@ def main(
         # the args provided in
         eval_args = load_generation_config(checkpoint_dir, EvalArgs())
         if eval_args.sample_metric_kwargs is not None:
-            sample_metric_kwargs = eval_args.sample_metric_kwargs.update(
-                sample_metric_kwargs
-            )
+            sample_metric_kwargs = {
+                **eval_args.sample_metric_kwargs,
+                **sample_metric_kwargs,
+            }
         print(
             "Token generation parameters:\n"
             f"temperature: {sample_metric_kwargs['temperature']}\n"
