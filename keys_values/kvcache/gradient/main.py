@@ -861,9 +861,10 @@ class LongContextGradientModel(LongContextInferenceModel):
             if self.device_to_host_stream is not None:
                 # Event at end of compute operation (on main device thread)
                 cuda_d2h_compute_event = torch.cuda.current_stream().record_event()
-                self._cuda_d2h_copy_event.synchronize()
-                cuda_d2h_compute_event.synchronize()
+                # Now, each stream has to wait for the other to finish
+                torch.cuda.current_stream().wait_event(self._cuda_d2h_copy_event)
                 self._cuda_d2h_copy_event = None
+                self.device_to_host_stream.wait_event(cuda_d2h_compute_event)
             # DEBUG (profile):
             torch.cuda.nvtx.range_pop()
 
