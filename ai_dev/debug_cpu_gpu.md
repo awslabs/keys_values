@@ -165,3 +165,143 @@ key=buffers[:, None, :, :ne2].to(device=device),
 # To:
 key=buffers[:, None, :, :ne2].to(device=device, non_blocking=True)
 ```
+
+## Second analysis (after fixes)
+
+Thanks, this code runs faster. But I am puzzled about one thing.
+
+I ran the new code (with changes based on your hints) twice, once with
+`grad.async_cpu_transfer=False` and once with `grad.async_cpu_transfer=True`.
+
+If `grad.async_cpu_transfer=False`, the code should not use multiple streams at
+all:
+
+* In `keys_values.kvcache.gradient.main.LongContextGradientModel`:
+  `self.device_to_host_stream=None` and `self.host_to_device_stream=None`
+* Then, in `_checkpoint_layer_input` and `checkpoint_layer_input_sync`, nothing
+  stream-related is done, so copy from GPU to CPU happens sequentially.
+* Also, in `keys_values.kvcache.gradient.accumulate.GradientAccumulator.run`,
+  everything should be as before.
+
+I profiled both cases with `Nvidia Nsight Compute`:
+
+* `grad.async_cpu_transfer=False`: Results in `~/tmp/profiling/cpu_gpu_after_noasync.sqlite`
+* `grad.async_cpu_transfer=True`: Results in `~/tmp/profiling/cpu_gpu_after_async.sqlite`
+
+While the total time for `grad.async_cpu_transfer=False` is a little more (221 secs)
+than for `grad.async_cpu_transfer=True` (214 secs), the difference is quite small,
+and I also do not see different patterns.
+
+Can you check again, also inspecting the `sqlite` files, whether we are still missing
+something? Can you confirm that CPU-GPU memory transfer nows runs in parallel with GPU
+computation if `grad.async_cpu_transfer=True`? And if not, can you figure out why not?
+
+Please append your final summary to the file `ai_dev/debug_cpu_gpu.md` in markdown
+format.
+
+## Answer: Analysis of async vs noasync profiles after fixes
+
+### Short answer
+
+**Yes, CPU-GPU memory transfer does now run in parallel with GPU computation** when
+`grad.async_cpu_transfer=True`. The profiling confirms it. The reason the speedup is
+small (~7 sec out of 221 sec, or ~3%) is that transfers are a relatively small part
+of the total wall time, and the dominant cost — PyTorch's CUDA memory allocator
+calling `cudaStreamSynchronize` — limits how much benefit overlapping can provide.
+
+### Profiling data summary
+
+All times are GPU-side (from Nsight Systems SQLite, `CUPTI_ACTIVITY_KIND_*` tables).
+
+| Metric | noasync (221 sec) | async (214 sec) |
+|---|---|---|
+| GPU kernel time | 158.9 sec | 159.0 sec |
+| HtoD transfer time | 11.6 sec | 11.8 sec |
+| DtoH transfer time | 5.1 sec | 5.2 sec |
+| `cudaStreamSynchronize` time (CPU-blocked) | 77.4 sec | 72.0 sec |
+| `cudaHostAlloc` time | 17.6 sec | 17.5 sec |
+| GPU wall time | 212.2 sec | 205.5 sec |
+
+Observations:
+- GPU kernel time is **identical** — the same compute work is done.
+- Transfer volumes are **identical** — same data moved in both modes.
+- `cudaHostAlloc` (17.5 sec) all happens during the **forward pass** (before the
+  backward loop), not during the backward loop itself. It is pinned memory creation
+  for `LayerInputDefaultCheckpoints` and KV cache checkpoint buffers.
+
+### Confirmation that overlap works
+
+The SQLite data shows three separate CUDA streams during the backward loop:
+
+- Stream 7: main compute stream (kernels + some memcpy)
+- Stream 13: DtoH transfers (`device_to_host_stream`)
+- Stream 17: HtoD transfers (`host_to_device_stream`)
+
+A query counting how much of the transfer time on streams 13/17 coincides with
+active kernels on stream 7 gives:
+
+```
+overlapped transfer time:  8.43 sec  (82% of transfers)
+sequential transfer time:  1.81 sec  (18% of transfers)
+```
+
+So 82% of the transfer operations on the dedicated transfer streams run **while
+the main stream is simultaneously executing kernels**. The overlap is real.
+
+### Why the speedup is only ~7 sec despite 8.4 sec of overlapped transfers
+
+The `cudaStreamSynchronize` calls on the main stream 7 account for 72–77 sec
+of wall time in both modes. These are **not from our code**; they come from
+PyTorch's CUDA caching memory allocator (`CUDACachingAllocator`). When the
+allocator needs to reclaim freed GPU tensors that are still logically in-flight
+on a stream, it must synchronize that stream before it can reuse the memory.
+
+The pattern is extremely regular: approximately **2 sec of allocator-induced
+stream sync per backward cell** × 36 cells ≈ 72 sec total. Each cell contributes:
+
+- ~1.06 sec between two layer-shard calls: `deallocate_kv_cache_buffers` inside
+  `GradientAccumulator.run`'s `finally` block triggers GPU memory reclamation for
+  the inference replay cache buffers.
+- ~0.9 sec during the backward pass itself: PyTorch's autograd engine allocates
+  and frees many tensors during `scalar_output.backward()`, causing repeated
+  allocator syncs.
+
+The async mode saves time because transfers on streams 13/17 can still proceed
+**during** these allocator stalls on stream 7. The allocator sync freezes stream 7
+and the CPU thread, but streams 13 and 17 are unaffected and continue to execute
+independently on the GPU hardware. The `cudaStreamSynchronize` time is ~5 sec
+shorter in async mode (77.4 → 72.0 sec), which is the overlap benefit. The
+remaining ~2 sec savings comes from direct overlap with active compute.
+
+### Remaining issue: blocking `.to(device)` in quantized checkpoint path
+
+In `KVCacheBufferQuantizedCheckpoints.get_checkpoint_slice`
+([checkpoints.py:401–402](keys_values/kvcache/gradient/checkpoints.py#L401)):
+
+```python
+keys = keys.to(device)    # BLOCKING — no non_blocking=True
+values = values.to(device)
+```
+
+This is in the quantized path (`qname != "default"`). For these profiling runs the
+default (non-quantized) path was used, so this did not affect results. If the
+quantized path is ever used with async transfers, this needs to be fixed.
+
+### Can we do better?
+
+The 72 sec of allocator sync is the main remaining bottleneck. Some options:
+
+1. **Avoid re-allocating inference replay caches every layer row**: Currently,
+   `_create_inference_replay_caches` allocates GPU buffers and `_deallocate_buffers`
+   frees them for every call to `GradientAccumulator.run`. The ~1.06 sec sync per
+   row is largely this allocation/deallocation cycle. Pre-allocating these buffers
+   once and reusing them across rows would eliminate the largest single sync.
+
+2. **Use `torch.cuda.memory.set_per_process_memory_fraction` or
+   `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`**: The expandable segments
+   allocator in PyTorch avoids some synchronizations during reallocation.
+
+3. **Accept the current state**: The 7 sec / 3.2% improvement is real and correct.
+   The compute kernel time (159 sec) cannot be reduced by transfer overlap — we are
+   already limited by the compute and the unavoidable allocator syncs.
+
