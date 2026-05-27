@@ -141,6 +141,8 @@ def test_layer_input_quantized_checkpoints(
                 )
                 == 0
             )
+            if device.type == "cuda":
+                torch.cuda.synchronize()
             results.append(
                 cp.get_checkpoint(
                     layer_idx=0,
