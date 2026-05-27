@@ -397,7 +397,8 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         # See comments in :meth:`_get_checkpoint`
         self.quant_buffers.drop_association()
         keys, values = self.quant_buffers.get_slots((input_pos, input_pos + num))
-        if device is not None:
+        if device is not None and device != keys.device:
+            # Must not use `non_blocking=True` here
             keys = keys.to(device)
             values = values.to(device)
         return DefaultKeysAndValues(keys, values)
@@ -980,11 +981,10 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
         if buffers.shape != shape:
             raise ValueError(f"buffers.shape = {buffers.shape}, must be {shape}")
         ne2 = self.n_embd // 2
-        device = torch.device("cpu")
         return cp_int.set_checkpoint_slice(
             chunk_idx=layer_idx,
-            key=buffers[:, None, :, :ne2].to(device=device),
-            value=buffers[:, None, :, ne2:].to(device=device),
+            key=buffers[:, None, :, :ne2],
+            value=buffers[:, None, :, ne2:],
             input_pos=rstart,
         )
 

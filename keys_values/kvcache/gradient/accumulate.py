@@ -535,6 +535,9 @@ class GradientAccumulator:
                 print(f"\nProcessing row of cells: Layer {first_layer_idx}")
         if record_gpu_memory_snapshots is not None:
             record_gpu_memory_snapshots.start_recording()
+        cache_lengths = [
+            kv_cache.cache_length for _, kv_cache in model_part.get_kv_caches()
+        ]
 
         # Run inference forward and store KV cache checkpoints
         if self.do_checkpointing:
@@ -550,10 +553,10 @@ class GradientAccumulator:
                 # Synchronize here to make sure the checkpoints are properly
                 # written to CPU (host), before they are read below
                 torch.cuda.synchronize()
-            # We could delete `infer_replay_caches` here. But we still use their
-            # buffers to de-quantize checkpoints below
-        else:
-            infer_replay_caches = None
+            # Remove caches (underlying buffers are kept)
+            while infer_replay_caches:
+                cache = infer_replay_caches.pop()
+                del cache
 
         try:
             # Loop over cells from right to left
@@ -605,8 +608,8 @@ class GradientAccumulator:
                     # `chunk_idxs[col_idx - 1]`, because `chunk_idxs[0] == 0` is a
                     # dummy entry
                     k_buffers, v_buffers = self._get_checkpoints(
-                        infer_replay_caches,
                         chunk_idx=chunk_idxs[col_idx],
+                        cache_lengths=cache_lengths,
                     )
                     k_buffers = [copy_requires_grad(x) for x in k_buffers]
                     v_buffers = [copy_requires_grad(x) for x in v_buffers]
@@ -675,9 +678,6 @@ class GradientAccumulator:
                             print(self._annotation_usage_logs[first_chunk_idx].report())
 
         finally:
-            while infer_replay_caches:
-                cache = infer_replay_caches.pop()
-                del cache
             if self.do_checkpointing:
                 self._kv_cache_checkpoints = None
             if record_gpu_memory_snapshots is not None:
@@ -771,16 +771,18 @@ class GradientAccumulator:
 
     def _get_checkpoints(
         self,
-        infer_replay_caches: List[KVCacheWithBuffers],
         chunk_idx: int,
+        cache_lengths: List[int],
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         k_buffers = []
         v_buffers = []
-        for kv_cache, checkpoints in zip(
-            infer_replay_caches,
+        # We use buffers here which are otherwise used by the inference replay
+        # caches.
+        for checkpoints, cache_length in zip(
             self._kv_cache_checkpoints,
+            cache_lengths,
         ):
-            buffers = kv_cache.kv_buffers
+            buffers = self._buffers_per_length[cache_length][0]
             # Copy from checkpoint (CPU) into buffer (on device)
             checkpoints.get_checkpoint(chunk_idx=chunk_idx, out=buffers)
             # Dequantize
