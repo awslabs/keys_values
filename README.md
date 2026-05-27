@@ -993,55 +993,6 @@ Other arguments for fine-tuning are:
   checkpoints are pinned. This can run faster, but needs more real CPU memory.
 
 
-### Profiling GPU Memory and Runtime
-
-This is based on https://pytorch.org/blog/understanding-gpu-memory-1/. It shows
-how to profile GPU memory usage during certain parts of forward and backward pass.
-
-GPU memory profiling is activated with the CL argument `--record_gpu_memory_snapshots 100000`.
-The number is the `max_entries` argument for `torch.cuda.memory._record_memory_history`.
-The kind of profiling is chosen with `--record_gpu_memory_kind`, with values 0, 1,
-2, 3. All of them write pickle files to `${OUT_DIR}/gpu_memory_snapshots/`. For
-`record_gpu_memory_kind=0`:
-
-* `${OUT_DIR}/gpu_memory_snapshots/iteration${ITER}/snapshot_initial.pickle`:
-  From start of iteration until backward over top-most layer. Includes the
-  forward pass for activation checkpoints and KV cache logs, as well as the
-  backward for the head model.
-* `${OUT_DIR}/gpu_memory_snapshots/iteration${ITER}/snapshot_layer${FST_LAYER_IDX}.pickle`:
-  Backward over one row of cells. Here, `FST_LAYER_IDX` the index of the first
-  layer for the row of cells.
-
-Here, `OUT_DIR` is given by the CL option `--out_dir ${OUT_DIR}`, `ITER` is the
-iteration number. Copy the snapshot files from the GPU instance.
-
-To watch a snapshot, you can try to upload the pickle file to their web
-interface at https://docs.pytorch.org/memory_viz. If this does not work for you,
-you need a script from `PyTorch`. Clone the `PyTorch` sources to `PYTORCH_PATH`, then
-run:
-```bash
-python3 ${PYTORCH_PATH}/torch/cuda/_memory_viz.py trace_plot snapshot_layer${FST_LAYER_IDX}.pickle -o snapshot_layer${FST_LAYER_IDX}.html
-```
-You can now open the resulting HTML file in your browser.
-
-For a healthy run, you should see:
-
-* Brief initial phase with little memory being used. This is the forward pass
-  for KV cache checkpointing
-* Train of pyramids, one for each cell in the row
-* All but the last pyramid has a number of layers proportional to how many
-  chunks are in the cell. There are also high but narrow spikes on top of the
-  downward slope, one per chunk. The layers correspond to tensors stored in the
-  `autograd` graph. If `autograd` saved tensors packing works properly, none of
-  them should be as large as the KV cache buffers. The narrow spikes are
-  memory required in MHA backward computations.
-* The final pyramid corresponds to the cell with the prefill chunk, where
-  more memory is required. Its shape depends on internals of SDPA implementations
-  in `PyTorch`.
-* Memory at the end of the recording should be roughly the same as at the start.
-  In particular, GPU memory should not build up across several snapshots
-
-
 ## Evaluation of Fine-tuned Models
 
 Our library provides scripts to evaluate fine-tuned models on test datasets.
@@ -1189,6 +1140,59 @@ dictionaries. If an entry does not contain a `eval_tasks` field, then all
 checkpoints found there are tasks. Jobs are iterated over in a nested loop,
 outer over setups, middle over tasks, inner over batches.
 
+### Writing out Generated Samples
+
+By default, the evaluation scripts write out metric values only. If
+`--use_sample_metric True`, the metric depends on a sample sequence generated
+from the model. In this case, the generated samples can be written out as
+well. Example:
+```bash
+python keys_values/__main__.py eval_long \
+    /home/ubuntu/out/finetune/lora/qwen3_4b/helmet_hotpot_qa_64k/h2o_lr5 \
+    --model_type lora \
+    --verbose some \
+    --devices 2 \
+    --batch_size 2 \
+    --use_sample_metric True \
+    --tasks "step-000310,final,step-000410" \
+    --num_store_generated_samples 100
+```
+
+This will not only write out files for metric values, but also for generated
+samples. The latter is done for at most the initial 100 cases in the dataset.
+If you like to write out samples for all dataset cases, set this to a very
+large number.
+
+Generated samples are written to files
+`<out_dir>/<task>/eval/generated_samples_<no>.yaml`. Example:
+```yaml
+- idx: 225
+  output: Debbie Gibson
+  raw_target:
+  - Debbie Gibson
+  - American singer - songwriter - actress Debbie Gibson
+  sft_target: American singer - songwriter - actress Debbie Gibson
+  sub_exact_match: 1.0
+- idx: 343
+  output: James Lafferty
+  raw_target:
+  - James Martin Lafferty
+  sft_target: James Martin Lafferty
+  sub_exact_match: 0.0
+```
+
+- `idx`: Index of case in dataset.
+- `output`: Generated sample.
+- `raw_target`: List of target strings the `sub_exact_match` depends upon. This
+  metric is 1 if at least one of these target strings is a substring in `output`.
+- `sft_target`: Target string which would be used in supervised fine-tuning.
+
+Extra tooling:
+- Use [collect_gen_samples](./keys_values/scripts/collect_gen_samples.py) to
+  collect results. This works like `collect_eval_results`.
+- Use [cleanup_gen_samples](./keys_values/scripts/cleanup_gen_samples.py) to
+  clean up results. This works like `cleanup_evaluation`.
+
 
 ## Implementing New KV Cache Policies
 
@@ -1253,3 +1257,76 @@ other cache policies can make use of it as well.
 Choose this base class only if all others do not apply. Your code will have to
 deal with SDPA, position encoding and buffer strategies. We recommend to use
 this base class only to wrap existing monolithic code.
+
+
+## Profiling GPU Memory and Runtime
+
+There is nothing special about this library when it comes to profiling tools.
+Here, we just review what we tried so far.
+
+### Profiling GPU Memory
+
+This is based on https://pytorch.org/blog/understanding-gpu-memory-1/. It shows
+how to profile GPU memory usage during certain parts of forward and backward pass.
+
+GPU memory profiling is activated with the CL argument `--record_gpu_memory_snapshots 100000`.
+The number is the `max_entries` argument for `torch.cuda.memory._record_memory_history`.
+The kind of profiling is chosen with `--record_gpu_memory_kind`, with values 0, 1,
+2, 3. All of them write pickle files to `${OUT_DIR}/gpu_memory_snapshots/`. For
+`record_gpu_memory_kind=0`:
+
+* `${OUT_DIR}/gpu_memory_snapshots/iteration${ITER}/snapshot_initial.pickle`:
+  From start of iteration until backward over top-most layer. Includes the
+  forward pass for activation checkpoints and KV cache logs, as well as the
+  backward for the head model.
+* `${OUT_DIR}/gpu_memory_snapshots/iteration${ITER}/snapshot_layer${FST_LAYER_IDX}.pickle`:
+  Backward over one row of cells. Here, `FST_LAYER_IDX` the index of the first
+  layer for the row of cells.
+
+Here, `OUT_DIR` is given by the CL option `--out_dir ${OUT_DIR}`, `ITER` is the
+iteration number. Copy the snapshot files from the GPU instance.
+
+To watch a snapshot, you can try to upload the pickle file to their web
+interface at https://docs.pytorch.org/memory_viz. If this does not work for you,
+you need a script from `PyTorch`. Clone the `PyTorch` sources to `PYTORCH_PATH`, then
+run:
+```bash
+python3 ${PYTORCH_PATH}/torch/cuda/_memory_viz.py trace_plot snapshot_layer${FST_LAYER_IDX}.pickle -o snapshot_layer${FST_LAYER_IDX}.html
+```
+You can now open the resulting HTML file in your browser.
+
+For a healthy run, you should see:
+
+* Brief initial phase with little memory being used. This is the forward pass
+  for KV cache checkpointing
+* Train of pyramids, one for each cell in the row
+* All but the last pyramid has a number of layers proportional to how many
+  chunks are in the cell. There are also high but narrow spikes on top of the
+  downward slope, one per chunk. The layers correspond to tensors stored in the
+  `autograd` graph. If `autograd` saved tensors packing works properly, none of
+  them should be as large as the KV cache buffers. The narrow spikes are
+  memory required in MHA backward computations.
+* The final pyramid corresponds to the cell with the prefill chunk, where
+  more memory is required. Its shape depends on internals of SDPA implementations
+  in `PyTorch`.
+* Memory at the end of the recording should be roughly the same as at the start.
+  In particular, GPU memory should not build up across several snapshots
+
+### Profiling GPU Runtime
+
+We focus on [Nvidia Nsight Compute](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html).
+
+* Annotate ranges with `torch.cuda.nvtx.range_push(<name>)` (start) and
+  `torch.cuda.nvtx.range_pop()` (end). You'll see these ranges in the final
+  visualization.
+* Run the script you'd like to profile as follows.
+
+```bash
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+KEYSVALS_LOG_DIR="<my_log_dir>" \
+nsys profile --trace=cuda,nvtx --output <report_name> \
+    python3 keys_values/__main__.py finetune_long_lora [...]
+```
+
+Once the script terminates or is stopped, results are written to
+`<report_name>.nsys-rep`. You can then use `nsys-ui` to look at results.
