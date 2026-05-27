@@ -941,16 +941,6 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         if not compute_loss and is_final_chunk and is_final_layer:
                             # We need the final layer output for the last chunk
                             logits_final_position = y[:, -1:, :].detach()
-                    # No explicit sync needed between layers: the D2H in
-                    # `_checkpoint_layer_input` uses `non_blocking=True` on
-                    # the default stream, so it serializes with the next
-                    # layer's quantize kernel (which reuses the shared
-                    # quantizer buffer) via the default stream's natural
-                    # ordering. A `cuda.synchronize()` here would only block
-                    # the CPU thread, not add any GPU-level ordering.
-                    # Old code:
-                    # if self._do_checkpoint_layer_input() and torch.cuda.is_available():
-                    #    torch.cuda.synchronize()
                     del embeddings
                     embeddings = torch.cat(new_embed_parts, dim=1)
                     assert embeddings.shape[1] == end - start, (
@@ -1010,14 +1000,6 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         logits_final_position = self.gpt_model.lm_head(
                             logits_final_position
                         )
-                if self._do_checkpoint_layer_input() and torch.cuda.is_available():
-                    # `_checkpoint_layer_input` called above transfers
-                    # `embeddings` to CPU. For this not to lead to
-                    # corruption of the CPU target, we need to synchronize
-                    # here.
-                    # TODO: Is this really a problem? We don't modify
-                    # `embeddings`, but just unlink it.
-                    torch.cuda.synchronize()
 
         if compute_loss:
             if num_target_entries is not None:
