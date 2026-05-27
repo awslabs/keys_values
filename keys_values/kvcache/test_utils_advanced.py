@@ -54,9 +54,9 @@ def exchange_kv_cache_checkpoints(
         ]
         return cache_buffers, checkpoints
 
-    accumulator._create_checkpoints_and_buffers = partial(
+    accumulator._get_checkpoints_and_buffers = partial(
         wrapped_create_checkpoints_and_buffers,
-        accumulator._create_checkpoints_and_buffers,
+        accumulator._get_checkpoints_and_buffers,
     )
 
 
