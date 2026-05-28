@@ -52,8 +52,8 @@ from keys_values.attention.attention_utils import (
     SDPA_KERNELS_BEST_ORDERING,
 )
 from keys_values.config import Config as ConfigFull
-from keys_values.data import Helmet, LongBenchV2, MyDataLoader
-from keys_values.data.base import INPUT_IDS_NAME, TARGETS_STRINGS_NAME
+from keys_values.data import Helmet, LongBenchV2, MyDataLoader, INPUT_IDS_NAME
+from keys_values.data.constants import TARGETS_STRINGS_NAME
 from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
 from keys_values.attention.flashinfer_wrapper import get_flashinfer_sdpa
 from keys_values.attention.flex_attention import FlexAttentionArgs, choose_q_lens

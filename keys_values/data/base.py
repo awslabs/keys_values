@@ -18,21 +18,7 @@ from torch.utils.data import Dataset
 
 from litgpt import Tokenizer, PromptStyle
 
-INPUT_IDS_NAME = "input_ids"
-
-LABELS_NAME = "labels"
-
-TARGETS_STRINGS_NAME = "targets_as_strings"
-
-POSITION_NAME = "position"
-
-LIT_MODEL_FNAME = "lit_model.pth"
-
-HEAD_MODEL_FNAME = "head_model.pth"
-
-LORA_WEIGHTS_FNAME = "lit_model.lora.pth"
-
-LORA_WEIGHTS_FNAME_OLD = "lit_model.pth.lora"
+from keys_values.data.constants import POSITION_NAME, INPUT_IDS_NAME
 
 
 class LongContextDataset(Dataset):

@@ -27,6 +27,7 @@ def setup(
     seed: int = 1337,
     access_token: Optional[str] = None,
     batch_size: Optional[int] = None,
+    checkpoint_dir: Optional[Path] = None,
     tasks: Optional[str] = None,
     kv_cache: Optional[KVCacheArgs] = None,
     sdpa: Optional[SDPAArgs] = None,
@@ -71,8 +72,11 @@ def setup(
         shortest ones. We then iterate over dataset batches (inner) and tasks
         (outer).
     * We write result files for every batch, to
-        `<task-path>/eval/eval/eval_metrics_<suffix>.csv`, see
+        `<task-path>/eval/eval_metrics_<suffix>.csv`, see
         :class:`EvaluationWithTasksHelper`.
+    * If `checkpoint_dir` is given, we run evaluation for a single task, loaded
+        from there. Results are written as stated above, where `<task-path>
+        = out_dir`.
 
     Arguments:
         out_dir: Directory from where to load checkpoints. Checkpoints are
@@ -83,6 +87,7 @@ def setup(
         access_token: Optional API token to access models with restrictions.
         batch_size: Size for test set batches. Only if you like to overwrite
             the configuration stored with the checkpoints
+        checkpoint_dir: See above. If given, `tasks` is ignored
         tasks: Comma-separated list of tasks (as string) for which to run
             evaluation, for example "final,step-000010,step-000020". If given,
             only these tasks (checkpoints) are evaluated for. Otherwise, we
@@ -129,6 +134,8 @@ def setup(
         entry["kv_cache"] = asdict(kv_cache)
     if sdpa is not None:
         entry["sdpa"] = asdict(sdpa)
+    if checkpoint_dir is not None:
+        entry["checkpoint_dir"] = checkpoint_dir
     sample_metric_kwargs = dict()
     if sample_metric_temperature is not None:
         sample_metric_kwargs["temperature"] = sample_metric_temperature

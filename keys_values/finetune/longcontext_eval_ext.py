@@ -35,15 +35,7 @@ from litgpt.utils import (
 
 from keys_values.attention.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.config import Config as ConfigFull
-from keys_values.data import LongBenchV2, Helmet
-from keys_values.data.base import (
-    LIT_MODEL_FNAME,
-    HEAD_MODEL_FNAME,
-    INPUT_IDS_NAME,
-    TARGETS_STRINGS_NAME,
-    LORA_WEIGHTS_FNAME,
-    LORA_WEIGHTS_FNAME_OLD,
-)
+from keys_values.data import LongBenchV2, Helmet, INPUT_IDS_NAME
 from keys_values.evaluation.evaluator import (
     SampleBasedMetricsEvaluator,
     TargetType,
@@ -54,8 +46,15 @@ from keys_values.evaluation.tasks import (
 )
 from keys_values.data.evaluation import (
     EvaluationDataLoader,
+)
+from keys_values.data.constants import (
     ORIG_IDX_NAME,
     TASK_NAME,
+    TARGETS_STRINGS_NAME,
+    LIT_MODEL_FNAME,
+    HEAD_MODEL_FNAME,
+    LORA_WEIGHTS_FNAME,
+    LORA_WEIGHTS_FNAME_OLD,
 )
 from keys_values.finetune.args import KVCacheArgs, SDPAArgs, EvalArgs
 from keys_values.finetune.batch_transform import BatchTransformFactory
@@ -258,15 +257,20 @@ def setup_internal(
     # Need to obtain `precision` from hyperparameters of first setup
     out_dir = Path(setups[0]["out_dir"])
     model_type = setups[0]["model_type"]
-    tasks = setups[0].get("eval_tasks")
-    eval = EvaluationTasks(out_dir, model_type, tasks)
-    if not eval.tasks:
-        raise ValueError(
-            f"No completed model checkpoints detected at {out_dir}. Are you "
-            f"sure that model_type = {model_type} is correct?"
-        )
+    checkpoint_dir = setups[0].get("checkpoint_dir")
+    if checkpoint_dir is None:
+        tasks = setups[0].get("eval_tasks")
+        eval = EvaluationTasks(out_dir, model_type, tasks)
+        if not eval.tasks:
+            raise ValueError(
+                f"No completed model checkpoints detected at {out_dir}. Are you "
+                f"sure that model_type = {model_type} is correct?"
+            )
+        task_path = out_dir / eval.tasks[0]
+    else:
+        task_path = Path(checkpoint_dir)
     _, hyp_pars = load_configuration(
-        task_path=out_dir / eval.tasks[0],
+        task_path=task_path,
         model_type=model_type,
     )
     precision = hyp_pars["precision"] or get_default_supported_precision(training=True)
@@ -326,23 +330,37 @@ def main(
         prefix = f"Setup {setup_no}: "
         out_dir = Path(_setup["out_dir"])
         model_type = _setup["model_type"]
+        checkpoint_dir = _setup.get("checkpoint_dir")
         kv_cache = _setup.get("kv_cache")
         sdpa = _setup.get("sdpa")
-        tasks = _setup.get("eval_tasks")
         print(f"\n{prefix}out_dir = {out_dir}, model_type = {model_type}")
-        eval = EvaluationTasks(out_dir, model_type, tasks)
-        if not eval.tasks:
-            raise ValueError(
-                f"{prefix}No completed model checkpoints detected at {out_dir}. Are you "
-                f"sure that model_type = {model_type} is correct?"
+        if checkpoint_dir is None:
+            tasks = _setup.get("eval_tasks")
+            eval_tasks = EvaluationTasks(out_dir, model_type, tasks)
+            if not eval_tasks.tasks:
+                raise ValueError(
+                    f"{prefix}No completed model checkpoints detected at {out_dir}. Are you "
+                    f"sure that model_type = {model_type} is correct?"
+                )
+            print(
+                "Detected model checkpoints to evaluate from:\n" + str(eval_tasks.tasks)
             )
-        print("Detected model checkpoints to evaluate from:\n" + str(eval.tasks))
+            task_path = out_dir / eval_tasks.tasks[0]
+        else:
+            checkpoint_dir = Path(checkpoint_dir)
+            if not checkpoint_dir.exists():
+                raise ValueError(
+                    f"{prefix}No completed model checkpoint detected at {checkpoint_dir}."
+                )
+            eval_tasks = None
+            task_path = checkpoint_dir
 
         # Configuration from first task (must be the same over all tasks)
         model_config, hyp_pars = load_configuration(
-            task_path=out_dir / eval.tasks[0],
+            task_path=task_path,
             model_type=model_type,
         )
+        model_name = hyp_pars["checkpoint_dir"].split("/")[-1]
         if model_type == "lora" and lora_dropout is not None:
             if lora_dropout < 0:
                 raise ValueError(f"lora_dropout {lora_dropout}, must be non-negative")
@@ -352,10 +370,15 @@ def main(
                 )
             model_config.config.lora_dropout = lora_dropout
         # Base model checkpoint
-        checkpoint_dir = auto_download_checkpoint(
+        # - For LoRA, most model weights are loaded from there
+        # - Tokenizer or generation params are loaded from there if they are
+        #   not part of the checkpoint
+        base_checkpoint_dir = auto_download_checkpoint(
             model_name=hyp_pars["checkpoint_dir"],
             access_token=access_token,
         )
+        if checkpoint_dir is None:
+            checkpoint_dir = base_checkpoint_dir
         if _batch_size is None:
             batch_size = hyp_pars["evals"]["micro_batch_size"]
             if batch_size is None:
@@ -401,9 +424,14 @@ def main(
         if yarn_rope is None:
             yarn_rope = True
         check_valid_checkpoint_dir(checkpoint_dir)
-        # If the checkpoint contains generation_config.json, load sample args. But
-        # the args provided in
+        # If the checkpoint contains generation_config.json, load sample args.
         eval_args = load_generation_config(checkpoint_dir, EvalArgs())
+        if (
+            eval_tasks is None
+            and not (checkpoint_dir / "generation_config.json").exists()
+        ):
+            # Load from base model checkpoint
+            eval_args = load_generation_config(base_checkpoint_dir, EvalArgs())
         if eval_args.sample_metric_kwargs is not None:
             sample_metric_kwargs = {
                 **eval_args.sample_metric_kwargs,
@@ -456,8 +484,18 @@ def main(
             device = torch.device("cuda", fabric.local_rank)
         else:
             device = torch.device("cpu")
-        tokenizer = Tokenizer(checkpoint_dir)
+        try:
+            tokenizer = Tokenizer(checkpoint_dir)
+        except Exception as ex:
+            if eval_tasks is None:
+                # Load tokenizer from base model checkpoint
+                tokenizer = Tokenizer(base_checkpoint_dir)
+            else:
+                raise ex
         with fabric.init_module(empty_init=(fabric.world_size > 1)):
+            # Updates `kv_cache.cache_kwargs` from other args:
+            kv_cache = kv_cache.update_cache_kwargs()
+            # Set `mha_kwargs`, update kv_cache.cache_kwargs` with that as well:
             mha_kwargs = get_mha_and_cache_kwargs(
                 attention_forward_temp_size_gb,
                 model_config.config,
@@ -494,11 +532,11 @@ def main(
                 fabric=fabric,
             )
         # Load base model
-        file_path = checkpoint_dir / LIT_MODEL_FNAME
+        file_path = base_checkpoint_dir / LIT_MODEL_FNAME
         load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
         # If there are head model weights, load them as well. Otherwise, we use
         # random initialization (or the head model may not have weights)
-        file_path = checkpoint_dir / HEAD_MODEL_FNAME
+        file_path = base_checkpoint_dir / HEAD_MODEL_FNAME
         if file_path.exists():
             load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
@@ -527,12 +565,14 @@ def main(
             model_config,
             devices,
             batch_size,
-            eval.tasks,
+            eval_tasks.tasks if eval_tasks is not None else None,
             use_sample_metric,
             sample_metric_max_generated_tokens,
             sample_metric_kwargs,
             num_store_generated_batches,
             skip_eval,
+            model_name,
+            checkpoint_dir if eval_tasks is None else None,
         )
 
 
@@ -546,12 +586,14 @@ def eval_for_setup(
     model_config: ModelConfiguration,
     devices: int,
     batch_size: int,
-    eval_tasks: List[str],
+    eval_tasks: Optional[List[str]],
     use_sample_metric: bool,
     sample_metric_max_generated_tokens,
     sample_metric_kwargs: Dict[str, Any],
     num_store_generated_batches: Optional[int],
     skip_eval: bool,
+    model_name: str,
+    checkpoint_dir: Optional[Path],
 ) -> None:
     # Test dataloader is over cross product of test dataset batches and
     # evaluation tasks
@@ -563,6 +605,7 @@ def eval_for_setup(
         batch_size=batch_size,
         devices=devices,
         fabric=fabric,
+        model_name=model_name,
     )
     ignore_index = getattr(data, "ignore_index", -100)
 
@@ -592,9 +635,10 @@ def eval_for_setup(
         model_type,
         model_config,
         devices,
-        num_store_generated_batches,
-        skip_eval,
-        ignore_index,
+        checkpoint_dir,
+        num_store_generated_batches=num_store_generated_batches,
+        skip_eval=skip_eval,
+        ignore_index=ignore_index,
     )
 
 
@@ -609,10 +653,12 @@ def eval_for_setup_internal(
     model_type: str,
     model_config: ModelConfiguration,
     devices: int,
+    checkpoint_dir: Optional[Path],
     num_store_generated_batches: Optional[int],
     skip_eval: bool,
     ignore_index: int = -100,
 ) -> None:
+    multiple_tasks = checkpoint_dir is None
     # Loop over test set batches
     # Note: `test_dataloader` returns the same batches on each rank. We use
     # a file lock to assign a batch to the first rank asking for a batch.
@@ -637,6 +683,7 @@ def eval_for_setup_internal(
         out_dir,
         tag=tag,
         eval_metrics_filename=fname,
+        multiple_tasks=multiple_tasks,
     )
     current_task = None
     test_dataiter = iter(test_dataloader)
@@ -651,14 +698,14 @@ def eval_for_setup_internal(
             print("Empty batch: Continue")
             continue
         if skip_until_next_task:
-            if batch[TASK_NAME] == current_task:
+            if not multiple_tasks or batch[TASK_NAME] == current_task:
                 continue
             skip_until_next_task = False
         store_generated_batch = (
             num_store_generated_batches is not None
             and batch_idx < num_store_generated_batches
         )
-        task = batch[TASK_NAME]
+        task = batch[TASK_NAME] if multiple_tasks else "THE_ONLY_ONE_31415927"
         if skip_eval and not store_generated_batch and task == current_task:
             print(
                 f"Wrote out generated samples for {num_store_generated_batches} batches: Skipping remaining ones for this task"
@@ -667,21 +714,27 @@ def eval_for_setup_internal(
             continue
         orig_idxs = batch[ORIG_IDX_NAME]
         eval_metrics_path = tasks_helper.get_lock(batch)
+        batch_name = f"{task}, {orig_idxs}" if multiple_tasks else str(orig_idxs)
         if eval_metrics_path is None:
-            print(f"Batch {task}, {orig_idxs} already done or in progress: Skipping")
+            print(f"Batch {batch_name} already done or in progress: Skipping")
             continue
         try:
             print_with_rank_and_timestamp(
-                f"Running inference for batch {task}, {orig_idxs}",
+                f"Running inference for batch {batch_name}",
                 fabric.global_rank,
             )
-            if test_dataloader.delay_tokenization:
+            if getattr(test_dataloader, "delay_tokenization", False):
                 # Tokenization only happens here
                 batch = test_dataiter.fetch_full(batch)
             batch = batch_transform(batch)
             if task != current_task:
-                task_path = out_dir / task
-                print(f"New task {task}: Load model checkpoint from {task_path}")
+                if multiple_tasks:
+                    task_path = out_dir / task
+                    part = " " + task
+                else:
+                    task_path = checkpoint_dir
+                    part = ""
+                print(f"New task{part}: Load model checkpoint from {task_path}")
                 load_model_checkpoint(
                     model=model,
                     task_path=task_path,
@@ -715,13 +768,19 @@ def eval_for_setup_internal(
                 metric_values = metric_values[metric_name]
             eval_time = time.perf_counter() - t0
             print_with_rank_and_timestamp(
-                f"Batch {task}, {orig_idxs}: {metric_name} = {metric_values.mean().item():.3f}, eval_time = {eval_time * 1000:.2f} ms",
+                f"Batch {batch_name}: {metric_name} = {metric_values.mean().item():.3f}, eval_time = {eval_time * 1000:.2f} ms",
                 fabric.global_rank,
             )
             flush_io_streams()
             if not skip_eval:
                 print(f"Storing to {eval_metrics_path}")
-                store_eval_metrics(metric_name, metric_values, batch, eval_metrics_path)
+                store_eval_metrics(
+                    metric_name,
+                    metric_values,
+                    batch,
+                    eval_metrics_path,
+                    multiple_tasks,
+                )
             if store_generated_batch:
                 if skip_eval:
                     result_path = eval_metrics_path
@@ -756,17 +815,21 @@ def eval_for_setup_internal(
 def get_dataloader(
     data: DataModule,
     tokenizer: Tokenizer,
-    eval_tasks: List[str],
+    eval_tasks: Optional[List[str]],
     head_model: str,
     batch_size: int,
     devices: int,
     fabric: Optional[L.Fabric],
+    model_name: Optional[str] = None,
 ) -> EvaluationDataLoader:
     """
     Creates data loader for cross product of test dataset with evaluation
-    tasks. Each evaluation task corresponds to a model checkpoint written
-    during or at the end of fine-tuning. See :class:`EvaluationTasks` and
-    :class:`EvaluationDataLoader` for more details.
+    tasks (if `eval_tasks` is given). Each evaluation task corresponds to a
+    model checkpoint written during or at the end of fine-tuning. See
+    :class:`EvaluationTasks` and :class:`EvaluationDataLoader` for more details.
+
+    If `eval_tasks is None`, the data loader is for the test set only, since
+    evaluation is run for a single checkpoint.
 
     Args:
         data: LongBenchV2 dataset
@@ -776,6 +839,7 @@ def get_dataloader(
         batch_size: Size of test batches
         devices: Number of devices to use
         fabric: Fabric
+        model_name: Sent to `data.connect`
 
     Returns:
         Data loader for cross product of test dataset with evaluation tasks
@@ -790,6 +854,7 @@ def get_dataloader(
         head_model=head_model,
         test_batch_size=batch_size,
         eval_tasks=eval_tasks,
+        model_name=model_name,
     )
     if fabric is not None:
         with fabric.rank_zero_first():
@@ -868,6 +933,11 @@ def load_model_checkpoint(
             file_path = task_path / LORA_WEIGHTS_FNAME_OLD
         strict = False
     load_checkpoint(fabric, model.gpt_model, file_path, strict=strict)
+    # If there are head model weights, load them as well. Otherwise, we use
+    # random initialization (or the head model may not have weights)
+    file_path = task_path / HEAD_MODEL_FNAME
+    if file_path.exists():
+        load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
 
 def store_eval_metrics(
@@ -875,14 +945,23 @@ def store_eval_metrics(
     metric_values: torch.Tensor,
     batch: dict[str, Any],
     eval_metrics_path: Path,
+    multiple_tasks: bool = True,
 ):
-    fieldnames = ["idx", "task", metric_name]
-    task = batch[TASK_NAME]
+    if multiple_tasks:
+        fieldnames = ["idx", "task", metric_name]
+        task = batch[TASK_NAME]
+    else:
+        fieldnames = ["idx", metric_name]
+        task = None
     with eval_metrics_path.open("w") as fp:
         writer = csv.writer(fp, delimiter=",")
         writer.writerow(fieldnames)
         for idx, loss in zip(batch[ORIG_IDX_NAME], metric_values):
-            writer.writerow([idx, task, loss.item()])
+            if multiple_tasks:
+                row = [idx, task, loss.item()]
+            else:
+                row = [idx, loss.item()]
+            writer.writerow(row)
 
 
 def store_generated_samples(

@@ -50,7 +50,15 @@ def _filter_dataset_case(
     return task != "010"
 
 
-def main(datasets, cases, result_path, final_table: bool):
+def main(
+    datasets,
+    cases,
+    result_path,
+    final_table: bool,
+    multiple_tasks: bool,
+):
+    if not multiple_tasks and not final_table:
+        raise ValueError("If multiple_tasks=False, then final_table must be True")
     base_path = result_path.parent
     col_labels = [
         d.removeprefix("helmet_").rsplit("_", 1)[0].replace("_", r"\_")
@@ -68,17 +76,23 @@ def main(datasets, cases, result_path, final_table: bool):
                 row.append([])
             else:
                 df = pd.read_csv(csv_path)
-                avg = df.groupby("task")["sub_exact_match"].mean()
-                row.append(
-                    _sort_entries(
-                        [
-                            (_short_task(t), v)
-                            for t, v in avg.items()
-                            if not final_table
-                            or _filter_dataset_case(dataset, case_key, _short_task(t))
-                        ]
+                if multiple_tasks:
+                    avg = df.groupby("task")["sub_exact_match"].mean()
+                    row.append(
+                        _sort_entries(
+                            [
+                                (_short_task(t), v)
+                                for t, v in avg.items()
+                                if not final_table
+                                or _filter_dataset_case(
+                                    dataset, case_key, _short_task(t)
+                                )
+                            ]
+                        )
                     )
-                )
+                else:
+                    avg = df["sub_exact_match"].mean()
+                    row.append([(None, avg.item())])
         table.append(row)
 
     # - final_table == False:
@@ -139,30 +153,41 @@ def main(datasets, cases, result_path, final_table: bool):
     result_path.write_text("\n".join(tex_lines) + "\n")
 
 
-# TODO: If `final_table = True`, do not print the task ID, just the metric value
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
     dataset_size = "64k"
     # dataset_size = "128k"
+    is_baseline = False
+    # is_baseline = True
+    if is_baseline:
+        base_path = base_path / "baseline"
     datasets = [
         f"helmet_nq_{dataset_size}",
         f"helmet_trivia_qa_{dataset_size}",
         f"helmet_hotpot_qa_{dataset_size}",
         f"helmet_pop_qa_{dataset_size}",
     ]
-    cases = [
-        ("lr_4gpu_cs2048_lr5", "lr_2048"),
-        ("slr_4gpu_cs2048_lr5", "slr_2048"),
-        ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
-        ("qh2o_4gpu_cs2048_lr5", "qh2o_2048"),
-        ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
-        ("qh2onorm_4gpu_cs2048_lr5", "qh2onorm_2048"),
-        ("lr_4gpu_cs1024_lr5", "lr_1024"),
-        ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
-    ]
+    if not is_baseline:
+        cases = [
+            ("lr_4gpu_cs2048_lr5", "lr_2048"),
+            ("slr_4gpu_cs2048_lr5", "slr_2048"),
+            ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
+            ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
+            ("qh2o_4gpu_cs2048_lr5", "qh2o_2048"),
+            ("qh2onorm_4gpu_cs2048_lr5", "qh2onorm_2048"),
+            ("lr_4gpu_cs1024_lr5", "lr_1024"),
+            ("slr_4gpu_cs1024_lr5", "slr_1024"),
+            ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
+            ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
+        ]
+    else:
+        cases = [
+            ("slr_4gpu_cs1024_lr5", "slr_1024"),
+            ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
+        ]
     result_path = base_path / f"results_{dataset_size}.tex"
     # final_table = False
     final_table = True
 
-    main(datasets, cases, result_path, final_table)
+    main(datasets, cases, result_path, final_table, multiple_tasks=not is_baseline)

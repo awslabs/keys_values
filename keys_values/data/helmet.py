@@ -19,6 +19,12 @@ from tokenizers import Tokenizer as HFTokenizer
 import torch
 from tqdm import tqdm
 
+from keys_values.data.constants import (
+    METADATA_SEQ_LENGTHS_KEY,
+    METADATA_KEYS,
+    RawDatasetType,
+    NUM_TOKENS_NAME,
+)
 from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.load_helmet_dev_eval import (
     load_helmet_dev_eval,
@@ -28,10 +34,6 @@ from keys_values.data.load_helmet_dev_eval import (
 from keys_values.data.module import (
     SequenceLengthFilteredDataModule,
     SequenceLengthFilteredDataTrainState,
-    METADATA_SEQ_LENGTHS_KEY,
-    METADATA_KEYS,
-    RawDatasetType,
-    NUM_TOKENS_NAME,
 )
 from keys_values.data.sft_dataset import SFTDataset, get_sft_collate_fn
 from keys_values.kvcache.smart_lastrec import (
@@ -214,7 +216,7 @@ class Helmet(SequenceLengthFilteredDataModule):
             root_key,
             self.dataset_key,
             self.max_length,
-            self.tokenizer.model_name,
+            self.model_name,
             split,
         ]
 

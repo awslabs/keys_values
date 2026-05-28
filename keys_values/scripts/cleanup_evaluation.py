@@ -22,9 +22,10 @@ def main(
     out_dir: Path,
     model_type: str,
     mode: Literal["non-lock", "lock", "all"],
+    multiple_tasks: bool,
 ):
     total_removed = 0
-    eval_tasks = EvaluationTasks(out_dir, model_type)
+    eval_tasks = EvaluationTasks(out_dir, model_type, multiple_tasks=multiple_tasks)
     print(f"Removing files for {out_dir}")
     for task_name, incomplete_file_paths in eval_tasks.eval_result_files(mode):
         print(f"{task_name}: Removing {len(incomplete_file_paths)} files (type {mode})")
@@ -36,8 +37,13 @@ def main(
 
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
+
     dataset_size = "64k"
     # dataset_size = "128k"
+    # is_baseline = False
+    is_baseline = True
+    if is_baseline:
+        base_path = base_path / "baseline"
     datasets = [
         f"helmet_nq_{dataset_size}",
         f"helmet_trivia_qa_{dataset_size}",
@@ -64,6 +70,6 @@ if __name__ == "__main__":
     for dataset, case in product(datasets, cases):
         out_dir = base_path / dataset / case
         if out_dir.exists():
-            main(out_dir, model_type, mode)
+            main(out_dir, model_type, mode, not is_baseline)
         else:
             print(f"\nResults for {dataset}/{case} do not exist")

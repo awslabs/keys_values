@@ -88,7 +88,6 @@ class KVCacheArgs:
         normalize_scores: Only for H2O and q-H2O cache policies. If `True`,
             score values are normalized by the number of token positions an
             entry is in the cache already.
-        KV cache buffers are normalized to
     """
 
     name: str

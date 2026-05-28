@@ -28,6 +28,7 @@ def main(
     out_dir: Path,
     model_type: str,
     tasks: Optional[List[str]] = None,
+    multiple_tasks: bool = True,
 ):
     # Collect results from all files across all tasks
     print(f"\nLoading generated samples files from {out_dir}")
@@ -37,6 +38,7 @@ def main(
         tasks,
         collect_results=True,
         eval_metrics_filename="eval/" + GENERATED_SAMPLES_FILENAME,
+        multiple_tasks=multiple_tasks,
     )
     all_data: Dict[str, List[Dict[str, Any]]] = dict()
     num_total = 0
@@ -69,6 +71,10 @@ if __name__ == "__main__":
     # mode = "sweep"
     dataset_size = "64k"
     # dataset_size = "128k"
+    is_baseline = False
+    # is_baseline = True
+    if is_baseline:
+        base_path = base_path / "baseline"
     datasets = [
         f"helmet_nq_{dataset_size}",
         f"helmet_trivia_qa_{dataset_size}",
@@ -77,14 +83,14 @@ if __name__ == "__main__":
     ]
     cases = [
         "lr_4gpu_cs2048_lr5",
-        "h2o_4gpu_cs2048_lr5",
         "slr_4gpu_cs2048_lr5",
+        "h2o_4gpu_cs2048_lr5",
         "qh2o_4gpu_cs2048_lr5",
         "h2onorm_4gpu_cs2048_lr5",
         "qh2onorm_4gpu_cs2048_lr5",
         "lr_4gpu_cs1024_lr5",
-        "h2o_4gpu_cs1024_lr5",
         "slr_4gpu_cs1024_lr5",
+        "h2o_4gpu_cs1024_lr5",
         "h2onorm_4gpu_cs1024_lr5",
     ]
     model_type = "lora"
@@ -92,7 +98,7 @@ if __name__ == "__main__":
         for dataset, case in product(datasets, cases):
             out_dir = base_path / dataset / case
             if out_dir.exists():
-                main(out_dir, model_type)
+                main(out_dir, model_type, multiple_tasks=not is_baseline)
             else:
                 print(f"\nResults for {dataset}/{case} do not exist")
     elif mode == "sweep":

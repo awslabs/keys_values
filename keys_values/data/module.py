@@ -11,11 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional, Dict, Any, Tuple, Union, Callable
+from typing import List, Optional, Dict, Any, Tuple, Union
 
 import torch
 from torch.utils.data import random_split, Subset
 
+from keys_values.data.constants import (
+    RawDatasetType,
+    CollateFnType,
+    NUM_TOKENS_NAME,
+)
 from litgpt.data import DataModule
 from litgpt.prompts import Default
 from litgpt.tokenizer import Tokenizer
@@ -28,16 +33,6 @@ from keys_values.data.evaluation import (
     EvaluationDataLoader,
 )
 from keys_values.data.trainstate import DataTrainState
-
-METADATA_SEQ_LENGTHS_KEY = "sequence_lengths"
-
-METADATA_KEYS = {METADATA_SEQ_LENGTHS_KEY}
-
-RawDatasetType = List[Dict[str, str]]
-
-CollateFnType = Callable[[List[Dict[str, Any]]], Dict[str, Any]]
-
-NUM_TOKENS_NAME = "num_tokens_instruction"
 
 
 class SequenceLengthFilteredDataTrainState(DataTrainState):
@@ -183,6 +178,7 @@ class SequenceLengthFilteredDataModule(DataModule):
         # This is used to support specialized data loaders.
         self._sequence_lengths = None
         self.training_state = None
+        self.model_name = None
 
     def connect(
         self,
@@ -203,6 +199,7 @@ class SequenceLengthFilteredDataModule(DataModule):
             :meth:`test_dataloader`.
         - `training_state`: Contains object of type
             :class:`SequenceLengthFilteredDataTrainState` (or subclass).
+        - `model_name`: Overwrites `tokenizer.model_name`
 
         Args:
             tokenizer: Tokenizer
@@ -246,6 +243,7 @@ class SequenceLengthFilteredDataModule(DataModule):
                 raise ValueError(
                     f"training_state must be an instance of SequenceLengthFilteredDataTrainState, but is {type(self.training_state)}"
                 )
+        self.model_name = kwargs.get("model_name", tokenizer.model_name)
 
     def _get_dataset(self) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
         """

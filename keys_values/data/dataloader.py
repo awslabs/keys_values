@@ -11,14 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Iterator, Dict, Any, List, Callable
+from typing import Iterator, Dict, Any
 
 import torch
 from torch.utils.data import Dataset
 
+from keys_values.data.constants import ORIG_IDX_NAME, Collator
 from keys_values.data.iterators import BatchSampler, SimilarSequenceLengthIterator
-
-Collator = Callable[[List[Dict[str, Any]]], Dict[str, Any]]
 
 
 class MyDataLoaderIterator(Iterator[Dict[str, Any]]):
@@ -35,7 +34,10 @@ class MyDataLoaderIterator(Iterator[Dict[str, Any]]):
 
     def __next__(self) -> Dict[str, Any]:
         inds = next(self._batch_iter)
-        return self.collate_fn([self.dataset[idx] for idx in inds])
+        return {
+            **self.collate_fn([self.dataset[idx] for idx in inds]),
+            ORIG_IDX_NAME: inds,
+        }
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         return self

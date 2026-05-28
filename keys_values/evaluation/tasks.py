@@ -16,12 +16,13 @@ from pathlib import Path
 import re
 from typing import List, Dict, Any, Optional, Iterable, Tuple, Literal
 
-from keys_values.data.base import (
+from keys_values.data.constants import (
+    ORIG_IDX_NAME,
+    TASK_NAME,
     LIT_MODEL_FNAME,
     LORA_WEIGHTS_FNAME,
     LORA_WEIGHTS_FNAME_OLD,
 )
-from keys_values.data.evaluation import ORIG_IDX_NAME, TASK_NAME
 
 EVAL_METRICS_FNAME = "eval/eval_metrics_{}.csv"
 
@@ -47,6 +48,9 @@ class EvaluationTasks:
 
     If `collect_results == True`, we collect tasks for which evaluation results
     are available.
+
+    If `multiple_tasks == False`, we do not use tasks, but look for evaluation
+    files of name :const:`EVAL_METRICS_FNAME` directly under `out_dir`.
     """
 
     def __init__(
@@ -56,17 +60,20 @@ class EvaluationTasks:
         tasks: Optional[List[str]] = None,
         collect_results: bool = False,
         eval_metrics_filename: Optional[str] = None,
+        multiple_tasks: bool = True,
     ):
         if isinstance(out_dir, str):
             out_dir = Path(out_dir)
         self._out_dir = out_dir
         self.model_type = model_type
-        self._tasks = tasks.copy() if tasks is not None else None
+        self._tasks = tasks.copy() if tasks is not None and multiple_tasks else None
+        self._multiple_tasks = multiple_tasks
         if eval_metrics_filename is None:
             eval_metrics_filename = EVAL_METRICS_FNAME
         self._eval_metrics_filename = eval_metrics_filename
         self._eval_metrics_glob = eval_metrics_filename.replace("{}", "*")
-        self._init_task_names(collect_results)
+        if multiple_tasks:
+            self._init_task_names(collect_results)
 
     def _init_task_names(self, collect_results: bool):
         if self._tasks is None:
@@ -107,7 +114,7 @@ class EvaluationTasks:
         return len(list(path.glob(self._eval_metrics_glob)))
 
     @property
-    def tasks(self) -> List[str]:
+    def tasks(self) -> Optional[List[str]]:
         return self._tasks
 
     @staticmethod
@@ -130,7 +137,7 @@ class EvaluationTasks:
     def eval_result_files(
         self,
         mode: Literal["non-lock", "lock", "all"] = "non-lock",
-    ) -> Iterable[Tuple[str, List[Path]]]:
+    ) -> Iterable[Tuple[Optional[str], List[Path]]]:
         """
         Args:
             mode: For "non-lock", we return complete files (not locks). For
@@ -145,9 +152,14 @@ class EvaluationTasks:
         choices = ("non-lock", "lock", "all")
         if mode not in choices:
             raise ValueError(f"Invalid mode = {mode}, must be in {choices}")
-        for task_name in self._tasks:
+        names = self._tasks if self._multiple_tasks else [None]
+        for task_name in names:
+            if task_name is not None:
+                base_dir = self._out_dir / task_name
+            else:
+                base_dir = self._out_dir
             result_file_paths = self._filter_incomplete_files(
-                (self._out_dir / task_name).glob(self._eval_metrics_glob),
+                base_dir.glob(self._eval_metrics_glob),
                 mode=mode,
             )
             if result_file_paths:
@@ -179,6 +191,9 @@ class EvaluationWithTasksHelper:
 
     We also support file locking here, which enables the custom batch
     dataloader we use.
+
+    If `multiple_tasks == False`, we support evaluation for a single task (or
+    checkpoint), and the `task` part of file names is skipped.
     """
 
     def __init__(
@@ -186,6 +201,7 @@ class EvaluationWithTasksHelper:
         out_dir: Path,
         tag: Optional[str] = None,
         eval_metrics_filename: Optional[str] = None,
+        multiple_tasks: bool = True,
     ):
         self._out_dir = out_dir
         if tag is None:
@@ -194,6 +210,7 @@ class EvaluationWithTasksHelper:
         if eval_metrics_filename is None:
             eval_metrics_filename = EVAL_METRICS_FNAME
         self._eval_metrics_filename = eval_metrics_filename
+        self._multiple_tasks = multiple_tasks
 
     def evaluation_metrics_path(self, batch: Dict[str, Any]) -> Path:
         """
@@ -206,16 +223,19 @@ class EvaluationWithTasksHelper:
 
         """
         orig_idxs = batch.get(ORIG_IDX_NAME)
-        task = batch.get(TASK_NAME)
-        if not isinstance(orig_idxs, list) or not isinstance(task, str):
-            raise ValueError(
-                f"Batch needs to contain entries {ORIG_IDX_NAME}, {TASK_NAME}, "
-                f"but got batch[{ORIG_IDX_NAME}] = {orig_idxs}, "
-                f"batch[{TASK_NAME}] = {task}."
-            )
         suffix = self._tag + str(orig_idxs[0])
         fname = self._eval_metrics_filename.format(suffix)
-        return self._out_dir / task / fname
+        if self._multiple_tasks:
+            task = batch.get(TASK_NAME)
+            if not isinstance(orig_idxs, list) or not isinstance(task, str):
+                raise ValueError(
+                    f"Batch needs to contain entries {ORIG_IDX_NAME}, {TASK_NAME}, "
+                    f"but got batch[{ORIG_IDX_NAME}] = {orig_idxs}, "
+                    f"batch[{TASK_NAME}] = {task}."
+                )
+            return self._out_dir / task / fname
+        else:
+            return self._out_dir / fname
 
     def get_lock(self, batch: Dict[str, Any]) -> Optional[Path]:
         """

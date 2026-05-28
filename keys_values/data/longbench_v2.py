@@ -21,13 +21,13 @@ from tqdm import tqdm
 
 from litgpt.tokenizer import Tokenizer
 
-from keys_values.data.dataloader import MyDataLoader
-from keys_values.data.module import (
-    SequenceLengthFilteredDataModule,
+from keys_values.data.constants import (
     METADATA_SEQ_LENGTHS_KEY,
     METADATA_KEYS,
     RawDatasetType,
 )
+from keys_values.data.dataloader import MyDataLoader
+from keys_values.data.module import SequenceLengthFilteredDataModule
 from keys_values.data.sequence_classification import (
     SequenceClassificationDataset,
     get_seq_class_collate_fn,
@@ -262,7 +262,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         return result
 
     def _metadata_keys(self) -> List[str]:
-        return [METADATA_SEQ_LENGTHS_KEY, self.tokenizer.model_name]
+        return [METADATA_SEQ_LENGTHS_KEY, self.model_name]
 
     def _filter_and_transform(
         self,
@@ -271,13 +271,12 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         metadata = self._load_metadata(len(dataset))
         seq_lengths = self._get_seq_lengths(metadata)
         try_to_store = seq_lengths is None and self.metadata_dir is not None
-        model_name = self.tokenizer.model_name
         # If `seq_lengths` could not be loaded, it is recomputed and stored below.
         # This takes more time.
         if try_to_store and self.metadata_dir is not None:
             print(
                 "\nFiltering the dataset takes a while. I'll store the index in "
-                f"{self.metadata_dir} under key '{model_name}', so next time "
+                f"{self.metadata_dir} under key '{self.model_name}', so next time "
                 "this won't have to be done (if you use the same dataset and model)."
             )
         transformed_data, seq_lengths, test_data = filter_and_transform(
@@ -317,7 +316,9 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         seq_lenghts = self._get_seq_lengths(data)
         if seq_lenghts is None:
             return data
-        prefix = f"data['{METADATA_SEQ_LENGTHS_KEY}']['{self.tokenizer.model_name}'] = {seq_lenghts}"
+        prefix = (
+            f"data['{METADATA_SEQ_LENGTHS_KEY}']['{self.model_name}'] = {seq_lenghts}"
+        )
         if not isinstance(seq_lenghts, list) or len(seq_lenghts) != num_records:
             print(prefix + f", must be list of length {num_records}")
             return None
@@ -585,14 +586,13 @@ class LongBenchV2Truncated(LongBenchV2):
 
     def _filter_and_transform(self, dataset: Any) -> List[Dict[str, str]]:
         metadata = self._load_metadata(len(dataset))
-        model_name = self.tokenizer.model_name
         if metadata is None:
             meta_path = Path(self.metadata_dir) / METADATA_FNAME
             raise FileNotFoundError(
                 f"Error trying to load metadata from {meta_path}. The metadata "
                 "file must exist. Use `LongBenchV2` first to create it."
             )
-        seq_lengths = metadata[METADATA_SEQ_LENGTHS_KEY][model_name]
+        seq_lengths = metadata[METADATA_SEQ_LENGTHS_KEY][self.model_name]
         truncation_lengths = None
         tl_map = metadata.get(METADATA_TRUNCATION_LENGHTS_KEY)
         if tl_map is not None:

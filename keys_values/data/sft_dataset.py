@@ -22,14 +22,12 @@ from litgpt.prompts import PromptStyle, Default
 from litgpt.tokenizer import Tokenizer
 
 from keys_values.data.base import (
-    INPUT_IDS_NAME,
-    LABELS_NAME,
-    TARGETS_STRINGS_NAME,
-    POSITION_NAME,
     LongContextDataset,
     common_collate_fn,
     is_pad_datacase,
 )
+from keys_values.data.constants import TARGETS_STRINGS_NAME, POSITION_NAME
+from keys_values.data import INPUT_IDS_NAME, LABELS_NAME
 
 
 class SFTDataset(LongContextDataset):
