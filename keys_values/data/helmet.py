@@ -318,7 +318,6 @@ class Helmet(SequenceLengthFilteredDataModule):
     def _get_seq_lengths(
         self, metadata: Optional[Dict[str, Any]], split: str
     ) -> Optional[List[int]]:
-        print(f"DEBUG: _get_seq_lengths: keys = {self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, split)}")  # DEBUG
         return get_dict(metadata, self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, split))
 
     def _load_metadata(self) -> Optional[Dict[str, Any]]:
