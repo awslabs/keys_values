@@ -349,7 +349,7 @@ def main(
             checkpoint_dir = Path(checkpoint_dir)
             if not checkpoint_dir.exists():
                 raise ValueError(
-                    f"{prefix}No completed model checkpoint detected at {checkpoint_dir}"
+                    f"{prefix}No completed model checkpoint detected at {checkpoint_dir}."
                 )
             eval_tasks = None
             task_path = checkpoint_dir
@@ -689,7 +689,7 @@ def eval_for_setup_internal(
             continue
         orig_idxs = batch[ORIG_IDX_NAME]
         eval_metrics_path = tasks_helper.get_lock(batch)
-        batch_name = f"{task}, {orig_idxs}" if multiple_tasks else orig_idxs
+        batch_name = f"{task}, {orig_idxs}" if multiple_tasks else str(orig_idxs)
         if eval_metrics_path is None:
             print(f"Batch {batch_name} already done or in progress: Skipping")
             continue
