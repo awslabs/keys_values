@@ -474,6 +474,9 @@ def main(
             device = torch.device("cpu")
         tokenizer = Tokenizer(checkpoint_dir)
         with fabric.init_module(empty_init=(fabric.world_size > 1)):
+            # Updates `kv_cache.cache_kwargs` from other args:
+            kv_cache = kv_cache.update_cache_kwargs()
+            # Set `mha_kwargs`, update kv_cache.cache_kwargs` with that as well:
             mha_kwargs = get_mha_and_cache_kwargs(
                 attention_forward_temp_size_gb,
                 model_config.config,
