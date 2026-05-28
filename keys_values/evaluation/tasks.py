@@ -179,6 +179,9 @@ class EvaluationWithTasksHelper:
 
     We also support file locking here, which enables the custom batch
     dataloader we use.
+
+    If `multiple_tasks == False`, we support evaluation for a single task (or
+    checkpoint), and the `task` part of file names is skipped.
     """
 
     def __init__(
@@ -186,6 +189,7 @@ class EvaluationWithTasksHelper:
         out_dir: Path,
         tag: Optional[str] = None,
         eval_metrics_filename: Optional[str] = None,
+        multiple_tasks: bool = True,
     ):
         self._out_dir = out_dir
         if tag is None:
@@ -194,6 +198,7 @@ class EvaluationWithTasksHelper:
         if eval_metrics_filename is None:
             eval_metrics_filename = EVAL_METRICS_FNAME
         self._eval_metrics_filename = eval_metrics_filename
+        self._multiple_tasks = multiple_tasks
 
     def evaluation_metrics_path(self, batch: Dict[str, Any]) -> Path:
         """
@@ -206,16 +211,20 @@ class EvaluationWithTasksHelper:
 
         """
         orig_idxs = batch.get(ORIG_IDX_NAME)
-        task = batch.get(TASK_NAME)
-        if not isinstance(orig_idxs, list) or not isinstance(task, str):
-            raise ValueError(
-                f"Batch needs to contain entries {ORIG_IDX_NAME}, {TASK_NAME}, "
-                f"but got batch[{ORIG_IDX_NAME}] = {orig_idxs}, "
-                f"batch[{TASK_NAME}] = {task}."
-            )
+        if self._multiple_tasks:
+            task = batch.get(TASK_NAME)
+            if not isinstance(orig_idxs, list) or not isinstance(task, str):
+                raise ValueError(
+                    f"Batch needs to contain entries {ORIG_IDX_NAME}, {TASK_NAME}, "
+                    f"but got batch[{ORIG_IDX_NAME}] = {orig_idxs}, "
+                    f"batch[{TASK_NAME}] = {task}."
+                )
         suffix = self._tag + str(orig_idxs[0])
         fname = self._eval_metrics_filename.format(suffix)
-        return self._out_dir / task / fname
+        if self._multiple_tasks:
+            return self._out_dir / task / fname
+        else:
+            return self._out_dir / fname
 
     def get_lock(self, batch: Dict[str, Any]) -> Optional[Path]:
         """

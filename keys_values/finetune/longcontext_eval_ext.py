@@ -571,7 +571,6 @@ def eval_for_setup(
 ) -> None:
     # Test dataloader is over cross product of test dataset batches and
     # evaluation tasks
-    # HIER!!
     test_dataloader = get_dataloader(
         data=data,
         tokenizer=tokenizer,
@@ -609,9 +608,10 @@ def eval_for_setup(
         model_type,
         model_config,
         devices,
-        num_store_generated_batches,
-        skip_eval,
-        ignore_index,
+        multiple_tasks=eval_tasks is not None,
+        num_store_generated_batches=num_store_generated_batches,
+        skip_eval=skip_eval,
+        ignore_index=ignore_index,
     )
 
 
@@ -626,6 +626,7 @@ def eval_for_setup_internal(
     model_type: str,
     model_config: ModelConfiguration,
     devices: int,
+    multiple_tasks: bool,
     num_store_generated_batches: Optional[int],
     skip_eval: bool,
     ignore_index: int = -100,
@@ -654,6 +655,7 @@ def eval_for_setup_internal(
         out_dir,
         tag=tag,
         eval_metrics_filename=fname,
+        multiple_tasks=multiple_tasks,
     )
     current_task = None
     test_dataiter = iter(test_dataloader)
@@ -668,14 +670,14 @@ def eval_for_setup_internal(
             print("Empty batch: Continue")
             continue
         if skip_until_next_task:
-            if batch[TASK_NAME] == current_task:
+            if not multiple_tasks or batch[TASK_NAME] == current_task:
                 continue
             skip_until_next_task = False
         store_generated_batch = (
             num_store_generated_batches is not None
             and batch_idx < num_store_generated_batches
         )
-        task = batch[TASK_NAME]
+        task = batch[TASK_NAME] if multiple_tasks else "THE_ONLY_ONE_31415927"
         if skip_eval and not store_generated_batch and task == current_task:
             print(
                 f"Wrote out generated samples for {num_store_generated_batches} batches: Skipping remaining ones for this task"
@@ -684,12 +686,13 @@ def eval_for_setup_internal(
             continue
         orig_idxs = batch[ORIG_IDX_NAME]
         eval_metrics_path = tasks_helper.get_lock(batch)
+        batch_name = f"{task}, {orig_idxs}" if multiple_tasks else orig_idxs
         if eval_metrics_path is None:
-            print(f"Batch {task}, {orig_idxs} already done or in progress: Skipping")
+            print(f"Batch {batch_name} already done or in progress: Skipping")
             continue
         try:
             print_with_rank_and_timestamp(
-                f"Running inference for batch {task}, {orig_idxs}",
+                f"Running inference for batch {batch_name}",
                 fabric.global_rank,
             )
             if test_dataloader.delay_tokenization:
@@ -697,8 +700,13 @@ def eval_for_setup_internal(
                 batch = test_dataiter.fetch_full(batch)
             batch = batch_transform(batch)
             if task != current_task:
-                task_path = out_dir / task
-                print(f"New task {task}: Load model checkpoint from {task_path}")
+                if multiple_tasks:
+                    task_path = out_dir / task
+                    part = " " + task
+                else:
+                    task_path = out_dir
+                    part = ""
+                print(f"New task{part}: Load model checkpoint from {task_path}")
                 load_model_checkpoint(
                     model=model,
                     task_path=task_path,
@@ -732,13 +740,15 @@ def eval_for_setup_internal(
                 metric_values = metric_values[metric_name]
             eval_time = time.perf_counter() - t0
             print_with_rank_and_timestamp(
-                f"Batch {task}, {orig_idxs}: {metric_name} = {metric_values.mean().item():.3f}, eval_time = {eval_time * 1000:.2f} ms",
+                f"Batch {batch_name}: {metric_name} = {metric_values.mean().item():.3f}, eval_time = {eval_time * 1000:.2f} ms",
                 fabric.global_rank,
             )
             flush_io_streams()
             if not skip_eval:
                 print(f"Storing to {eval_metrics_path}")
-                store_eval_metrics(metric_name, metric_values, batch, eval_metrics_path)
+                store_eval_metrics(
+                    metric_name, metric_values, batch, eval_metrics_path, multiple_tasks,
+                )
             if store_generated_batch:
                 if skip_eval:
                     result_path = eval_metrics_path
@@ -773,7 +783,7 @@ def eval_for_setup_internal(
 def get_dataloader(
     data: DataModule,
     tokenizer: Tokenizer,
-    eval_tasks: List[str],
+    eval_tasks: Optional[List[str]],
     head_model: str,
     batch_size: int,
     devices: int,
@@ -781,9 +791,12 @@ def get_dataloader(
 ) -> EvaluationDataLoader:
     """
     Creates data loader for cross product of test dataset with evaluation
-    tasks. Each evaluation task corresponds to a model checkpoint written
-    during or at the end of fine-tuning. See :class:`EvaluationTasks` and
-    :class:`EvaluationDataLoader` for more details.
+    tasks (if `eval_tasks` is given). Each evaluation task corresponds to a
+    model checkpoint written during or at the end of fine-tuning. See
+    :class:`EvaluationTasks` and :class:`EvaluationDataLoader` for more details.
+
+    If `eval_tasks is None`, the data loader is for the test set only, since
+    evaluation is run for a single checkpoint.
 
     Args:
         data: LongBenchV2 dataset
@@ -892,14 +905,23 @@ def store_eval_metrics(
     metric_values: torch.Tensor,
     batch: dict[str, Any],
     eval_metrics_path: Path,
+    multiple_tasks: bool = True,
 ):
-    fieldnames = ["idx", "task", metric_name]
-    task = batch[TASK_NAME]
+    if multiple_tasks:
+        fieldnames = ["idx", "task", metric_name]
+        task = batch[TASK_NAME]
+    else:
+        fieldnames = ["idx", metric_name]
+        task = None
     with eval_metrics_path.open("w") as fp:
         writer = csv.writer(fp, delimiter=",")
         writer.writerow(fieldnames)
         for idx, loss in zip(batch[ORIG_IDX_NAME], metric_values):
-            writer.writerow([idx, task, loss.item()])
+            if multiple_tasks:
+                row = [idx, task, loss.item()]
+            else:
+                row = [idx, loss.item()]
+            writer.writerow(row)
 
 
 def store_generated_samples(
