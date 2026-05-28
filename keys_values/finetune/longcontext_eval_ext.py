@@ -258,15 +258,20 @@ def setup_internal(
     # Need to obtain `precision` from hyperparameters of first setup
     out_dir = Path(setups[0]["out_dir"])
     model_type = setups[0]["model_type"]
-    tasks = setups[0].get("eval_tasks")
-    eval = EvaluationTasks(out_dir, model_type, tasks)
-    if not eval.tasks:
-        raise ValueError(
-            f"No completed model checkpoints detected at {out_dir}. Are you "
-            f"sure that model_type = {model_type} is correct?"
-        )
+    checkpoint_dir = setups[0].get("checkpoint_dir")
+    if checkpoint_dir is None:
+        tasks = setups[0].get("eval_tasks")
+        eval = EvaluationTasks(out_dir, model_type, tasks)
+        if not eval.tasks:
+            raise ValueError(
+                f"No completed model checkpoints detected at {out_dir}. Are you "
+                f"sure that model_type = {model_type} is correct?"
+            )
+        task_path = out_dir / eval.tasks[0]
+    else:
+        task_path = Path(checkpoint_dir)
     _, hyp_pars = load_configuration(
-        task_path=out_dir / eval.tasks[0],
+        task_path=task_path,
         model_type=model_type,
     )
     precision = hyp_pars["precision"] or get_default_supported_precision(training=True)
@@ -326,21 +331,32 @@ def main(
         prefix = f"Setup {setup_no}: "
         out_dir = Path(_setup["out_dir"])
         model_type = _setup["model_type"]
+        checkpoint_dir = _setup.get("checkpoint_dir")
         kv_cache = _setup.get("kv_cache")
         sdpa = _setup.get("sdpa")
-        tasks = _setup.get("eval_tasks")
         print(f"\n{prefix}out_dir = {out_dir}, model_type = {model_type}")
-        eval = EvaluationTasks(out_dir, model_type, tasks)
-        if not eval.tasks:
-            raise ValueError(
-                f"{prefix}No completed model checkpoints detected at {out_dir}. Are you "
-                f"sure that model_type = {model_type} is correct?"
-            )
-        print("Detected model checkpoints to evaluate from:\n" + str(eval.tasks))
+        if checkpoint_dir is None:
+            tasks = _setup.get("eval_tasks")
+            eval_tasks = EvaluationTasks(out_dir, model_type, tasks)
+            if not eval_tasks.tasks:
+                raise ValueError(
+                    f"{prefix}No completed model checkpoints detected at {out_dir}. Are you "
+                    f"sure that model_type = {model_type} is correct?"
+                )
+            print("Detected model checkpoints to evaluate from:\n" + str(eval_tasks.tasks))
+            task_path = out_dir / eval_tasks.tasks[0]
+        else:
+            checkpoint_dir = Path(checkpoint_dir)
+            if not checkpoint_dir.exists():
+                raise ValueError(
+                    f"{prefix}No completed model checkpoint detected at {checkpoint_dir}"
+                )
+            eval_tasks = None
+            task_path = checkpoint_dir
 
         # Configuration from first task (must be the same over all tasks)
         model_config, hyp_pars = load_configuration(
-            task_path=out_dir / eval.tasks[0],
+            task_path=task_path,
             model_type=model_type,
         )
         if model_type == "lora" and lora_dropout is not None:
@@ -352,10 +368,11 @@ def main(
                 )
             model_config.config.lora_dropout = lora_dropout
         # Base model checkpoint
-        checkpoint_dir = auto_download_checkpoint(
-            model_name=hyp_pars["checkpoint_dir"],
-            access_token=access_token,
-        )
+        if checkpoint_dir is None:
+            checkpoint_dir = auto_download_checkpoint(
+                model_name=hyp_pars["checkpoint_dir"],
+                access_token=access_token,
+            )
         if _batch_size is None:
             batch_size = hyp_pars["evals"]["micro_batch_size"]
             if batch_size is None:
@@ -401,8 +418,7 @@ def main(
         if yarn_rope is None:
             yarn_rope = True
         check_valid_checkpoint_dir(checkpoint_dir)
-        # If the checkpoint contains generation_config.json, load sample args. But
-        # the args provided in
+        # If the checkpoint contains generation_config.json, load sample args.
         eval_args = load_generation_config(checkpoint_dir, EvalArgs())
         if eval_args.sample_metric_kwargs is not None:
             sample_metric_kwargs = {
@@ -527,7 +543,7 @@ def main(
             model_config,
             devices,
             batch_size,
-            eval.tasks,
+            eval_tasks.tasks if eval_tasks is not None else None,
             use_sample_metric,
             sample_metric_max_generated_tokens,
             sample_metric_kwargs,
@@ -546,7 +562,7 @@ def eval_for_setup(
     model_config: ModelConfiguration,
     devices: int,
     batch_size: int,
-    eval_tasks: List[str],
+    eval_tasks: Optional[List[str]],
     use_sample_metric: bool,
     sample_metric_max_generated_tokens,
     sample_metric_kwargs: Dict[str, Any],
@@ -555,6 +571,7 @@ def eval_for_setup(
 ) -> None:
     # Test dataloader is over cross product of test dataset batches and
     # evaluation tasks
+    # HIER!!
     test_dataloader = get_dataloader(
         data=data,
         tokenizer=tokenizer,

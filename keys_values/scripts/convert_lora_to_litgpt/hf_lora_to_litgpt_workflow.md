@@ -20,7 +20,6 @@ project
     adapter_config.json
     adapter_model.safetensors
   merged
-  litgpt_merged
 ```
 
 The adapter directory should contain `adapter_config.json` and either `adapter_model.safetensors` or `adapter_model.bin`.
@@ -30,8 +29,8 @@ The adapter directory should contain `adapter_config.json` and either `adapter_m
 Create a separate environment to avoid package conflicts.
 
 ```bash
-conda create -n qwen3_lora_litgpt
-conda activate qwen3_lora_litgpt
+python3 -m venv lora_to_litgpt
+. lora_to_litgpt/bin/activate
 ```
 
 Install dependencies.
@@ -65,11 +64,9 @@ The merged model directory should look similar to this:
 ```text
 merged
   config.json
-  generation_config.json
   model.safetensors
   tokenizer.json
   tokenizer_config.json
-  special_tokens_map.json
 ```
 
 Depending on the save settings and model size, the weight files may also be sharded, for example:
@@ -84,10 +81,8 @@ model.safetensors.index.json
 
 Run:
 
-DOES NOT WORK!
-
 ```bash
-litgpt convert_from_hf <data-dir>/merged <data-dir>/litgpt_merged
+litgpt convert_to_litgpt <data-dir>/merged --model_name Qwen3-4B
 ```
 
 ## Step 5 Test LitGPT Checkpoint
@@ -95,38 +90,34 @@ litgpt convert_from_hf <data-dir>/merged <data-dir>/litgpt_merged
 Run:
 
 ```bash
-litgpt chat --checkpoint_dir ./litgpt_merged
+litgpt chat --checkpoint_dir <data-dir>/merged
 ```
 
 Or:
 
 ```bash
-litgpt generate --checkpoint_dir ./litgpt_merged --prompt "Hello"
+litgpt generate --checkpoint_dir <data-dir>/merged --prompt "Hello"
 ```
+
+## Step 6 Copy Extra Config Files
+
+The checkpoints lack some config files which are written with checkpoints during
+training. These files depend mostly on the model and the dataset, while their
+`kvcache` and `sdpa` args can be overwritten in the evaluation script.
+
+```bash
+cp model_config.yaml <data-dir>/merged/.
+cp generation_config.json <data-dir>/merged/.
+cp <data>/hyperparameters.yaml <data-dir>/merged/.
+```
+
+Here, <data> denotes the dataset.
 
 ## Common Issues
 
 If the merged model gives poor answers, the most likely reason is that the adapter was merged into the wrong base model. Use the exact base model used during LoRA training.
 
 If LitGPT conversion fails, upgrade LitGPT and check that the merged Hugging Face model directory contains `config.json`, tokenizer files, and model weight files.
-
-## Recommended Commands
-
-```bash
-conda create -n qwen3_lora_litgpt python=3.10 -y
-conda activate qwen3_lora_litgpt
-
-pip install -U torch transformers accelerate peft safetensors litgpt
-
-python merge_qwen3_lora.py \
-  --base-model Qwen/Qwen3-4B \
-  --adapter-dir ./lora_adapter \
-  --output-dir ./merged_qwen3_4b
-
-litgpt convert_from_hf ./merged_qwen3_4b ./litgpt_qwen3_4b_merged
-
-litgpt chat --checkpoint_dir ./litgpt_qwen3_4b_merged
-```
 
 ## Notes
 

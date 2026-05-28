@@ -1,0 +1,92 @@
+checkpoint_dir: Qwen/Qwen3-4B-Instruct-2507
+precision: bf16-true
+devices: 4
+resume: false
+data:
+  class_path: keys_values.data.Helmet
+  init_args:
+    dataset_key: pop_qa
+    max_length: 64k
+    dataset_parent_dir: ~/.cache/huggingface/helmet/data
+    mask_prompt: true
+    val_split_fraction: 0.1
+    ignore_index: -100
+    seed: 42
+    metadata_dir: /home/ubuntu/out/finetune/data
+    trainloader_longest_first: true
+    trainloader_shortest_first: false
+train:
+  save_interval: 5
+  log_interval: 1
+  micro_batch_size: 2
+  lr_warmup_fraction: 0.15
+  epochs: 5
+  max_grad_norm: 1.0
+  average_loss_per_batch: true
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0
+  query: true
+  key: false
+  value: true
+  projection: false
+  mlp: false
+  head: false
+  kind: default
+eval:
+  interval: 5
+  max_new_tokens: 100
+  max_iters: 100
+  initial_validation: true
+  final_validation: true
+  evaluate_example: first
+  use_sample_metric: false
+  sample_metric_max_generated_tokens: 20
+optimizer:
+  name: AdamW
+  learning_rate: 0.0005
+logger_name: csv
+seed: 1337
+kv_cache:
+  name: lastrec-torch-quantized8
+  cache_length: 32768
+  chunk_size: 2048
+  cache_kwargs:
+    replay_log_blocksize: 1024
+    allocate_buffers: false
+    max_num_ranges: 4
+  randomize_chunk_sizes: false
+  allocate_buffers: false
+  grace_period: 0
+  init_grace_tokens: 0
+  cpu_offload: false
+  verbose: some
+grad:
+  layers_per_cell: 1
+  chunks_per_cell_multiplier: 1.0
+  layercp_qname: default
+  cachecp_qname: torch-quantized8
+  single_tokens_for_targets: false
+  use_old_cache: false
+  max_match_trials_pack_arg: 8
+  layercp_pin_memory: true
+  cachecp_pin_memory: true
+  debug_print_annotations: false
+head_model: next_token_prediction
+verbose: some
+oom_error_recovery: false
+yarn_rope: true
+sdpa:
+  flex_attention: true
+  flex_extend_kv: false
+  flex_num_q_lens: 4
+  reorder_sort_if_3d: true
+  use_flex_for_attn_weights: true
+  dynamo_cache_size_limit: 32
+  flashinfer_attention: true
+record_gpu_memory_kind: 0
+record_gpu_memory_period: 0
+generate_with_eval: false
+profile_grad_times: 0
+debug_dont_use_autograd_hooks: false
