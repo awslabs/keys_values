@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from itertools import product
 from dataclasses import replace
+from itertools import product
+from typing import Any, Dict
 
 import torch
 import pytest
@@ -42,8 +43,29 @@ from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.utils import randint_torch
 
 
+@pytest.fixture(scope="session")
+def gradcomp_mha_kwargs() -> Dict[str, Any]:
+    if torch.cuda.is_available():
+        mha_kwargs = dict(flexatt_args=FlexAttentionArgs(q_lens=[8, 32, 96, 128]))
+    else:
+        mha_kwargs = dict()
+    return mha_kwargs
+
+
+def _append_name(case: tuple) -> tuple:
+    cache_name, cache_kwargs, cache_lengths, use_old_cache, device = case
+    parts = (
+        cache_name,
+        "gp10" if "grace_period" in cache_kwargs else "none",
+        str(cache_lengths[0]),
+        str(use_old_cache),
+        "cpu" if device.type == "cpu" else "cuda",
+    )
+    return case + ("-".join(parts),)
+
+
 def args_complete_gradient_computation():
-    return [
+    cases = [
         b + c + (d, a)
         for a, b, c, d in product(
             available_backends(),
@@ -59,18 +81,21 @@ def args_complete_gradient_computation():
             [False, True],
         )
     ]
+    return [_append_name(case) for case in cases]
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths, use_old_cache, device",
+    "cache_name, cache_kwargs, cache_lengths, use_old_cache, device, case_name",
     args_complete_gradient_computation(),
 )
 def test_complete_gradient_computation(
+    gradcomp_mha_kwargs,
     cache_name,
     cache_kwargs,
     cache_lengths,
     use_old_cache,
     device,
+    case_name,
 ):
     seed = 31415927
     torch.random.manual_seed(seed)
@@ -86,9 +111,10 @@ def test_complete_gradient_computation(
     head_size = 64
     vocab_size = 48
     layers_per_cell = 1
-    chunk_size = 8
-    max_sequence_length = max(cache_lengths) * 8
+    chunk_size = 16 if device.type == "cpu" else 32
+    max_sequence_length = max(cache_lengths) * 6
     min_sequence_length = max(cache_lengths) * 2
+    print(case_name)
 
     # Create model and KV caches
     config = Config(
@@ -106,10 +132,10 @@ def test_complete_gradient_computation(
         cache_length=cache_lengths[0],
         dtype=dtype,
     )
-    if device == torch.device("cpu"):
+    if device.type == "cpu":
         mha_kwargs = dict()
     else:
-        mha_kwargs = dict(flexatt_args=FlexAttentionArgs())
+        mha_kwargs = gradcomp_mha_kwargs
     cache_kwargs.update(mha_kwargs)
     with torch.device(device):
         gpt_model = GPT(config, **mha_kwargs)
