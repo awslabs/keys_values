@@ -359,6 +359,7 @@ def main(
             task_path=task_path,
             model_type=model_type,
         )
+        model_name = model_config["name"]
         if model_type == "lora" and lora_dropout is not None:
             if lora_dropout < 0:
                 raise ValueError(f"lora_dropout {lora_dropout}, must be non-negative")
@@ -370,7 +371,7 @@ def main(
         # Base model checkpoint
         if checkpoint_dir is None:
             checkpoint_dir = auto_download_checkpoint(
-                model_name=hyp_pars["checkpoint_dir"],
+                model_name=model_name,
                 access_token=access_token,
             )
         if _batch_size is None:
@@ -552,6 +553,7 @@ def main(
             sample_metric_kwargs,
             num_store_generated_batches,
             skip_eval,
+            model_name,
         )
 
 
@@ -571,6 +573,7 @@ def eval_for_setup(
     sample_metric_kwargs: Dict[str, Any],
     num_store_generated_batches: Optional[int],
     skip_eval: bool,
+    model_name: str,
 ) -> None:
     # Test dataloader is over cross product of test dataset batches and
     # evaluation tasks
@@ -582,6 +585,7 @@ def eval_for_setup(
         batch_size=batch_size,
         devices=devices,
         fabric=fabric,
+        model_name=model_name,
     )
     ignore_index = getattr(data, "ignore_index", -100)
 
@@ -791,6 +795,7 @@ def get_dataloader(
     batch_size: int,
     devices: int,
     fabric: Optional[L.Fabric],
+    model_name: Optional[str] = None,
 ) -> EvaluationDataLoader:
     """
     Creates data loader for cross product of test dataset with evaluation
@@ -809,6 +814,7 @@ def get_dataloader(
         batch_size: Size of test batches
         devices: Number of devices to use
         fabric: Fabric
+        model_name: Sent to `data.connect`
 
     Returns:
         Data loader for cross product of test dataset with evaluation tasks
@@ -823,6 +829,7 @@ def get_dataloader(
         head_model=head_model,
         test_batch_size=batch_size,
         eval_tasks=eval_tasks,
+        model_name=model_name,
     )
     if fabric is not None:
         with fabric.rank_zero_first():

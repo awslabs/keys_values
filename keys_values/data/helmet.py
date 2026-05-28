@@ -214,7 +214,7 @@ class Helmet(SequenceLengthFilteredDataModule):
             root_key,
             self.dataset_key,
             self.max_length,
-            self.tokenizer.model_name,
+            self.model_name,
             split,
         ]
 
@@ -318,7 +318,7 @@ class Helmet(SequenceLengthFilteredDataModule):
     def _get_seq_lengths(
         self, metadata: Optional[Dict[str, Any]], split: str
     ) -> Optional[List[int]]:
-        print(f"\nDEBUG: _get_seq_lengths:\nmetadata = {metadata}\nkeys = {self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, split)}")  # DEBUG
+        print(f"DEBUG: _get_seq_lengths: keys = {self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, split)}")  # DEBUG
         return get_dict(metadata, self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, split))
 
     def _load_metadata(self) -> Optional[Dict[str, Any]]:

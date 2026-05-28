@@ -183,6 +183,7 @@ class SequenceLengthFilteredDataModule(DataModule):
         # This is used to support specialized data loaders.
         self._sequence_lengths = None
         self.training_state = None
+        self.model_name = None
 
     def connect(
         self,
@@ -203,6 +204,7 @@ class SequenceLengthFilteredDataModule(DataModule):
             :meth:`test_dataloader`.
         - `training_state`: Contains object of type
             :class:`SequenceLengthFilteredDataTrainState` (or subclass).
+        - `model_name`: Overwrites `tokenizer.model_name`
 
         Args:
             tokenizer: Tokenizer
@@ -246,6 +248,7 @@ class SequenceLengthFilteredDataModule(DataModule):
                 raise ValueError(
                     f"training_state must be an instance of SequenceLengthFilteredDataTrainState, but is {type(self.training_state)}"
                 )
+        self.model_name = kwargs.get("model_name", tokenizer.model_name)
 
     def _get_dataset(self) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
         """
