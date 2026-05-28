@@ -359,7 +359,7 @@ def main(
             task_path=task_path,
             model_type=model_type,
         )
-        model_name = model_config["name"]
+        model_name = hyp_pars["checkpoint_dir"].split("/")[-1]
         if model_type == "lora" and lora_dropout is not None:
             if lora_dropout < 0:
                 raise ValueError(f"lora_dropout {lora_dropout}, must be non-negative")
@@ -371,7 +371,7 @@ def main(
         # Base model checkpoint
         if checkpoint_dir is None:
             checkpoint_dir = auto_download_checkpoint(
-                model_name=model_name,
+                model_name=hyp_pars["checkpoint_dir"],
                 access_token=access_token,
             )
         if _batch_size is None:
