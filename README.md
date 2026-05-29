@@ -1193,6 +1193,110 @@ Extra tooling:
 - Use [cleanup_gen_samples](./keys_values/scripts/cleanup_gen_samples.py) to
   clean up results. This works like `cleanup_evaluation`.
 
+### Evaluation for Single Checkpoints
+
+The evaluation scripts can also be used for checkpoints not created by our
+fine-tuning scripts. For example, you may want to compare against checkpoints
+which were trained using other frameworks, or were downloaded from Hugging
+Face directly.
+
+To this end, use the `checkpoint_dir` argument. For example:
+```bash
+python keys_values/__main__.py eval_long \
+    /home/ubuntu/out/finetune/lora/qwen3_4b/baseline/helmet_hotpot_qa_64k/h2o_lr5 \
+    --checkpoint_dir /home/ubuntu/out/finetune/checkpoints/mycheckpoint \
+    --model_type lora \
+    --verbose some \
+    --devices 2 \
+    --batch_size 2 \
+    --use_sample_metric True \
+    --sample_metric_max_generated_tokens 20
+```
+
+* `/home/ubuntu/out/finetune/lora/qwen3_4b/baseline/helmet_hotpot_qa_64k/h2o_lr5` is the
+  `--out_dir` path, but checkpoints are not loaded from there.
+* Instead, a single checkpoint is read from
+  `/home/ubuntu/out/finetune/checkpoints/mycheckpoint`, the value of `--checkpoint_dir`.
+* Results are written to `<out_dir>/eval/eval_metrics_<no>.csv`.
+
+The scripts [collect_eval_results](./keys_values/scripts/collect_eval_results.py)
+and [cleanup_evaluation](./keys_values/scripts/cleanup_evaluation.py) work in
+the same way, except you need to pass `multiple_tasks=False` to the `main`
+functions (or set `is_baseline=True`).
+
+You can also use `eval_long_ext` to run evaluations over several checkpoints.
+For example:
+```bash
+python keys_values/__main__.py eval_long_ext \
+    ./test_eval.yaml \
+    --verbose some \
+    --devices 2 \
+    --batch_size 2 \
+    --use_sample_metric True \
+    --sample_metric_max_generated_tokens 20
+```
+
+Here, `test_eval.yaml` is a YAML file describing the setups (where each setup
+is a separate checkpoint). For example:
+```yaml
+- out_dir: /home/ubuntu/out/finetune/lora/qwen3_4b/baseline/helmet_hotpot_qa_64k/h2o_lr5
+  model_type: full
+  checkpoint_dir: /home/ubuntu/out/finetune/checkpoints/hotpot_qa_64k/merged
+  kv_cache:
+    name: h2o-torch-quantized8
+    cache_length: 32768
+    chunk_size: 1024
+- out_dir: /home/ubuntu/out/finetune/lora/qwen3_4b/baseline/helmet_nq_64k/slr_lr5
+  model_type: full
+  checkpoint_dir: /home/ubuntu/out/finetune/checkpoints/nq_64k/merged
+  kv_cache:
+    name: smart-lastrec-torch-quantized8
+    cache_length: 32768
+    chunk_size: 1024
+```
+
+Note how `kv_cache` overwrites the hyperparameter setup of the checkpoint, which
+is useful if you want to evaluate a checkpoint with different KV cache strategies.
+
+#### Format of Checkpoint
+
+Our evaluation scripts require checkpoints to be stored in a particular way,
+as produced by our fine-tuning scripts. The information here is relevant if
+you try to import checkpoints from elsewhere.
+
+The script [convert_lora_to_litgpt.sh](./keys_values/scripts/convert_lora_to_litgpt/convert_lora_to_litgpt.sh)
+shows how checkpoints written by Hugging Face can be imported. Please also read
+[hf_lora_to_litgpt_workflow.md](./keys_values/scripts/convert_lora_to_litgpt/hf_lora_to_litgpt_workflow.md).
+This is specific to LoRA and a particular base model being used, so make sure
+to modify them accordingly. In a nutshell, a checkpoint directory needs to
+contain:
+
+* Model weights in LitGPT format: `lit_model.pth` for full weights
+  (`model_type = "full"`) `lit_model.lora.pth` for LoRA weights only
+  (`model_type = "lora"`; all others are loaded from the base model).
+  If the head model has parameters as well: `head_model.pth`.
+* `tokenizer.json`, `tokenizer_config.json`: Tokenizer parameters. If these
+  are not part of the checkpoint, they are loaded from the base checkpoint.
+* `hyperparameters.yaml`: This is specific to LitGPT and our code, so needs
+  to be added for external checkpoints. It mostly specifies the dataset
+  (`data` field) and the base model (`checkpoint_dir` field). Note that
+  certain fields (`kv_cache`, `sdpa`) can be overwritten in the evaluation
+  script. A simple way to obtain this file for your checkpoint is to run
+  our fine-tuning script with a setup which uses the same base model and
+  dataset you want to use. Examples for some `Helmet` datasets and the
+  `Qwen/Qwen3-4B-Instruct-2507` base model are given in
+  `keys_values/scripts/convert_lora_to_litgpt`.
+* `model_config.yaml`: This is specific to LitGPT and our code, so needs
+  to be added for external checkpoints. It specifies the configuration of
+  the base model. A simple way to obtain this file for your checkpoint is to
+  run our fine-tuning script with a setup which uses the same base model you
+  want to use. An example for the `Qwen/Qwen3-4B-Instruct-2507` base model is
+  [model_config.yaml](./keys_values/scripts/convert_lora_to_litgpt/model_config.yaml).
+* `generation_config.json`: This file typically comes with Hugging Face
+  checkpoints, it specifies parameters to be used for token generation.
+  An example for the `Qwen/Qwen3-4B-Instruct-2507` base model is
+  [generation_config.json](./keys_values/scripts/convert_lora_to_litgpt/generation_config.json).
+
 
 ## Implementing New KV Cache Policies
 

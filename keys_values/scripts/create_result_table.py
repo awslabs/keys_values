@@ -139,12 +139,15 @@ def main(datasets, cases, result_path, final_table: bool):
     result_path.write_text("\n".join(tex_lines) + "\n")
 
 
-# TODO: If `final_table = True`, do not print the task ID, just the metric value
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
     dataset_size = "64k"
     # dataset_size = "128k"
+    is_baseline = False
+    # is_baseline = True
+    if is_baseline:
+        base_path = base_path / "baseline"
     datasets = [
         f"helmet_nq_{dataset_size}",
         f"helmet_trivia_qa_{dataset_size}",

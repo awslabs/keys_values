@@ -370,11 +370,15 @@ def main(
                 )
             model_config.config.lora_dropout = lora_dropout
         # Base model checkpoint
+        # - For LoRA, most model weights are loaded from there
+        # - Tokenizer or generation params are loaded from there if they are
+        #   not part of the checkpoint
+        base_checkpoint_dir = auto_download_checkpoint(
+            model_name=hyp_pars["checkpoint_dir"],
+            access_token=access_token,
+        )
         if checkpoint_dir is None:
-            checkpoint_dir = auto_download_checkpoint(
-                model_name=hyp_pars["checkpoint_dir"],
-                access_token=access_token,
-            )
+            checkpoint_dir = base_checkpoint_dir
         if _batch_size is None:
             batch_size = hyp_pars["evals"]["micro_batch_size"]
             if batch_size is None:
@@ -422,6 +426,9 @@ def main(
         check_valid_checkpoint_dir(checkpoint_dir)
         # If the checkpoint contains generation_config.json, load sample args.
         eval_args = load_generation_config(checkpoint_dir, EvalArgs())
+        if eval_tasks is None and not (checkpoint_dir / "generation_config.json").exists():
+            # Load from base model checkpoint
+            eval_args = load_generation_config(base_checkpoint_dir, EvalArgs())
         if eval_args.sample_metric_kwargs is not None:
             sample_metric_kwargs = {
                 **eval_args.sample_metric_kwargs,
@@ -474,7 +481,14 @@ def main(
             device = torch.device("cuda", fabric.local_rank)
         else:
             device = torch.device("cpu")
-        tokenizer = Tokenizer(checkpoint_dir)
+        try:
+            tokenizer = Tokenizer(checkpoint_dir)
+        except Exception as ex:
+            if eval_tasks is None:
+                # Load tokenizer from base model checkpoint
+                tokenizer = Tokenizer(base_checkpoint_dir)
+            else:
+                raise ex
         with fabric.init_module(empty_init=(fabric.world_size > 1)):
             # Updates `kv_cache.cache_kwargs` from other args:
             kv_cache = kv_cache.update_cache_kwargs()
@@ -515,11 +529,11 @@ def main(
                 fabric=fabric,
             )
         # Load base model
-        file_path = checkpoint_dir / LIT_MODEL_FNAME
+        file_path = base_checkpoint_dir / LIT_MODEL_FNAME
         load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
         # If there are head model weights, load them as well. Otherwise, we use
         # random initialization (or the head model may not have weights)
-        file_path = checkpoint_dir / HEAD_MODEL_FNAME
+        file_path = base_checkpoint_dir / HEAD_MODEL_FNAME
         if file_path.exists():
             load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
@@ -916,6 +930,11 @@ def load_model_checkpoint(
             file_path = task_path / LORA_WEIGHTS_FNAME_OLD
         strict = False
     load_checkpoint(fabric, model.gpt_model, file_path, strict=strict)
+    # If there are head model weights, load them as well. Otherwise, we use
+    # random initialization (or the head model may not have weights)
+    file_path = task_path / HEAD_MODEL_FNAME
+    if file_path.exists():
+        load_checkpoint(fabric, model.head_model, file_path, strict=True)
 
 
 def store_eval_metrics(
