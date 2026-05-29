@@ -546,6 +546,7 @@ def main(
             num_store_generated_batches,
             skip_eval,
             model_name,
+            checkpoint_dir if eval_tasks is None else None,
         )
 
 
@@ -566,6 +567,7 @@ def eval_for_setup(
     num_store_generated_batches: Optional[int],
     skip_eval: bool,
     model_name: str,
+    checkpoint_dir: Optional[Path],
 ) -> None:
     # Test dataloader is over cross product of test dataset batches and
     # evaluation tasks
@@ -607,7 +609,7 @@ def eval_for_setup(
         model_type,
         model_config,
         devices,
-        multiple_tasks=eval_tasks is not None,
+        checkpoint_dir,
         num_store_generated_batches=num_store_generated_batches,
         skip_eval=skip_eval,
         ignore_index=ignore_index,
@@ -625,11 +627,12 @@ def eval_for_setup_internal(
     model_type: str,
     model_config: ModelConfiguration,
     devices: int,
-    multiple_tasks: bool,
+    checkpoint_dir: Optional[Path],
     num_store_generated_batches: Optional[int],
     skip_eval: bool,
     ignore_index: int = -100,
 ) -> None:
+    multiple_tasks = checkpoint_dir is None
     # Loop over test set batches
     # Note: `test_dataloader` returns the same batches on each rank. We use
     # a file lock to assign a batch to the first rank asking for a batch.
@@ -703,7 +706,7 @@ def eval_for_setup_internal(
                     task_path = out_dir / task
                     part = " " + task
                 else:
-                    task_path = out_dir
+                    task_path = checkpoint_dir
                     part = ""
                 print(f"New task{part}: Load model checkpoint from {task_path}")
                 load_model_checkpoint(
