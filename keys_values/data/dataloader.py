@@ -16,6 +16,7 @@ from typing import Iterator, Dict, Any, List, Callable
 import torch
 from torch.utils.data import Dataset
 
+from keys_values.data.evaluation import ORIG_IDX_NAME
 from keys_values.data.iterators import BatchSampler, SimilarSequenceLengthIterator
 
 Collator = Callable[[List[Dict[str, Any]]], Dict[str, Any]]
@@ -35,7 +36,10 @@ class MyDataLoaderIterator(Iterator[Dict[str, Any]]):
 
     def __next__(self) -> Dict[str, Any]:
         inds = next(self._batch_iter)
-        return self.collate_fn([self.dataset[idx] for idx in inds])
+        return {
+            **self.collate_fn([self.dataset[idx] for idx in inds]),
+            ORIG_IDX_NAME: inds,
+        }
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         return self

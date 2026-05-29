@@ -211,6 +211,8 @@ class EvaluationWithTasksHelper:
 
         """
         orig_idxs = batch.get(ORIG_IDX_NAME)
+        suffix = self._tag + str(orig_idxs[0])
+        fname = self._eval_metrics_filename.format(suffix)
         if self._multiple_tasks:
             task = batch.get(TASK_NAME)
             if not isinstance(orig_idxs, list) or not isinstance(task, str):
@@ -219,9 +221,6 @@ class EvaluationWithTasksHelper:
                     f"but got batch[{ORIG_IDX_NAME}] = {orig_idxs}, "
                     f"batch[{TASK_NAME}] = {task}."
                 )
-        suffix = self._tag + str(orig_idxs[0])
-        fname = self._eval_metrics_filename.format(suffix)
-        if self._multiple_tasks:
             return self._out_dir / task / fname
         else:
             return self._out_dir / fname

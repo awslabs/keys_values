@@ -155,14 +155,16 @@ if __name__ == "__main__":
         ("lr_4gpu_cs2048_lr5", "lr_2048"),
         ("slr_4gpu_cs2048_lr5", "slr_2048"),
         ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
-        ("qh2o_4gpu_cs2048_lr5", "qh2o_2048"),
         ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
+        ("qh2o_4gpu_cs2048_lr5", "qh2o_2048"),
         ("qh2onorm_4gpu_cs2048_lr5", "qh2onorm_2048"),
         ("lr_4gpu_cs1024_lr5", "lr_1024"),
+        ("slr_4gpu_cs1024_lr5", "slr_1024"),
         ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
+        ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
     ]
     result_path = base_path / f"results_{dataset_size}.tex"
-    # final_table = False
-    final_table = True
+    final_table = False
+    # final_table = True
 
     main(datasets, cases, result_path, final_table)
