@@ -27,9 +27,7 @@ from keys_values.data.constants import (
     RawDatasetType,
 )
 from keys_values.data.dataloader import MyDataLoader
-from keys_values.data.module import (
-    SequenceLengthFilteredDataModule,
-)
+from keys_values.data.module import SequenceLengthFilteredDataModule
 from keys_values.data.sequence_classification import (
     SequenceClassificationDataset,
     get_seq_class_collate_fn,
@@ -318,7 +316,9 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         seq_lenghts = self._get_seq_lengths(data)
         if seq_lenghts is None:
             return data
-        prefix = f"data['{METADATA_SEQ_LENGTHS_KEY}']['{self.model_name}'] = {seq_lenghts}"
+        prefix = (
+            f"data['{METADATA_SEQ_LENGTHS_KEY}']['{self.model_name}'] = {seq_lenghts}"
+        )
         if not isinstance(seq_lenghts, list) or len(seq_lenghts) != num_records:
             print(prefix + f", must be list of length {num_records}")
             return None

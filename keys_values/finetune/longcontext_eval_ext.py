@@ -47,8 +47,15 @@ from keys_values.evaluation.tasks import (
 from keys_values.data.evaluation import (
     EvaluationDataLoader,
 )
-from keys_values.data.constants import ORIG_IDX_NAME, TASK_NAME, TARGETS_STRINGS_NAME, LIT_MODEL_FNAME, \
-    HEAD_MODEL_FNAME, LORA_WEIGHTS_FNAME, LORA_WEIGHTS_FNAME_OLD
+from keys_values.data.constants import (
+    ORIG_IDX_NAME,
+    TASK_NAME,
+    TARGETS_STRINGS_NAME,
+    LIT_MODEL_FNAME,
+    HEAD_MODEL_FNAME,
+    LORA_WEIGHTS_FNAME,
+    LORA_WEIGHTS_FNAME_OLD,
+)
 from keys_values.finetune.args import KVCacheArgs, SDPAArgs, EvalArgs
 from keys_values.finetune.batch_transform import BatchTransformFactory
 from keys_values.finetune.longcontext_full import (
@@ -335,7 +342,9 @@ def main(
                     f"{prefix}No completed model checkpoints detected at {out_dir}. Are you "
                     f"sure that model_type = {model_type} is correct?"
                 )
-            print("Detected model checkpoints to evaluate from:\n" + str(eval_tasks.tasks))
+            print(
+                "Detected model checkpoints to evaluate from:\n" + str(eval_tasks.tasks)
+            )
             task_path = out_dir / eval_tasks.tasks[0]
         else:
             checkpoint_dir = Path(checkpoint_dir)
@@ -749,7 +758,11 @@ def eval_for_setup_internal(
             if not skip_eval:
                 print(f"Storing to {eval_metrics_path}")
                 store_eval_metrics(
-                    metric_name, metric_values, batch, eval_metrics_path, multiple_tasks,
+                    metric_name,
+                    metric_values,
+                    batch,
+                    eval_metrics_path,
+                    multiple_tasks,
                 )
             if store_generated_batch:
                 if skip_eval:

@@ -16,8 +16,13 @@ from pathlib import Path
 import re
 from typing import List, Dict, Any, Optional, Iterable, Tuple, Literal
 
-from keys_values.data.constants import ORIG_IDX_NAME, TASK_NAME, LIT_MODEL_FNAME, LORA_WEIGHTS_FNAME, \
-    LORA_WEIGHTS_FNAME_OLD
+from keys_values.data.constants import (
+    ORIG_IDX_NAME,
+    TASK_NAME,
+    LIT_MODEL_FNAME,
+    LORA_WEIGHTS_FNAME,
+    LORA_WEIGHTS_FNAME_OLD,
+)
 
 EVAL_METRICS_FNAME = "eval/eval_metrics_{}.csv"
 
@@ -154,7 +159,8 @@ class EvaluationTasks:
             else:
                 base_dir = self._out_dir
             result_file_paths = self._filter_incomplete_files(
-                base_dir.glob(self._eval_metrics_glob), mode=mode,
+                base_dir.glob(self._eval_metrics_glob),
+                mode=mode,
             )
             if result_file_paths:
                 yield task_name, result_file_paths

@@ -21,7 +21,6 @@ from litgpt import Tokenizer, PromptStyle
 from keys_values.data.constants import POSITION_NAME, INPUT_IDS_NAME
 
 
-
 class LongContextDataset(Dataset):
     """
     Base class for some datasets we define here.
