@@ -694,7 +694,7 @@ def eval_for_setup_internal(
                 f"Running inference for batch {batch_name}",
                 fabric.global_rank,
             )
-            if test_dataloader.delay_tokenization:
+            if getattr(test_dataloader, "delay_tokenization", False):
                 # Tokenization only happens here
                 batch = test_dataiter.fetch_full(batch)
             batch = batch_transform(batch)
