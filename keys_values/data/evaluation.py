@@ -12,19 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-from typing import Tuple, List, Iterator, Dict, Any
+from typing import List, Iterator, Dict, Any
 
 import torch
 from torch.utils.data import Dataset
 
+from keys_values.data.constants import ResultType, ORIG_IDX_NAME, TASK_NAME
 from keys_values.data.dataloader import Collator
 from keys_values.data.iterators import BatchSampler
-
-ResultType = Tuple[List[int], int]
-
-ORIG_IDX_NAME = "orig_idx"
-
-TASK_NAME = "task"
 
 
 class SimilarSequenceLengthWithTasksIterator(Iterator[ResultType]):

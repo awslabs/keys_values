@@ -21,12 +21,14 @@ from tqdm import tqdm
 
 from litgpt.tokenizer import Tokenizer
 
-from keys_values.data.dataloader import MyDataLoader
-from keys_values.data.module import (
-    SequenceLengthFilteredDataModule,
+from keys_values.data.constants import (
     METADATA_SEQ_LENGTHS_KEY,
     METADATA_KEYS,
     RawDatasetType,
+)
+from keys_values.data.dataloader import MyDataLoader
+from keys_values.data.module import (
+    SequenceLengthFilteredDataModule,
 )
 from keys_values.data.sequence_classification import (
     SequenceClassificationDataset,

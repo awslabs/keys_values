@@ -32,11 +32,7 @@ from litgpt.utils import (
     load_checkpoint,
 )
 
-from keys_values.data.base import (
-    LIT_MODEL_FNAME,
-    HEAD_MODEL_FNAME,
-    LORA_WEIGHTS_FNAME,
-)
+from keys_values.data.constants import LIT_MODEL_FNAME, HEAD_MODEL_FNAME, LORA_WEIGHTS_FNAME
 from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.trainstate import DataTrainState
 from keys_values.finetune.args import (

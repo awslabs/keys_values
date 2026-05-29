@@ -35,15 +35,7 @@ from litgpt.utils import (
 
 from keys_values.attention.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.config import Config as ConfigFull
-from keys_values.data import LongBenchV2, Helmet
-from keys_values.data.base import (
-    LIT_MODEL_FNAME,
-    HEAD_MODEL_FNAME,
-    INPUT_IDS_NAME,
-    TARGETS_STRINGS_NAME,
-    LORA_WEIGHTS_FNAME,
-    LORA_WEIGHTS_FNAME_OLD,
-)
+from keys_values.data import LongBenchV2, Helmet, INPUT_IDS_NAME
 from keys_values.evaluation.evaluator import (
     SampleBasedMetricsEvaluator,
     TargetType,
@@ -54,9 +46,9 @@ from keys_values.evaluation.tasks import (
 )
 from keys_values.data.evaluation import (
     EvaluationDataLoader,
-    ORIG_IDX_NAME,
-    TASK_NAME,
 )
+from keys_values.data.constants import ORIG_IDX_NAME, TASK_NAME, TARGETS_STRINGS_NAME, LIT_MODEL_FNAME, \
+    HEAD_MODEL_FNAME, LORA_WEIGHTS_FNAME, LORA_WEIGHTS_FNAME_OLD
 from keys_values.finetune.args import KVCacheArgs, SDPAArgs, EvalArgs
 from keys_values.finetune.batch_transform import BatchTransformFactory
 from keys_values.finetune.longcontext_full import (

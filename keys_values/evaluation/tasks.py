@@ -16,12 +16,8 @@ from pathlib import Path
 import re
 from typing import List, Dict, Any, Optional, Iterable, Tuple, Literal
 
-from keys_values.data.base import (
-    LIT_MODEL_FNAME,
-    LORA_WEIGHTS_FNAME,
-    LORA_WEIGHTS_FNAME_OLD,
-)
-from keys_values.data.evaluation import ORIG_IDX_NAME, TASK_NAME
+from keys_values.data.constants import ORIG_IDX_NAME, TASK_NAME, LIT_MODEL_FNAME, LORA_WEIGHTS_FNAME, \
+    LORA_WEIGHTS_FNAME_OLD
 
 EVAL_METRICS_FNAME = "eval/eval_metrics_{}.csv"
 
