@@ -43,6 +43,9 @@ class EvaluationTasks:
 
     If `collect_results == True`, we collect tasks for which evaluation results
     are available.
+
+    If `multiple_tasks == False`, we do not use tasks, but look for evaluation
+    files of name :const:`EVAL_METRICS_FNAME` directly under `out_dir`.
     """
 
     def __init__(
@@ -52,17 +55,20 @@ class EvaluationTasks:
         tasks: Optional[List[str]] = None,
         collect_results: bool = False,
         eval_metrics_filename: Optional[str] = None,
+        multiple_tasks: bool = True,
     ):
         if isinstance(out_dir, str):
             out_dir = Path(out_dir)
         self._out_dir = out_dir
         self.model_type = model_type
-        self._tasks = tasks.copy() if tasks is not None else None
+        self._tasks = tasks.copy() if tasks is not None and multiple_tasks else None
+        self._multiple_tasks = multiple_tasks
         if eval_metrics_filename is None:
             eval_metrics_filename = EVAL_METRICS_FNAME
         self._eval_metrics_filename = eval_metrics_filename
         self._eval_metrics_glob = eval_metrics_filename.replace("{}", "*")
-        self._init_task_names(collect_results)
+        if multiple_tasks:
+            self._init_task_names(collect_results)
 
     def _init_task_names(self, collect_results: bool):
         if self._tasks is None:
@@ -103,7 +109,7 @@ class EvaluationTasks:
         return len(list(path.glob(self._eval_metrics_glob)))
 
     @property
-    def tasks(self) -> List[str]:
+    def tasks(self) -> Optional[List[str]]:
         return self._tasks
 
     @staticmethod
@@ -126,7 +132,7 @@ class EvaluationTasks:
     def eval_result_files(
         self,
         mode: Literal["non-lock", "lock", "all"] = "non-lock",
-    ) -> Iterable[Tuple[str, List[Path]]]:
+    ) -> Iterable[Tuple[Optional[str], List[Path]]]:
         """
         Args:
             mode: For "non-lock", we return complete files (not locks). For
@@ -141,10 +147,14 @@ class EvaluationTasks:
         choices = ("non-lock", "lock", "all")
         if mode not in choices:
             raise ValueError(f"Invalid mode = {mode}, must be in {choices}")
-        for task_name in self._tasks:
+        names = self._tasks if self._multiple_tasks else [None]
+        for task_name in names:
+            if task_name is not None:
+                base_dir = self._out_dir / task_name
+            else:
+                base_dir = self._out_dir
             result_file_paths = self._filter_incomplete_files(
-                (self._out_dir / task_name).glob(self._eval_metrics_glob),
-                mode=mode,
+                base_dir.glob(self._eval_metrics_glob), mode=mode,
             )
             if result_file_paths:
                 yield task_name, result_file_paths

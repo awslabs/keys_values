@@ -27,6 +27,7 @@ def main(
     out_dir: Path,
     model_type: str,
     tasks: Optional[List[str]] = None,
+    multiple_tasks: bool = True,
 ):
     # Collect results from all files across all tasks
     print(f"\nLoading evaluation result files from {out_dir}")
@@ -35,6 +36,7 @@ def main(
         model_type,
         tasks,
         collect_results=True,
+        multiple_tasks=multiple_tasks,
     )
     all_data = []
     column_names = None
@@ -102,7 +104,7 @@ if __name__ == "__main__":
         for dataset, case in product(datasets, cases):
             out_dir = base_path / dataset / case
             if out_dir.exists():
-                main(out_dir, model_type)
+                main(out_dir, model_type, multiple_tasks=not is_baseline)
             else:
                 print(f"\nResults for {dataset}/{case} do not exist")
     elif mode == "sweep":
