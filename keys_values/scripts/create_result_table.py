@@ -50,7 +50,15 @@ def _filter_dataset_case(
     return task != "010"
 
 
-def main(datasets, cases, result_path, final_table: bool):
+def main(
+    datasets,
+    cases,
+    result_path,
+    final_table: bool,
+    multiple_tasks: bool,
+):
+    if not multiple_tasks and not final_table:
+        raise ValueError("If multiple_tasks=False, then final_table must be True")
     base_path = result_path.parent
     col_labels = [
         d.removeprefix("helmet_").rsplit("_", 1)[0].replace("_", r"\_")
@@ -68,17 +76,21 @@ def main(datasets, cases, result_path, final_table: bool):
                 row.append([])
             else:
                 df = pd.read_csv(csv_path)
-                avg = df.groupby("task")["sub_exact_match"].mean()
-                row.append(
-                    _sort_entries(
-                        [
-                            (_short_task(t), v)
-                            for t, v in avg.items()
-                            if not final_table
-                            or _filter_dataset_case(dataset, case_key, _short_task(t))
-                        ]
+                if multiple_tasks:
+                    avg = df.groupby("task")["sub_exact_match"].mean()
+                    row.append(
+                        _sort_entries(
+                            [
+                                (_short_task(t), v)
+                                for t, v in avg.items()
+                                if not final_table
+                                   or _filter_dataset_case(dataset, case_key, _short_task(t))
+                            ]
+                        )
                     )
-                )
+                else:
+                    avg = df["sub_exact_match"].mean()
+                    row.append([(None, avg.item())])
         table.append(row)
 
     # - final_table == False:
@@ -144,8 +156,8 @@ if __name__ == "__main__":
 
     dataset_size = "64k"
     # dataset_size = "128k"
-    # is_baseline = False
-    is_baseline = True
+    is_baseline = False
+    # is_baseline = True
     if is_baseline:
         base_path = base_path / "baseline"
     datasets = [
@@ -176,4 +188,4 @@ if __name__ == "__main__":
     # final_table = False
     final_table = True
 
-    main(datasets, cases, result_path, final_table)
+    main(datasets, cases, result_path, final_table, multiple_tasks=not is_baseline)
