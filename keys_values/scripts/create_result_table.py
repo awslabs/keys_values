@@ -144,8 +144,8 @@ if __name__ == "__main__":
 
     dataset_size = "64k"
     # dataset_size = "128k"
-    is_baseline = False
-    # is_baseline = True
+    # is_baseline = False
+    is_baseline = True
     if is_baseline:
         base_path = base_path / "baseline"
     datasets = [
@@ -154,18 +154,24 @@ if __name__ == "__main__":
         f"helmet_hotpot_qa_{dataset_size}",
         f"helmet_pop_qa_{dataset_size}",
     ]
-    cases = [
-        ("lr_4gpu_cs2048_lr5", "lr_2048"),
-        ("slr_4gpu_cs2048_lr5", "slr_2048"),
-        ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
-        ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
-        ("qh2o_4gpu_cs2048_lr5", "qh2o_2048"),
-        ("qh2onorm_4gpu_cs2048_lr5", "qh2onorm_2048"),
-        ("lr_4gpu_cs1024_lr5", "lr_1024"),
-        ("slr_4gpu_cs1024_lr5", "slr_1024"),
-        ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
-        ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
-    ]
+    if not is_baseline:
+        cases = [
+            ("lr_4gpu_cs2048_lr5", "lr_2048"),
+            ("slr_4gpu_cs2048_lr5", "slr_2048"),
+            ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
+            ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
+            ("qh2o_4gpu_cs2048_lr5", "qh2o_2048"),
+            ("qh2onorm_4gpu_cs2048_lr5", "qh2onorm_2048"),
+            ("lr_4gpu_cs1024_lr5", "lr_1024"),
+            ("slr_4gpu_cs1024_lr5", "slr_1024"),
+            ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
+            ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
+        ]
+    else:
+        cases = [
+            ("slr_4gpu_cs1024_lr5", "slr_1024"),
+            ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
+        ]
     result_path = base_path / f"results_{dataset_size}.tex"
     # final_table = False
     final_table = True
