@@ -167,7 +167,7 @@ if __name__ == "__main__":
         ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
     ]
     result_path = base_path / f"results_{dataset_size}.tex"
-    final_table = False
-    # final_table = True
+    # final_table = False
+    final_table = True
 
     main(datasets, cases, result_path, final_table)
