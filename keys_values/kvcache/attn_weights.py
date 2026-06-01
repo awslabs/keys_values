@@ -31,6 +31,7 @@ from keys_values.kvcache.buffers import (
     KVCacheBuffersParams,
     positions_wrap_around,
     PositionsType,
+    check_array_index,
 )
 from keys_values.utils import (
     index_to_3d,
@@ -892,6 +893,9 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         for scores, _ in self._score_buffers():
             scores.fill_(0.0)
 
+    def active_dimensions(self) -> Tuple[int, ...]:
+        return (0, 1)
+
     def token_positions(self) -> torch.Tensor:
         if self.current_length is None:
             raise IndexError("Cache is not initialized, call 'prefill' first")
@@ -1027,3 +1031,20 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             )
         )
         return base_kwargs
+
+    def set_token_positions(
+        self,
+        index: torch.Tensor,
+        tp_values: torch.Tensor,
+    ):
+        check_array_index(
+            index, (self.batch_size, self.n_query_groups, self.cache_length)
+        )
+        tp_values = tp_values.flatten()
+        if tp_values.numel() != index.shape[1]:
+            raise ValueError(
+                f"tp_values.shape = {tp_values.shape}, index.shape = {index.shape}: Not compatible"
+            )
+        self.token_pos[index[0], index[1], index[2]] = tp_values.to(
+            dtype=self.token_pos.dtype
+        )

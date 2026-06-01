@@ -53,25 +53,41 @@ ReorderAnnotationCallback = Callable[
 ]
 
 
-def zeropad_4d_tensor_on_left(x: torch.Tensor, num: int) -> torch.Tensor:
+def zeropad_4d_tensor(
+    x: torch.Tensor,
+    num: int,
+    pad_on_left: bool = True,
+) -> torch.Tensor:
     assert x.ndim == 4
-    fill_left = torch.zeros(
+    filler = torch.zeros(
         (1, 1, 1, 1),
         dtype=x.dtype,
         device=x.device,
     ).expand(*x.shape[:2], num, x.shape[-1])
-    return torch.cat((fill_left, x), dim=2)
+    if pad_on_left:
+        args = (filler, x)
+    else:
+        args = (x, filler)
+    return torch.cat(args, dim=2)
 
 
-def nanpad_4d_tensor_on_left(x: torch.Tensor, num: int) -> torch.Tensor:
+def nanpad_4d_tensor(
+    x: torch.Tensor,
+    num: int,
+    pad_on_left: bool = True,
+) -> torch.Tensor:
     assert x.ndim == 4
-    fill_left = torch.full(
+    filler = torch.full(
         (1, 1, 1, 1),
         torch.nan,
         dtype=x.dtype,
         device=x.device,
     ).expand(*x.shape[:2], num, x.shape[-1])
-    return torch.cat((fill_left, x), dim=2)
+    if pad_on_left:
+        args = (filler, x)
+    else:
+        args = (x, filler)
+    return torch.cat(args, dim=2)
 
 
 def scaled_dot_product_attention(
@@ -171,7 +187,7 @@ def scaled_dot_product_attention(
     # `query` tokens, are on the right end. Causal masking works if `query`
     # is zero-padded on the left
     if q_len < kv_len:
-        query = zeropad_4d_tensor_on_left(query, kv_len - q_len)
+        query = zeropad_4d_tensor(query, kv_len - q_len)
     if annotation_callback is not None:
         annotation_callback = partial(
             annotation_callback,
@@ -384,18 +400,14 @@ def reorder_buffer_given_extra_info(
     buffer: torch.Tensor,
     **kwargs,
 ) -> torch.Tensor:
-    """
-    Same as :func:`reorder_key_value`, but the permutation indices are
-    given here, not determined.
-
-    """
+    assert buffer.ndim == 4
     sort_index = kwargs.get("sort_index")
     if sort_index is not None:
         if sort_index.ndim == 1:
             buffer = buffer[:, :, sort_index, :]
         else:
             index = expand_index(sort_index, buffer.shape[-1])
-            buffer = torch.gather(buffer, -2, index)
+            buffer = torch.gather(buffer, 2, index)
     else:
         index_gat = kwargs["index_gat"]
         index_scat = kwargs["index_scat"]

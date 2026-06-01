@@ -21,7 +21,7 @@ from keys_values.config import Config
 from keys_values.kvcache.attn_weights import AttnWeightsKVCache
 from keys_values.kvcache.base import KVCacheParams, KVCache
 from keys_values.kvcache.basics import KVCacheWithBuffers
-from keys_values.kvcache.buffers import KVCacheBuffers
+from keys_values.kvcache.buffers import KVCacheBuffers, check_array_index
 from keys_values.utils import bits_for_torch_dtype, bitsize_of
 
 
@@ -589,6 +589,18 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
         else:
             return None
 
+    def active_dimensions(self) -> Tuple[int, ...]:
+        return (1,)
+
+    def token_positions(self) -> torch.Tensor:
+        if self.current_length is None:
+            raise IndexError("Cache is not initialized, call 'prefill' first")
+        return (
+            self.token_pos[0, :, : self.current_length]
+            .unsqueeze(0)
+            .expand(self.batch_size, -1, -1)
+        )
+
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         sz_total, dct_sz = super().size_estimate()
         sz_sc = bitsize_of(self.scores)
@@ -623,3 +635,21 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
             for k, v in super()._base_kwargs_for_clone().items()
             if k not in REMOVE_ARG_NAMES
         }
+
+    def set_token_positions(
+        self,
+        index: torch.Tensor,
+        tp_values: torch.Tensor,
+    ):
+        check_array_index(index, (self.n_query_groups, self.cache_length))
+        tp_values = tp_values.flatten().to(dtype=self.token_pos.dtype)
+        ind_sz = index.shape[1]
+        if tp_values.numel() != ind_sz:
+            raise ValueError(
+                f"tp_values.shape = {tp_values.shape}, index.shape = {index.shape}: Not compatible"
+            )
+        # `token_pos` has a batch dimension for ease of implementation
+        kwargs = dict(dtype=index.dtype, device=index.device)
+        for b in range(self.batch_size):
+            b_ind = torch.full((1,), b, **kwargs).expand(ind_sz)
+            self.token_pos[b_ind, index[0], index[1]] = tp_values

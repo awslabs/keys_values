@@ -28,6 +28,16 @@ from keys_values.utils import (
 )
 
 
+def check_array_index(index: torch.Tensor, max_vals: Tuple[int, ...]):
+    if index.ndim != 2 or index.shape[1] == 0 or index.shape[0] != len(max_vals):
+        raise ValueError(
+            f"index.shape = {index.shape}, must be ({len(max_vals)}, num), num > 0"
+        )
+    for i, max_val in enumerate(max_vals):
+        if (index[i] < 0).any().item() or (index[i] >= max_val).any().item():
+            raise ValueError(f"index[{i}] entries must be in [0, {max_val})")
+
+
 @dataclass(frozen=True)
 class KVCacheBuffersParams:
     """
@@ -188,6 +198,8 @@ class KVCacheBuffers(torch.nn.Module):
     def get_slots(
         self,
         positions: PositionsType,
+        out_key: Optional[torch.Tensor] = None,
+        out_value: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Use :meth:`get_keys_values()` to obtain all or most of the buffers, as
@@ -197,9 +209,33 @@ class KVCacheBuffers(torch.nn.Module):
             positions: Slot positions, either `(start, end)` with
                 `num = end - start` or batched of shape
                 `(batch_size, n_query_groups, num)`
+            out_key: If given, `key` is written there
+            out_value: If given, `value` is written there
 
         Returns:
             key, value, `(batch_size, n_query_groups, num, head_size)`
+
+        """
+        raise NotImplementedError()
+
+    def get_vectors(
+        self,
+        index: torch.Tensor,
+        out_key: Optional[torch.Tensor] = None,
+        out_value: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Read-access to KV vectors by integer array indexing. `index` has shape
+        `(3, num)` with columns `[b, h, i]`, the returned `key, value` have
+        shape `(num, head_size)`.
+
+        Args:
+            index: Integer array index, `(3, num)`
+            out_key: If given, `key` is written there
+            out_value: If given, `value` is written there
+
+        Returns:
+            key, value, `(num, head_size)`
 
         """
         raise NotImplementedError()
@@ -220,6 +256,25 @@ class KVCacheBuffers(torch.nn.Module):
                 `(batch_size, n_query_groups, num)`
             key: Keys to write, `(batch_size, n_query_groups, num, head_size)`
             value: Values to write, `(batch_size, n_query_groups, num, head_size)`
+
+        """
+        raise NotImplementedError()
+
+    def set_vectors(
+        self,
+        index: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ):
+        """
+        Write-access to KV vectors by integer array indexing. `index` has shape
+        `(3, num)` with columns `[b, h, i]`, arguments `key, value` have shape
+        `(num, head_size)`.
+
+        Args:
+            index: Integer array index `(3, num)`
+            key: Keys to write, `(num, head_size)`
+            value: Values to write, `(num, head_size)`
 
         """
         raise NotImplementedError()
@@ -482,6 +537,8 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
     def get_slots(
         self,
         positions: PositionsType,
+        out_key: Optional[torch.Tensor] = None,
+        out_value: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         self._assert_buffers_allocated_and_initialized()
         positions = self._check_positions(positions)
@@ -493,7 +550,34 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
             start, end = positions
             res_k = self.k[: self.batch_size, :, start:end, :]
             res_v = self.v[: self.batch_size, :, start:end, :]
-        return res_k, res_v
+        if out_key is None:
+            out_key = res_k
+        else:
+            out_key.copy_(res_k)
+        if out_value is None:
+            out_value = res_v
+        else:
+            out_value.copy_(res_v)
+        return out_key, out_value
+
+    def get_vectors(
+        self,
+        index: torch.Tensor,
+        out_key: Optional[torch.Tensor] = None,
+        out_value: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self._check_index(index)
+        res_k = self.k[index[0], index[1], index[2], :]
+        res_v = self.v[index[0], index[1], index[2], :]
+        if out_key is None:
+            out_key = res_k
+        else:
+            out_key.copy_(res_k)
+        if out_value is None:
+            out_value = res_v
+        else:
+            out_value.copy_(res_v)
+        return out_key, out_value
 
     def set_slots(
         self,
@@ -517,6 +601,16 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
             start, end = positions
             self.k[: self.batch_size, :, start:end, :] = key
             self.v[: self.batch_size, :, start:end, :] = value
+
+    def set_vectors(
+        self,
+        index: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ):
+        self._check_index(index)
+        self.k[index[0], index[1], index[2], :] = key
+        self.v[index[0], index[1], index[2], :] = value
 
     def _forward(
         self,
@@ -617,3 +711,8 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
             if positions.dtype != torch.int64:
                 positions = positions.to(dtype=torch.int64)
         return positions
+
+    def _check_index(self, index: torch.Tensor):
+        check_array_index(
+            index, (self.batch_size, self.n_query_groups, self.cache_length)
+        )

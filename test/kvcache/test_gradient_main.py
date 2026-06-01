@@ -19,11 +19,11 @@ import torch
 import pytest
 import lightning as L
 
-from keys_values.config import Config
 from litgpt.utils import _RunIf
 
 from keys_values.finetune.utils import may_match_twice_flex_attention_sdpa
 from keys_values.attention.flex_attention import FlexAttentionArgs
+from keys_values.config import Config
 from keys_values.head_model import CrossEntropyOnLogits, SequenceClassification
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams

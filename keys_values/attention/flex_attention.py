@@ -28,8 +28,8 @@ from keys_values.attention.sdpa_wrapper import (
     reorder_key_value,
     reorder_inverse,
     ReorderAnnotationCallback,
-    zeropad_4d_tensor_on_left,
-    nanpad_4d_tensor_on_left,
+    zeropad_4d_tensor,
+    nanpad_4d_tensor,
 )
 from keys_values.utils import repeat_interleave
 
@@ -113,11 +113,16 @@ class FlexAttnManager:
     The idea for managers is to share compiled block masks and attention
     functions across several layers and iterations, so that compilations
     are required initially only.
+
+    If `forward_return_lse == True`, the compute graphs returned
+    for `requires_grad == False` output `attn_outputs, aux`, where `aux.lse`
+    are log-sum-exp of attention weights.
     """
 
-    def __init__(self):
+    def __init__(self, forward_return_lse: bool = False):
         self._entries = dict()
         self.num_hits = dict()
+        self.forward_return_lse = forward_return_lse
 
     def _use_kv_lens(self) -> bool:
         raise NotImplementedError
@@ -146,8 +151,14 @@ class FlexAttnManager:
     ) -> BlockMask:
         raise NotImplementedError
 
+    def _requires_grad_from_args(self, args: tuple) -> bool:
+        raise NotImplementedError
+
     def _extra_flex_attention_kwargs(self, args: tuple) -> Dict[str, Any]:
-        return dict()
+        if self.forward_return_lse and not self._requires_grad_from_args(args):
+            return {"return_aux": AuxRequest(lse=True)}
+        else:
+            return dict()
 
     def __call__(
         self,
@@ -267,8 +278,12 @@ class FlexAttnForPrefillManager(FlexAttnManager):
 
     """
 
-    def __init__(self, kv_lens: Optional[List[int]] = None):
-        super().__init__()
+    def __init__(
+        self,
+        kv_lens: Optional[List[int]] = None,
+        forward_return_lse: bool = False,
+    ):
+        super().__init__(forward_return_lse)
         self.kv_lens = prepare_lens(kv_lens, "kv_lens")
 
     def transform_kv_len(self, kv_len: int) -> int:
@@ -302,6 +317,9 @@ class FlexAttnForPrefillManager(FlexAttnManager):
     @staticmethod
     def _from_args(args: tuple, name: str) -> Any:
         return args[FlexAttnForPrefillManager._ARGS_NAMES[name]]
+
+    def _requires_grad_from_args(self, args: tuple) -> bool:
+        return self._from_args(args, "requires_grad")
 
     def _args_to_str(self, *args) -> str:
         parts = [
@@ -363,9 +381,14 @@ def causal_mask_for_chunk_reversed(
     kv_idx: torch.Tensor,
     offset: int,
 ) -> torch.Tensor:
-    left_arg = kv_idx + offset
-    result = left_arg >= q_idx
-    return result
+    return causal_mask_for_chunk(
+        batch=batch,
+        head=head,
+        q_idx=kv_idx,
+        kv_idx=q_idx,
+        offset=offset,
+        sliding_window_size=None,
+    )
 
 
 class FlexAttnForChunkManager(FlexAttnManager):
@@ -411,7 +434,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
         q_lens: Optional[List[int]] = None,
         forward_return_lse: bool = False,
     ):
-        super().__init__()
+        super().__init__(forward_return_lse)
         self.kv_lens = prepare_lens(kv_lens, "kv_lens")
         self.q_lens = prepare_lens(q_lens, "q_lens")
         self.forward_return_lse = forward_return_lse
@@ -491,6 +514,9 @@ class FlexAttnForChunkManager(FlexAttnManager):
     def _from_args(args: tuple, name: str) -> Any:
         return args[FlexAttnForChunkManager._ARGS_NAMES[name]]
 
+    def _requires_grad_from_args(self, args: tuple) -> bool:
+        return self._from_args(args, "requires_grad")
+
     def _args_to_str(self, *args) -> str:
         parts = [
             f"q_len:{self._from_args(args, 'q_len'):5d}",
@@ -549,13 +575,6 @@ class FlexAttnForChunkManager(FlexAttnManager):
             KV_LEN=kv_len,
             device=device,
         )
-
-    def _extra_flex_attention_kwargs(self, args: tuple) -> Dict[str, Any]:
-        requires_grad = self._from_args(args, "requires_grad")
-        if self.forward_return_lse and not requires_grad:
-            return {"return_aux": AuxRequest(lse=True)}
-        else:
-            return dict()
 
 
 class FlexAttentionArgs:
@@ -703,14 +722,14 @@ def pad_arguments(
         # The real query entries must be right-aligned with key, value,
         # otherwise our causal attention masking does not work out properly.
         # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
-        query = zeropad_4d_tensor_on_left(query, pad_q)
+        query = zeropad_4d_tensor(query, pad_q)
     if pad_kv > 0:
         # Use NaN padding for `key`, zero padding for `value`.
         # We replace NaN -> -infty later when masking. Padding on left, not
         # right, for same reason as for query above.
-        key = nanpad_4d_tensor_on_left(key, pad_kv)
+        key = nanpad_4d_tensor(key, pad_kv)
         if value is not None:
-            value = zeropad_4d_tensor_on_left(value, pad_kv)
+            value = zeropad_4d_tensor(value, pad_kv)
     return query, key, value, pad_q, pad_kv
 
 
@@ -830,7 +849,7 @@ def scaled_dot_product_attention_flexatt(
         sort_if_3d: See :func:`reorder_key_value`.
 
     Returns:
-        Attention outputs, shape `(batch_size, n_head, q_len, head_size)`
+        Outputs of shape `(batch_size, n_head, q_len, head_size)`
 
     """
     batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(
