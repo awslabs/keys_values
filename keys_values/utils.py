@@ -98,6 +98,21 @@ def is_index_1d(index: torch.Tensor) -> bool:
     )
 
 
+def is_index_compatible(
+    index: torch.Tensor,
+    active_dimensions: Tuple[int, ...],
+) -> bool:
+    ndim = index.ndim
+    assert all(0 <= x < ndim - 1 for x in active_dimensions)
+    stride = index.stride()
+    shape = tuple(index.shape)
+    return stride[-1] == 1 and all(
+        s == 0 or l == 1
+        for i, (s, l) in enumerate(zip(stride[:-1], shape[:-1]))
+        if i not in active_dimensions
+    )
+
+
 def need_repeat_interleave(n_head: int, n_query_groups: int) -> bool:
     return n_query_groups < n_head and FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA
 
@@ -374,3 +389,37 @@ def encode(
     if hasattr(result, "ids"):
         result = result.ids
     return result
+
+
+def random_choices(
+    shape: Tuple[int, ...],
+    size_range: int,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """
+    Samples index tensor of shape `shape`, so that each final dimension
+    `result[..., :] is a random subset of `range(size_range)`.
+
+    Args:
+        shape: Result shape
+        size_range: See above
+        device: Device for result
+
+    Returns:
+        Index tensor
+
+    """
+    if size_range < shape[-1]:
+        raise ValueError("size_range must be >= shape[-1]")
+    dtype = dtype = torch.int32
+    rand_arr = torch.randint(
+        torch.iinfo(dtype).min,
+        torch.iinfo(dtype).max,
+        shape[:-1] + (size_range,),
+        dtype=dtype,
+        device=device,
+    )
+    if shape[-1] < size_range:
+        return rand_arr.topk(shape[-1], dim=-1).indices
+    else:
+        return rand_arr.argsort(dim=-1)

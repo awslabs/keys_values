@@ -290,13 +290,37 @@ class KVCache(torch.nn.Module):
             dtype=self.dtype,
         )
 
+    def active_dimensions(self) -> Tuple[int, ...]:
+        """
+        Key and value vectors are indexed by `(b, h, i)`, where `i` is
+        associated with the token dimension. A dimension of `(b, h)` is called
+        active if the cache policy can make different decisions along that
+        dimension: KV vectors are stored for some values, but not for others.
+        Note that `i` is always active and is not covered here.
+        Examples:
+
+        * :class:`LastRecentlyInsertedKVCache`: A token either has KV entries
+            in the cache for all `(b, h)`, or for none. Active dimensions:
+            `()`
+        * :class:`SmartInitialLastRecentlyInsertedKVCache`: The policy is
+            sensitive to token position and batch position, but not to query
+            group. Active dimensions: `(0,)`
+        * :class:`AttnWeightsKVCache`: The policy is sensitive to all
+            dimensions. Active dimensions: `(0, 1)`
+        * :class:`H2OOriginalKVCache`: The policy is sensitive to query group
+            and token position, but not to batch position. Active dimensions:
+            `(1,)`
+
+        Returns:
+            Tuple of active dimensions
+
+        """
+        raise NotImplementedError()
+
     def token_positions(self) -> torch.Tensor:
         """
-        Note: For many cache policies, a token is either represented in the
-        cache for all `(b, h)`, batch dimensions and heads, or for none.
-        This means that `token_positions` is essentially 1D. This simpler
-        structure is exploited downstream.
-        Make sure to return an index obtained as
+        If `active_dimensions == ()`, make sure to return an index
+        obtained as
         `index_to_3d(tp_1d, batch_size, n_query_groups)` with
         :func:`keys_values.utils.index_to_3d` in this case, so that the
         simpler structure is recognized.
@@ -305,6 +329,7 @@ class KVCache(torch.nn.Module):
             Token positions in slots of the cache, shape
             `(batch_size, n_query_groups, current_length)`, where
             `current_length <= cache_length` is the current cache length.
+
         """
         raise NotImplementedError()
 

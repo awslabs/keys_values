@@ -290,6 +290,27 @@ class KVCacheWithBuffers(DefaultKVCache):
         result["buffers"] = self.kv_buffers
         return result
 
+    def set_token_positions(
+        self,
+        index: torch.Tensor,
+        tp_values: torch.Tensor,
+    ):
+        """
+        Specialized method, used in conjunction with `kv_buffers.set_vectors`
+        to modify cache content on a per-vector basis.
+
+        Let `nact = len(active_dimensions)`. `index` has shape
+        `(nact + 1, num)`, `tp_values` has shape `(num,)`. We set
+        `token_positions[{index[k, i]}, index[nact, i]] = tp_values[i]`,
+        where `k in active_dimensions`.
+
+        Args:
+            index: Array index, `(nact + 1, num)`
+            tp_values: Values to write, `(num,)`
+
+        """
+        raise NotImplementedError()
+
 
 class DenseKVCache(KVCacheWithBuffers):
     """
@@ -388,6 +409,9 @@ class DenseKVCache(KVCacheWithBuffers):
                 max_prefill_length=self.max_prefill_length,
             )
 
+    def active_dimensions(self) -> Tuple[int, ...]:
+        return ()
+
     def token_positions(self) -> torch.Tensor:
         device = torch.get_default_device() if self.device is None else self.device
         return index_to_3d(
@@ -433,6 +457,13 @@ class DenseKVCache(KVCacheWithBuffers):
 
     def clone(self) -> KVCache:
         return DenseKVCache(**self._base_kwargs_for_clone())
+
+    def set_token_positions(
+        self,
+        index: torch.Tensor,
+        tp_values: torch.Tensor,
+    ):
+        raise NotImplementedError("Cannot be used for DenseKVCache")
 
 
 class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
@@ -655,6 +686,9 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 init_grace_tokens=self.init_grace_tokens,
             )
 
+    def active_dimensions(self) -> Tuple[int, ...]:
+        return ()
+
     def token_positions(self) -> torch.Tensor:
         result = index_to_3d(
             self.token_pos[: self.current_length],
@@ -709,3 +743,12 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
 
     def clone(self) -> KVCache:
         return LastRecentlyInsertedKVCache(**self._base_kwargs_for_clone())
+
+    def set_token_positions(
+        self,
+        index: torch.Tensor,
+        tp_values: torch.Tensor,
+    ):
+        if index.ndim > 2 or (index.ndim == 2 and index.shape[0] != 1):
+            raise ValueError(f"index must be vector, got {index.shape}")
+        self.token_pos[index.flatten()] = tp_values.to(dtype=self.token_pos.dtype)
