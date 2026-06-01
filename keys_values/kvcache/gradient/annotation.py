@@ -21,6 +21,7 @@ from keys_values.utils import (
     shape_to_tuple,
     expand_index,
     repeat_interleave,
+    random_choices,
 )
 
 # The typical shape for `annotation.delta` in phase (1), matching annotations
@@ -184,17 +185,7 @@ def create_random_index(
     # independent permutations per (b, h).
     # Replaced a Python nested for loop over b and h, which launched a large
     # number of CUDA kernels.
-    if num < length:
-        result = (
-            torch.rand(*shape[:2], length, device=device, dtype=torch.float32)
-            .topk(num, dim=-1)
-            .indices
-        )
-    else:
-        result = torch.rand(
-            *shape[:2], length, device=device, dtype=torch.float32
-        ).argsort(dim=-1)
-    result = result.to(dtype=dtype)
+    result = random_choices(shape, size_range=length, device=device).to(dtype=dtype)
     return expand_index(result, shape[-1])
 
 

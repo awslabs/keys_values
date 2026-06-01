@@ -67,11 +67,7 @@ def datasets_and_cases(
         case_patterns = [ALL_CASES[1], ALL_CASES[3], ALL_CASES[4]]
 
     if not with_short:
-        cases = [
-            elem[0].format(cs)
-            for elem in case_patterns
-            for cs in chunk_sizes
-        ]
+        cases = [elem[0].format(cs) for elem in case_patterns for cs in chunk_sizes]
     else:
         cases = [
             (elem[0].format(cs), elem[1].format(cs))

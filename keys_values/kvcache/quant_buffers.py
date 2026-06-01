@@ -203,10 +203,22 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
     def get_slots(
         self,
         positions: PositionsType,
+        out_key: Optional[torch.Tensor] = None,
+        out_value: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         self._assert_buffers_allocated()
         self.dequant_buffers.set_quantized_cache(self)
-        return self.dequant_buffers.get_slots(positions)
+        return self.dequant_buffers.get_slots(positions, out_key, out_value)
+
+    def get_vectors(
+        self,
+        index: torch.Tensor,
+        out_key: Optional[torch.Tensor] = None,
+        out_value: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self._assert_buffers_allocated()
+        self.dequant_buffers.set_quantized_cache(self)
+        return self.dequant_buffers.get_vectors(index, out_key, out_value)
 
     def set_slots(
         self,
@@ -217,6 +229,16 @@ class QuantizedKVCacheBuffers(KVCacheBuffers):
         self._assert_buffers_allocated()
         self.dequant_buffers.set_quantized_cache(self)
         self.dequant_buffers.set_slots(positions, key, value)
+
+    def set_vectors(
+        self,
+        index: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ):
+        self._assert_buffers_allocated()
+        self.dequant_buffers.set_quantized_cache(self)
+        self.dequant_buffers.set_vectors(index, key, value)
 
     def _forward(
         self,
@@ -559,6 +581,8 @@ class DequantizedKVCacheBuffers:
     def get_slots(
         self,
         positions: PositionsType,
+        out_key: Optional[torch.Tensor] = None,
+        out_value: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if not self.buffers_are_allocated:
             raise IndexError("Buffers are not allocated. Call 'prefill' first")
@@ -573,7 +597,35 @@ class DequantizedKVCacheBuffers:
             start, end = positions
             res_k = self.k_buff[: self.batch_size, :, start:end, :]
             res_v = self.v_buff[: self.batch_size, :, start:end, :]
-        return res_k, res_v
+        if out_key is None:
+            out_key = res_k
+        else:
+            out_key.copy_(res_k)
+        if out_value is None:
+            out_value = res_v
+        else:
+            out_value.copy_(res_v)
+        return out_key, out_value
+
+    # Copied from `DefaultKVCacheBuffers.get_vectors`
+    def get_vectors(
+        self,
+        index: torch.Tensor,
+        out_key: Optional[torch.Tensor] = None,
+        out_value: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if not self.buffers_are_allocated:
+            raise IndexError("Buffers are not allocated. Call 'prefill' first")
+        self._check_index(index)
+        if out_key is None:
+            out_key = self.k_buff[index[0], index[1], index[2], :]
+        else:
+            out_key.copy_(self.k_buff[index[0], index[1], index[2], :])
+        if out_value is None:
+            out_value = self.v_buff[index[0], index[1], index[2], :]
+        else:
+            out_value.copy_(self.v_buff[index[0], index[1], index[2], :])
+        return out_key, out_value
 
     def _track_slots(self, positions: PositionsType):
         if not self._needs_write_back:
@@ -601,6 +653,7 @@ class DequantizedKVCacheBuffers:
             self._slots_to_write_back = None
         self._needs_write_back = True
 
+    # Copied from `DefaultKVCacheBuffers.set_slots`
     def set_slots(
         self,
         positions: PositionsType,
@@ -625,6 +678,31 @@ class DequantizedKVCacheBuffers:
             start, end = positions
             self.k_buff[: self.batch_size, :, start:end, :] = key
             self.v_buff[: self.batch_size, :, start:end, :] = value
+
+    # Copied from `DefaultKVCacheBuffers.set_vectors`
+    def set_vectors(
+        self,
+        index: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ):
+        if not self.buffers_are_allocated:
+            raise IndexError("Buffers are not allocated. Call 'prefill' first")
+        if self.device != key.device:
+            raise ValueError(
+                f"key.device = {key.device}, must be equal to {self.device}"
+            )
+        self._check_quantized_cache()
+        self._check_index(index)
+        self.k_buff[index[0], index[1], index[2], :] = key
+        self.v_buff[index[0], index[1], index[2], :] = value
+        # Slots correspond to unique entries in `index[2]`
+        slots_touched = list(set(index[2].tolist()))
+        self._track_slots(
+            torch.tensor(slots_touched, dtype=index.dtype, device=index.device).view(
+                1, 1, -1
+            )
+        )
 
     # Copied from `KVCacheBuffers.forward`:
     def forward(
@@ -728,6 +806,15 @@ class DequantizedKVCacheBuffers:
             if positions.dtype != torch.int64:
                 positions = positions.to(dtype=torch.int64)
         return positions
+
+    def _check_index(self, index: torch.Tensor):
+        if index.ndim != 2 or index.shape[0] == 0 or index.shape[1] != 3:
+            raise ValueError(f"index.shape = {index.shape}, must be (num, 3), num > 0")
+        for i, max_val in enumerate(
+            (self.batch_size, self.n_query_groups, self.cache_length)
+        ):
+            if not (0 <= index[:, i] < max_val).all().item():
+                raise ValueError(f"index[:, {i}] entries must be in [0, {max_val})")
 
     def _quantize(self) -> None:
         cache = self._quantized_cache

@@ -18,11 +18,11 @@ from typing import Any, Dict
 import torch
 import pytest
 
-from keys_values.config import Config
 from litgpt.utils import _RunIf
 
 from keys_values.finetune.utils import may_match_twice_flex_attention_sdpa
 from keys_values.attention.flex_attention import FlexAttentionArgs
+from keys_values.config import Config
 from keys_values.distributed.fabric import Fabric
 from keys_values.head_model import CrossEntropyOnLogits, SequenceClassification
 from keys_values.head_model_factory import HeadModelFactory
