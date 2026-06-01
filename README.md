@@ -7,6 +7,30 @@ It sits on top of [LitGPT](https://github.com/Lightning-AI/litgpt/tree/main).
 The library is primarily intended for research and evaluation. Using it as part
 of a production system will require substantial extra efforts.
 
+
+## What's New (Release 0.2.0)?
+
+* New scaled dot product attention kernels returning attention weights (major
+  speed-up of H2O cache strategies)
+  - Add FlashInfer CUDA kernels and Triton score-sum for efficient attention weight computation
+  - Baseline SDPA returning attention weights, calling FlexAttention 2x ([#78](https://github.com/awslabs/keys_values/pull/78))
+  - More tests for FlashInfer SDPA ([#113](https://github.com/awslabs/keys_values/pull/113))
+* CPU offloading of (quantized) KV cache buffers ([#47](https://github.com/awslabs/keys_values/pull/47))
+* Substantial speed-ups by improvement in CPU--GPU memory transfer
+  ([#63](https://github.com/awslabs/keys_values/pull/63),
+  [#120](https://github.com/awslabs/keys_values/pull/120),
+  [#67](https://github.com/awslabs/keys_values/pull/67),
+  [#118](https://github.com/awslabs/keys_values/pull/118))
+* Improved evaluation scripts
+  - Modernize `longcontext_eval` script (no more Fabric; [#39](https://github.com/awslabs/keys_values/pull/39))
+  - Code for supporting sample-based metrics for evaluation ([#81](https://github.com/awslabs/keys_values/pull/81))
+  - New evaluation script which iterates over several setups ([#106](https://github.com/awslabs/keys_values/pull/106))
+  - Evaluation scripts can also write generated samples to files ([#114](https://github.com/awslabs/keys_values/pull/114))
+  - Refactor evaluation script so it can run with baseline checkpoints ([#123](https://github.com/awslabs/keys_values/pull/123))
+* Store training state and resume training from stored state. Fix bug in `SFTDataset.__getitem__` ([#103](https://github.com/awslabs/keys_values/pull/103))
+* Speed-ups by kernel fusion ([#105](https://github.com/awslabs/keys_values/pull/105))
+
+
 ## Getting Started
 
 We depend on `LitGPT` and inherits its dependencies. Depending on what you plan
