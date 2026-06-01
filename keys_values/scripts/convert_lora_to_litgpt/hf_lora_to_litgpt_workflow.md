@@ -52,6 +52,8 @@ checkpoint is downloaded again every time.
 export CHECKPOINT_DIR="64k_baselines_v1"; \
 for d in nq_64k pop_qa_64k trivia_qa_64k hotpot_qa_64k
 do
+  mkdir ${CHECKPOINT_DIR}/$d/lora_adapter
+  mv ${CHECKPOINT_DIR}/$d/* ${CHECKPOINT_DIR}/$d/lora_adapter/.
   python merge_qwen3_lora.py \
     --base-model Qwen/Qwen3-4B-Instruct-2507 \
     --adapter-dir ${CHECKPOINT_DIR}/$d/lora_adapter \

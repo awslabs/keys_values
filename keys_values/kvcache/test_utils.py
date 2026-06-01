@@ -14,10 +14,11 @@
 from itertools import product
 import math
 import os
-from typing import Tuple, Optional, List, Dict, Callable
+from typing import Tuple, Optional, List, Dict, Callable, Any
 
 import torch
 
+from keys_values.attention.sdpa_wrapper import reorder_key_value
 from keys_values.config import Config
 
 from keys_values.attention.base import (
@@ -27,6 +28,7 @@ from keys_values.attention.base import (
 from keys_values.attention.attention_utils import build_mask_cache
 from keys_values.kvcache.base import KVCacheParams, KVCache
 from keys_values.kvcache.factory import KVCacheFactory
+from keys_values.utils import index_to_3d, random_choices
 
 # Tests run quite slowly for "mps". If this changes, switch this to True
 RUN_TESTS_FOR_MPS = False
@@ -157,15 +159,59 @@ def random_index(
     diff = end - start
     if diff < num:
         raise ValueError(f"end - start = {diff}, must be >= num = {num}")
-    index_kwargs = dict(dtype=torch.int64, device=device)
-    result = torch.empty(
-        (batch_size, params.n_query_groups, num),
-        **index_kwargs,
+    return (
+        random_choices(
+            (batch_size, params.n_query_groups, num),
+            size_range=diff,
+            device=device,
+        )
+        + start
     )
-    for b in range(batch_size):
-        for h in range(params.n_query_groups):
-            result[b, h, :] = (torch.randperm(diff, **index_kwargs) + start)[:num]
-    return result
+
+
+def random_token_positions(
+    batch_size: int,
+    n_query_groups: int,
+    cache_length: int,
+    input_pos: int,
+    essentially_1d: bool = False,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """
+    To simulate a realistic random `token_positions`, we first set it to
+    `range(cache_length)`, then overwrite randomly chosen positions with entries
+    `range(cache_length, input_pos)`.
+
+    The latter part is too difficult for large `input_pos`. Instead, if
+    `n = cache_length, m = input_pos - cache_length`, the expected number of
+    positions overwritten is `n * (1 - exp(m * log(1 - 1/n)))`. We overwrite
+    them with a random subset of `range(cache_length, input_pos)`.
+
+    """
+    index_kwargs = dict(dtype=torch.int64, device=device)
+    result = torch.arange(cache_length, **index_kwargs)
+    if not essentially_1d:
+        result = index_to_3d(result, batch_size, n_query_groups).contiguous()
+    n = cache_length
+    m = input_pos - cache_length
+    if m < n // 2:
+        num_overwrite = m
+    else:
+        num_overwrite = round(n * (1.0 - math.exp(m * math.log1p(-1.0 / n))))
+    if essentially_1d:
+        shape = (num_overwrite,)
+    else:
+        shape = (batch_size, n_query_groups, num_overwrite)
+    index = random_choices(shape, size_range=n, device=device)
+    vals = random_choices(shape, size_range=m, device=device) + n
+    if essentially_1d:
+        result[index] = vals
+    else:
+        result.scatter_(dim=-1, index=index, src=vals)
+    if essentially_1d:
+        return index_to_3d(result, batch_size, n_query_groups)
+    else:
+        return result
 
 
 def compute_attn_weights(
@@ -317,3 +363,72 @@ def debug_print_gradients(model: torch.nn.Module):
                 row = f"{name}: None"
             rows.append(row)
     print("\n".join(rows))
+
+
+def distribute_and_reorder_data(
+    data: Dict[str, torch.Tensor],
+    num_devices: int,
+    input_pos: int,
+) -> Tuple[List[Dict[str, Any]], List[torch.Tensor]]:
+    shape = tuple(data["key"].shape)
+    cache_length = shape[2]
+    assert cache_length % num_devices == 0
+    local_cl = cache_length // num_devices
+    new_shape = shape[:2] + (local_cl, num_devices, shape[-1])
+    _data = {name: data[name].view(*new_shape) for name in ("key", "value")}
+    if input_pos > 0:
+        _data["token_pos"] = data["token_pos"].view(*new_shape[:-1])
+    q_len = data["query"].shape[2]
+    u_val = (num_devices - input_pos % num_devices) % num_devices
+    result = []
+    q_inds = []
+    for rank in range(num_devices):
+        entry = {
+            name: _data[name][:, :, :, rank, :].contiguous()
+            for name in ("key", "value")
+        }
+        start = (u_val + rank) % num_devices
+        q_ind = torch.arange(start, q_len, num_devices)
+        q_inds.append(q_ind)
+        entry["query"] = data["query"][:, :, q_ind, :].contiguous()
+        if input_pos > 0:
+            entry["token_pos"] = _data["token_pos"][:, :, :, rank].contiguous()
+            entry["key"], entry["value"], entry["extra_info"] = reorder_key_value(
+                key=entry["key"],
+                value=entry["value"],
+                token_positions=entry["token_pos"],
+                input_pos=input_pos,  # Not used
+                q_len=0,  # Not used
+                sort_if_3d=True,
+            )
+        result.append(entry)
+    return result, q_inds
+
+
+def equalize_token_pos(
+    token_pos: torch.Tensor,
+    input_pos: int,
+    q_len: int,
+    num_devices: int,
+):
+    assert token_pos.ndim == 3
+    batch_size, n_query_groups, kv_len = token_pos.shape
+    assert kv_len % num_devices == 0
+    kv_per_rank = kv_len // num_devices
+    tp_4d = token_pos.view(batch_size, n_query_groups, kv_per_rank, num_devices)
+    kwargs = dict(dtype=token_pos.dtype, device=token_pos.device)
+    uval = (num_devices - input_pos % num_devices) % num_devices
+    for rank in range(num_devices):
+        start = input_pos + (uval + rank) % num_devices
+        new_vals = torch.arange(start, input_pos + q_len, num_devices, **kwargs)
+        sz = new_vals.numel()
+        rand_pos = random_choices(
+            (batch_size, n_query_groups, sz),
+            size_range=kv_per_rank,
+            device=token_pos.device,
+        )
+        tp_4d[:, :, :, rank].scatter_(
+            2,
+            rand_pos,
+            index_to_3d(new_vals, batch_size, n_query_groups),
+        )

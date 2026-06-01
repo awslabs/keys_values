@@ -32,6 +32,7 @@ from keys_values.kvcache.buffers import (
     KVCacheBuffers,
     KVCacheBuffersParams,
     positions_wrap_around,
+    check_array_index,
 )
 from keys_values.config import Config
 from keys_values.utils import bits_for_torch_dtype, bitsize_of, encode, index_to_3d
@@ -703,6 +704,9 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 protected_end=self.protected_end,
             )
 
+    def active_dimensions(self) -> Tuple[int, ...]:
+        return (0,)
+
     def token_positions(self) -> torch.Tensor:
         return (
             self.token_pos[: self.batch_size, : self.current_length]
@@ -769,3 +773,16 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
 
     def clone(self) -> KVCache:
         return SmartInitialLastRecentlyInsertedKVCache(**self._base_kwargs_for_clone())
+
+    def set_token_positions(
+        self,
+        index: torch.Tensor,
+        tp_values: torch.Tensor,
+    ):
+        check_array_index(index, (self.batch_size, self.cache_length))
+        tp_values = tp_values.flatten()
+        if tp_values.numel() != index.shape[1]:
+            raise ValueError(
+                f"tp_values.shape = {tp_values.shape}, index.shape = {index.shape}: Not compatible"
+            )
+        self.token_pos[index[0], index[1]] = tp_values.to(dtype=self.token_pos.dtype)
