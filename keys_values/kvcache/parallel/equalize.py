@@ -165,18 +165,17 @@ def _get_allocations(
     comm_plan: Dict[Tuple[int, int], np.ndarray],
     device: torch.device,
 ) -> Tuple[
-    Dict[Tuple[int, int, int], torch.Tensor], Dict[Tuple[int, int, int], torch.Tensor]
+    Dict[int, torch.Tensor], Dict[int, torch.Tensor]
 ]:
     """
     Return source and target allocations for rank `rank`.
 
     Source allocations apply when `rank` is the source in a communication,
     listing cache positions which are not to be overwritten. They are indexed
-    by `(trg_rank, b, h)`, where `trg_rank` is the target rank in the
-    communication.
+    by `trg_rank`, the target rank in the communication.
     Target allocations apply when `rank` is the target in a communication,
-    listing overwriting positions. They are indexed by `(src_rank, b, h)`,
-    where `src_rank` is the source rank in the communication.
+    listing overwriting positions. They are indexed by `src_rank`, the source
+    rank in the communication.
 
     Args:
         rank: Rank of device
@@ -192,7 +191,7 @@ def _get_allocations(
     """
     int_dtype = overwrite_pos.dtype
     batch_size, n_query_groups, q_len = overwrite_pos.shape
-    # Lists of size 2: First target, then source
+    # Lists of size two: First target, then source
     is_for_me = (overwrite_pos // cache_length) == rank
     positions = [
         {
@@ -203,11 +202,11 @@ def _get_allocations(
     ]
     q_len_for_me = _get_q_len_for_rank(num_devices, q_len, input_pos, int_dtype)[rank]
     _other_pos = dict()
-    for key, ow_pos in positions[0].items():
+    for b_h, ow_pos in positions[0].items():
         num = q_len_for_me - ow_pos.numel()
         if num > 0:
             ow_set = set(ow_pos.tolist())
-            _other_pos[key] = np.array(
+            _other_pos[b_h] = np.array(
                 list(islice((x for x in range(cache_length) if x not in ow_set), num)),
                 dtype=int_dtype,
             )
@@ -217,6 +216,7 @@ def _get_allocations(
         for _ in range(2)
     ]
     allocations = [dict(), dict()]
+    kwargs = dict(dtype=int_dtype, device=device)
     for (src_rank, trg_rank), plan in comm_plan.items():
         if trg_rank == rank:
             ind = 0
@@ -227,14 +227,26 @@ def _get_allocations(
         else:
             continue
         for row in plan:
-            key = row.totuple()[:2]
+            b_h = row.totuple()[:2]
             mass = row[-1]
-            pos = rel_pos[ind][key]
-            allocations[ind][(other_rank,) + key] = torch.tensor(
-                positions[ind][key][pos : (pos + mass)],
-                device=device,
+            pos = rel_pos[ind][b_h]
+            new_row = torch.tensor(
+                positions[ind][b_h][pos : (pos + mass)], **kwargs,
             )
-            rel_pos[ind][key] += mass
+            new_cols = torch.cat(
+                (
+                    torch.tensor(b_h, **kwargs).view(-1, 1).expand(-1, mass),
+                    new_row.view(1, -1),
+                ),
+                dim=0,
+            )
+            if other_rank in allocations[ind]:
+                allocations[ind][other_rank] = torch.cat(
+                    (allocations[ind][other_rank], new_cols), dim=-1,
+                )
+            else:
+                allocations[ind][other_rank] = new_cols
+            rel_pos[ind][b_h] += mass
     return allocations[1], allocations[0]
 
 
@@ -250,8 +262,7 @@ def _execute_communication(
     rank: int,
     src_rank: int,
     trg_rank: int,
-    plan: np.ndarray,
-    source_allocations: Dict[Tuple[int, int, int], torch.Tensor],
+    source_allocations: Dict[int, torch.Tensor],
     kv_cache: KVCacheWithBuffers,
 ) -> Optional[WriteBackToBuffer]:
     result = None
@@ -260,23 +271,21 @@ def _execute_communication(
         device = kv_cache.device
         head_size = kv_cache.head_size
         int_dtype = kv_cache.token_positions().dtype
-        num_vecs = plan[:, 2].sum().item()
+        num_vecs = source_allocations[src_rank].shape[0]
         keys = torch.zeros((num_vecs, head_size), dtype=dtype, device=device)
         values = torch.zeros((num_vecs, head_size), dtype=dtype, device=device)
         token_pos = torch.zeros((num_vecs,), dtype=int_dtype, device=device)
         if rank == src_rank:
-            k_and_v = kv_cache.kv_buffers.get_keys_values()
-            token_positions = kv_cache.token_positions()
             # Collect and send to `trg_rank`
-            start = 0
-            for row in plan:
-                b_h = row.totuple()[:2]
-                sz = row[-1]
-                index = source_allocations[(trg_rank,) + b_h]
-                keys[start : start + sz, :] = k_and_v.keys()[*b_h, index, :]
-                values[start : start + sz, :] = k_and_v.values()[*b_h, index, :]
-                token_pos[start : start + sz] = token_positions[*b_h, index]
-                start += sz
+            index = source_allocations[src_rank]
+            kv_cache.kv_buffers.get_vectors(
+                index=index,
+                out_key=keys,
+                out_value=values,
+            )
+            token_pos.copy_(
+                kv_cache.token_positions()[index[0], index[1], index[2]]
+            )
             req_keys = dist.isend(keys, dst=trg_rank)
             req_values = dist.isend(values, dst=trg_rank)
             req_tps = dist.isend(token_pos, dst=trg_rank)
@@ -288,7 +297,7 @@ def _execute_communication(
         req_keys.wait()
         req_values.wait()
         req_tps.wait()
-        # Write into `trg_rank` cache
+        # Write-back to`trg_rank` cache is delayed
         if rank == trg_rank:
             result = WriteBackToBuffer(
                 src_rank=src_rank,
@@ -360,6 +369,7 @@ def equalize_cache_content(
     # Rank needs to determine:
     # - Which slots to read and free up as source
     # - Which slots to write to as target
+    # Note: Given the allocations, we do not need `comm_plan.values()` anymore.
     source_allocations, target_allocations = _get_allocations(
         rank,
         num_devices,
@@ -372,19 +382,31 @@ def equalize_cache_content(
 
     # Communication (each transfer can run in parallel)
     # Note: Results are first collected, then written back en bulk below.
-    # This is because we cannot write back individual KV vectors into buffers.
+    # While `KVCacheBuffers.set_vectors` allows to write specific KV vectors
+    # into buffers, and these are non-overlapping for different transfers, we
+    # cannot be sure whether PyTorch supports concurrent writing into the
+    # same buffers.
     results = []
-    for (src_rank, trg_rank), plan in comm_plan.items():
+    for (src_rank, trg_rank) in comm_plan.keys():
         result = _execute_communication(
             rank,
             src_rank,
             trg_rank,
-            plan,
             source_allocations,
             kv_cache,
         )
         if result is not None:
             results.append(result)
 
-    # Write back to cache buffers
-    # HIER
+    # Write back to cache buffer
+    for result in results:
+        index = target_allocations[result.src_rank]
+        kv_cache.kv_buffers.set_vectors(
+            index=index,
+            key=result.key,
+            value=result.value,
+        )
+        kv_cache.set_token_positions(
+            index=index,
+            tp_values=result.token_pos,
+        )

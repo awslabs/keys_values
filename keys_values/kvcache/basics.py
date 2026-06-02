@@ -290,6 +290,29 @@ class KVCacheWithBuffers(DefaultKVCache):
         result["buffers"] = self.kv_buffers
         return result
 
+    def set_token_positions(
+        self,
+        index: torch.Tensor,
+        tp_values: torch.Tensor,
+    ):
+        """
+        Specialized method, used in conjunction with `kv_buffers.set_vectors`
+        to modify cache content on a per-vector basis.
+
+        There are two cases:
+        - If cache logic is essentially 1D, so token is either in the cache for
+            all `(b, h)`, or not at all, then `index.ndim == 1`, and we set
+            `token_positions[index[i]] = tp_values[i]`
+        - If cache logic is 3D, then `index.ndim == 3`, and we set
+            `token_positions[index[0, i], index[1, i], index[2, i]] = tp_values[i]`.
+
+        Args:
+            index: Array index, `(3, num)` or `(num,)`
+            tp_values: Values to write, `(num,)`
+
+        """
+        raise NotImplementedError()
+
 
 class DenseKVCache(KVCacheWithBuffers):
     """
@@ -433,6 +456,13 @@ class DenseKVCache(KVCacheWithBuffers):
 
     def clone(self) -> KVCache:
         return DenseKVCache(**self._base_kwargs_for_clone())
+
+    def set_token_positions(
+        self,
+        index: torch.Tensor,
+        tp_values: torch.Tensor,
+    ):
+        raise NotImplementedError("Cannot be used for DenseKVCache")
 
 
 class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
@@ -709,3 +739,12 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
 
     def clone(self) -> KVCache:
         return LastRecentlyInsertedKVCache(**self._base_kwargs_for_clone())
+
+    def set_token_positions(
+        self,
+        index: torch.Tensor,
+        tp_values: torch.Tensor,
+    ):
+        if index.ndim != 1:
+            raise ValueError(f"index.ndim must be 1, got {index.ndim}")
+        self.token_pos[index] = tp_values
