@@ -297,6 +297,7 @@ def _execute_communication(
     trg_rank: int,
     source_allocations: Dict[int, torch.Tensor],
     kv_cache: KVCacheWithBuffers,
+    source_stats: Dict[int, int],
 ) -> Optional[WriteBackToBuffer]:
     essentially_1d = kv_cache.is_essentially_1d()
     result = None
@@ -328,6 +329,7 @@ def _execute_communication(
                     out_value=values,
                 )
                 token_pos.copy_(kv_cache.token_positions()[0, 0, index])
+                source_stats[trg_rank] = source_stats.get(trg_rank, 0) + index.shape[0]
             req_keys = dist.isend(keys, dst=trg_rank)
             req_values = dist.isend(values, dst=trg_rank)
             req_tps = dist.isend(token_pos, dst=trg_rank)
@@ -356,7 +358,7 @@ def equalize_cache_content(
     input_pos: int,
     kv_cache: KVCacheWithBuffers,
     overwrite_pos: torch.Tensor,
-):
+) -> Tuple[Dict[int, int], Dict[int, int]]:
     """
     In context parallelism, a "virtual" KV cache of length
     `num_devices * cache_length` is realized on `num_devices` devices, each
@@ -392,6 +394,10 @@ def equalize_cache_content(
         input_pos: Token position where new content starts
         kv_cache: KV cache on rank `rank`
         overwrite_pos: See above
+
+    Returns:
+        `source_stats`, `target_stats`, which are dictionaries mapping
+        rank of communication partner to number of KV vectors transferred.
 
     """
     if num_devices <= 1:
@@ -437,6 +443,7 @@ def equalize_cache_content(
     # cannot be sure whether PyTorch supports concurrent writing into the
     # same buffers.
     results = []
+    source_stats = dict()
     for (src_rank, trg_rank) in comm_plan.keys():
         result = _execute_communication(
             rank,
@@ -444,13 +451,16 @@ def equalize_cache_content(
             trg_rank,
             source_allocations,
             kv_cache,
+            source_stats,
         )
         if result is not None:
             results.append(result)
 
     # Write back to cache buffer
+    target_stats = dict()
     for result in results:
-        index = target_allocations[result.src_rank]
+        src_rank = result.src_rank
+        index = target_allocations[src_rank]
         if not essentially_1d:
             kv_cache.kv_buffers.set_vectors(
                 index=index,
@@ -467,3 +477,6 @@ def equalize_cache_content(
             index=index,
             tp_values=result.token_pos,
         )
+        target_stats[src_rank] = target_stats.get(src_rank, 0) + index.shape[0]
+
+    return source_stats, target_stats
