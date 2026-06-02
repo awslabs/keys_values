@@ -300,8 +300,7 @@ class KVCacheWithBuffers(DefaultKVCache):
         to modify cache content on a per-vector basis.
 
         There are two cases:
-        - If cache logic is essentially 1D, so token is either in the cache for
-            all `(b, h)`, or not at all, then `index.ndim == 1`, and we set
+        - If cache logic is essentially 1D, then `index.ndim == 1`, and we set
             `token_positions[index[i]] = tp_values[i]`
         - If cache logic is 3D, then `index.ndim == 3`, and we set
             `token_positions[index[0, i], index[1, i], index[2, i]] = tp_values[i]`.
@@ -410,6 +409,10 @@ class DenseKVCache(KVCacheWithBuffers):
                 cache_length=self.cache_length,
                 max_prefill_length=self.max_prefill_length,
             )
+
+    @staticmethod
+    def is_essentially_1d() -> bool:
+        return True
 
     def token_positions(self) -> torch.Tensor:
         device = torch.get_default_device() if self.device is None else self.device
@@ -684,6 +687,10 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 n_query_groups=self.n_query_groups,
                 init_grace_tokens=self.init_grace_tokens,
             )
+
+    @staticmethod
+    def is_essentially_1d() -> bool:
+        return True
 
     def token_positions(self) -> torch.Tensor:
         result = index_to_3d(

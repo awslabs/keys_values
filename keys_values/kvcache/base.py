@@ -290,13 +290,24 @@ class KVCache(torch.nn.Module):
             dtype=self.dtype,
         )
 
+    @staticmethod
+    def is_essentially_1d() -> bool:
+        """
+        A cache policy for which a token is either represented in the
+        cache for all `(b, h)`, batch dimensions and heads, or for none,
+        is called "essentially 1D". This property simplifies certain
+        computations.
+
+        Returns:
+            Is the cache policy essentially 1D?
+
+        """
+        raise NotImplementedError()
+
     def token_positions(self) -> torch.Tensor:
         """
-        Note: For many cache policies, a token is either represented in the
-        cache for all `(b, h)`, batch dimensions and heads, or for none.
-        This means that `token_positions` is essentially 1D. This simpler
-        structure is exploited downstream.
-        Make sure to return an index obtained as
+        If `is_essentially_1d()` is `True`, make sure to return an index
+        obtained as
         `index_to_3d(tp_1d, batch_size, n_query_groups)` with
         :func:`keys_values.utils.index_to_3d` in this case, so that the
         simpler structure is recognized.
@@ -305,6 +316,7 @@ class KVCache(torch.nn.Module):
             Token positions in slots of the cache, shape
             `(batch_size, n_query_groups, current_length)`, where
             `current_length <= cache_length` is the current cache length.
+
         """
         raise NotImplementedError()
 

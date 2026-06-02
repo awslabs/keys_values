@@ -893,6 +893,10 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         for scores, _ in self._score_buffers():
             scores.fill_(0.0)
 
+    @staticmethod
+    def is_essentially_1d() -> bool:
+        return False
+
     def token_positions(self) -> torch.Tensor:
         if self.current_length is None:
             raise IndexError("Cache is not initialized, call 'prefill' first")

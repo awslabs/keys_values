@@ -196,6 +196,8 @@ class KVCacheBuffers(torch.nn.Module):
     def get_slots(
         self,
         positions: PositionsType,
+        out_key: Optional[torch.Tensor] = None,
+        out_value: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Use :meth:`get_keys_values()` to obtain all or most of the buffers, as
@@ -205,6 +207,8 @@ class KVCacheBuffers(torch.nn.Module):
             positions: Slot positions, either `(start, end)` with
                 `num = end - start` or batched of shape
                 `(batch_size, n_query_groups, num)`
+            out_key: If given, `key` is written there
+            out_value: If given, `value` is written there
 
         Returns:
             key, value, `(batch_size, n_query_groups, num, head_size)`
@@ -531,6 +535,8 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
     def get_slots(
         self,
         positions: PositionsType,
+        out_key: Optional[torch.Tensor] = None,
+        out_value: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         self._assert_buffers_allocated_and_initialized()
         positions = self._check_positions(positions)
@@ -542,7 +548,15 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
             start, end = positions
             res_k = self.k[: self.batch_size, :, start:end, :]
             res_v = self.v[: self.batch_size, :, start:end, :]
-        return res_k, res_v
+        if out_key is None:
+            out_key = res_k
+        else:
+            out_key.copy_(res_k)
+        if out_value is None:
+            out_value = res_v
+        else:
+            out_value.copy_(res_v)
+        return out_key, out_value
 
     def get_vectors(
         self,
@@ -551,14 +565,16 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         out_value: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         self._check_index(index)
+        res_k = self.k[index[0], index[1], index[2], :]
+        res_v = self.v[index[0], index[1], index[2], :]
         if out_key is None:
-            out_key = self.k[index[0], index[1], index[2], :]
+            out_key = res_k
         else:
-            out_key.copy_(self.k[index[0], index[1], index[2], :])
+            out_key.copy_(res_k)
         if out_value is None:
-            out_value = self.v[index[0], index[1], index[2], :]
+            out_value = res_v
         else:
-            out_value.copy_(self.v[index[0], index[1], index[2], :])
+            out_value.copy_(res_v)
         return out_key, out_value
 
     def set_slots(

@@ -13,7 +13,7 @@
 # limitations under the License.
 from dataclasses import dataclass
 from itertools import islice
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -21,6 +21,7 @@ import torch
 import torch.distributed as dist
 
 from keys_values.kvcache.basics import KVCacheWithBuffers
+from keys_values.utils import is_index_1d, index_to_3d
 
 
 def _get_q_len_for_rank(
@@ -46,35 +47,38 @@ def _get_communication_plan(
     cache_length: int,
     input_pos: int,
     overwrite_pos: np.ndarray,
-) -> Dict[Tuple[int, int], np.ndarray]:
+) -> Dict[Tuple[int, int], Union[np.ndarray, int]]:
     """
     The communication plan maps `(from_device, to_device)` to a matrix whose
     rows are `[b, h, num_vecs]`, meaning that for `(b, h)`, `num_vecs` KV
     vectors are to be transferred.
+    If the KV cache is essentially 1D, values are just `num_vecs`.
 
     Args:
         num_devices: Total number of ranks
         cache_length: Length of cache on each rank
         input_pos: Token position where new content starts
-        overwrite_pos: See :class:`CacheContentEqualizer`
+        overwrite_pos: See :func:`equalize_cache_content`
 
     Returns:
         Communication plan
 
     """
-    assert overwrite_pos.ndim == 3
+    assert overwrite_pos.ndim in (1, 3)
+    essentially_1d = overwrite_pos.ndim == 1
     q_len = overwrite_pos.shape[-1]
     int_dtype = overwrite_pos.dtype
     q_len_for_rank = _get_q_len_for_rank(num_devices, q_len, input_pos, int_dtype)
     # Determine the Delta numbers
+    shape = (1,) * overwrite_pos.ndim
     num_per_rank = (
         (overwrite_pos // cache_length).astype(int_dtype)
-        == np.arange(num_devices, dtype=int_dtype).reshape(1, 1, 1, -1)
+        == np.arange(num_devices, dtype=int_dtype).reshape(*shape, -1)
     ).sum(axis=-2)
-    delta_per_rank = num_per_rank - q_len_for_rank.reshape(1, 1, -1)
+    delta_per_rank = num_per_rank - q_len_for_rank.reshape(*shape[:-1], -1)
     if not np.all(delta_per_rank.sum(axis=-1) == 0):
         raise ValueError(
-            f"delta_per_rank must sum to 0 for each (b,h), but got:\n{delta_per_rank}:\n{delta_per_rank}"
+            f"delta_per_rank must sum to 0 for each (b, h), but got:\n{delta_per_rank}:\n{delta_per_rank}"
         )
     # Shapes: (bs, n_kv, num_devices)
     ranks = np.argsort(delta_per_rank, axis=-1)
@@ -83,8 +87,9 @@ def _get_communication_plan(
     # Determine the communications
     communications = None
     while not torch.all(sorted_delta == 0):
-        smallest = sorted_delta[..., 0].copy()  # (bs, n_kv)
-        largest = sorted_delta[..., -1].copy()  # (bs, n_kv)
+        # (bs, n_kv, 1) or (1,):
+        smallest = sorted_delta[..., 0:1].copy()
+        largest = sorted_delta[..., (num_devices - 1) : num_devices].copy()
         min_vals = np.minimum(largest, -smallest)
         args1 = np.concatenate(
             (ranks[..., 0:1], ranks[..., (num_devices - 1) : num_devices]),
@@ -95,7 +100,7 @@ def _get_communication_plan(
             axis=-1,
         )
         extra = np.concatenate(
-            (np.where(largest >= -smallest, args1, args2), min_vals[..., np.newaxis]),
+            (np.where(largest >= -smallest, args1, args2), min_vals),
             axis=-1,
         )[..., np.newaxis]
         if communications is None:
@@ -106,8 +111,8 @@ def _get_communication_plan(
         smallest += min_vals
         if num_devices > 2:
             sorted_delta = sorted_delta[..., 1:(-1)]
-            ranks_smallest = ranks[..., 0].copy()
-            ranks_largest = ranks[..., -1].copy()
+            ranks_smallest = ranks[..., 0:1].copy()
+            ranks_largest = ranks[..., (num_devices - 1) : num_devices].copy()
             ranks = ranks[..., 1:(-1)]
             new_pos_largest = np.searchsorted(sorted_delta, largest)
             sorted_delta = np.insert(
@@ -131,29 +136,42 @@ def _get_communication_plan(
     # Transform into plan: Needs groupby and filter out zero mass items
     if communications is None:
         return dict()
-
-    batch_size, n_query_groups, _, num_rounds = communications.shape
-    b_idx, h_idx = np.meshgrid(
-        np.arange(batch_size), np.arange(n_query_groups), indexing="ij"
-    )
-    df = pd.DataFrame(
-        {
-            "b": np.broadcast_to(
-                b_idx[..., np.newaxis], (batch_size, n_query_groups, num_rounds)
-            ).ravel(),
-            "h": np.broadcast_to(
-                h_idx[..., np.newaxis], (batch_size, n_query_groups, num_rounds)
-            ).ravel(),
-            "from": communications[:, :, 0, :].ravel(),
-            "to": communications[:, :, 1, :].ravel(),
-            "mass": communications[:, :, 2, :].ravel(),
+    if not essentially_1d:
+        batch_size, n_query_groups, _, num_rounds = communications.shape
+        b_idx, h_idx = np.meshgrid(
+            np.arange(batch_size), np.arange(n_query_groups), indexing="ij"
+        )
+        df = pd.DataFrame(
+            {
+                "b": np.broadcast_to(
+                    b_idx[..., np.newaxis], (batch_size, n_query_groups, num_rounds)
+                ).ravel(),
+                "h": np.broadcast_to(
+                    h_idx[..., np.newaxis], (batch_size, n_query_groups, num_rounds)
+                ).ravel(),
+                "from": communications[:, :, 0, :].ravel(),
+                "to": communications[:, :, 1, :].ravel(),
+                "mass": communications[:, :, 2, :].ravel(),
+            }
+        )
+        df = df[df["mass"] != 0]
+        return {
+            (from_, to_): group[["b", "h", "mass"]].to_numpy()
+            for (from_, to_), group in df.groupby(["from", "to"])
         }
-    )
-    df = df[df["mass"] != 0]
-    return {
-        (from_, to_): group[["b", "h", "mass"]].to_numpy()
-        for (from_, to_), group in df.groupby(["from", "to"])
-    }
+    else:
+        df = pd.DataFrame(
+            {
+                "from": communications[0].ravel(),
+                "to": communications[1].ravel(),
+                "mass": communications[2].ravel(),
+            }
+        )
+        df = df[df["mass"] != 0]
+        return {
+            (from_, to_): group["mass"].item()
+            for (from_, to_), group in df.groupby(["from", "to"])
+        }
 
 
 def _get_allocations(
@@ -162,7 +180,7 @@ def _get_allocations(
     input_pos: int,
     cache_length: int,
     overwrite_pos: np.ndarray,
-    comm_plan: Dict[Tuple[int, int], np.ndarray],
+    comm_plan: Dict[Tuple[int, int], Union[np.ndarray, int]],
     device: torch.device,
 ) -> Tuple[
     Dict[int, torch.Tensor], Dict[int, torch.Tensor]
@@ -182,7 +200,7 @@ def _get_allocations(
         num_devices: Total number of ranks
         input_pos: Token position where new content starts
         cache_length: Length of cache on each rank
-        overwrite_pos: See :class:`CacheContentEqualizer`
+        overwrite_pos: See :func:`equalize_cache_content`
         comm_plan: Communication plan
 
     Returns:
@@ -190,9 +208,16 @@ def _get_allocations(
 
     """
     int_dtype = overwrite_pos.dtype
-    batch_size, n_query_groups, q_len = overwrite_pos.shape
+    essentially_1d = overwrite_pos.ndim == 1
+    if not essentially_1d:
+        batch_size, n_query_groups, q_len = overwrite_pos.shape
+    else:
+        # In this case, the dictionaries have a single entry with key (0, 0)
+        batch_size, n_query_groups, q_len = 1, 1, overwrite_pos.shape[-1]
     # Lists of size two: First target, then source
     is_for_me = (overwrite_pos // cache_length) == rank
+    if essentially_1d:
+        is_for_me = is_for_me.view(1, 1, -1)
     positions = [
         {
             (b, h): overwrite_pos[b, h, is_for_me[b, h, :]] % cache_length
@@ -227,19 +252,27 @@ def _get_allocations(
         else:
             continue
         for row in plan:
-            b_h = row.totuple()[:2]
-            mass = row[-1]
-            pos = rel_pos[ind][b_h]
-            new_row = torch.tensor(
-                positions[ind][b_h][pos : (pos + mass)], **kwargs,
-            )
-            new_cols = torch.cat(
-                (
-                    torch.tensor(b_h, **kwargs).view(-1, 1).expand(-1, mass),
-                    new_row.view(1, -1),
-                ),
-                dim=0,
-            )
+            if not essentially_1d:
+                b_h = row.totuple()[:2]
+                mass = row[-1]
+                pos = rel_pos[ind][b_h]
+                new_row = torch.tensor(
+                    positions[ind][b_h][pos : (pos + mass)], **kwargs,
+                )
+                new_cols = torch.cat(
+                    (
+                        torch.tensor(b_h, **kwargs).view(-1, 1).expand(-1, mass),
+                        new_row.view(1, -1),
+                    ),
+                    dim=0,
+                )
+            else:
+                mass = row[-1]
+                b_h = (0, 0)
+                pos = rel_pos[ind][b_h]
+                new_cols = torch.tensor(
+                    positions[ind][b_h][pos : (pos + mass)], **kwargs,
+                )
             if other_rank in allocations[ind]:
                 allocations[ind][other_rank] = torch.cat(
                     (allocations[ind][other_rank], new_cols), dim=-1,
@@ -265,6 +298,7 @@ def _execute_communication(
     source_allocations: Dict[int, torch.Tensor],
     kv_cache: KVCacheWithBuffers,
 ) -> Optional[WriteBackToBuffer]:
+    essentially_1d = kv_cache.is_essentially_1d()
     result = None
     if rank in (src_rank, trg_rank):
         dtype = kv_cache.dtype
@@ -278,14 +312,22 @@ def _execute_communication(
         if rank == src_rank:
             # Collect and send to `trg_rank`
             index = source_allocations[src_rank]
-            kv_cache.kv_buffers.get_vectors(
-                index=index,
-                out_key=keys,
-                out_value=values,
-            )
-            token_pos.copy_(
-                kv_cache.token_positions()[index[0], index[1], index[2]]
-            )
+            if not essentially_1d:
+                kv_cache.kv_buffers.get_vectors(
+                    index=index,
+                    out_key=keys,
+                    out_value=values,
+                )
+                token_pos.copy_(
+                    kv_cache.token_positions()[index[0], index[1], index[2]]
+                )
+            else:
+                kv_cache.kv_buffers.get_slots(
+                    positions=index_to_3d(index, kv_cache.batch_size, kv_cache.n_query_groups),
+                    out_key=keys,
+                    out_value=values,
+                )
+                token_pos.copy_(kv_cache.token_positions()[0, 0, index])
             req_keys = dist.isend(keys, dst=trg_rank)
             req_values = dist.isend(values, dst=trg_rank)
             req_tps = dist.isend(token_pos, dst=trg_rank)
@@ -341,12 +383,15 @@ def equalize_cache_content(
     A position `p` is assigned to rank `p // cache_length`, referring to local
     position `p % cache_length` there.
 
+    If `kv_cache.is_essentially_1d() == True`, `overwrite_pos` must be
+    essentially 1D. Computations are much simplified in this case.
+
     Args:
         rank: Rank of device
         num_devices: Total number of ranks
         input_pos: Token position where new content starts
         kv_cache: KV cache on rank `rank`
-        overwrite_pos: See :class:`CacheContentEqualizer`
+        overwrite_pos: See above
 
     """
     if num_devices <= 1:
@@ -358,6 +403,11 @@ def equalize_cache_content(
         raise ValueError(
             f"kv_cache must be full (but current_length = {kv_cache.current_length} < {cache_length} = cache_length)"
         )
+    essentially_1d = kv_cache.is_essentially_1d()
+    if essentially_1d:
+        if not is_index_1d(overwrite_pos):
+            raise ValueError("overwrite_pos must be essentially 1D, use `index_to_3d`")
+        overwrite_pos = overwrite_pos[0, 0, :]
     overwrite_pos = overwrite_pos.numpy()
     # Create communication plan
     comm_plan = _get_communication_plan(
@@ -401,11 +451,18 @@ def equalize_cache_content(
     # Write back to cache buffer
     for result in results:
         index = target_allocations[result.src_rank]
-        kv_cache.kv_buffers.set_vectors(
-            index=index,
-            key=result.key,
-            value=result.value,
-        )
+        if not essentially_1d:
+            kv_cache.kv_buffers.set_vectors(
+                index=index,
+                key=result.key,
+                value=result.value,
+            )
+        else:
+            kv_cache.kv_buffers.set_slots(
+                positions=index_to_3d(index, kv_cache.batch_size, kv_cache.n_query_groups),
+                key=result.key,
+                value=result.value,
+            )
         kv_cache.set_token_positions(
             index=index,
             tp_values=result.token_pos,
