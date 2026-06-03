@@ -374,3 +374,32 @@ def encode(
     if hasattr(result, "ids"):
         result = result.ids
     return result
+
+
+def random_choices(
+    shape: Tuple[int, ...],
+    size_range: int,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """
+    Samples index tensor of shape `shape`, so that each final dimension
+    `result[..., :] is a random subset of `range(size_range)`.
+
+    Args:
+        shape: Result shape
+        size_range: See above
+        device: Device for result
+
+    Returns:
+        Index tensor
+
+    """
+    if size_range < shape[-1]:
+        raise ValueError("size_range must be >= shape[-1]")
+    rand_arr = torch.randint(
+        2 ** 32, shape[:-1] + (size_range,), dtype=torch.uint32, device=device
+    )
+    if shape[-1] < size_range:
+        return rand_arr.topk(shape[-1], dim=-1).indices
+    else:
+        return rand_arr.argsort(dim=-1)

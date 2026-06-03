@@ -27,6 +27,7 @@ from keys_values.attention.base import (
 from keys_values.attention.attention_utils import build_mask_cache
 from keys_values.kvcache.base import KVCacheParams, KVCache
 from keys_values.kvcache.factory import KVCacheFactory
+from keys_values.utils import index_to_3d, random_choices
 
 # Tests run quite slowly for "mps". If this changes, switch this to True
 RUN_TESTS_FOR_MPS = False
@@ -157,15 +158,56 @@ def random_index(
     diff = end - start
     if diff < num:
         raise ValueError(f"end - start = {diff}, must be >= num = {num}")
-    index_kwargs = dict(dtype=torch.int64, device=device)
-    result = torch.empty(
+    return random_choices(
         (batch_size, params.n_query_groups, num),
-        **index_kwargs,
-    )
-    for b in range(batch_size):
-        for h in range(params.n_query_groups):
-            result[b, h, :] = (torch.randperm(diff, **index_kwargs) + start)[:num]
-    return result
+        size_range=diff,
+        device=device,
+    ) + start
+
+
+def random_token_positions(
+    batch_size: int,
+    n_query_groups: int,
+    cache_length: int,
+    input_pos: int,
+    essential_1d: bool = False,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """
+    To simulate a realistic random `token_positions`, we first set it to
+    `range(cache_length)`, then overwrite randomly chosen positions with entries
+    `range(cache_length, input_pos)`.
+
+    The latter part is too difficult for large `input_pos`. Instead, if
+    `n = cache_length, m = input_pos - cache_length`, the expected number of
+    positions overwritten is `n * (1 - exp(m * log(1 - 1/n)))`. We overwrite
+    them with a random subset of `range(cache_length, input_pos)`.
+
+    """
+    index_kwargs = dict(dtype=torch.int64, device=device)
+    result = torch.arange(cache_length, **index_kwargs)
+    if not essential_1d:
+        result = index_to_3d(result, batch_size, n_query_groups).contiguous()
+    n = cache_length
+    m = input_pos - cache_length
+    if m < n // 2:
+        num_overwrite = m
+    else:
+        num_overwrite = round(n * (1.0 - math.exp(m * math.log1p(-1.0 / n))))
+    if essential_1d:
+        shape = (num_overwrite,)
+    else:
+        shape = (batch_size, n_query_groups, num_overwrite)
+    index = random_choices(shape, size_range=n, device=device)
+    vals = random_choices(shape, size_range=m, device=device) + n
+    if essential_1d:
+        result[index] = vals
+    else:
+        result.scatter_(dim=-1, index=index, src=vals)
+    if essential_1d:
+        return index_to_3d(result, batch_size, n_query_groups)
+    else:
+        return result
 
 
 def compute_attn_weights(

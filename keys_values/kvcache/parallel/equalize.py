@@ -13,7 +13,7 @@
 # limitations under the License.
 from dataclasses import dataclass
 from itertools import islice
-from typing import Dict, Tuple, Optional, Union
+from typing import Dict, Tuple, Optional, Union, Callable
 
 import numpy as np
 import pandas as pd
@@ -291,6 +291,51 @@ class WriteBackToBuffer:
     token_pos: torch.Tensor
 
 
+# We use `_send` and `_receive` in order to be able to mock things during
+# testing, see `test.kvcache.test_equalize.test_equalize_before_after`.
+# The callback returned is called at the end of the function. It returns
+# a flag. If this is `False`, the results are not written back.
+
+def _send(
+    src_rank: int,
+    trg_rank: int,
+    keys: torch.Tensor,
+    values: torch.Tensor,
+    token_pos: torch.Tensor,
+) -> Callable[[], bool]:
+    req_keys = dist.isend(keys, dst=trg_rank)
+    req_values = dist.isend(values, dst=trg_rank)
+    req_tps = dist.isend(token_pos, dst=trg_rank)
+
+    def wait() -> bool:
+        req_keys.wait()
+        req_values.wait()
+        req_tps.wait()
+        return True
+
+    return wait
+
+
+def _receive(
+    src_rank: int,
+    trg_rank: int,
+    keys: torch.Tensor,
+    values: torch.Tensor,
+    token_pos: torch.Tensor,
+) -> Callable[[], bool]:
+    req_keys = dist.irecv(keys, src=src_rank)
+    req_values = dist.irecv(values, src=src_rank)
+    req_tps = dist.irecv(token_pos, src=src_rank)
+
+    def wait() -> bool:
+        req_keys.wait()
+        req_values.wait()
+        req_tps.wait()
+        return True
+
+    return wait
+
+
 def _execute_communication(
     rank: int,
     src_rank: int,
@@ -330,19 +375,13 @@ def _execute_communication(
                 )
                 token_pos.copy_(kv_cache.token_positions()[0, 0, index])
                 source_stats[trg_rank] = source_stats.get(trg_rank, 0) + index.shape[0]
-            req_keys = dist.isend(keys, dst=trg_rank)
-            req_values = dist.isend(values, dst=trg_rank)
-            req_tps = dist.isend(token_pos, dst=trg_rank)
+            callback = _send(src_rank, trg_rank, keys, values, token_pos)
         else:
             # Receive from `src_rank`
-            req_keys = dist.irecv(keys, src=src_rank)
-            req_values = dist.irecv(values, src=src_rank)
-            req_tps = dist.irecv(token_pos, src=src_rank)
-        req_keys.wait()
-        req_values.wait()
-        req_tps.wait()
+            callback = _receive(src_rank, trg_rank, keys, values, token_pos)
+        do_write_back = callback()
         # Write-back to`trg_rank` cache is delayed
-        if rank == trg_rank:
+        if do_write_back and rank == trg_rank:
             result = WriteBackToBuffer(
                 src_rank=src_rank,
                 keys=keys,
