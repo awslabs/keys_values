@@ -396,8 +396,9 @@ def random_choices(
     """
     if size_range < shape[-1]:
         raise ValueError("size_range must be >= shape[-1]")
+    dtype =  dtype=torch.int32
     rand_arr = torch.randint(
-        2 ** 32, shape[:-1] + (size_range,), dtype=torch.uint32, device=device
+        torch.iinfo(dtype).min, torch.iinfo(dtype).max, shape[:-1] + (size_range,), dtype=dtype, device=device,
     )
     if shape[-1] < size_range:
         return rand_arr.topk(shape[-1], dim=-1).indices

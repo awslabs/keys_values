@@ -754,4 +754,4 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     ):
         if index.ndim != 1:
             raise ValueError(f"index.ndim must be 1, got {index.ndim}")
-        self.token_pos[index] = tp_values
+        self.token_pos[index] = tp_values.to(dtype=self.token_pos.dtype)

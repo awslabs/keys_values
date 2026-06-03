@@ -1042,4 +1042,4 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         tp_values = tp_values.flatten()
         if tp_values.numel() != index.shape[1]:
             raise ValueError(f"tp_values.shape = {tp_values.shape}, index.shape = {index.shape}: Not compatible")
-        self.token_pos[index[0], index[1], index[2]] = tp_values
+        self.token_pos[index[0], index[1], index[2]] = tp_values.to(dtype=self.token_pos.dtype)

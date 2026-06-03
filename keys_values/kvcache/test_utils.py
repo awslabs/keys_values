@@ -170,7 +170,7 @@ def random_token_positions(
     n_query_groups: int,
     cache_length: int,
     input_pos: int,
-    essential_1d: bool = False,
+    essentially_1d: bool = False,
     device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     """
@@ -186,7 +186,7 @@ def random_token_positions(
     """
     index_kwargs = dict(dtype=torch.int64, device=device)
     result = torch.arange(cache_length, **index_kwargs)
-    if not essential_1d:
+    if not essentially_1d:
         result = index_to_3d(result, batch_size, n_query_groups).contiguous()
     n = cache_length
     m = input_pos - cache_length
@@ -194,17 +194,17 @@ def random_token_positions(
         num_overwrite = m
     else:
         num_overwrite = round(n * (1.0 - math.exp(m * math.log1p(-1.0 / n))))
-    if essential_1d:
+    if essentially_1d:
         shape = (num_overwrite,)
     else:
         shape = (batch_size, n_query_groups, num_overwrite)
     index = random_choices(shape, size_range=n, device=device)
     vals = random_choices(shape, size_range=m, device=device) + n
-    if essential_1d:
+    if essentially_1d:
         result[index] = vals
     else:
         result.scatter_(dim=-1, index=index, src=vals)
-    if essential_1d:
+    if essentially_1d:
         return index_to_3d(result, batch_size, n_query_groups)
     else:
         return result

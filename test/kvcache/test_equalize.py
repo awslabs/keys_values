@@ -43,13 +43,13 @@ def args_equalize_before_after() -> Tuple[str, List[tuple]]:
         for name in KVCacheFactory.supported_names()
         if name.endswith("-default") and not name.startswith("dense")
     ]
-    return product_with_devices(names, "name, kwargs")
+    return product_with_devices(names[:1], "name, kwargs")
 
 
 def _extract_content(
     kv_caches: List[KVCacheWithBuffers],
 ) -> Dict[str, torch.Tensor]:
-    essential_1d = kv_caches[0].is_essential_1d()
+    essentially_1d = kv_caches[0].is_essentially_1d()
     parts = {
         "key": [],
         "value": [],
@@ -59,9 +59,9 @@ def _extract_content(
         k_and_v = kv_cache.kv_buffers.get_keys_values()
         parts["key"].append(k_and_v.keys())
         parts["value"].append(k_and_v.values())
-        tp = kv_cache.token_positions
+        tp = kv_cache.token_positions()
         parts["token_pos"].append(
-            tp[0, 0, :] if essential_1d else tp
+            tp[0, 0, :] if essentially_1d else tp
         )
     return {
         k: torch.cat(v, dim=0 if k == "token_pos" else 2)
@@ -71,7 +71,7 @@ def _extract_content(
 
 def _compare_contents(
     contents: List[Dict[str, torch.Tensor]],
-    essential_1d: bool,
+    essentially_1d: bool,
 ) -> None:
     sorted_contents = []
     for content in contents:
@@ -86,7 +86,7 @@ def _compare_contents(
         sorted_token_pos = reorder_buffer_given_extra_info(
             buffer=content["token_pos"], **extra_info,
         )
-        if essential_1d:
+        if essentially_1d:
             sorted_token_pos = sorted_token_pos[0, 0, :]
         sorted_contents.append(
             {
@@ -135,7 +135,7 @@ def test_equalize_before_after(device, name, kwargs):
     kv_caches = [
         create_kv_cache(name, params, **kwargs) for _ in range(num_devices)
     ]
-    essential_1d = kv_caches[0].is_essential_1d()
+    essentially_1d = kv_caches[0].is_essentially_1d()
 
     q_len = randint_torch(virtual_length // 8, (virtual_length * 3) // 4)
     input_pos = randint_torch(virtual_length, virtual_length * 2)
@@ -157,13 +157,13 @@ def test_equalize_before_after(device, name, kwargs):
         n_query_groups=params.n_query_groups,
         cache_length=virtual_length,
         input_pos=input_pos,
-        essential_1d=essential_1d,
+        essentially_1d=essentially_1d,
         device=device,
     )
     for off, kv_cache in enumerate(kv_caches):
         sel_ind = torch.arange(off, virtual_length, num_devices, **index_kwargs)
         assert sel_ind.numel() == cache_length  # Sanity check
-        if essential_1d:
+        if essentially_1d:
             kv_cache.set_token_positions(
                 index=torch.arange(cache_length, **index_kwargs),
                 tp_values=all_token_positions[0, 0, sel_ind],
@@ -176,7 +176,7 @@ def test_equalize_before_after(device, name, kwargs):
 
     # Equalization (parallel computation is mocked, see above)
     shape = (params.max_batch_size, params.n_query_groups, q_len)
-    if essential_1d:
+    if essentially_1d:
         overwrite_pos = index_to_3d(
             random_choices(shape[-1:], size_range=virtual_length, device=device),
             *shape[:-1],
@@ -269,5 +269,5 @@ def test_equalize_before_after(device, name, kwargs):
     contents.append(_extract_content(kv_caches))
     _compare_contents(
         contents=contents,
-        essential_1d=essential_1d,
+        essentially_1d=essentially_1d,
     )

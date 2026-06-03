@@ -28,7 +28,7 @@ def _get_q_len_for_rank(
     num_devices: int,
     q_len: int,
     input_pos: int,
-    int_dtype: torch.dtype,
+    int_dtype: np.dtype,
 ) -> np.ndarray:
     min_ql = q_len // num_devices
     num_plus1 = q_len - min_ql * num_devices
@@ -72,7 +72,7 @@ def _get_communication_plan(
     # Determine the Delta numbers
     shape = (1,) * overwrite_pos.ndim
     num_per_rank = (
-        (overwrite_pos // cache_length).astype(int_dtype)
+        (overwrite_pos // cache_length).astype(int_dtype)[..., np.newaxis]
         == np.arange(num_devices, dtype=int_dtype).reshape(*shape, -1)
     ).sum(axis=-2)
     delta_per_rank = num_per_rank - q_len_for_rank.reshape(*shape[:-1], -1)
@@ -86,7 +86,7 @@ def _get_communication_plan(
 
     # Determine the communications
     communications = None
-    while not torch.all(sorted_delta == 0):
+    while not np.all(sorted_delta == 0):
         # (bs, n_kv, 1) or (1,):
         smallest = sorted_delta[..., 0:1].copy()
         largest = sorted_delta[..., (num_devices - 1) : num_devices].copy()
@@ -129,7 +129,7 @@ def _get_communication_plan(
             )
             ranks = np.insert(ranks, new_pos_smallest, ranks_smallest)
         else:
-            if not torch.all(largest == 0) or not torch.all(smallest == 0):
+            if not np.all(largest == 0) or not np.all(smallest == 0):
                 raise IndexError("Internal error for num_devices == 2")
             break
 
@@ -182,6 +182,7 @@ def _get_allocations(
     overwrite_pos: np.ndarray,
     comm_plan: Dict[Tuple[int, int], Union[np.ndarray, int]],
     device: torch.device,
+    dtype: torch.dtype,
 ) -> Tuple[
     Dict[int, torch.Tensor], Dict[int, torch.Tensor]
 ]:
@@ -209,15 +210,15 @@ def _get_allocations(
     """
     int_dtype = overwrite_pos.dtype
     essentially_1d = overwrite_pos.ndim == 1
+    is_for_me = (overwrite_pos // cache_length) == rank
     if not essentially_1d:
         batch_size, n_query_groups, q_len = overwrite_pos.shape
     else:
         # In this case, the dictionaries have a single entry with key (0, 0)
         batch_size, n_query_groups, q_len = 1, 1, overwrite_pos.shape[-1]
+        overwrite_pos = overwrite_pos.reshape(1, 1, -1)
+        is_for_me = is_for_me.reshape(1, 1, -1)
     # Lists of size two: First target, then source
-    is_for_me = (overwrite_pos // cache_length) == rank
-    if essentially_1d:
-        is_for_me = is_for_me.view(1, 1, -1)
     positions = [
         {
             (b, h): overwrite_pos[b, h, is_for_me[b, h, :]] % cache_length
@@ -228,7 +229,7 @@ def _get_allocations(
     q_len_for_me = _get_q_len_for_rank(num_devices, q_len, input_pos, int_dtype)[rank]
     _other_pos = dict()
     for b_h, ow_pos in positions[0].items():
-        num = q_len_for_me - ow_pos.numel()
+        num = q_len_for_me - ow_pos.shape[0]
         if num > 0:
             ow_set = set(ow_pos.tolist())
             _other_pos[b_h] = np.array(
@@ -241,7 +242,7 @@ def _get_allocations(
         for _ in range(2)
     ]
     allocations = [dict(), dict()]
-    kwargs = dict(dtype=int_dtype, device=device)
+    kwargs = dict(dtype=dtype, device=device)
     for (src_rank, trg_rank), plan in comm_plan.items():
         if trg_rank == rank:
             ind = 0
@@ -251,6 +252,8 @@ def _get_allocations(
             other_rank = trg_rank
         else:
             continue
+        if essentially_1d:
+            plan = [plan]
         for row in plan:
             if not essentially_1d:
                 b_h = row.totuple()[:2]
@@ -267,7 +270,7 @@ def _get_allocations(
                     dim=0,
                 )
             else:
-                mass = row[-1]
+                mass = row
                 b_h = (0, 0)
                 pos = rel_pos[ind][b_h]
                 new_cols = torch.tensor(
@@ -453,13 +456,13 @@ def equalize_cache_content(
         if not is_index_1d(overwrite_pos):
             raise ValueError("overwrite_pos must be essentially 1D, use `index_to_3d`")
         overwrite_pos = overwrite_pos[0, 0, :]
-    overwrite_pos = overwrite_pos.numpy()
+    overwrite_pos_np = overwrite_pos.numpy()
     # Create communication plan
     comm_plan = _get_communication_plan(
         num_devices,
         cache_length,
         input_pos,
-        overwrite_pos,
+        overwrite_pos_np,
     )
     # Rank needs to determine:
     # - Which slots to read and free up as source
@@ -470,9 +473,10 @@ def equalize_cache_content(
         num_devices,
         input_pos,
         cache_length,
-        overwrite_pos,
+        overwrite_pos_np,
         comm_plan,
         kv_cache.device,
+        overwrite_pos.dtype,
     )
 
     # Communication (each transfer can run in parallel)
