@@ -344,53 +344,58 @@ def _execute_communication(
     src_rank: int,
     trg_rank: int,
     source_allocations: Dict[int, torch.Tensor],
+    num_vecs: int,
     kv_cache: KVCacheWithBuffers,
     source_stats: Dict[int, int],
 ) -> Optional[WriteBackToBuffer]:
+    assert rank in (src_rank, trg_rank)
     essentially_1d = kv_cache.is_essentially_1d()
     result = None
-    if rank in (src_rank, trg_rank):
-        dtype = kv_cache.dtype
-        device = kv_cache.device
-        head_size = kv_cache.head_size
-        int_dtype = kv_cache.token_positions().dtype
-        num_vecs = source_allocations[src_rank].shape[0]
-        keys = torch.zeros((num_vecs, head_size), dtype=dtype, device=device)
-        values = torch.zeros((num_vecs, head_size), dtype=dtype, device=device)
-        token_pos = torch.zeros((num_vecs,), dtype=int_dtype, device=device)
-        if rank == src_rank:
-            # Collect and send to `trg_rank`
-            index = source_allocations[src_rank]
-            if not essentially_1d:
-                kv_cache.kv_buffers.get_vectors(
-                    index=index,
-                    out_key=keys,
-                    out_value=values,
-                )
-                token_pos.copy_(
-                    kv_cache.token_positions()[index[0], index[1], index[2]]
-                )
-            else:
-                kv_cache.kv_buffers.get_slots(
-                    positions=index_to_3d(index, kv_cache.batch_size, kv_cache.n_query_groups),
-                    out_key=keys,
-                    out_value=values,
-                )
-                token_pos.copy_(kv_cache.token_positions()[0, 0, index])
-                source_stats[trg_rank] = source_stats.get(trg_rank, 0) + index.shape[0]
-            callback = _send(src_rank, trg_rank, keys, values, token_pos)
-        else:
-            # Receive from `src_rank`
-            callback = _receive(src_rank, trg_rank, keys, values, token_pos)
-        do_write_back = callback()
-        # Write-back to`trg_rank` cache is delayed
-        if do_write_back and rank == trg_rank:
-            result = WriteBackToBuffer(
-                src_rank=src_rank,
-                keys=keys,
-                values=values,
-                token_pos=token_pos,
+    dtype = kv_cache.dtype
+    device = kv_cache.device
+    head_size = kv_cache.head_size
+    int_dtype = kv_cache.token_positions().dtype
+    kwargs = dict(dtype=dtype, device=device)
+    shape = (kv_cache.batch_size, kv_cache.n_query_groups)
+    sz = num_vecs * shape[0] * shape[1] if essentially_1d else num_vecs
+    keys = torch.zeros((sz, head_size), **kwargs)
+    values = torch.zeros((sz, head_size), **kwargs)
+    token_pos = torch.zeros((num_vecs,), dtype=int_dtype, device=device)
+
+    if rank == src_rank:
+        # Collect and send to `trg_rank`
+        index = source_allocations[trg_rank]
+        if not essentially_1d:
+            kv_cache.kv_buffers.get_vectors(
+                index=index,
+                out_key=keys,
+                out_value=values,
             )
+            token_pos.copy_(
+                kv_cache.token_positions()[index[0], index[1], index[2]]
+            )
+        else:
+            kv_cache.kv_buffers.get_slots(
+                positions=index_to_3d(index, *shape),
+                out_key=keys.view(*shape, num_vecs, head_size),
+                out_value=values.view(*shape, num_vecs, head_size),
+            )
+            token_pos.copy_(kv_cache.token_positions()[0, 0, index])
+        source_stats[trg_rank] = source_stats.get(trg_rank, 0) + sz
+        callback = _send(src_rank, trg_rank, keys, values, token_pos)
+    else:
+        # Receive from `src_rank`
+        callback = _receive(src_rank, trg_rank, keys, values, token_pos)
+    do_write_back = callback()
+
+    # Write-back to`trg_rank` cache is delayed
+    if do_write_back and rank == trg_rank:
+        result = WriteBackToBuffer(
+            src_rank=src_rank,
+            keys=keys,
+            values=values,
+            token_pos=token_pos,
+        )
     return result
 
 
@@ -447,6 +452,7 @@ def equalize_cache_content(
     if overwrite_pos.ndim != 3:
         raise ValueError("overwrite_pos must have 3 dimensions")
     cache_length = kv_cache.cache_length
+    head_size = kv_cache.head_size
     if kv_cache.current_length < cache_length:
         raise ValueError(
             f"kv_cache must be full (but current_length = {kv_cache.current_length} < {cache_length} = cache_length)"
@@ -488,38 +494,45 @@ def equalize_cache_content(
     results = []
     source_stats = dict()
     for (src_rank, trg_rank) in comm_plan.keys():
-        result = _execute_communication(
-            rank,
-            src_rank,
-            trg_rank,
-            source_allocations,
-            kv_cache,
-            source_stats,
-        )
-        if result is not None:
-            results.append(result)
+        if rank in (src_rank, trg_rank):
+            if rank == src_rank:
+                num_vecs = source_allocations[trg_rank].shape[0]
+            else:
+                num_vecs = target_allocations[src_rank].shape[0]
+            result = _execute_communication(
+                rank,
+                src_rank,
+                trg_rank,
+                source_allocations,
+                num_vecs,
+                kv_cache,
+                source_stats,
+            )
+            if result is not None:
+                results.append(result)
 
     # Write back to cache buffer
     target_stats = dict()
+    shape = (kv_cache.batch_size, kv_cache.n_query_groups)
     for result in results:
         src_rank = result.src_rank
         index = target_allocations[src_rank]
         if not essentially_1d:
             kv_cache.kv_buffers.set_vectors(
                 index=index,
-                key=result.key,
-                value=result.value,
+                key=result.keys,
+                value=result.values,
             )
         else:
             kv_cache.kv_buffers.set_slots(
-                positions=index_to_3d(index, kv_cache.batch_size, kv_cache.n_query_groups),
-                key=result.key,
-                value=result.value,
+                positions=index_to_3d(index, *shape),
+                key=result.keys.view(*shape, -1, head_size),
+                value=result.values.view(*shape, -1, head_size),
             )
         kv_cache.set_token_positions(
             index=index,
             tp_values=result.token_pos,
         )
-        target_stats[src_rank] = target_stats.get(src_rank, 0) + index.shape[0]
+        target_stats[src_rank] = target_stats.get(src_rank, 0) + result.keys.shape[0]
 
     return source_stats, target_stats

@@ -373,27 +373,15 @@ def reorder_buffer_given_extra_info(
     buffer: torch.Tensor,
     **kwargs,
 ) -> torch.Tensor:
-    """
-    Same as :func:`reorder_key_value`, but the permutation indices are
-    given here, not determined. If `sort_index` is given, `buffer` can also
-    be 3D.
-
-    """
-    is_3d = buffer.ndim == 3
-    assert is_3d or buffer.ndim == 4
+    assert buffer.ndim == 4
     sort_index = kwargs.get("sort_index")
     if sort_index is not None:
         if sort_index.ndim == 1:
-            buffer = buffer[:, :, sort_index] if is_3d else buffer[:, :, sort_index, :]
+            buffer = buffer[:, :, sort_index, :]
         else:
-            if is_3d:
-                index = sort_index
-            else:
-                index = expand_index(sort_index, buffer.shape[-1])
+            index = expand_index(sort_index, buffer.shape[-1])
             buffer = torch.gather(buffer, 2, index)
     else:
-        if is_3d:
-            raise ValueError("buffer must be 4D if sort_index is not given")
         index_gat = kwargs["index_gat"]
         index_scat = kwargs["index_scat"]
         buffer = _reorder(buffer, index_gat, index_scat)

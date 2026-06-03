@@ -43,7 +43,7 @@ def args_equalize_before_after() -> Tuple[str, List[tuple]]:
         for name in KVCacheFactory.supported_names()
         if name.endswith("-default") and not name.startswith("dense")
     ]
-    return product_with_devices(names[:1], "name, kwargs")
+    return product_with_devices(names[1:2], "name, kwargs")
 
 
 def _extract_content(
@@ -75,19 +75,23 @@ def _compare_contents(
 ) -> None:
     sorted_contents = []
     for content in contents:
+        token_pos = content["token_pos"]
+        if essentially_1d:
+            token_pos = index_to_3d(token_pos, *content["key"].shape[:2])
         sorted_key, sorted_value, extra_info = reorder_key_value(
             key=content["key"],
             value=content["value"],
-            token_positions=content["token_pos"],
-            input_pos=8,
-            q_len=4,
+            token_positions=token_pos,
+            input_pos=8,  # not used
+            q_len=4,  # not used
             sort_if_3d=True,
         )
-        sorted_token_pos = reorder_buffer_given_extra_info(
-            buffer=content["token_pos"], **extra_info,
-        )
         if essentially_1d:
-            sorted_token_pos = sorted_token_pos[0, 0, :]
+            sorted_token_pos = token_pos[0, 0, extra_info["sort_index"]]
+        else:
+            sorted_token_pos = reorder_buffer_given_extra_info(
+                buffer=token_pos, **extra_info,
+            )
         sorted_contents.append(
             {
                 "key": sorted_key,
@@ -96,6 +100,7 @@ def _compare_contents(
             }
         )
     for name in ("token_pos", "key", "value"):
+        print(name)
         torch.testing.assert_close(sorted_contents[0][name], sorted_contents[1][name])
 
 
@@ -264,7 +269,7 @@ def test_equalize_before_after(device, name, kwargs):
     for rank, (src, trg) in enumerate(zip(source_stats, target_stats)):
         num_sent = sum(src.values())
         num_recv = sum(trg.values())
-        print(f"{rank}: Sent {num_sent}, received {num_recv}")
+        print(f"{rank}: Sent {num_sent:3d}, received {num_recv:3d}")
 
     contents.append(_extract_content(kv_caches))
     _compare_contents(
