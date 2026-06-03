@@ -37,8 +37,7 @@ def _filter_dataset_case(
     task: str,
 ) -> bool:
     if dataset.endswith("_128k"):
-        # Not yet implemented!!
-        return True
+        return not (case.startswith("lr_1024") and task == "410")
     # Filter out error in results:
     if task == "380" and case.startswith("lr_") and dataset.startswith("helmet_trivia"):
         return False
@@ -155,11 +154,13 @@ def main(
 
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
-
     # dataset_size = "64k"
     dataset_size = "128k"
     is_baseline = False
     # is_baseline = True
+    # final_table = False
+    final_table = True
+
     if is_baseline:
         base_path = base_path / "baseline"
     datasets = [
@@ -200,7 +201,5 @@ if __name__ == "__main__":
             ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
         ]
     result_path = base_path / f"results_{dataset_size}.tex"
-    # final_table = False
-    final_table = True
 
     main(datasets, cases, result_path, final_table, multiple_tasks=not is_baseline)
