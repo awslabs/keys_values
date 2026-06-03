@@ -37,7 +37,7 @@ def _filter_dataset_case(
     task: str,
 ) -> bool:
     if dataset.endswith("_128k"):
-        return not (case.startswith("lr_1024") and task == "410")
+        return not (case.startswith("lr_gpu4_cs1024") and task == "410")
     # Filter out error in results:
     if task == "380" and case.startswith("lr_") and dataset.startswith("helmet_trivia"):
         return False
