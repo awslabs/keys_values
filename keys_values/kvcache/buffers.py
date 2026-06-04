@@ -28,9 +28,9 @@ from keys_values.utils import (
 )
 
 
-def check_array_index(index: torch.Tensor, max_vals: Tuple[int, int, int]):
-    if index.ndim != 2 or index.shape[1] == 0 or index.shape[0] != 3:
-        raise ValueError(f"index.shape = {index.shape}, must be (3, num), num > 0")
+def check_array_index(index: torch.Tensor, max_vals: Tuple[int, ...]):
+    if index.ndim != 2 or index.shape[1] == 0 or index.shape[0] != len(max_vals):
+        raise ValueError(f"index.shape = {index.shape}, must be ({len(max_vals)}, num), num > 0")
     for i, max_val in enumerate(max_vals):
         if not (0 <= index[i] < max_val).all().item():
             raise ValueError(f"index[{i}] entries must be in [0, {max_val})")

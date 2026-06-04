@@ -32,6 +32,7 @@ from keys_values.kvcache.buffers import (
     KVCacheBuffers,
     KVCacheBuffersParams,
     positions_wrap_around,
+    check_array_index,
 )
 from keys_values.config import Config
 from keys_values.utils import bits_for_torch_dtype, bitsize_of, encode
@@ -537,3 +538,11 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
 
     def clone(self) -> KVCache:
         return SmartInitialLastRecentlyInsertedKVCache(**self._base_kwargs_for_clone())
+
+    def set_token_positions(
+        self,
+        index: torch.Tensor,
+        tp_values: torch.Tensor,
+    ):
+        check_array_index(index, (self.batch_size, self.cache_length))
+        self.token_pos[index[0], index[1]] = tp_values.to(dtype=self.token_pos.dtype)

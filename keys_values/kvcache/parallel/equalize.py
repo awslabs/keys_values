@@ -42,7 +42,6 @@ def _get_q_len_for_rank(
     return q_len_for_rank
 
 
-# HIER
 def _get_communication_plan(
     num_devices: int,
     cache_length: int,
@@ -53,36 +52,45 @@ def _get_communication_plan(
     """
     The communication plan maps `(from_device, to_device)` to a matrix whose
     rows are `[b, h, num_vecs]`, meaning that for `(b, h)`, `num_vecs` KV
-    vectors are to be transferred.
-    If the KV cache is essentially 1D, values are just `num_vecs`.
+
+    If the KV cache is essentially 1D (`active_dimensions == ()`), matrices are
+    single rows `[0, 0, num_vecs]`. But in other cases of
+    `active_dimensions != (0, 1)`, we "flatten" content into the form above.
 
     Args:
         num_devices: Total number of ranks
         cache_length: Length of cache on each rank
         input_pos: Token position where new content starts
         overwrite_pos: See :func:`equalize_cache_content`
+        active_dimensions: Property of KV cache logic
 
     Returns:
         Communication plan
 
     """
-    assert overwrite_pos.ndim in (1, 3)
-    essentially_1d = overwrite_pos.ndim == 1
+    assert overwrite_pos.ndim == 3
+    essentially_1d = active_dimensions == ()
     q_len = overwrite_pos.shape[-1]
     int_dtype = overwrite_pos.dtype
     q_len_for_rank = _get_q_len_for_rank(num_devices, q_len, input_pos, int_dtype)
     # Determine the Delta numbers
-    shape = (1,) * overwrite_pos.ndim
+    if essentially_1d:
+        shape = ()
+        overwrite_pos = overwrite_pos[0, 0, :]
+    else:
+        shape = (1, 1)
     num_per_rank = (
         (overwrite_pos // cache_length).astype(int_dtype)[..., np.newaxis]
-        == np.arange(num_devices, dtype=int_dtype).reshape(*shape, -1)
+        == np.arange(num_devices, dtype=int_dtype).reshape(*shape, 1, -1)
     ).sum(axis=-2)
-    delta_per_rank = num_per_rank - q_len_for_rank.reshape(*shape[:-1], -1)
+    delta_per_rank = num_per_rank - q_len_for_rank.reshape(*shape, -1)
     if not np.all(delta_per_rank.sum(axis=-1) == 0):
         raise ValueError(
-            f"delta_per_rank must sum to 0 for each (b, h), but got:\n{delta_per_rank}:\n{delta_per_rank}"
+            f"delta_per_rank must sum to 0 for each (b, h), but got:\n{delta_per_rank}"
         )
-    # Shapes: (bs, n_kv, num_devices)
+    # Shapes: (bs, n_kv, num_devices) or (num_devices,)
+    # Note: If `len(active_dimensions) == 1`, we do redundant work along the
+    # inactive dimension, but this does not matter.
     ranks = np.argsort(delta_per_rank, axis=-1)
     sorted_delta = np.take_along_axis(delta_per_rank, ranks, axis=-1)
 
@@ -91,15 +99,13 @@ def _get_communication_plan(
     while not np.all(sorted_delta == 0):
         # (bs, n_kv, 1) or (1,):
         smallest = sorted_delta[..., 0:1].copy()
-        largest = sorted_delta[..., (num_devices - 1) : num_devices].copy()
+        largest = sorted_delta[..., -1:].copy()
         min_vals = np.minimum(largest, -smallest)
         args1 = np.concatenate(
-            (ranks[..., 0:1], ranks[..., (num_devices - 1) : num_devices]),
-            axis=-1,
+            (ranks[..., 0:1], ranks[..., -1:]), axis=-1,
         )
         args2 = np.concatenate(
-            (ranks[..., (num_devices - 1) : num_devices], ranks[..., 0:1]),
-            axis=-1,
+            (ranks[..., -1:], ranks[..., 0:1]), axis=-1,
         )
         extra = np.concatenate(
             (np.where(largest >= -smallest, args1, args2), min_vals),
@@ -114,7 +120,7 @@ def _get_communication_plan(
         if num_devices > 2:
             sorted_delta = sorted_delta[..., 1:(-1)]
             ranks_smallest = ranks[..., 0:1].copy()
-            ranks_largest = ranks[..., (num_devices - 1) : num_devices].copy()
+            ranks_largest = ranks[..., -1:].copy()
             ranks = ranks[..., 1:(-1)]
             new_pos_largest = np.searchsorted(sorted_delta, largest)
             sorted_delta = np.insert(
@@ -171,7 +177,7 @@ def _get_communication_plan(
         )
         df = df[df["mass"] != 0]
         return {
-            (from_, to_): group["mass"].item()
+            (from_, to_): np.array([0, 0, group["mass"].item()]).reshape(1, -1)
             for (from_, to_), group in df.groupby(["from", "to"])
         }
 
@@ -185,6 +191,7 @@ def _get_allocations(
     comm_plan: Dict[Tuple[int, int], Union[np.ndarray, int]],
     device: torch.device,
     dtype: torch.dtype,
+    active_dimensions: Tuple[int, ...],
 ) -> Tuple[
     Dict[int, torch.Tensor], Dict[int, torch.Tensor]
 ]:
@@ -205,21 +212,22 @@ def _get_allocations(
         cache_length: Length of cache on each rank
         overwrite_pos: See :func:`equalize_cache_content`
         comm_plan: Communication plan
+        active_dimensions: Property of KV cache logic
 
     Returns:
         `source_allocations, target_allocations`
 
     """
     int_dtype = overwrite_pos.dtype
-    essentially_1d = overwrite_pos.ndim == 1
+    essentially_1d = active_dimensions == ()
     is_for_me = (overwrite_pos // cache_length) == rank
     if not essentially_1d:
         batch_size, n_query_groups, q_len = overwrite_pos.shape
     else:
         # In this case, the dictionaries have a single entry with key (0, 0)
         batch_size, n_query_groups, q_len = 1, 1, overwrite_pos.shape[-1]
-        overwrite_pos = overwrite_pos.reshape(1, 1, -1)
-        is_for_me = is_for_me.reshape(1, 1, -1)
+        overwrite_pos = overwrite_pos[0, 0, :].reshape(1, 1, -1)
+        is_for_me = is_for_me[0, 0, :].reshape(1, 1, -1)
     # Lists of size two: First target, then source
     positions = [
         {
@@ -254,29 +262,20 @@ def _get_allocations(
             other_rank = trg_rank
         else:
             continue
-        if essentially_1d:
-            plan = [plan]
         for row in plan:
+            b_h = (row[0], row[1])
+            mass = row[-1]
+            pos = rel_pos[ind][b_h]
+            new_cols = torch.tensor(
+                positions[ind][b_h][pos: (pos + mass)], **kwargs,
+            )
             if not essentially_1d:
-                b_h = row.totuple()[:2]
-                mass = row[-1]
-                pos = rel_pos[ind][b_h]
-                new_row = torch.tensor(
-                    positions[ind][b_h][pos : (pos + mass)], **kwargs,
-                )
                 new_cols = torch.cat(
                     (
                         torch.tensor(b_h, **kwargs).view(-1, 1).expand(-1, mass),
-                        new_row.view(1, -1),
+                        new_cols.view(1, -1),
                     ),
                     dim=0,
-                )
-            else:
-                mass = row
-                b_h = (0, 0)
-                pos = rel_pos[ind][b_h]
-                new_cols = torch.tensor(
-                    positions[ind][b_h][pos : (pos + mass)], **kwargs,
                 )
             if other_rank in allocations[ind]:
                 allocations[ind][other_rank] = torch.cat(
@@ -350,8 +349,15 @@ def _execute_communication(
     kv_cache: KVCacheWithBuffers,
     source_stats: Dict[int, int],
 ) -> Optional[WriteBackToBuffer]:
+    """
+    Note: If `len(active_dimensions) == 1`, one dimension in `token_pos` has
+    stride 0, we could exploit this to transmit less data. But this is dwarfed
+    by `keys, values`, so we don't bother here.
+
+    """
     assert rank in (src_rank, trg_rank)
-    essentially_1d = kv_cache.active_dimensions() == ()
+    active_dimensions = kv_cache.active_dimensions()
+    essentially_1d = active_dimensions == ()
     result = None
     dtype = kv_cache.dtype
     device = kv_cache.device
@@ -470,7 +476,6 @@ def equalize_cache_content(
         )
     overwrite_pos_np = overwrite_pos.numpy()
     # Create communication plan
-    # HIER!!
     comm_plan = _get_communication_plan(
         num_devices,
         cache_length,
@@ -491,6 +496,7 @@ def equalize_cache_content(
         comm_plan,
         kv_cache.device,
         overwrite_pos.dtype,
+        active_dimensions,
     )
 
     # Communication (each transfer can run in parallel)
@@ -537,10 +543,27 @@ def equalize_cache_content(
                 key=result.keys.view(*shape, -1, head_size),
                 value=result.values.view(*shape, -1, head_size),
             )
-        kv_cache.set_token_positions(
-            index=index,
-            tp_values=result.token_pos,
-        )
+        if len(active_dimensions) == 1:
+            # We transmitted `token_pos` as if active dimensions were (0, 1).
+            adim = 1 - active_dimensions[0]
+            assert adim in (0, 1)  # Sanity check
+            rel_ind = index[1 - adim] == 0
+            token_pos_2d = result.token_pos[rel_ind]
+            if token_pos_2d.numel() * shape[adim] != result.token_pos.numel():
+                raise ValueError(
+                    f"token_pos received not compatible with active_dimensions = {active_dimensions}:\n" + str(
+                        result.token_pos.view(*shape, -1))
+                )
+            index_2d = index[rel_ind, [adim, 2]]
+            kv_cache.set_token_positions(
+                index=index_2d,
+                tp_values=token_pos_2d,
+            )
+        else:
+            kv_cache.set_token_positions(
+                index=index,
+                tp_values=result.token_pos,
+            )
         target_stats[src_rank] = target_stats.get(src_rank, 0) + result.keys.shape[0]
 
     return source_stats, target_stats

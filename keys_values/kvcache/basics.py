@@ -299,14 +299,13 @@ class KVCacheWithBuffers(DefaultKVCache):
         Specialized method, used in conjunction with `kv_buffers.set_vectors`
         to modify cache content on a per-vector basis.
 
-        There are two cases:
-        - If cache logic is essentially 1D, then `index.ndim == 1`, and we set
-            `token_positions[index[i]] = tp_values[i]`
-        - If cache logic is 3D, then `index.ndim == 3`, and we set
-            `token_positions[index[0, i], index[1, i], index[2, i]] = tp_values[i]`.
+        Let `nact = len(active_dimensions)`. `index` has shape
+        `(nact + 1, num)`, `tp_values` has shape `(num,)`. We set
+        `token_positions[{index[k, i]}, index[nact, i]] = tp_values[i]`,
+        where `k in active_dimensions`.
 
         Args:
-            index: Array index, `(3, num)` or `(num,)`
+            index: Array index, `(nact + 1, num)`
             tp_values: Values to write, `(num,)`
 
         """
@@ -750,6 +749,6 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         index: torch.Tensor,
         tp_values: torch.Tensor,
     ):
-        if index.ndim != 1:
-            raise ValueError(f"index.ndim must be 1, got {index.ndim}")
-        self.token_pos[index] = tp_values.to(dtype=self.token_pos.dtype)
+        if index.ndim > 2 or (index.ndim == 2 and index.shape[0] != 1):
+            raise ValueError(f"index must be vector, got {index.shape}")
+        self.token_pos[index.flatten()] = tp_values.to(dtype=self.token_pos.dtype)
