@@ -470,7 +470,7 @@ def equalize_cache_content(
     if not is_index_compatible(overwrite_pos, active_dimensions):
         raise ValueError(
             "overwrite_pos not compatible with kv_cache.active_dimensions:\n"
-            f"stride = {overwrite_pos.stride()}\n
+            f"stride = {overwrite_pos.stride()}\n"
             f"shape = {overwrite_pos.shape}\n"
             f"active_dimensions = {active_dimensions}"
         )

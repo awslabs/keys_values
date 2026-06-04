@@ -25,6 +25,7 @@ from keys_values.kvcache.attn_weights import AttnWeightsKVCache
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.kvcache.factory import KVCacheFactory
+from keys_values.kvcache.smart_lastrec import SmartInitialLastRecentlyInsertedKVCache
 from keys_values.kvcache.parallel.equalize import equalize_cache_content
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
@@ -140,7 +141,8 @@ def test_equalize_before_after(device, name, kwargs):
     kv_caches = [
         create_kv_cache(name, params, **kwargs) for _ in range(num_devices)
     ]
-    essentially_1d = kv_caches[0].active_dimensions() == ()
+    active_dimensions = kv_caches[0].active_dimensions()
+    essentially_1d = active_dimensions == ()
 
     q_len = randint_torch(virtual_length // 8, (virtual_length * 3) // 4)
     input_pos = randint_torch(virtual_length, virtual_length * 2)
@@ -173,23 +175,27 @@ def test_equalize_before_after(device, name, kwargs):
                 index=torch.arange(cache_length, **index_kwargs),
                 tp_values=all_token_positions[0, 0, sel_ind],
             )
-        else:
-            assert isinstance(kv_cache, AttnWeightsKVCache), f"type(kv_cache) = {type(kv_cache)}, must be subclass of AttnWeightsKVCache"
+        elif isinstance(kv_cache, AttnWeightsKVCache):
             kv_cache.token_pos.copy_(all_token_positions[:, :, sel_ind])
+        elif isinstance(kv_cache, SmartInitialLastRecentlyInsertedKVCache):
+            kv_cache.token_pos.copy_(all_token_positions[:, 0, sel_ind])
+        else:
+            raise NotImplementedError(f"type(kv_cache) = {type(kv_cache)} not supported")
     # Content before equalization
     contents = [_extract_content(kv_caches)]
 
     # Equalization (parallel computation is mocked, see above)
     shape = (params.max_batch_size, params.n_query_groups, q_len)
-    if essentially_1d:
-        overwrite_pos = index_to_3d(
-            random_choices(shape[-1:], size_range=virtual_length, device=device),
-            *shape[:-1],
-        )
-    else:
-        overwrite_pos = random_choices(
-            shape, size_range=virtual_length, device=device,
-        )
+    inner_shape = tuple(shape[i] for i in active_dimensions + (2,))
+    _inner = random_choices(inner_shape, size_range=virtual_length, device=device)
+    view_dims = list(shape)
+    exp_dims = list(shape[:-1]) + [-1]
+    for i in range(2):
+        if i in active_dimensions:
+            exp_dims[i] = -1
+        else:
+            view_dims[i] = 1
+    overwrite_pos = _inner.view(*view_dims).expand(*exp_dims)
 
     # Mock proceeds in two phases. First phase 1 (send)
     source_stats = []
