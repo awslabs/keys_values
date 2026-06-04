@@ -49,7 +49,7 @@ def args_equalize_before_after() -> Tuple[str, List[tuple]]:
 def _extract_content(
     kv_caches: List[KVCacheWithBuffers],
 ) -> Dict[str, torch.Tensor]:
-    essentially_1d = kv_caches[0].is_essentially_1d()
+    essentially_1d = kv_caches[0].active_dimensions() == ()
     parts = {
         "key": [],
         "value": [],
@@ -140,7 +140,7 @@ def test_equalize_before_after(device, name, kwargs):
     kv_caches = [
         create_kv_cache(name, params, **kwargs) for _ in range(num_devices)
     ]
-    essentially_1d = kv_caches[0].is_essentially_1d()
+    essentially_1d = kv_caches[0].active_dimensions() == ()
 
     q_len = randint_torch(virtual_length // 8, (virtual_length * 3) // 4)
     input_pos = randint_torch(virtual_length, virtual_length * 2)

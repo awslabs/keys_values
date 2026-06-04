@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 
 from keys_values.kvcache.basics import KVCacheWithBuffers
-from keys_values.utils import is_index_1d, index_to_3d
+from keys_values.utils import index_to_3d, is_index_compatible
 
 
 def _get_q_len_for_rank(
@@ -42,11 +42,13 @@ def _get_q_len_for_rank(
     return q_len_for_rank
 
 
+# HIER
 def _get_communication_plan(
     num_devices: int,
     cache_length: int,
     input_pos: int,
     overwrite_pos: np.ndarray,
+    active_dimensions: Tuple[int, ...],
 ) -> Dict[Tuple[int, int], Union[np.ndarray, int]]:
     """
     The communication plan maps `(from_device, to_device)` to a matrix whose
@@ -349,7 +351,7 @@ def _execute_communication(
     source_stats: Dict[int, int],
 ) -> Optional[WriteBackToBuffer]:
     assert rank in (src_rank, trg_rank)
-    essentially_1d = kv_cache.is_essentially_1d()
+    essentially_1d = kv_cache.active_dimensions() == ()
     result = None
     dtype = kv_cache.dtype
     device = kv_cache.device
@@ -432,8 +434,8 @@ def equalize_cache_content(
     A position `p` is assigned to rank `p // cache_length`, referring to local
     position `p % cache_length` there.
 
-    If `kv_cache.is_essentially_1d() == True`, `overwrite_pos` must be
-    essentially 1D. Computations are much simplified in this case.
+    `overwrite_pos` must be compatible with `kv_cache.active_dimensions()`. With
+    less active dimensions, transfers are more constrained.
 
     Args:
         rank: Rank of device
@@ -457,18 +459,24 @@ def equalize_cache_content(
         raise ValueError(
             f"kv_cache must be full (but current_length = {kv_cache.current_length} < {cache_length} = cache_length)"
         )
-    essentially_1d = kv_cache.is_essentially_1d()
-    if essentially_1d:
-        if not is_index_1d(overwrite_pos):
-            raise ValueError("overwrite_pos must be essentially 1D, use `index_to_3d`")
-        overwrite_pos = overwrite_pos[0, 0, :]
+    active_dimensions = kv_cache.active_dimensions()
+    essentially_1d = active_dimensions == ()
+    if not is_index_compatible(overwrite_pos, active_dimensions):
+        raise ValueError(
+            "overwrite_pos not compatible with kv_cache.active_dimensions:\n"
+            f"stride = {overwrite_pos.stride()}\n
+            f"shape = {overwrite_pos.shape}\n"
+            f"active_dimensions = {active_dimensions}"
+        )
     overwrite_pos_np = overwrite_pos.numpy()
     # Create communication plan
+    # HIER!!
     comm_plan = _get_communication_plan(
         num_devices,
         cache_length,
         input_pos,
         overwrite_pos_np,
+        active_dimensions,
     )
     # Rank needs to determine:
     # - Which slots to read and free up as source

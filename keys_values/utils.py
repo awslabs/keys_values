@@ -98,6 +98,21 @@ def is_index_1d(index: torch.Tensor) -> bool:
     )
 
 
+def is_index_compatible(
+    index: torch.Tensor,
+    active_dimensions: Tuple[int, ...],
+) -> bool:
+    ndim = index.ndim
+    assert all(0 <= x < ndim - 1 for x in active_dimensions)
+    stride = index.stride()
+    shape = tuple(index.shape)
+    return stride[-1] == 1 and all(
+        s == 0 or l == 1
+        for i, (s, l) in enumerate(zip(stride[:-1], shape[:-1]))
+        if i not in active_dimensions
+    )
+
+
 def need_repeat_interleave(n_head: int, n_query_groups: int) -> bool:
     return n_query_groups < n_head and FUSED_SDPA_DOES_NOT_SUPPORT_ENABLE_GQA
 

@@ -410,9 +410,8 @@ class DenseKVCache(KVCacheWithBuffers):
                 max_prefill_length=self.max_prefill_length,
             )
 
-    @staticmethod
-    def is_essentially_1d() -> bool:
-        return True
+    def active_dimensions(self) -> Tuple[int, ...]:
+        return ()
 
     def token_positions(self) -> torch.Tensor:
         device = torch.get_default_device() if self.device is None else self.device
@@ -688,9 +687,8 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 init_grace_tokens=self.init_grace_tokens,
             )
 
-    @staticmethod
-    def is_essentially_1d() -> bool:
-        return True
+    def active_dimensions(self) -> Tuple[int, ...]:
+        return ()
 
     def token_positions(self) -> torch.Tensor:
         result = index_to_3d(

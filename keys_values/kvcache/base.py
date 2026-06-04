@@ -290,23 +290,33 @@ class KVCache(torch.nn.Module):
             dtype=self.dtype,
         )
 
-    @staticmethod
-    def is_essentially_1d() -> bool:
+    def active_dimensions(self) -> Tuple[int, ...]:
         """
-        A cache policy for which a token is either represented in the
-        cache for all `(b, h)`, batch dimensions and heads, or for none,
-        is called "essentially 1D". This property simplifies certain
-        computations.
+        Key and value vectors are indexed by `(b, h, i)`, where `i` is
+        associated with the token dimension. A dimension of `(b, h)` is called
+        active if the cache policy can make different decisions along that
+        dimension: KV vectors are stored for some values, but not for others.
+        Note that `i` is always active and is not covered here.
+        Examples:
+
+        * :class:`LastRecentlyInsertedKVCache`: A token either has KV entries
+            in the cache for all `(b, h)`, or for none. Active dimensions:
+            `()`
+        * :class:`SmartInitialLastRecentlyInsertedKVCache`: The policy is
+            sensitive to token position and batch position, but not to query
+            group. Active dimensions: `(0,)`
+        * :class:`AttnWeightsKVCache`: The policy is sensitive to all
+            dimensions. Active dimensions: `(0, 1)`
 
         Returns:
-            Is the cache policy essentially 1D?
+            Tuple of active dimensions
 
         """
         raise NotImplementedError()
 
     def token_positions(self) -> torch.Tensor:
         """
-        If `is_essentially_1d()` is `True`, make sure to return an index
+        If `active_dimensions == ()`, make sure to return an index
         obtained as
         `index_to_3d(tp_1d, batch_size, n_query_groups)` with
         :func:`keys_values.utils.index_to_3d` in this case, so that the

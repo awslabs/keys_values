@@ -893,9 +893,8 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         for scores, _ in self._score_buffers():
             scores.fill_(0.0)
 
-    @staticmethod
-    def is_essentially_1d() -> bool:
-        return False
+    def active_dimensions(self) -> Tuple[int, ...]:
+        return (0, 1)
 
     def token_positions(self) -> torch.Tensor:
         if self.current_length is None:

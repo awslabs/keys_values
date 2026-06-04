@@ -473,9 +473,8 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 init_length=self.init_length,
             )
 
-    @staticmethod
-    def is_essentially_1d() -> bool:
-        return False
+    def active_dimensions(self) -> Tuple[int, ...]:
+        return (0,)
 
     def token_positions(self) -> torch.Tensor:
         return (
