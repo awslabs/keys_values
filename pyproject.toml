@@ -29,6 +29,7 @@ dependencies = [
 
 [project.optional-dependencies]
 cuda = ["flashinfer-python"]
+trl = ["trl>=1.0.0"]
 
 [tool.setuptools.packages.find]
 include = [
