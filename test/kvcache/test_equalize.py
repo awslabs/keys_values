@@ -119,18 +119,22 @@ def test_equalize_before_after(device, name, kwargs):
     torch.random.manual_seed(seed)
     vocab_size = 128
     dtype = torch.bfloat16
-    num_devices = 8
     index_kwargs = dict(dtype=torch.int64, device=device)
 
+    num_devices = 8
+    batch_size = 3
+    n_query_groups = 4
+    cache_length = 32
+    head_size = 8
+    n_head = 4
     params = KVCacheParams(
-        max_batch_size=3,
-        n_query_groups=4,
-        cache_length=32,
-        head_size=8,
-        n_head=4,
+        max_batch_size=batch_size,
+        n_query_groups=n_query_groups,
+        cache_length=cache_length,
+        head_size=head_size,
+        n_head=n_head,
         dtype=dtype,
     )
-    cache_length = params.cache_length
     virtual_length = cache_length * num_devices
     if name.startswith("smart-lastrec"):
         kwargs = {**kwargs, **cache_kwargs_for_smart_lastrec()}
@@ -154,8 +158,8 @@ def test_equalize_before_after(device, name, kwargs):
         start = end
     # Set token_positions
     all_token_positions = random_token_positions(
-        batch_size=params.max_batch_size,
-        n_query_groups=params.n_query_groups,
+        batch_size=batch_size,
+        n_query_groups=n_query_groups,
         cache_length=virtual_length,
         input_pos=input_pos,
         essentially_1d=essentially_1d,
@@ -181,7 +185,7 @@ def test_equalize_before_after(device, name, kwargs):
     contents = [_extract_content(kv_caches)]
 
     # Equalization (parallel computation is mocked, see above)
-    shape = (params.max_batch_size, params.n_query_groups, q_len)
+    shape = (batch_size, n_query_groups, q_len)
     inner_shape = tuple(shape[i] for i in active_dimensions + (2,))
     _inner = random_choices(inner_shape, size_range=virtual_length, device=device)
     view_dims = list(shape)

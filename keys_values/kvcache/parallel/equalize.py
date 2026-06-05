@@ -13,9 +13,8 @@
 # limitations under the License.
 from dataclasses import dataclass
 from itertools import islice
-from typing import Dict, Tuple, Optional, Union, Callable
+from typing import Dict, Tuple, Optional, Callable
 
-import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
@@ -28,11 +27,11 @@ def _get_q_len_for_rank(
     num_devices: int,
     q_len: int,
     input_pos: int,
-    int_dtype: np.dtype,
-) -> np.ndarray:
+    **kwargs,
+) ->torch.Tensor:
     min_ql = q_len // num_devices
     num_plus1 = q_len - min_ql * num_devices
-    q_len_for_rank = np.full((num_devices,), min_ql, dtype=int_dtype)
+    q_len_for_rank = torch.full((num_devices,), min_ql, **kwargs)
     if num_plus1 > 0:
         start = input_pos % num_devices
         end = min(start + num_plus1, num_devices)
@@ -46,9 +45,9 @@ def _get_communication_plan(
     num_devices: int,
     cache_length: int,
     input_pos: int,
-    overwrite_pos: np.ndarray,
+    overwrite_pos: torch.Tensor,
     active_dimensions: Tuple[int, ...],
-) -> Dict[Tuple[int, int], Union[np.ndarray, int]]:
+) -> Dict[Tuple[int, int], torch.Tensor]:
     """
     The communication plan maps `(from_device, to_device)` to a matrix whose
     rows are `[b, h, num_vecs]`, meaning that for `(b, h)`, `num_vecs` KV
@@ -71,8 +70,8 @@ def _get_communication_plan(
     assert overwrite_pos.ndim == 3
     essentially_1d = active_dimensions == ()
     q_len = overwrite_pos.shape[-1]
-    int_dtype = overwrite_pos.dtype
-    q_len_for_rank = _get_q_len_for_rank(num_devices, q_len, input_pos, int_dtype)
+    kwargs = dict(dtype=overwrite_pos.dtype, device=overwrite_pos.device)
+    q_len_for_rank = _get_q_len_for_rank(num_devices, q_len, input_pos, **kwargs)
     # Determine the Delta numbers
     if essentially_1d:
         shape = ()
@@ -80,11 +79,11 @@ def _get_communication_plan(
     else:
         shape = (1, 1)
     num_per_rank = (
-        (overwrite_pos // cache_length).astype(int_dtype)[..., np.newaxis]
-        == np.arange(num_devices, dtype=int_dtype).reshape(*shape, 1, -1)
-    ).sum(axis=-2)
-    delta_per_rank = num_per_rank - q_len_for_rank.reshape(*shape, -1)
-    if not np.all(delta_per_rank.sum(axis=-1) == 0):
+        (overwrite_pos // cache_length).unsqueeze(-1)
+        == torch.arange(num_devices, **kwargs).view(*shape, 1, -1)
+    ).sum(dim=-2)
+    delta_per_rank = num_per_rank - q_len_for_rank.view(*shape, -1)
+    if not torch.all(delta_per_rank.sum(dim=-1) == 0).item():
         raise ValueError(
             f"delta_per_rank must sum to 0 for each (b, h), but got:\n{delta_per_rank}"
         )
@@ -93,32 +92,32 @@ def _get_communication_plan(
     # inactive dimension, but this does not matter.
     # Determine the communications
     communications = None
-    while not np.all(delta_per_rank == 0):
+    while not torch.all(delta_per_rank == 0).item():
         # (bs, n_kv, 1) or (1,):
-        ranks_smallest = np.argmin(delta_per_rank, axis=-1, keepdims=True)
-        ranks_largest = np.argmax(delta_per_rank, axis=-1, keepdims=True)
-        smallest = np.take_along_axis(delta_per_rank, ranks_smallest, axis=-1)
-        largest = np.take_along_axis(delta_per_rank, ranks_largest, axis=-1)
-        min_vals = np.minimum(largest, -smallest)
-        args1 = np.concatenate(
-            (ranks_smallest, ranks_largest), axis=-1,
+        ranks_smallest = torch.argmin(delta_per_rank, dim=-1, keepdim=True)
+        ranks_largest = torch.argmax(delta_per_rank, dim=-1, keepdim=True)
+        smallest = delta_per_rank.gather(-1, ranks_smallest)
+        largest = delta_per_rank.gather(-1, ranks_largest)
+        min_vals = torch.minimum(largest, -smallest)
+        args1 = torch.cat(
+            (ranks_smallest, ranks_largest), dim=-1,
         )
-        args2 = np.concatenate(
-            (ranks_largest, ranks_smallest), axis=-1,
+        args2 = torch.cat(
+            (ranks_largest, ranks_smallest), dim=-1,
         )
         # (bs, n_kv, 3, 1) or (3, 1):
-        extra = np.concatenate(
-            (np.where(largest >= -smallest, args1, args2), min_vals),
-            axis=-1,
-        )[..., np.newaxis]
+        extra = torch.cat(
+            (torch.where(largest >= -smallest, args1, args2), min_vals),
+            dim=-1,
+        ).unsqueeze(-1)
         if communications is None:
             communications = extra
         else:
-            communications = np.concatenate((communications, extra), axis=-1)
+            communications = torch.cat((communications, extra), dim=-1)
         largest -= min_vals
         smallest += min_vals
-        np.put_along_axis(delta_per_rank, ranks_smallest, smallest, axis=-1)
-        np.put_along_axis(delta_per_rank, ranks_largest, largest, axis=-1)
+        delta_per_rank.scatter_(-1, ranks_smallest, smallest)
+        delta_per_rank.scatter_(-1, ranks_largest, largest)
 
     # `communications` is `(bs, n_kv, 3, num_rounds)` or `(3, num_rounds)`
     # Transform into plan: Needs groupby and filter out zero mass items
@@ -126,35 +125,37 @@ def _get_communication_plan(
         return dict()
     if not essentially_1d:
         batch_size, n_query_groups, _, num_rounds = communications.shape
-        b_idx, h_idx = np.meshgrid(
-            np.arange(batch_size), np.arange(n_query_groups), indexing="ij"
+        b_idx, h_idx = torch.meshgrid(
+            torch.arange(batch_size, **kwargs),
+            torch.arange(n_query_groups, **kwargs),
+            indexing="ij",
         )
         shape = (batch_size, n_query_groups, num_rounds)
         df = pd.DataFrame(
             {
-                "b": np.broadcast_to(b_idx[..., np.newaxis], shape).ravel(),
-                "h": np.broadcast_to(h_idx[..., np.newaxis], shape).ravel(),
-                "from": communications[:, :, 0, :].ravel(),
-                "to": communications[:, :, 1, :].ravel(),
-                "mass": communications[:, :, 2, :].ravel(),
+                "b": b_idx.unsqueeze(-1).expand(*shape).flatten().numpy(),
+                "h": h_idx.unsqueeze(-1).expand(*shape).flatten().numpy(),
+                "from": communications[:, :, 0, :].flatten().numpy(),
+                "to": communications[:, :, 1, :].flatten().numpy(),
+                "mass": communications[:, :, 2, :].flatten().numpy(),
             }
         )
         df = df[df["mass"] != 0]
         return {
-            (from_, to_): group[["b", "h", "mass"]].to_numpy()
+            (from_, to_): torch.tensor(group[["b", "h", "mass"]].to_numpy(), **kwargs)
             for (from_, to_), group in df.groupby(["from", "to"])
         }
     else:
         df = pd.DataFrame(
             {
-                "from": communications[0].ravel(),
-                "to": communications[1].ravel(),
-                "mass": communications[2].ravel(),
+                "from": communications[0].flatten().numpy(),
+                "to": communications[1].flatten().numpy(),
+                "mass": communications[2].flatten().numpy(),
             }
         )
         df = df[df["mass"] != 0]
         return {
-            (from_, to_): np.array([0, 0, group["mass"].item()]).reshape(1, -1)
+            (from_, to_): torch.tensor([0, 0, group["mass"].item()], **kwargs).unsqueeze(0)
             for (from_, to_), group in df.groupby(["from", "to"])
         }
 
@@ -164,10 +165,8 @@ def _get_allocations(
     num_devices: int,
     input_pos: int,
     cache_length: int,
-    overwrite_pos: np.ndarray,
-    comm_plan: Dict[Tuple[int, int], Union[np.ndarray, int]],
-    device: torch.device,
-    dtype: torch.dtype,
+    overwrite_pos: torch.Tensor,
+    comm_plan: Dict[Tuple[int, int], torch.Tensor],
     active_dimensions: Tuple[int, ...],
 ) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
     """
@@ -193,7 +192,7 @@ def _get_allocations(
         `source_allocations, target_allocations`
 
     """
-    int_dtype = overwrite_pos.dtype
+    kwargs = dict(dtype=overwrite_pos.dtype, device=overwrite_pos.device)
     essentially_1d = active_dimensions == ()
     is_for_me = (overwrite_pos // cache_length) == rank
     if not essentially_1d:
@@ -209,15 +208,15 @@ def _get_allocations(
             for h in range(n_query_groups)
         }
     ]
-    q_len_for_me = _get_q_len_for_rank(num_devices, q_len, input_pos, int_dtype)[rank]
+    q_len_for_me = _get_q_len_for_rank(num_devices, q_len, input_pos, **kwargs)[rank]
     _other_pos = dict()
     for b_h, ow_pos in positions[0].items():
         num = q_len_for_me - ow_pos.shape[0]
         if num > 0:
             ow_set = set(ow_pos.tolist())
-            _other_pos[b_h] = np.array(
+            _other_pos[b_h] = torch.tensor(
                 list(islice((x for x in range(cache_length) if x not in ow_set), num)),
-                dtype=int_dtype,
+                **kwargs,
             )
     positions.append(_other_pos)
     rel_pos = [
@@ -225,7 +224,6 @@ def _get_allocations(
         for _ in range(2)
     ]
     allocations = [dict(), dict()]
-    kwargs = dict(dtype=dtype, device=device)
     for (src_rank, trg_rank), plan in comm_plan.items():
         if trg_rank == rank:
             ind = 0
@@ -238,16 +236,16 @@ def _get_allocations(
         for row in plan:
             b_h = (int(row[0]), int(row[1]))
             mass = row[-1]
+            print(f"({src_rank}, {trg_rank}): ind={ind}, {b_h} -- {mass}")  # DEBUG
             pos = rel_pos[ind][b_h]
             new_cols = torch.tensor(
-                positions[ind][b_h][pos : (pos + mass)],
-                **kwargs,
+                positions[ind][b_h][pos : (pos + mass)], **kwargs,
             )
             if not essentially_1d:
                 new_cols = torch.cat(
                     (
-                        torch.tensor(b_h, **kwargs).view(-1, 1).expand(-1, mass),
-                        new_cols.view(1, -1),
+                        torch.tensor(b_h, **kwargs).unsqueeze(-1).expand(-1, mass),
+                        new_cols.unsqueeze(0),
                     ),
                     dim=0,
                 )
@@ -448,13 +446,12 @@ def equalize_cache_content(
             f"shape = {overwrite_pos.shape}\n"
             f"active_dimensions = {active_dimensions}"
         )
-    overwrite_pos_np = overwrite_pos.numpy()
     # Create communication plan
     comm_plan = _get_communication_plan(
         num_devices,
         cache_length,
         input_pos,
-        overwrite_pos_np,
+        overwrite_pos,
         active_dimensions,
     )
     # Rank needs to determine:
@@ -466,10 +463,8 @@ def equalize_cache_content(
         num_devices,
         input_pos,
         cache_length,
-        overwrite_pos_np,
+        overwrite_pos,
         comm_plan,
-        kv_cache.device,
-        overwrite_pos.dtype,
         active_dimensions,
     )
 
