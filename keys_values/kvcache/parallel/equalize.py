@@ -91,22 +91,22 @@ def _get_communication_plan(
     # Shapes: (bs, n_kv, num_devices) or (num_devices,)
     # Note: If `len(active_dimensions) == 1`, we do redundant work along the
     # inactive dimension, but this does not matter.
-    ranks = np.argsort(delta_per_rank, axis=-1)
-    sorted_delta = np.take_along_axis(delta_per_rank, ranks, axis=-1)
-
     # Determine the communications
     communications = None
-    while not np.all(sorted_delta == 0):
+    while not np.all(delta_per_rank == 0):
         # (bs, n_kv, 1) or (1,):
-        smallest = sorted_delta[..., 0:1].copy()
-        largest = sorted_delta[..., -1:].copy()
+        ranks_smallest = np.argmin(delta_per_rank, axis=-1, keepdims=True)
+        ranks_largest = np.argmax(delta_per_rank, axis=-1, keepdims=True)
+        smallest = np.take_along_axis(delta_per_rank, ranks_smallest, axis=-1)
+        largest = np.take_along_axis(delta_per_rank, ranks_largest, axis=-1)
         min_vals = np.minimum(largest, -smallest)
         args1 = np.concatenate(
-            (ranks[..., 0:1], ranks[..., -1:]), axis=-1,
+            (ranks_smallest, ranks_largest), axis=-1,
         )
         args2 = np.concatenate(
-            (ranks[..., -1:], ranks[..., 0:1]), axis=-1,
+            (ranks_largest, ranks_smallest), axis=-1,
         )
+        # (bs, n_kv, 3, 1) or (3, 1):
         extra = np.concatenate(
             (np.where(largest >= -smallest, args1, args2), min_vals),
             axis=-1,
@@ -117,30 +117,10 @@ def _get_communication_plan(
             communications = np.concatenate((communications, extra), axis=-1)
         largest -= min_vals
         smallest += min_vals
-        if num_devices > 2:
-            sorted_delta = sorted_delta[..., 1:(-1)]
-            ranks_smallest = ranks[..., 0:1].copy()
-            ranks_largest = ranks[..., -1:].copy()
-            ranks = ranks[..., 1:(-1)]
-            new_pos_largest = np.searchsorted(sorted_delta, largest)
-            sorted_delta = np.insert(
-                sorted_delta,
-                new_pos_largest,
-                largest,
-            )
-            ranks = np.insert(ranks, new_pos_largest, ranks_largest)
-            new_pos_smallest = np.searchsorted(sorted_delta, smallest)
-            sorted_delta = np.insert(
-                sorted_delta,
-                new_pos_smallest,
-                smallest,
-            )
-            ranks = np.insert(ranks, new_pos_smallest, ranks_smallest)
-        else:
-            if not np.all(largest == 0) or not np.all(smallest == 0):
-                raise IndexError("Internal error for num_devices == 2")
-            break
+        np.put_along_axis(delta_per_rank, ranks_smallest, smallest, axis=-1)
+        np.put_along_axis(delta_per_rank, ranks_largest, largest, axis=-1)
 
+    # `communications` is `(bs, n_kv, 3, num_rounds)` or `(3, num_rounds)`
     # Transform into plan: Needs groupby and filter out zero mass items
     if communications is None:
         return dict()
@@ -149,14 +129,11 @@ def _get_communication_plan(
         b_idx, h_idx = np.meshgrid(
             np.arange(batch_size), np.arange(n_query_groups), indexing="ij"
         )
+        shape = (batch_size, n_query_groups, num_rounds)
         df = pd.DataFrame(
             {
-                "b": np.broadcast_to(
-                    b_idx[..., np.newaxis], (batch_size, n_query_groups, num_rounds)
-                ).ravel(),
-                "h": np.broadcast_to(
-                    h_idx[..., np.newaxis], (batch_size, n_query_groups, num_rounds)
-                ).ravel(),
+                "b": np.broadcast_to(b_idx[..., np.newaxis], shape).ravel(),
+                "h": np.broadcast_to(h_idx[..., np.newaxis], shape).ravel(),
                 "from": communications[:, :, 0, :].ravel(),
                 "to": communications[:, :, 1, :].ravel(),
                 "mass": communications[:, :, 2, :].ravel(),
@@ -192,9 +169,7 @@ def _get_allocations(
     device: torch.device,
     dtype: torch.dtype,
     active_dimensions: Tuple[int, ...],
-) -> Tuple[
-    Dict[int, torch.Tensor], Dict[int, torch.Tensor]
-]:
+) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
     """
     Return source and target allocations for rank `rank`.
 
@@ -226,8 +201,6 @@ def _get_allocations(
     else:
         # In this case, the dictionaries have a single entry with key (0, 0)
         batch_size, n_query_groups, q_len = 1, 1, overwrite_pos.shape[-1]
-        overwrite_pos = overwrite_pos[0, 0, :].reshape(1, 1, -1)
-        is_for_me = is_for_me[0, 0, :].reshape(1, 1, -1)
     # Lists of size two: First target, then source
     positions = [
         {
@@ -263,11 +236,12 @@ def _get_allocations(
         else:
             continue
         for row in plan:
-            b_h = (row[0], row[1])
+            b_h = (int(row[0]), int(row[1]))
             mass = row[-1]
             pos = rel_pos[ind][b_h]
             new_cols = torch.tensor(
-                positions[ind][b_h][pos: (pos + mass)], **kwargs,
+                positions[ind][b_h][pos : (pos + mass)],
+                **kwargs,
             )
             if not essentially_1d:
                 new_cols = torch.cat(
@@ -279,7 +253,8 @@ def _get_allocations(
                 )
             if other_rank in allocations[ind]:
                 allocations[ind][other_rank] = torch.cat(
-                    (allocations[ind][other_rank], new_cols), dim=-1,
+                    (allocations[ind][other_rank], new_cols),
+                    dim=-1,
                 )
             else:
                 allocations[ind][other_rank] = new_cols
@@ -299,6 +274,7 @@ class WriteBackToBuffer:
 # testing, see `test.kvcache.test_equalize.test_equalize_before_after`.
 # The callback returned is called at the end of the function. It returns
 # a flag. If this is `False`, the results are not written back.
+
 
 def _send(
     src_rank: int,
@@ -379,9 +355,7 @@ def _execute_communication(
                 out_key=keys,
                 out_value=values,
             )
-            token_pos.copy_(
-                kv_cache.token_positions()[index[0], index[1], index[2]]
-            )
+            token_pos.copy_(kv_cache.token_positions()[index[0], index[1], index[2]])
         else:
             kv_cache.kv_buffers.get_slots(
                 positions=index_to_3d(index, *shape),
@@ -507,12 +481,12 @@ def equalize_cache_content(
     # same buffers.
     results = []
     source_stats = dict()
-    for (src_rank, trg_rank) in comm_plan.keys():
+    for src_rank, trg_rank in comm_plan.keys():
         if rank in (src_rank, trg_rank):
             if rank == src_rank:
-                num_vecs = source_allocations[trg_rank].shape[0]
+                num_vecs = source_allocations[trg_rank].shape[-1]
             else:
-                num_vecs = target_allocations[src_rank].shape[0]
+                num_vecs = target_allocations[src_rank].shape[-1]
             result = _execute_communication(
                 rank,
                 src_rank,
@@ -551,8 +525,8 @@ def equalize_cache_content(
             token_pos_2d = result.token_pos[rel_ind]
             if token_pos_2d.numel() * shape[adim] != result.token_pos.numel():
                 raise ValueError(
-                    f"token_pos received not compatible with active_dimensions = {active_dimensions}:\n" + str(
-                        result.token_pos.view(*shape, -1))
+                    f"token_pos received not compatible with active_dimensions = {active_dimensions}:\n"
+                    + str(result.token_pos.view(*shape, -1))
                 )
             index_2d = index[rel_ind, [adim, 2]]
             kv_cache.set_token_positions(

@@ -699,7 +699,9 @@ class DequantizedKVCacheBuffers:
         # Slots correspond to unique entries in `index[2]`
         slots_touched = list(set(index[2].tolist()))
         self._track_slots(
-            torch.tensor(slots_touched, dtype=index.dtype, device=index.device).view(1, 1, -1)
+            torch.tensor(slots_touched, dtype=index.dtype, device=index.device).view(
+                1, 1, -1
+            )
         )
 
     # Copied from `KVCacheBuffers.forward`:
@@ -808,7 +810,9 @@ class DequantizedKVCacheBuffers:
     def _check_index(self, index: torch.Tensor):
         if index.ndim != 2 or index.shape[0] == 0 or index.shape[1] != 3:
             raise ValueError(f"index.shape = {index.shape}, must be (num, 3), num > 0")
-        for i, max_val in enumerate((self.batch_size, self.n_query_groups, self.cache_length)):
+        for i, max_val in enumerate(
+            (self.batch_size, self.n_query_groups, self.cache_length)
+        ):
             if not (0 <= index[:, i] < max_val).all().item():
                 raise ValueError(f"index[:, {i}] entries must be in [0, {max_val})")
 

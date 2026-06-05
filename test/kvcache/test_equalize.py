@@ -61,13 +61,8 @@ def _extract_content(
         parts["key"].append(k_and_v.keys())
         parts["value"].append(k_and_v.values())
         tp = kv_cache.token_positions()
-        parts["token_pos"].append(
-            tp[0, 0, :] if essentially_1d else tp
-        )
-    return {
-        k: torch.cat(v, dim=0 if k == "token_pos" else 2)
-        for k, v in parts.items()
-    }
+        parts["token_pos"].append(tp[0, 0, :] if essentially_1d else tp)
+    return {k: torch.cat(v, dim=0 if k == "token_pos" else 2) for k, v in parts.items()}
 
 
 def _compare_contents(
@@ -91,7 +86,8 @@ def _compare_contents(
             sorted_token_pos = token_pos[0, 0, extra_info["sort_index"]]
         else:
             sorted_token_pos = reorder_buffer_given_extra_info(
-                buffer=token_pos, **extra_info,
+                buffer=token_pos,
+                **extra_info,
             )
         sorted_contents.append(
             {
@@ -138,9 +134,7 @@ def test_equalize_before_after(device, name, kwargs):
     virtual_length = cache_length * num_devices
     if name.startswith("smart-lastrec"):
         kwargs = {**kwargs, **cache_kwargs_for_smart_lastrec()}
-    kv_caches = [
-        create_kv_cache(name, params, **kwargs) for _ in range(num_devices)
-    ]
+    kv_caches = [create_kv_cache(name, params, **kwargs) for _ in range(num_devices)]
     active_dimensions = kv_caches[0].active_dimensions()
     essentially_1d = active_dimensions == ()
 
@@ -180,7 +174,9 @@ def test_equalize_before_after(device, name, kwargs):
         elif isinstance(kv_cache, SmartInitialLastRecentlyInsertedKVCache):
             kv_cache.token_pos.copy_(all_token_positions[:, 0, sel_ind])
         else:
-            raise NotImplementedError(f"type(kv_cache) = {type(kv_cache)} not supported")
+            raise NotImplementedError(
+                f"type(kv_cache) = {type(kv_cache)} not supported"
+            )
     # Content before equalization
     contents = [_extract_content(kv_caches)]
 
@@ -226,7 +222,9 @@ def test_equalize_before_after(device, name, kwargs):
         return lambda: False
 
     with mock.patch("keys_values.kvcache.parallel.equalize._send", mock_send_phase1):
-        with mock.patch("keys_values.kvcache.parallel.equalize._receive", mock_receive_phase1):
+        with mock.patch(
+            "keys_values.kvcache.parallel.equalize._receive", mock_receive_phase1
+        ):
             for rank, kv_cache in enumerate(kv_caches):
                 _source_stats, _ = equalize_cache_content(
                     rank=rank,
@@ -261,7 +259,9 @@ def test_equalize_before_after(device, name, kwargs):
         return lambda: True
 
     with mock.patch("keys_values.kvcache.parallel.equalize._send", mock_send_phase2):
-        with mock.patch("keys_values.kvcache.parallel.equalize._receive", mock_receive_phase2):
+        with mock.patch(
+            "keys_values.kvcache.parallel.equalize._receive", mock_receive_phase2
+        ):
             for rank, kv_cache in enumerate(kv_caches):
                 _, _target_stats = equalize_cache_content(
                     rank=rank,

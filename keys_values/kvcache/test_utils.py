@@ -158,11 +158,14 @@ def random_index(
     diff = end - start
     if diff < num:
         raise ValueError(f"end - start = {diff}, must be >= num = {num}")
-    return random_choices(
-        (batch_size, params.n_query_groups, num),
-        size_range=diff,
-        device=device,
-    ) + start
+    return (
+        random_choices(
+            (batch_size, params.n_query_groups, num),
+            size_range=diff,
+            device=device,
+        )
+        + start
+    )
 
 
 def random_token_positions(
