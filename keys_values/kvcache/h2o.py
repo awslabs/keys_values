@@ -515,7 +515,6 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
     and `self.token_pos` are broadcast here over the batch dimension. Their
     shapes remain the same, for compatibility with the parent class. Also,
     the score buffer `scores` has a batch dimension, even if it is not used.
-
     """
 
     def __init__(
