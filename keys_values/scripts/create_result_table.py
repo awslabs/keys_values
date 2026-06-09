@@ -138,7 +138,8 @@ def main(
                     st, v = entries[k]
                     if not final_table:
                         cells.append(r"{\small " + st + r":}")
-                    cells.append(r"{\small\!" + f"{v * 100:.2f}" + "}")
+                    # Metric values of the form 12.3 (one trailing digit)
+                    cells.append(r"{\small\!" + f"{v * 100:.1f}" + "}")
                 else:
                     if not final_table:
                         cells.append("")
