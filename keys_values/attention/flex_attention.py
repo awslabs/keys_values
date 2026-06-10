@@ -190,10 +190,15 @@ class FlexAttnForPrefillManager(FlexAttnManager):
 
     Note that `flex_attention` is often not used for the prefill calls, because
     standard PyTorch SDPA is faster. It is used only with non-standard SDPA.
+
+    If `forward_return_lse == True`, the compute graphs returned
+    for `requires_grad == False` output `attn_outputs, aux`, where `aux.lse`
+    are log-sum-exp of attention weights.
     """
 
-    def __init__(self):
+    def __init__(self, forward_return_lse: bool = False):
         super().__init__()
+        self.forward_return_lse = forward_return_lse
 
     def _get_args(
         self,
@@ -254,6 +259,13 @@ class FlexAttnForPrefillManager(FlexAttnManager):
             KV_LEN=kv_len,
             device=device,
         )
+
+    def _extra_flex_attention_kwargs(self, args: tuple) -> Dict[str, Any]:
+        requires_grad = self._from_args(args, "requires_grad")
+        if self.forward_return_lse and not requires_grad:
+            return {"return_aux": AuxRequest(lse=True)}
+        else:
+            return dict()
 
 
 def causal_mask_for_chunk(
@@ -570,7 +582,6 @@ class FlexAttentionArgs:
         return "\n".join(parts)
 
 
-# HIER: return_lse=True case. Also need them for input_pos == 0!
 def scaled_dot_product_attention_flexatt(
     flexatt_args: FlexAttentionArgs,
     query: torch.Tensor,
@@ -583,7 +594,6 @@ def scaled_dot_product_attention_flexatt(
     token_positions: Optional[torch.Tensor],
     annotation_callback: Optional[ReorderAnnotationCallback] = None,
     sort_if_3d: bool = True,
-    return_lse: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
     Computes scaled dot product attention (SDPA) using PyTorch
@@ -620,13 +630,9 @@ def scaled_dot_product_attention_flexatt(
         annotation_callback: If this is given and `key, value` are reordered,
             the results are passed to this callback.
         sort_if_3d: See :func:`reorder_key_value`.
-        return_lse: If `True` and `flexatt_args.forward_return_lse == True`,
-            return log_sum_exp values as second argument.
 
     Returns:
-        `(outputs, lse)`, where `outputs` have shape
-        `(batch_size, n_head, q_len, head_size)`. If `return_lse == True`,
-        return log_sum_exp values as `lse`, shape `(batch_size, n_head, q_len)`.
+        `Outputs of shape `(batch_size, n_head, q_len, head_size)`
 
     """
     batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(
@@ -634,8 +640,6 @@ def scaled_dot_product_attention_flexatt(
         key,
         value,
     )
-    if return_lse and not flexatt_args.forward_return_lse:
-        raise ValueError("If return_lse == True, must have flexatt_args.forward_return_lse == True as well")
     if input_pos == 0:
         if q_len != kv_len:
             raise ValueError(

@@ -87,7 +87,13 @@ class RingFlexAttnForPrefillManager(FlexAttnForPrefillManager):
         if requires_grad:
             raise NotImplementedError("requires_grad=True not supported")
         result = super()._get_args(
-            kv_len, device, dtype, requires_grad, sliding_window_size, als_signature, **kwargs,
+            kv_len,
+            device,
+            dtype,
+            requires_grad,
+            sliding_window_size,
+            als_signature,
+            **kwargs,
         )
         offset_positive = self._unpack_extra_kwargs(**kwargs)
         return result + (offset_positive,)
@@ -151,7 +157,8 @@ def causal_mask_for_chunk(
     """
     right_arg = kv_idx - thresh  # j - thresh
     return torch.logical_or(
-        right_arg < 0, right_arg < q_idx + int(offset_positive),
+        right_arg < 0,
+        right_arg < q_idx + int(offset_positive),
     )
 
 
@@ -200,7 +207,13 @@ class RingFlexAttnForChunkManager(FlexAttnForChunkManager):
         if requires_grad:
             raise NotImplementedError("requires_grad=True not supported")
         result = super()._get_args(
-            kv_len, device, dtype, requires_grad, sliding_window_size, als_signature, **kwargs,
+            kv_len,
+            device,
+            dtype,
+            requires_grad,
+            sliding_window_size,
+            als_signature,
+            **kwargs,
         )
         thresh, offset_positive = self._unpack_extra_kwargs(**kwargs)
         return result + (thresh, offset_positive)
@@ -256,9 +269,10 @@ class RingFlexAttnForChunkManager(FlexAttnForChunkManager):
         )
 
 
-class RingFlexAttentionArgs:
+class RingOffdiagFlexAttentionArgs:
     """
-    Maintains managers (for prefill and chunk computations).
+    Maintains managers (for prefill and chunk computations) for the offdiagonal
+    case `rank_r != rank_s`.
 
     Using `q_lens` is strongly recommended. You can use :func:`choose_q_lens`.
 
@@ -308,12 +322,14 @@ class RingFlexAttentionArgs:
         Also, `M(r) = q_len` and `P = input_pos`.
 
         """
-        if not(0 <= rank_r < self.num_devices):
+        if not (0 <= rank_r < self.num_devices):
             raise ValueError(f"rank_r={rank_r}, must be in [0, {self.num_devices})")
-        if not(0 <= rank_s < self.num_devices):
+        if not (0 <= rank_s < self.num_devices):
             raise ValueError(f"rank_s={rank_s}, must be in [0, {self.num_devices})")
         if rank_r == rank_s:
-            raise ValueError("Must have rank_r != rank_s. Use FlexAttentionArgs if they are the same")
+            raise ValueError(
+                "Must have rank_r != rank_s. Use FlexAttentionArgs if they are the same"
+            )
         if input_pos == 0:
             offset_positive = rank_r > rank_s
             return (
@@ -371,8 +387,99 @@ class RingFlexAttentionArgs:
         return "\n".join(parts)
 
 
-def scaled_dot_product_attention_ring_flexatt(
-    flexatt_args: RingFlexAttentionArgs,
+class RingDiagFlexAttentionArgs:
+    """
+    Maintains managers (for prefill and chunk computations) for the diagonal
+    case `rank_r == rank_s`. This is the same as treated by
+    :class:`FlexAttentionArgs`, but the log_sum_exp array is returned as well.
+
+    Using `q_lens` is strongly recommended. You can use :func:`choose_q_lens`.
+
+    Note: If `q_lens` is used, the expression returned by :meth:`attn_fn` for
+    `input_pos > 0` must be used with `query` tensors of length
+    `transform_q_len(q_len)`, which may be larger than `q_len`. The padding
+    must be done by the caller.
+
+    Args:
+        q_lens: If given, this is a list of `q_len` chunk lengths for which
+            graphs are created. Any `q_len` passed to :meth:`attn_fn` with
+            `input_pos > 0` is mapped to the smallest entry `>= q_len`.
+        extend_kv: If `True` we always extend `key, value` to `n_head`. This
+            needs more memory, only use if the default does not work.
+    """
+
+    def __init__(
+        self,
+        q_lens: Optional[List[int]] = None,
+        extend_kv: bool = False,
+    ):
+        self.attn_prefill_manager = FlexAttnForPrefillManager(forward_return_lse=True)
+        self.attn_chunk_manager = FlexAttnForChunkManager(
+            q_lens, forward_return_lse=True
+        )
+        self.extend_kv = extend_kv
+
+    def attn_fn(
+        self,
+        q_len: int,
+        kv_len: int,
+        batch_size: int,
+        n_head: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        input_pos: int,
+    ) -> Tuple[FlexAttnWithBlockMask, bool]:
+        if input_pos == 0:
+            return (
+                self.attn_prefill_manager(
+                    kv_len=kv_len,
+                    device=device,
+                    dtype=dtype,
+                    requires_grad=False,
+                    sliding_window_size=None,
+                    attention_logit_softcapping=None,
+                )[0],
+                False,
+            )
+        else:
+            _attn_fn, extend_kv = self.attn_chunk_manager(
+                kv_len=kv_len,
+                device=device,
+                dtype=dtype,
+                requires_grad=False,
+                sliding_window_size=None,
+                attention_logit_softcapping=None,
+                q_len=q_len,
+                batch_size=batch_size,
+                n_head=n_head,
+                reverse=False,
+            )
+            return _attn_fn, extend_kv or self.extend_kv
+
+    def transform_q_len(self, q_len: int) -> int:
+        return self.attn_chunk_manager.transform_q_len(q_len)
+
+    def report(self) -> str:
+        parts = []
+        if self.attn_prefill_manager.num_hits:
+            parts.extend(
+                [
+                    "FlexAttention: attn_fn graphs and usage for prefill:",
+                    self.attn_prefill_manager.report(),
+                ]
+            )
+        if self.attn_chunk_manager.num_hits:
+            parts.extend(
+                [
+                    "FlexAttention: attn_fn graphs and usage for chunks:",
+                    self.attn_chunk_manager.report(),
+                ]
+            )
+        return "\n".join(parts)
+
+
+def sdpa_ring_flexatt_offdiag(
+    flexatt_args: RingOffdiagFlexAttentionArgs,
     rank_r: int,
     rank_s: int,
     query: torch.Tensor,
@@ -436,7 +543,9 @@ def scaled_dot_product_attention_ring_flexatt(
     if not (0 <= rank_s < flexatt_args.num_devices):
         raise ValueError(f"rank_s={rank_s}, must be in [0, {flexatt_args.num_devices})")
     if rank_r == rank_s:
-        raise ValueError("Must have rank_r != rank_s. Use scaled_dot_product_attention_flexatt if they are the same")
+        raise ValueError(
+            "Must have rank_r != rank_s. Use scaled_dot_product_attention_flexatt if they are the same"
+        )
     if input_pos == 0:
         if q_len != kv_len:
             raise ValueError(
@@ -469,6 +578,93 @@ def scaled_dot_product_attention_ring_flexatt(
         # on the right here, since this works better with how masking is done
         # here.
         query = zeropad_query(query, q_len_tr - q_len, pad_on_left=False)
+    # Deal with non-standard `scale_factor`
+    if scale_factor is not None:
+        diff = scale_factor * math.sqrt(head_size)
+        if not (0.999 < diff < 1.001):
+            query = query * diff
+
+    output, aux = attn_fn(
+        query=query,
+        key=key,
+        value=value,
+        scale=None,
+        enable_gqa=enable_gqa,
+    )
+    lse = aux.lse
+    if q_len_tr > q_len:
+        # Padding was on the right, not on the left
+        output = output[:, :, :q_len, :].clone()
+        lse = lse[:, :, :q_len].clone()
+    return output, lse
+
+
+def sdpa_ring_flexatt_diag(
+    flexatt_args: RingDiagFlexAttentionArgs,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    scale_factor: Optional[float],
+    input_pos: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Computes scaled dot product attention (SDPA) part for a diagonal cell
+    `(rank_r, rank_r)` in RingAttention. This is essentially the same as
+    `keys_values.attention.flex_attention.scaled_dot_product_attention_flexatt`,
+    but the log_sum_exp values are returned as well, and `key, value` need
+    to be reordered already.
+
+    Args:
+        flexatt_args: Arguments for `flex_attention`. Most important are the
+            managers, see :class:`FlexAttnForPrefillManager` and
+            :class:`FlexAttnForChunkManager`.
+        query: Queries, shape `(batch_size, n_head, q_len, head_size)`
+        key: Keys, shape `(batch_size, n_query_groups, kv_len, head_size)`
+        value: Values, shape `(batch_size, n_query_groups, kv_len, head_size)`
+        scale_factor: Scale factor for attention
+        input_pos: Position in input sequence
+
+    Returns:
+        `(output, lse)`, where `output` are attention outputs, shape
+        `(batch_size, n_head, q_len, head_size)`, `lse` are the log-sum-exp
+        values needed for RingAttention, shape `(batch_size, n_head, q_len)`.
+
+    """
+    batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(
+        query,
+        key,
+        value,
+    )
+    if input_pos == 0:
+        if q_len != kv_len:
+            raise ValueError(
+                f"For input_pos=0, must have q_len == kv_len, but have q_len = {q_len}, kv_len = {kv_len}"
+            )
+    enable_gqa = n_query_groups < n_head
+    attn_fn, extend_kv = flexatt_args.attn_fn(
+        q_len=q_len,
+        kv_len=kv_len,
+        batch_size=batch_size,
+        n_head=n_head,
+        device=query.device,
+        dtype=query.dtype,
+        input_pos=input_pos,
+    )
+    if enable_gqa and extend_kv:
+        key = repeat_interleave(key, n_head)
+        value = repeat_interleave(value, n_head)
+        enable_gqa = False
+        extend_kv = True
+    else:
+        extend_kv = False
+    q_len_tr = flexatt_args.transform_q_len(q_len)
+    if q_len_tr > q_len:
+        # Use zero padding
+        # Importantly, zeros are appended **on the left**, not on the right.
+        # The real query entries must be right-aligned with key, value,
+        # otherwise our causal attention masking does not work out properly.
+        # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
+        query = zeropad_query(query, q_len_tr - q_len)
     # Deal with non-standard `scale_factor`
     if scale_factor is not None:
         diff = scale_factor * math.sqrt(head_size)

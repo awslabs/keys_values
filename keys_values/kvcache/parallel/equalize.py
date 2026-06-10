@@ -28,7 +28,7 @@ def _get_q_len_for_rank(
     q_len: int,
     input_pos: int,
     **kwargs,
-) ->torch.Tensor:
+) -> torch.Tensor:
     min_ql = q_len // num_devices
     num_plus1 = q_len - min_ql * num_devices
     q_len_for_rank = torch.full((num_devices,), min_ql, **kwargs)
@@ -100,10 +100,12 @@ def _get_communication_plan(
         largest = delta_per_rank.gather(-1, ranks_largest)
         min_vals = torch.minimum(largest, -smallest)
         args1 = torch.cat(
-            (ranks_smallest, ranks_largest), dim=-1,
+            (ranks_smallest, ranks_largest),
+            dim=-1,
         )
         args2 = torch.cat(
-            (ranks_largest, ranks_smallest), dim=-1,
+            (ranks_largest, ranks_smallest),
+            dim=-1,
         )
         # (bs, n_kv, 3, 1) or (3, 1):
         extra = torch.cat(
@@ -155,7 +157,9 @@ def _get_communication_plan(
         )
         df = df[df["mass"] != 0]
         return {
-            (from_, to_): torch.tensor([0, 0, group["mass"].item()], **kwargs).unsqueeze(0)
+            (from_, to_): torch.tensor(
+                [0, 0, group["mass"].item()], **kwargs
+            ).unsqueeze(0)
             for (from_, to_), group in df.groupby(["from", "to"])
         }
 
@@ -239,7 +243,8 @@ def _get_allocations(
             print(f"({src_rank}, {trg_rank}): ind={ind}, {b_h} -- {mass}")  # DEBUG
             pos = rel_pos[ind][b_h]
             new_cols = torch.tensor(
-                positions[ind][b_h][pos : (pos + mass)], **kwargs,
+                positions[ind][b_h][pos : (pos + mass)],
+                **kwargs,
             )
             if not essentially_1d:
                 new_cols = torch.cat(

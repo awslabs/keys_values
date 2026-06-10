@@ -15,14 +15,12 @@ from typing import Optional, List, Tuple
 
 import torch
 
-from keys_values.attention.flex_attention import (
-    scaled_dot_product_attention_flexatt,
-    FlexAttentionArgs,
-)
 from keys_values.config import Config
 from keys_values.kvcache.parallel.flex_for_ring import (
-    scaled_dot_product_attention_ring_flexatt,
-    RingFlexAttentionArgs,
+    sdpa_ring_flexatt_offdiag,
+    sdpa_ring_flexatt_diag,
+    RingOffdiagFlexAttentionArgs,
+    RingDiagFlexAttentionArgs,
 )
 
 
@@ -44,17 +42,16 @@ class RingAttentionDriver:
     updated by new information (as well as equalized before). Also, they must
     have been reordered so the new content is on the right end. This is also
     why `token_positions` is not needed here.
-
     """
 
     def __init__(
         self,
         rank_r: int,
-        flexatt_args_diag: FlexAttentionArgs,
-        flexatt_args_offdiag: RingFlexAttentionArgs,
+        flexatt_args_diag: RingDiagFlexAttentionArgs,
+        flexatt_args_offdiag: RingOffdiagFlexAttentionArgs,
     ):
         self.num_devices = flexatt_args_offdiag.num_devices
-        if not(0 <= rank_r < self.num_devices):
+        if not (0 <= rank_r < self.num_devices):
             raise ValueError(f"rank_r={rank_r}, must be in [0, {self.num_devices})")
         self.rank_r = rank_r
         self.flexatt_args_diag = flexatt_args_diag
@@ -84,7 +81,10 @@ class RingAttentionDriver:
             raise ValueError(f"query.shape={query.shape}, must be 4D")
         batch_size, _, q_len, _ = query.shape
         shape = (
-            batch_size, config.n_head, q_len, config.head_size,
+            batch_size,
+            config.n_head,
+            q_len,
+            config.head_size,
         )
         if query.shape != shape:
             raise ValueError(f"query.shape={query.shape}, must be {shape}")
@@ -144,9 +144,16 @@ class RingAttentionDriver:
             raise ValueError(f"key.shape={key.shape}, must be 4D")
         if self.steps_done == 0:
             self.kv_len = key.shape[2]
-        shape = (self.batch_size, self.config.n_query_groups, self.kv_len, self.config.head_size)
+        shape = (
+            self.batch_size,
+            self.config.n_query_groups,
+            self.kv_len,
+            self.config.head_size,
+        )
         if key.shape != shape or value.shape != shape:
-            raise ValueError(f"key.shape={key.shape}, value.shape={value.shape}, must be {shape}")
+            raise ValueError(
+                f"key.shape={key.shape}, value.shape={value.shape}, must be {shape}"
+            )
         new_output, new_lse = self._attention_for_cell(key, value, rank_s)
         self._accumulate(new_output, new_lse)
         self.steps_done += 1
@@ -159,10 +166,17 @@ class RingAttentionDriver:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.steps_done == 0:
             # Diagonal case: `rank_r == rank_s`
-            # HIER! Need `lse` as well!
+            output, lse = sdpa_ring_flexatt_diag(
+                flexatt_args=self.flexatt_args_diag,
+                query=self.query,
+                key=key,
+                value=value,
+                scale_factor=self.scale,
+                input_pos=self.input_pos,
+            )
         else:
             # Offdiagonal case: `rank_r != rank_s`
-            output, lse = scaled_dot_product_attention_ring_flexatt(
+            output, lse = sdpa_ring_flexatt_offdiag(
                 flexatt_args=self.flexatt_args_offdiag,
                 rank_r=self.rank_r,
                 rank_s=rank_s,
@@ -180,8 +194,20 @@ class RingAttentionDriver:
             self._accum_output = new_output
             self._accum_lse = new_lse
         else:
-            # RingAttention accumulation: See technical report
-            # HIER!
+            new_accum_lse = torch.maximum(self._accum_lse, new_lse) + torch.log1p(
+                -torch.abs(self._accum_lse - new_lse)
+            )
+            dtype = self._accum_output.dtype
+            self._accum_output = self._accum_output * torch.exp(
+                self._accum_lse - new_accum_lse
+            ).to(dtype=dtype).unsqueeze(-1) + new_output * torch.exp(
+                new_lse - new_accum_lse
+            ).to(
+                dtype=dtype
+            ).unsqueeze(
+                -1
+            )
+            self._accum_lse = new_accum_lse
 
     def results(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """
