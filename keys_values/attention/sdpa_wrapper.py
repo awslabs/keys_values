@@ -53,14 +53,34 @@ ReorderAnnotationCallback = Callable[
 ]
 
 
-def zeropad_query_on_left(query: torch.Tensor, num: int) -> torch.Tensor:
+def zeropad_query(
+    query: torch.Tensor,
+    num: int,
+    pad_on_left: bool = True,
+) -> torch.Tensor:
+    """
+    Pads `query` with zeros along dimension 2, on the left or on the right.
+
+    Args:
+        query: Queries, shape `(batch_size, n_head, q_len, head_size)`
+        num: Number of elements to pad
+        pad_on_left: Pad on left along dim 2? Otherwise, pad on right
+
+    Returns:
+        Padded tensor, shape `(batch_size, n_head, q_len + num, head_size)`
+
+    """
     assert query.ndim == 4
-    fill_left = torch.zeros(
+    fill_zeros = torch.zeros(
         (1, 1, 1, 1),
         dtype=query.dtype,
         device=query.device,
     ).expand(*query.shape[:2], num, query.shape[-1])
-    return torch.cat((fill_left, query), dim=2)
+    if pad_on_left:
+        args = (fill_zeros, query)
+    else:
+        args = (query, fill_zeros)
+    return torch.cat(args, dim=2)
 
 
 def scaled_dot_product_attention(
@@ -160,7 +180,7 @@ def scaled_dot_product_attention(
     # `query` tokens, are on the right end. Causal masking works if `query`
     # is zero-padded on the left
     if q_len < kv_len:
-        query = zeropad_query_on_left(query, kv_len - q_len)
+        query = zeropad_query(query, kv_len - q_len)
     if annotation_callback is not None:
         annotation_callback = partial(
             annotation_callback,

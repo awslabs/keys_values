@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from functools import partial
+import math
 from typing import Optional, List, Tuple, Any
 
 import torch
@@ -27,6 +28,11 @@ from keys_values.attention.flex_attention import (
     FlexAttnForChunkManager,
     FlexAttnWithBlockMask,
 )
+from keys_values.attention.sdpa_wrapper import (
+    sdpa_check_args,
+    zeropad_query,
+)
+from keys_values.utils import repeat_interleave
 
 
 def causal_mask_for_prefill(
@@ -279,10 +285,8 @@ class RingFlexAttentionArgs:
         self.attn_prefill_manager = RingFlexAttnForPrefillManager()
         self.attn_chunk_manager = RingFlexAttnForChunkManager(q_lens)
         self.extend_kv = extend_kv
-        self._num_devices = num_devices
+        self.num_devices = num_devices
 
-    # HIER: What about thresh and offset_positive? Do this based on
-    # knowing r and s here?
     def attn_fn(
         self,
         q_len: int,
@@ -304,10 +308,10 @@ class RingFlexAttentionArgs:
         Also, `M(r) = q_len` and `P = input_pos`.
 
         """
-        if not(0 <= rank_r < self._num_devices):
-            raise ValueError(f"rank_r={rank_r}, must be in [0, {self._num_devices})")
-        if not(0 <= rank_s < self._num_devices):
-            raise ValueError(f"rank_s={rank_s}, must be in [0, {self._num_devices})")
+        if not(0 <= rank_r < self.num_devices):
+            raise ValueError(f"rank_r={rank_r}, must be in [0, {self.num_devices})")
+        if not(0 <= rank_s < self.num_devices):
+            raise ValueError(f"rank_s={rank_s}, must be in [0, {self.num_devices})")
         if rank_r == rank_s:
             raise ValueError("Must have rank_r != rank_s. Use FlexAttentionArgs if they are the same")
         if input_pos == 0:
@@ -325,7 +329,7 @@ class RingFlexAttentionArgs:
                 False,
             )
         else:
-            ndevs = self._num_devices  # N
+            ndevs = self.num_devices  # N
             u_val = (ndevs - (input_pos % ndevs)) % ndevs  # U
             offset_positive = ((rank_r + u_val) % ndevs) > ((rank_s + u_val) % ndevs)
             thresh = kv_len - q_len_for_s
@@ -365,3 +369,122 @@ class RingFlexAttentionArgs:
                 ]
             )
         return "\n".join(parts)
+
+
+def scaled_dot_product_attention_ring_flexatt(
+    flexatt_args: RingFlexAttentionArgs,
+    rank_r: int,
+    rank_s: int,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    scale_factor: Optional[float],
+    input_pos: int,
+    q_len_for_s: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Computes scaled dot product attention (SDPA) part for one cell
+    `(rank_r, rank_s)` in RingAttention. Here, `rank_r != rank_s` (use
+    `keys_values.attention.flex_attention.scaled_dot_product_attention_flexatt`
+    for the standard case `rank_r == rank_s`. Here, `query` is for `rank_r`,
+    while `key, value` is for `rank_s`.
+
+    `key, value` must already have been updated and reordered, so that the new
+    entries are on the right end (final `q_len_for_s` slots).
+
+    Note: `flex_attention` is always called with `scale=None`, the default
+    scale factor. If `scale_factor` is different, we multiply a factor into
+    `query`. This avoids bogus graph re-compilations due to small numerical
+    differences in `scale`.
+
+    Padding of query: In general, we pad `query` to the nearest length in
+    `flexatt_args.attn_chunk_manager.q_lens`, so that only a small number of
+    graphs need to be maintained. In the standard case `rank_r == rank_s`,
+    padding is done on the left, because the mask assumes `query` is
+    right-aligned with `keys, values`. Here, we use padding on the right,
+    because this works better with how the masks are defined here. Padding is
+    done internally here.
+
+    Args:
+        flexatt_args: Arguments for `flex_attention`. Most important are the
+            managers, see :class:`RingFlexAttnForPrefillManager` and
+            :class:`RingFlexAttnForChunkManager`.
+        rank_r: Device rank for query
+        rank_s: Device rank for key, value
+        query: Queries, shape `(batch_size, n_head, q_len, head_size)`
+        key: Keys, shape `(batch_size, n_query_groups, kv_len, head_size)`
+        value: Values, shape `(batch_size, n_query_groups, kv_len, head_size)`
+        scale_factor: Scale factor for attention
+        input_pos: Position in input sequence
+        q_len_for_s: Number of new slots (or length of query) for rank `rank_s`.
+            Need not be the same as `q_len = query.shape[2]` (at most 1
+            different).
+
+    Returns:
+        `(output, lse)`, where `output` are attention outputs, shape
+        `(batch_size, n_head, q_len, head_size)`, `lse` are the log-sum-exp
+        values needed for RingAttention, shape `(batch_size, n_head, q_len)`.
+
+    """
+    batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(
+        query,
+        key,
+        value,
+    )
+    if not (0 <= rank_r < flexatt_args.num_devices):
+        raise ValueError(f"rank_r={rank_r}, must be in [0, {flexatt_args.num_devices})")
+    if not (0 <= rank_s < flexatt_args.num_devices):
+        raise ValueError(f"rank_s={rank_s}, must be in [0, {flexatt_args.num_devices})")
+    if rank_r == rank_s:
+        raise ValueError("Must have rank_r != rank_s. Use scaled_dot_product_attention_flexatt if they are the same")
+    if input_pos == 0:
+        if q_len != kv_len:
+            raise ValueError(
+                f"For input_pos=0, must have q_len == kv_len, but have q_len = {q_len}, kv_len = {kv_len}"
+            )
+    enable_gqa = n_query_groups < n_head
+    attn_fn, extend_kv = flexatt_args.attn_fn(
+        q_len=q_len,
+        kv_len=kv_len,
+        batch_size=batch_size,
+        n_head=n_head,
+        device=query.device,
+        dtype=query.dtype,
+        input_pos=input_pos,
+        rank_r=rank_r,
+        rank_s=rank_s,
+        q_len_for_s=q_len_for_s,
+    )
+    if enable_gqa and extend_kv:
+        key = repeat_interleave(key, n_head)
+        value = repeat_interleave(value, n_head)
+        enable_gqa = False
+        extend_kv = True
+    else:
+        extend_kv = False
+    q_len_tr = flexatt_args.transform_q_len(q_len)
+    if q_len_tr > q_len:
+        # Use zero padding
+        # Different to `scaled_dot_product_attention_flexatt`, padding is done
+        # on the right here, since this works better with how masking is done
+        # here.
+        query = zeropad_query(query, q_len_tr - q_len, pad_on_left=False)
+    # Deal with non-standard `scale_factor`
+    if scale_factor is not None:
+        diff = scale_factor * math.sqrt(head_size)
+        if not (0.999 < diff < 1.001):
+            query = query * diff
+
+    output, aux = attn_fn(
+        query=query,
+        key=key,
+        value=value,
+        scale=None,
+        enable_gqa=enable_gqa,
+    )
+    lse = aux.lse
+    if q_len_tr > q_len:
+        # Padding was on the right, not on the left
+        output = output[:, :, :q_len, :].clone()
+        lse = lse[:, :, :q_len].clone()
+    return output, lse

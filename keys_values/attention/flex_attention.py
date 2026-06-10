@@ -28,7 +28,7 @@ from keys_values.attention.sdpa_wrapper import (
     reorder_key_value,
     reorder_inverse,
     ReorderAnnotationCallback,
-    zeropad_query_on_left,
+    zeropad_query,
 )
 from keys_values.utils import repeat_interleave
 
@@ -570,6 +570,7 @@ class FlexAttentionArgs:
         return "\n".join(parts)
 
 
+# HIER: return_lse=True case. Also need them for input_pos == 0!
 def scaled_dot_product_attention_flexatt(
     flexatt_args: FlexAttentionArgs,
     query: torch.Tensor,
@@ -582,7 +583,8 @@ def scaled_dot_product_attention_flexatt(
     token_positions: Optional[torch.Tensor],
     annotation_callback: Optional[ReorderAnnotationCallback] = None,
     sort_if_3d: bool = True,
-) -> torch.Tensor:
+    return_lse: bool = False,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
     Computes scaled dot product attention (SDPA) using PyTorch
     `flex_attention`. This does not need reordering of `key`, `value`, since
@@ -618,9 +620,13 @@ def scaled_dot_product_attention_flexatt(
         annotation_callback: If this is given and `key, value` are reordered,
             the results are passed to this callback.
         sort_if_3d: See :func:`reorder_key_value`.
+        return_lse: If `True` and `flexatt_args.forward_return_lse == True`,
+            return log_sum_exp values as second argument.
 
     Returns:
-        Attention outputs, shape `(batch_size, n_head, q_len, head_size)`
+        `(outputs, lse)`, where `outputs` have shape
+        `(batch_size, n_head, q_len, head_size)`. If `return_lse == True`,
+        return log_sum_exp values as `lse`, shape `(batch_size, n_head, q_len)`.
 
     """
     batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(
@@ -628,6 +634,8 @@ def scaled_dot_product_attention_flexatt(
         key,
         value,
     )
+    if return_lse and not flexatt_args.forward_return_lse:
+        raise ValueError("If return_lse == True, must have flexatt_args.forward_return_lse == True as well")
     if input_pos == 0:
         if q_len != kv_len:
             raise ValueError(
@@ -679,7 +687,7 @@ def scaled_dot_product_attention_flexatt(
         # The real query entries must be right-aligned with key, value,
         # otherwise our causal attention masking does not work out properly.
         # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
-        query = zeropad_query_on_left(query, q_len_tr - q_len)
+        query = zeropad_query(query, q_len_tr - q_len)
     # Deal with non-standard `scale_factor`
     if scale_factor is not None:
         diff = scale_factor * math.sqrt(head_size)
@@ -851,7 +859,7 @@ def sdpa_flexatt_with_attn_weights(
         # The real query entries must be right-aligned with key, value,
         # otherwise our causal attention masking does not work out properly.
         # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
-        query = zeropad_query_on_left(query, q_len_tr - q_len)
+        query = zeropad_query(query, q_len_tr - q_len)
     # Deal with non-standard `scale_factor`
     if scale_factor is not None:
         diff = scale_factor * math.sqrt(head_size)
