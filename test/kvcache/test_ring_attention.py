@@ -11,21 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from itertools import product
-import math
 from typing import Dict, List, Any, Tuple
+
 import pytest
 import torch
-
 from litgpt.utils import _RunIf
 
 from keys_values.attention.attention_utils import sample_token_positions
-from keys_values.attention.sdpa_wrapper import reorder_key_value
-from keys_values.attention.base import MultiHeadSelfAttention, DefaultKeysAndValues
 from keys_values.attention.flex_attention import (
-    FlexAttentionArgs,
     scaled_dot_product_attention_flexatt,
+    FlexAttentionArgs,
 )
+from keys_values.attention.sdpa_wrapper import reorder_key_value
 from keys_values.config import Config
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.parallel.flex_for_ring import (
@@ -34,7 +31,6 @@ from keys_values.kvcache.parallel.flex_for_ring import (
 )
 from keys_values.kvcache.parallel.ring_attention import RingAttentionDriver
 from keys_values.kvcache.test_utils import random_args_cache_forward
-from keys_values.utils import index_to_3d
 
 
 def _distribute_and_reorder_data(
@@ -193,3 +189,20 @@ def test_sdpa_distributed_vs_single(
     dist_outputs = [driver.results()[0] for driver in drivers]
 
     # Single computation
+    flexatt_args = FlexAttentionArgs()
+    output_all, _ = scaled_dot_product_attention_flexatt(
+        flexatt_args=flexatt_args,
+        query=data_all["query"],
+        key=data_all["key"],
+        value=data_all["value"],
+        scale_factor=None,
+        sliding_window_size=None,
+        attention_logit_softcapping=None,
+        input_pos=input_pos,
+        token_positions=data_all["token_pos"],
+    )
+    single_outputs = [output_all[:, :, q_ind, :] for q_ind in q_inds]
+
+    for rank, (d_output, s_output) in enumerate(zip(dist_outputs, single_outputs)):
+        print(f"Outputs for rank {rank}")
+        torch.testing.assert_close(d_output, s_output)
