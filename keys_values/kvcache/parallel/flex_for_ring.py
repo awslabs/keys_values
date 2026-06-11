@@ -17,10 +17,8 @@ from typing import Optional, List, Tuple, Any
 
 import torch
 from torch.nn.attention.flex_attention import (
-    flex_attention,
     create_block_mask,
     BlockMask,
-    AuxRequest,
 )
 
 from keys_values.attention.flex_attention import (

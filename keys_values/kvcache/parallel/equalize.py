@@ -79,7 +79,7 @@ def _get_communication_plan(
     else:
         shape = (1, 1)
     num_per_rank = (
-        (overwrite_pos // cache_length).unsqueeze(-1)
+        (overwrite_pos % num_devices).unsqueeze(-1)
         == torch.arange(num_devices, **kwargs).view(*shape, 1, -1)
     ).sum(dim=-2)
     delta_per_rank = num_per_rank - q_len_for_rank.view(*shape, -1)
@@ -198,7 +198,7 @@ def _get_allocations(
     """
     kwargs = dict(dtype=overwrite_pos.dtype, device=overwrite_pos.device)
     essentially_1d = active_dimensions == ()
-    is_for_me = (overwrite_pos // cache_length) == rank
+    is_for_me = (overwrite_pos % num_devices) == rank
     if not essentially_1d:
         batch_size, n_query_groups, q_len = overwrite_pos.shape
     else:
@@ -207,7 +207,7 @@ def _get_allocations(
     # Lists of size two: First target, then source
     positions = [
         {
-            (b, h): overwrite_pos[b, h, is_for_me[b, h, :]] % cache_length
+            (b, h): overwrite_pos[b, h, is_for_me[b, h, :]] // num_devices
             for b in range(batch_size)
             for h in range(n_query_groups)
         }
@@ -396,6 +396,11 @@ def equalize_cache_content(
     `num_devices * cache_length` is realized on `num_devices` devices, each
     maintaining a "physical" cache of length `cache_length`.
 
+    A virtual cache position `p` maps to physical position `p // num_devices`
+    on device `p % num_devices`. Namely, the cache is filled in a round-robin
+    fashion, which ensures that the most recent tokens are equally distributed
+    among devices, which reduces the amount of equalization (see below).
+
     At the start of an update with new KV information for `q_len` tokens,
     `batch_size * n_query_groups * q_len` KV vectors are evicted (i.e.,
     overwritten by new information). The new information is distributed
@@ -414,11 +419,10 @@ def equalize_cache_content(
     `overwrite_pos` is an index tensor of shape
     `(batch_size, n_query_groups, q_len)`, containing the overwrite positions
     for the virtual cache. Entries are in `range(num_devices * cache_length)`.
-    A position `p` is assigned to rank `p // cache_length`, referring to local
-    position `p % cache_length` there.
-
-    `overwrite_pos` must be compatible with `kv_cache.active_dimensions()`. With
-    less active dimensions, transfers are more constrained.
+    A position `p` is assigned to rank `p % cache_length`, referring to local
+    position `p // cache_length` there. `overwrite_pos` must be compatible with
+    `kv_cache.active_dimensions()`. With less active dimensions, transfers are
+    more constrained.
 
     Args:
         rank: Rank of device
