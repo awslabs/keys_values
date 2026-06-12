@@ -47,7 +47,8 @@ def _distribute_and_reorder_data(
         name: data[name].view(*new_shape)
         for name in ("key", "value")
     }
-    _data["token_pos"] = data["token_pos"].view(*new_shape[:-1])
+    if input_pos > 0:
+        _data["token_pos"] = data["token_pos"].view(*new_shape[:-1])
     q_len = data["query"].shape[2]
     u_val = (num_devices - input_pos % num_devices) % num_devices
     result = []
@@ -55,24 +56,25 @@ def _distribute_and_reorder_data(
     for rank in range(num_devices):
         entry = {
             name: _data[name][:, :, :, rank, :].contiguous()
-            for name in ("key", "value", "query")
+            for name in ("key", "value")
         }
         start = (u_val + rank) % num_devices
-        q_rng = torch.arange(start, q_len, num_devices)
-        q_inds.append(q_rng)
-        entry["query"] = data["query"][:, :, q_rng, :].contiguous()
-        entry["token_pos"] = data["token_pos"][:, :, :, rank].contiguous() // num_devices
-        _key, _value, extra_info = reorder_key_value(
-            key=entry["key"],
-            value=entry["value"],
-            token_positions=entry["token_pos"],
-            input_pos=input_pos,  # Not used
-            q_len=0,  # Not used
-            sort_if_3d=True,
-        )
-        entry["key"] = _key
-        entry["value"] = _value
-        entry["extra_info"] = extra_info
+        q_ind = torch.arange(start, q_len, num_devices)
+        q_inds.append(q_ind)
+        entry["query"] = data["query"][:, :, q_ind, :].contiguous()
+        if input_pos > 0:
+            entry["token_pos"] = _data["token_pos"][:, :, :, rank].contiguous()
+            _key, _value, extra_info = reorder_key_value(
+                key=entry["key"],
+                value=entry["value"],
+                token_positions=entry["token_pos"],
+                input_pos=input_pos,  # Not used
+                q_len=0,  # Not used
+                sort_if_3d=True,
+            )
+            entry["key"] = _key
+            entry["value"] = _value
+            entry["extra_info"] = extra_info
         result.append(entry)
     return result, q_inds
 
@@ -90,7 +92,7 @@ def _distribute_and_reorder_data(
         (12, 4, 16, 256, torch.float16, 256 * 8 + 513, 8, True, False),
     ],
 )
-def test_sdpa_distributed_vs_single(
+def test_sdpa_distributed_vs_single_on_chunk(
     n_head,
     n_query_groups,
     q_len,
@@ -187,10 +189,11 @@ def test_sdpa_distributed_vs_single(
             entry_s = data[rank_s]
             driver(entry_s["key"], entry_s["value"])
     dist_outputs = [driver.results()[0] for driver in drivers]
+    dist_lses = [driver.results()[1] for driver in drivers]
 
     # Single computation
-    flexatt_args = FlexAttentionArgs()
-    output_all, _ = scaled_dot_product_attention_flexatt(
+    flexatt_args = FlexAttentionArgs(forward_return_lse=True)
+    output_all, lse_all = scaled_dot_product_attention_flexatt(
         flexatt_args=flexatt_args,
         query=data_all["query"],
         key=data_all["key"],
@@ -202,7 +205,119 @@ def test_sdpa_distributed_vs_single(
         token_positions=data_all["token_pos"],
     )
     single_outputs = [output_all[:, :, q_ind, :] for q_ind in q_inds]
+    single_lses = [lse_all[:, :, q_ind] for q_ind in q_inds]
 
-    for rank, (d_output, s_output) in enumerate(zip(dist_outputs, single_outputs)):
+    for rank, (d_output, s_output, d_lse, s_lse) in enumerate(
+        zip(dist_outputs, single_outputs, dist_lses, single_lses)
+    ):
         print(f"Outputs for rank {rank}")
         torch.testing.assert_close(d_output, s_output)
+        torch.testing.assert_close(d_lse, s_lse)
+
+
+
+
+@_RunIf(min_cuda_gpus=1)
+@pytest.mark.parametrize(
+    "n_head, n_query_groups, kv_len_per_rank, dtype, num_devices",
+    [
+        (4, 2, 512, torch.float16, 4),
+        (4, 4, 256, torch.bfloat16, 2),
+        (8, 4, 128, torch.float16, 8),
+        (12, 4, 512, torch.bfloat16, 3),
+        (24, 8, 256, torch.float16, 5),
+        (9, 3, 256, torch.bfloat16, 4),
+        (12, 4, 256, torch.float16, 8),
+    ],
+)
+def test_sdpa_distributed_vs_single_on_prefill(
+    n_head,
+    n_query_groups,
+    kv_len_per_rank,
+    dtype,
+    num_devices,
+):
+    seed = 31415927
+    torch.manual_seed(seed)
+
+    batch_size = 2
+    head_size = 32
+    device = torch.device("cuda", 0)
+    kv_len = kv_len_per_rank * num_devices
+    input_pos = 0
+
+    config = Config.from_name(
+        "gemma-2-27b",
+        block_size=3 * kv_len,
+        n_layer=1,
+        n_query_groups=n_query_groups,
+        n_head=n_head,
+        n_embd=n_head * head_size,
+        intermediate_size=n_head * head_size * 3,
+        rotary_percentage=1.0,
+    )
+    params = KVCacheParams.from_config(
+        config=config,
+        max_batch_size=batch_size,
+        cache_length=kv_len,
+        dtype=dtype,
+    )
+    # Sample data for comparison
+    data_all = random_args_cache_forward(
+        params,
+        num=kv_len,
+        vocab_size=config.vocab_size,
+        device=device,
+    )
+
+    # Distributed computation
+    data, q_inds = _distribute_and_reorder_data(data_all, num_devices, input_pos)
+    flexatt_args_diag = RingDiagFlexAttentionArgs()
+    flexatt_args_offdiag = RingOffdiagFlexAttentionArgs(num_devices=num_devices)
+    drivers = [
+        RingAttentionDriver(
+            rank_r=r,
+            flexatt_args_diag=flexatt_args_diag,
+            flexatt_args_offdiag=flexatt_args_offdiag,
+        )
+        for r in range(num_devices)
+    ]
+    for entry, driver in zip(data, drivers):
+        driver.reset(
+            query=entry["query"],
+            scale=None,
+            input_pos=input_pos,
+            num_new_tokens=kv_len,
+            config=config,
+        )
+    # Loop around the ring
+    for iter in range(num_devices):
+        for driver in drivers:
+            rank_s = (driver.rank_r - iter) % num_devices
+            entry_s = data[rank_s]
+            driver(entry_s["key"], entry_s["value"])
+    dist_outputs = [driver.results()[0] for driver in drivers]
+    dist_lses = [driver.results()[1] for driver in drivers]
+
+    # Single computation
+    flexatt_args = FlexAttentionArgs(forward_return_lse=True)
+    output_all, lse_all = scaled_dot_product_attention_flexatt(
+        flexatt_args=flexatt_args,
+        query=data_all["query"],
+        key=data_all["key"],
+        value=data_all["value"],
+        scale_factor=None,
+        sliding_window_size=None,
+        attention_logit_softcapping=None,
+        input_pos=input_pos,
+        token_positions=None,
+    )
+    single_outputs = [output_all[:, :, q_ind, :] for q_ind in q_inds]
+    single_lses = [lse_all[:, :, q_ind] for q_ind in q_inds]
+
+    for rank, (d_output, s_output, d_lse, s_lse) in enumerate(
+        zip(dist_outputs, single_outputs, dist_lses, single_lses)
+    ):
+        print(f"Outputs for rank {rank}")
+        torch.testing.assert_close(d_output, s_output)
+        torch.testing.assert_close(d_lse, s_lse)
