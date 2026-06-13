@@ -594,7 +594,7 @@ def scaled_dot_product_attention_flexatt(
     token_positions: Optional[torch.Tensor],
     annotation_callback: Optional[ReorderAnnotationCallback] = None,
     sort_if_3d: bool = True,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+) -> torch.Tensor:
     """
     Computes scaled dot product attention (SDPA) using PyTorch
     `flex_attention`. This does not need reordering of `key`, `value`, since
@@ -632,7 +632,7 @@ def scaled_dot_product_attention_flexatt(
         sort_if_3d: See :func:`reorder_key_value`.
 
     Returns:
-        `Outputs of shape `(batch_size, n_head, q_len, head_size)`
+        Outputs of shape `(batch_size, n_head, q_len, head_size)`
 
     """
     batch_size, n_head, n_query_groups, q_len, kv_len, head_size = sdpa_check_args(

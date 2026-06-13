@@ -58,13 +58,11 @@ class RingFlexAttnForPrefillManager(FlexAttnForPrefillManager):
     def _unpack_extra_kwargs(
         self,
         **kwargs,
-    ) -> Tuple[int, bool]:
-        unpacked_args = []
-        for name in ("offset_positive",):
-            if name not in kwargs:
-                raise ValueError(f"{name} is required")
-            unpacked_args.append(kwargs[name])
-        return tuple(unpacked_args)
+    ) -> bool:
+        name = "offset_positive"
+        if name not in kwargs:
+            raise ValueError(f"{name} is required")
+        return kwargs[name]
 
     def _get_args(
         self,
