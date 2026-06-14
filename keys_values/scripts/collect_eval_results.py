@@ -79,8 +79,12 @@ if __name__ == "__main__":
     # dataset_size = "128k"
     is_baseline = False
     # is_baseline = True
+    is_base_model = False
+    # is_base_model = True
     if is_baseline:
         base_path = base_path / "baseline"
+    elif is_base_model:
+        base_path = base_path / "basemod"
     datasets = [
         f"helmet_nq_{dataset_size}",
         f"helmet_trivia_qa_{dataset_size}",

@@ -160,33 +160,37 @@ if __name__ == "__main__":
     # dataset_size = "128k"
     # is_baseline = False
     is_baseline = True
+    is_base_model = False
+    # is_base_model = True
     if is_baseline:
         base_path = base_path / "baseline"
+    elif is_base_model:
+        base_path = base_path / "basemod"
     datasets = [
         f"helmet_nq_{dataset_size}",
         f"helmet_trivia_qa_{dataset_size}",
         f"helmet_hotpot_qa_{dataset_size}",
         f"helmet_pop_qa_{dataset_size}",
     ]
-    if not is_baseline:
-        cases = [
-            ("lr_4gpu_cs2048_lr5", "lr_2048"),
-            ("slr_4gpu_cs2048_lr5", "slr_2048"),
-            ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
-            ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
-            ("qh2o_4gpu_cs2048_lr5", "qh2o_2048"),
-            ("qh2onorm_4gpu_cs2048_lr5", "qh2onorm_2048"),
-            ("lr_4gpu_cs1024_lr5", "lr_1024"),
-            ("slr_4gpu_cs1024_lr5", "slr_1024"),
-            ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
-            ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
-        ]
-    else:
-        cases = [
-            ("slr_4gpu_cs1024_lr5", "slr_1024"),
-            ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
-            ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
-        ]
+    cases = [
+        ("lr_4gpu_cs2048_lr5", "lr_2048"),
+        ("slr_4gpu_cs2048_lr5", "slr_2048"),
+        ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
+        ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
+        ("h2oorig_4gpu_cs2048_lr5", "h2oorig_2048"),
+        ("lr_4gpu_cs1024_lr5", "lr_1024"),
+        ("slr_4gpu_cs1024_lr5", "slr_1024"),
+        ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
+        ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
+        ("h2oorig_4gpu_cs1024_lr5", "h2oorig_1024"),
+    ]
+    if not is_baseline and not is_base_model:
+        cases.extend(
+            [
+                ("qh2o_4gpu_cs2048_lr5", "qh2o_2048"),
+                ("qh2onorm_4gpu_cs2048_lr5", "qh2onorm_2048"),
+            ]
+        )
     result_path = base_path / f"results_{dataset_size}.tex"
     # final_table = False
     final_table = True
