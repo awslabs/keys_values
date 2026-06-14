@@ -214,12 +214,9 @@ def test_sdpa_distributed_vs_single_on_chunk(
 @pytest.mark.parametrize(
     "n_head, n_query_groups, kv_len_per_rank, dtype, num_devices",
     [
-        (4, 2, 512, torch.float32, 4),
-        (4, 4, 256, torch.float32, 2),
-        (8, 4, 128, torch.float32, 8),
-    #    (4, 2, 512, torch.float16, 4),
-    #    (4, 4, 256, torch.bfloat16, 2),
-    #    (8, 4, 128, torch.float16, 8),
+        (4, 2, 512, torch.float16, 4),
+        (4, 4, 256, torch.bfloat16, 2),
+        (8, 4, 128, torch.float16, 8),
     #    (12, 4, 512, torch.bfloat16, 3),
     #    (24, 8, 256, torch.float16, 5),
     #    (9, 3, 256, torch.bfloat16, 4),

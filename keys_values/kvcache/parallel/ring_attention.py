@@ -157,6 +157,9 @@ class RingAttentionDriver:
         new_output, new_lse = self._attention_for_cell(key, value, rank_s)
         self._accumulate(new_output, new_lse)
         self.steps_done += 1
+        if self.steps_done == self.num_devices:
+            res_dtype = self.query.dtype
+            self._accum_output = self._accum_lse.to(dtype=res_dtype)
 
     def _attention_for_cell(
         self,
@@ -190,6 +193,10 @@ class RingAttentionDriver:
         return output, lse
 
     def _accumulate(self, new_output: torch.Tensor, new_lse: torch.Tensor):
+        # We keep `_accum_output` and `_accum_lse` in `float32`
+        acc_dtype = torch.float32
+        assert new_lse.dtype == acc_dtype  # Sanity check
+        new_output = new_output.to(dtype=acc_dtype)
         if self.steps_done == 0:
             self._accum_output = new_output
             self._accum_lse = new_lse
@@ -198,13 +205,12 @@ class RingAttentionDriver:
             new_accum_lse = torch.maximum(self._accum_lse, new_lse) + torch.log1p(
                 torch.exp(-torch.abs(self._accum_lse - new_lse))
             )
-            dtype = self._accum_output.dtype
             output_part1 = self._accum_output * torch.exp(
                 self._accum_lse - new_accum_lse
-            ).to(dtype=dtype).unsqueeze(-1)
+            ).unsqueeze(-1)
             output_part2 = new_output * torch.exp(
                 new_lse - new_accum_lse
-            ).to(dtype=dtype).unsqueeze(-1)
+            ).unsqueeze(-1)
             self._accum_output = output_part1 + output_part2
             self._accum_lse = new_accum_lse
 
@@ -216,4 +222,5 @@ class RingAttentionDriver:
         """
         if self._accum_output is None:
             raise IndexError("Accumulators are still empty")
-        return self._accum_output, self._accum_lse
+        res_dtype = self.query.dtype
+        return self._accum_output.to(dtype=res_dtype), self._accum_lse
