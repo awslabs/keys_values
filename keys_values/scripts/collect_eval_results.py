@@ -93,22 +93,22 @@ if __name__ == "__main__":
         f"helmet_pop_qa_{dataset_size}",
     ]
     cases = [
-        ("lr_4gpu_cs2048_lr5", "lr_2048"),
-        ("slr_4gpu_cs2048_lr5", "slr_2048"),
-        ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
-        ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
-        ("h2oorig_4gpu_cs2048_lr5", "h2oorig_2048"),
-        ("lr_4gpu_cs1024_lr5", "lr_1024"),
-        ("slr_4gpu_cs1024_lr5", "slr_1024"),
-        ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
-        ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
-        ("h2oorig_4gpu_cs1024_lr5", "h2oorig_1024"),
+        "lr_4gpu_cs2048_lr5",
+        "slr_4gpu_cs2048_lr5",
+        "h2o_4gpu_cs2048_lr5",
+        "h2onorm_4gpu_cs2048_lr5",
+        "h2oorig_4gpu_cs2048_lr5",
+        "lr_4gpu_cs1024_lr5",
+        "slr_4gpu_cs1024_lr5",
+        "h2o_4gpu_cs1024_lr5",
+        "h2onorm_4gpu_cs1024_lr5",
+        "h2oorig_4gpu_cs1024_lr5",
     ]
     if multiple_tasks:
         cases.extend(
             [
-                ("qh2o_4gpu_cs2048_lr5", "qh2o_2048"),
-                ("qh2onorm_4gpu_cs2048_lr5", "qh2onorm_2048"),
+                "qh2o_4gpu_cs2048_lr5",
+                "qh2onorm_4gpu_cs2048_lr5",
             ]
         )
     model_type = "lora"
