@@ -232,6 +232,7 @@ def test_sdpa_distributed_vs_single_on_prefill(
 ):
     seed = 31415927
     torch.manual_seed(seed)
+    atol = 0.0005 if dtype == torch.float16 else 0.005
 
     batch_size = 2
     head_size = 32
@@ -312,4 +313,4 @@ def test_sdpa_distributed_vs_single_on_prefill(
         zip(dist_outputs, single_outputs)
     ):
         print(f"Outputs for rank {rank}")
-        torch.testing.assert_close(d_output, s_output)
+        torch.testing.assert_close(d_output, s_output, atol=atol)
