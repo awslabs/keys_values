@@ -307,6 +307,9 @@ class KVCache(torch.nn.Module):
             group. Active dimensions: `(0,)`
         * :class:`AttnWeightsKVCache`: The policy is sensitive to all
             dimensions. Active dimensions: `(0, 1)`
+        * :class:`H2OOriginalKVCache`: The policy is sensitive to query group
+            and token position, but not to batch position. Active dimensions:
+            `(1,)`
 
         Returns:
             Tuple of active dimensions

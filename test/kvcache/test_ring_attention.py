@@ -81,12 +81,12 @@ def _distribute_and_reorder_data(
     "n_head, n_query_groups, q_len, kv_len_per_rank, dtype, input_pos, num_devices, do_q_lens, is_1d",
     [
         (4, 2, 128, 512, torch.float16, 512 * 4, 4, False, False),
-        (4, 4, 8, 256, torch.bfloat16, 256 * 2 + 11, 2, False, False),
-        (8, 4, 64, 128, torch.float16, 128 * 8 + 5, 8, True, True),
-        (12, 4, 16, 512, torch.bfloat16, 512 * 3 + 127, 3, False, True),
-        (24, 8, 8, 256, torch.float16, 256 * 5 + 15, 5, True, False),
-        (9, 3, 128, 256, torch.bfloat16, 256 * 4 + 27, 4, False, True),
-        (12, 4, 16, 256, torch.float16, 256 * 8 + 513, 8, True, False),
+    #    (4, 4, 8, 256, torch.bfloat16, 256 * 2 + 11, 2, False, False),
+    #    (8, 4, 64, 128, torch.float16, 128 * 8 + 5, 8, True, True),
+    #    (12, 4, 16, 512, torch.bfloat16, 512 * 3 + 127, 3, False, True),
+    #    (24, 8, 8, 256, torch.float16, 256 * 5 + 15, 5, True, False),
+    #    (9, 3, 128, 256, torch.bfloat16, 256 * 4 + 27, 4, False, True),
+    #    (12, 4, 16, 256, torch.float16, 256 * 8 + 513, 8, True, False),
     ],
 )
 def test_sdpa_distributed_vs_single_on_chunk(

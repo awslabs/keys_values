@@ -545,4 +545,9 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         tp_values: torch.Tensor,
     ):
         check_array_index(index, (self.batch_size, self.cache_length))
+        tp_values = tp_values.flatten()
+        if tp_values.numel() != index.shape[1]:
+            raise ValueError(
+                f"tp_values.shape = {tp_values.shape}, index.shape = {index.shape}: Not compatible"
+            )
         self.token_pos[index[0], index[1]] = tp_values.to(dtype=self.token_pos.dtype)
