@@ -79,8 +79,8 @@ if __name__ == "__main__":
     # dataset_size = "128k"
     is_baseline = False
     # is_baseline = True
-    is_base_model = False
-    # is_base_model = True
+    # is_base_model = False
+    is_base_model = True
     if is_baseline:
         base_path = base_path / "baseline"
     elif is_base_model:
@@ -104,11 +104,12 @@ if __name__ == "__main__":
         "h2onorm_4gpu_cs1024_lr5",
     ]
     model_type = "lora"
+    miultiple_tasks = not is_baseline and not is_base_model
     if mode == "collect":
         for dataset, case in product(datasets, cases):
             out_dir = base_path / dataset / case
             if out_dir.exists():
-                main(out_dir, model_type, multiple_tasks=not is_baseline)
+                main(out_dir, model_type, multiple_tasks=miultiple_tasks)
             else:
                 print(f"\nResults for {dataset}/{case} do not exist")
     elif mode == "sweep":
