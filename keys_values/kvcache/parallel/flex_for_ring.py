@@ -53,7 +53,7 @@ class RingFlexAttnForPrefillManager(FlexAttnForPrefillManager):
     """
 
     def __init__(self):
-        super().__init__()
+        super().__init__(forward_return_lse=True)
 
     def _unpack_extra_kwargs(
         self,
@@ -102,6 +102,9 @@ class RingFlexAttnForPrefillManager(FlexAttnForPrefillManager):
     @staticmethod
     def _from_args(args: tuple, name: str) -> Any:
         return args[RingFlexAttnForPrefillManager._ARGS_NAMES[name]]
+
+    def _requires_grad_from_args(self, args: tuple) -> bool:
+        raise NotImplementedError
 
     def _args_to_str(self, *args) -> str:
         parts = [
@@ -223,6 +226,9 @@ class RingFlexAttnForChunkManager(FlexAttnForChunkManager):
     @staticmethod
     def _from_args(args: tuple, name: str) -> Any:
         return args[RingFlexAttnForChunkManager._ARGS_NAMES[name]]
+
+    def _requires_grad_from_args(self, args: tuple) -> bool:
+        raise NotImplementedError
 
     def _args_to_str(self, *args) -> str:
         parts = [
@@ -409,9 +415,10 @@ class RingDiagFlexAttentionArgs:
         q_lens: Optional[List[int]] = None,
         extend_kv: bool = False,
     ):
+        # Different to :class:`FlexAttentionArgs`: Also prefill returns log_sum_exp:
         self.attn_prefill_manager = FlexAttnForPrefillManager(forward_return_lse=True)
         self.attn_chunk_manager = FlexAttnForChunkManager(
-            q_lens, forward_return_lse=True
+            q_lens, forward_return_lse=True,
         )
         self.extend_kv = extend_kv
 
@@ -676,7 +683,7 @@ def sdpa_ring_flexatt_diag(
     )
     lse = aux.lse
     if q_len_tr > q_len:
-        # Padding was on the right, not on the left
-        output = output[:, :, :q_len, :].clone()
-        lse = lse[:, :, :q_len].clone()
+        # Padding was on the left
+        output = output[:, :, (-q_len):, :].clone()
+        lse = lse[:, :, (-q_len):].clone()
     return output, lse
