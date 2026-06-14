@@ -104,7 +104,7 @@ class RingFlexAttnForPrefillManager(FlexAttnForPrefillManager):
         return args[RingFlexAttnForPrefillManager._ARGS_NAMES[name]]
 
     def _requires_grad_from_args(self, args: tuple) -> bool:
-        raise NotImplementedError
+        return self._from_args(args, "requires_grad")
 
     def _args_to_str(self, *args) -> str:
         parts = [
@@ -228,7 +228,7 @@ class RingFlexAttnForChunkManager(FlexAttnForChunkManager):
         return args[RingFlexAttnForChunkManager._ARGS_NAMES[name]]
 
     def _requires_grad_from_args(self, args: tuple) -> bool:
-        raise NotImplementedError
+        return self._from_args(args, "requires_grad")
 
     def _args_to_str(self, *args) -> str:
         parts = [
