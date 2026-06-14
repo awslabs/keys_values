@@ -220,6 +220,7 @@ class RingAttentionDriver:
             self._accum_output = new_output
             self._accum_lse = new_lse
         else:
+            print(f"_accum_lse: ({self._accum_lse.dtype}, {self._accum_lse.shape}); new_lse: ({new_lse.dtype}; {new_lse.shape})")  # DEBUG
             new_accum_lse = torch.maximum(self._accum_lse, new_lse) + torch.log1p(
                 -torch.abs(self._accum_lse - new_lse)
             )
