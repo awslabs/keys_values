@@ -22,6 +22,7 @@ from keys_values.kvcache.parallel.flex_for_ring import (
     RingOffdiagFlexAttentionArgs,
     RingDiagFlexAttentionArgs,
 )
+from keys_values.utils import check_for_nan
 
 
 class RingAttentionDriver:
@@ -92,6 +93,11 @@ class RingAttentionDriver:
             raise ValueError(f"input_pos={input_pos}, must be >= 0")
         if scale is not None and scale <= 0:
             raise ValueError(f"scale={scale}, must be positive")
+        check_for_nan(
+            query,
+            "RingAttentionDriver.reset",
+            "query",
+        )
         self.query = query
         self.scale = scale
         self.input_pos = input_pos
@@ -154,7 +160,27 @@ class RingAttentionDriver:
             raise ValueError(
                 f"key.shape={key.shape}, value.shape={value.shape}, must be {shape}"
             )
+        check_for_nan(
+            key,
+            "RingAttentionDriver.__call__",
+            "key",
+        )
+        check_for_nan(
+            value,
+            "RingAttentionDriver.__call__",
+            "value",
+        )
         new_output, new_lse = self._attention_for_cell(key, value, rank_s)
+        check_for_nan(
+            new_output,
+            "RingAttentionDriver.__call__",
+            "new_output",
+        )
+        check_for_nan(
+            new_lse,
+            "RingAttentionDriver.__call__",
+            "new_lse",
+        )
         self._accumulate(new_output, new_lse)
         self.steps_done += 1
 
@@ -197,16 +223,29 @@ class RingAttentionDriver:
             new_accum_lse = torch.maximum(self._accum_lse, new_lse) + torch.log1p(
                 -torch.abs(self._accum_lse - new_lse)
             )
-            dtype = self._accum_output.dtype
-            self._accum_output = self._accum_output * torch.exp(
-                self._accum_lse - new_accum_lse
-            ).to(dtype=dtype).unsqueeze(-1) + new_output * torch.exp(
-                new_lse - new_accum_lse
-            ).to(
-                dtype=dtype
-            ).unsqueeze(
-                -1
+            check_for_nan(
+                new_accum_lse,
+                "RingAttentionDriver._accumulate",
+                "new_accum_lse",
             )
+            dtype = self._accum_output.dtype
+            output_part1 = self._accum_output * torch.exp(
+                self._accum_lse - new_accum_lse
+            ).to(dtype=dtype).unsqueeze(-1)
+            check_for_nan(
+                output_part1,
+                "RingAttentionDriver._accumulate",
+                "output_part1",
+            )
+            output_part2 = new_output * torch.exp(
+                new_lse - new_accum_lse
+            ).to(dtype=dtype).unsqueeze(-1)
+            check_for_nan(
+                output_part1,
+                "RingAttentionDriver._accumulate",
+                "output_part1",
+            )
+            self._accum_output = output_part1 + output_part2
             self._accum_lse = new_accum_lse
 
     def results(self) -> Tuple[torch.Tensor, torch.Tensor]:

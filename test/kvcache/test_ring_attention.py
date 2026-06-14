@@ -31,6 +31,7 @@ from keys_values.kvcache.parallel.flex_for_ring import (
 )
 from keys_values.kvcache.parallel.ring_attention import RingAttentionDriver
 from keys_values.kvcache.test_utils import random_args_cache_forward
+from keys_values.utils import check_for_nan
 
 
 def _distribute_and_reorder_data(
@@ -275,6 +276,7 @@ def test_sdpa_distributed_vs_single_on_prefill(
         for r in range(num_devices)
     ]
     for entry, driver in zip(data, drivers):
+        print(f"Rank {driver.rank_r}: reset")  # DEBUG
         driver.reset(
             query=entry["query"],
             scale=None,
@@ -286,9 +288,18 @@ def test_sdpa_distributed_vs_single_on_prefill(
     for it in range(num_devices):
         for driver in drivers:
             rank_s = (driver.rank_r - it) % num_devices
+            print(f"Iter {it}, rank {driver.rank_r}: rank_s = {rank_s}")  # DEBUG
             entry_s = data[rank_s]
             driver(entry_s["key"], entry_s["value"])
     dist_outputs = [driver.results()[0] for driver in drivers]
+    # DEBUG
+    for rank, d_output in enumerate(dist_outputs):
+        check_for_nan(
+            d_output,
+            f"Rank {rank}",
+            "d_output",
+        )
+    # END DEBUG
 
     # Single computation
     flexatt_args = FlexAttentionArgs()
@@ -304,6 +315,14 @@ def test_sdpa_distributed_vs_single_on_prefill(
         token_positions=None,
     )
     single_outputs = [output_all[:, :, q_ind, :] for q_ind in q_inds]
+    # DEBUG
+    for rank, s_output in enumerate(single_outputs):
+        check_for_nan(
+            s_output,
+            f"Rank {rank}",
+            "s_output",
+        )
+    # END DEBUG
 
     for rank, (d_output, s_output) in enumerate(
         zip(dist_outputs, single_outputs)
