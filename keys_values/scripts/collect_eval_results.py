@@ -79,8 +79,13 @@ if __name__ == "__main__":
     # dataset_size = "128k"
     is_baseline = False
     # is_baseline = True
+    # is_base_model = False
+    is_base_model = True
+    multiple_tasks = not is_baseline and not is_base_model
     if is_baseline:
         base_path = base_path / "baseline"
+    elif is_base_model:
+        base_path = base_path / "basemod"
     datasets = [
         f"helmet_nq_{dataset_size}",
         f"helmet_trivia_qa_{dataset_size}",
@@ -91,20 +96,27 @@ if __name__ == "__main__":
         "lr_4gpu_cs2048_lr5",
         "slr_4gpu_cs2048_lr5",
         "h2o_4gpu_cs2048_lr5",
-        "qh2o_4gpu_cs2048_lr5",
         "h2onorm_4gpu_cs2048_lr5",
-        "qh2onorm_4gpu_cs2048_lr5",
+        "h2oorig_4gpu_cs2048_lr5",
         "lr_4gpu_cs1024_lr5",
         "slr_4gpu_cs1024_lr5",
         "h2o_4gpu_cs1024_lr5",
         "h2onorm_4gpu_cs1024_lr5",
+        "h2oorig_4gpu_cs1024_lr5",
     ]
+    if multiple_tasks:
+        cases.extend(
+            [
+                "qh2o_4gpu_cs2048_lr5",
+                "qh2onorm_4gpu_cs2048_lr5",
+            ]
+        )
     model_type = "lora"
     if mode == "collect":
         for dataset, case in product(datasets, cases):
             out_dir = base_path / dataset / case
             if out_dir.exists():
-                main(out_dir, model_type, multiple_tasks=not is_baseline)
+                main(out_dir, model_type, multiple_tasks=multiple_tasks)
             else:
                 print(f"\nResults for {dataset}/{case} do not exist")
     elif mode == "sweep":
