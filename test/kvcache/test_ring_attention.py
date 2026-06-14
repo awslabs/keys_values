@@ -292,14 +292,6 @@ def test_sdpa_distributed_vs_single_on_prefill(
             entry_s = data[rank_s]
             driver(entry_s["key"], entry_s["value"])
     dist_outputs = [driver.results()[0] for driver in drivers]
-    # DEBUG
-    for rank, d_output in enumerate(dist_outputs):
-        check_for_nan(
-            d_output,
-            f"Rank {rank}",
-            "d_output",
-        )
-    # END DEBUG
 
     # Single computation
     flexatt_args = FlexAttentionArgs()
@@ -315,14 +307,6 @@ def test_sdpa_distributed_vs_single_on_prefill(
         token_positions=None,
     )
     single_outputs = [output_all[:, :, q_ind, :] for q_ind in q_inds]
-    # DEBUG
-    for rank, s_output in enumerate(single_outputs):
-        check_for_nan(
-            s_output,
-            f"Rank {rank}",
-            "s_output",
-        )
-    # END DEBUG
 
     for rank, (d_output, s_output) in enumerate(
         zip(dist_outputs, single_outputs)
