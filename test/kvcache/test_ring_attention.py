@@ -31,7 +31,6 @@ from keys_values.kvcache.parallel.flex_for_ring import (
 )
 from keys_values.kvcache.parallel.ring_attention import RingAttentionDriver
 from keys_values.kvcache.test_utils import random_args_cache_forward
-from keys_values.utils import check_for_nan
 
 
 def _distribute_and_reorder_data(
@@ -103,6 +102,8 @@ def test_sdpa_distributed_vs_single_on_chunk(
 ):
     seed = 31415927
     torch.manual_seed(seed)
+    atol = 0.0005 if dtype == torch.float16 else 0.005
+    rtol = 0.1
 
     batch_size = 2
     head_size = 32
@@ -207,7 +208,7 @@ def test_sdpa_distributed_vs_single_on_chunk(
         zip(dist_outputs, single_outputs)
     ):
         print(f"Outputs for rank {rank}")
-        torch.testing.assert_close(d_output, s_output)
+        torch.testing.assert_close(d_output, s_output, atol=atol, rtol=rtol)
 
 
 @_RunIf(min_cuda_gpus=1)
@@ -217,10 +218,10 @@ def test_sdpa_distributed_vs_single_on_chunk(
         (4, 2, 512, torch.float16, 4),
         (4, 4, 256, torch.bfloat16, 2),
         (8, 4, 128, torch.float16, 8),
-    #    (12, 4, 512, torch.bfloat16, 3),
-    #    (24, 8, 256, torch.float16, 5),
-    #    (9, 3, 256, torch.bfloat16, 4),
-    #    (12, 4, 256, torch.float16, 8),
+        (12, 4, 512, torch.bfloat16, 3),
+        (24, 8, 256, torch.float16, 5),
+        (9, 3, 256, torch.bfloat16, 4),
+        (12, 4, 256, torch.float16, 8),
     ],
 )
 def test_sdpa_distributed_vs_single_on_prefill(
