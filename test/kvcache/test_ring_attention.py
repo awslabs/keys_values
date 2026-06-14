@@ -215,12 +215,12 @@ def test_sdpa_distributed_vs_single_on_chunk(
     "n_head, n_query_groups, kv_len_per_rank, dtype, num_devices",
     [
         (4, 2, 512, torch.float16, 4),
-    #    (4, 4, 256, torch.bfloat16, 2),
-    #    (8, 4, 128, torch.float16, 8),
-    #    (12, 4, 512, torch.bfloat16, 3),
-    #    (24, 8, 256, torch.float16, 5),
-    #    (9, 3, 256, torch.bfloat16, 4),
-    #    (12, 4, 256, torch.float16, 8),
+        (4, 4, 256, torch.bfloat16, 2),
+        (8, 4, 128, torch.float16, 8),
+        (12, 4, 512, torch.bfloat16, 3),
+        (24, 8, 256, torch.float16, 5),
+        (9, 3, 256, torch.bfloat16, 4),
+        (12, 4, 256, torch.float16, 8),
     ],
 )
 def test_sdpa_distributed_vs_single_on_prefill(
@@ -276,7 +276,7 @@ def test_sdpa_distributed_vs_single_on_prefill(
         for r in range(num_devices)
     ]
     for entry, driver in zip(data, drivers):
-        print(f"Rank {driver.rank_r}: reset")  # DEBUG
+        # print(f"Rank {driver.rank_r}: reset")  # DEBUG
         driver.reset(
             query=entry["query"],
             scale=None,
@@ -288,7 +288,7 @@ def test_sdpa_distributed_vs_single_on_prefill(
     for it in range(num_devices):
         for driver in drivers:
             rank_s = (driver.rank_r - it) % num_devices
-            print(f"Iter {it}, rank {driver.rank_r}: rank_s = {rank_s}")  # DEBUG
+            # print(f"Iter {it}, rank {driver.rank_r}: rank_s = {rank_s}")  # DEBUG
             entry_s = data[rank_s]
             driver(entry_s["key"], entry_s["value"])
     dist_outputs = [driver.results()[0] for driver in drivers]
