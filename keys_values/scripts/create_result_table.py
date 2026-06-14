@@ -158,14 +158,15 @@ if __name__ == "__main__":
 
     dataset_size = "64k"
     # dataset_size = "128k"
-    # is_baseline = False
-    is_baseline = True
-    is_base_model = False
-    # is_base_model = True
+    is_baseline = False
+    # is_baseline = True
+    # is_base_model = False
+    is_base_model = True
     if is_baseline:
         base_path = base_path / "baseline"
     elif is_base_model:
         base_path = base_path / "basemod"
+    multiple_tasks = not is_baseline and not is_base_model
     datasets = [
         f"helmet_nq_{dataset_size}",
         f"helmet_trivia_qa_{dataset_size}",
@@ -195,4 +196,4 @@ if __name__ == "__main__":
     # final_table = False
     final_table = True
 
-    main(datasets, cases, result_path, final_table, multiple_tasks=not is_baseline)
+    main(datasets, cases, result_path, final_table, multiple_tasks=multiple_tasks)
