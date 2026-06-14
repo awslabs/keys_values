@@ -159,7 +159,7 @@ class RingAttentionDriver:
         self.steps_done += 1
         if self.steps_done == self.num_devices:
             res_dtype = self.query.dtype
-            self._accum_output = self._accum_lse.to(dtype=res_dtype)
+            self._accum_output = self._accum_output.to(dtype=res_dtype)
 
     def _attention_for_cell(
         self,
