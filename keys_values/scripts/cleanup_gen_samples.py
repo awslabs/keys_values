@@ -17,13 +17,17 @@ import yaml
 from keys_values.finetune.longcontext_eval_ext import GENERATED_SAMPLES_FILENAME
 
 
-def main(control_file: Path):
+def main(control_file: Path, multiple_tasks: bool):
     setups = yaml.safe_load(control_file.open())
     num_total = 0
     for setup in setups:
-        for task in setup["eval_tasks"]:
+        tasks = setup["eval_tasks"] if multiple_tasks else [None]
+        for task in tasks:
             num_task = 0
-            base_path = Path(setup["out_dir"]) / task / "eval"
+            if multiple_tasks:
+                base_path = Path(setup["out_dir"]) / task / "eval"
+            else:
+                base_path = Path(setup["out_dir"]) / "eval"
             for path in base_path.glob(GENERATED_SAMPLES_FILENAME.replace("{}", "*")):
                 path.unlink()
                 num_task += 1
@@ -34,12 +38,13 @@ def main(control_file: Path):
 
 
 if __name__ == "__main__":
-    dataset_size = "64k"
-    # dataset_size = "128k"
+    # dataset_size = "64k"
+    dataset_size = "128k"
     is_baseline = False
     # is_baseline = True
     # is_base_model = False
     is_base_model = True
+    multiple_tasks = not is_baseline and not is_base_model
     if is_baseline:
         extra = "bl_"
     elif is_base_model:
@@ -48,4 +53,4 @@ if __name__ == "__main__":
         extra = ""
     # control_file = f"sync/keys_values/eval_inst1_{extra}{dataset_size}.yaml"
     control_file = f"git/keys_values/eval_inst2_3_{extra}{dataset_size}.yaml"
-    main(Path.home() / control_file)
+    main(Path.home() / control_file, multiple_tasks)
