@@ -36,6 +36,16 @@ def main(control_file: Path):
 if __name__ == "__main__":
     dataset_size = "64k"
     # dataset_size = "128k"
-    control_file = f"sync/keys_values/eval_inst1_{dataset_size}.yaml"
-    # control_file = f"git/keys_values/eval_inst2_3_{dataset_size}.yaml"
+    is_baseline = False
+    # is_baseline = True
+    # is_base_model = False
+    is_base_model = True
+    if is_baseline:
+        extra = "bl_"
+    elif is_base_model:
+        extra = "basemod_"
+    else:
+        extra = ""
+    # control_file = f"sync/keys_values/eval_inst1_{extra}{dataset_size}.yaml"
+    control_file = f"git/keys_values/eval_inst2_3_{extra}{dataset_size}.yaml"
     main(Path.home() / control_file)
