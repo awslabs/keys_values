@@ -34,7 +34,7 @@ from keys_values.kvcache.buffers import (
     positions_wrap_around,
 )
 from keys_values.config import Config
-from keys_values.utils import bits_for_torch_dtype, bitsize_of, encode
+from keys_values.utils import bits_for_torch_dtype, bitsize_of, encode, index_to_3d
 
 
 @dataclass(frozen=True)
@@ -170,29 +170,60 @@ class SmartInitialLastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
             return torch.cat(positions, dim=-1)
 
 
+def positions_outside_protected_range(
+    num: int,
+    current: int,
+    end: int,
+    protected_start: int,
+    protected_end: int,
+    **index_kwargs,
+) -> torch.Tensor:
+    assert 0 <= protected_start < protected_end <= end
+    assert 0 <= current < protected_start or protected_end <= current < end
+    assert protected_end - protected_start < end
+    parts = []
+    remainder = num
+    while remainder > 0:
+        diff = protected_start - current
+        if diff > 0:
+            diff = min(diff, remainder)
+            part = torch.arange(current, current + diff, **index_kwargs)
+            remainder -= diff
+            current = protected_end % end
+        else:
+            diff = min(end - current, remainder)
+            part = torch.arange(current, current + diff, **index_kwargs)
+            remainder -= diff
+            current = 0 if protected_start > 0 else protected_end
+        parts.append(part)
+    return torch.cat(parts, dim=0)
+
+
+# TODO: What if protected range does not lie in prefill chunk?
 class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
     """
-    Advanced variant of :class:`LastRecentlyInsertedKVCache`. Here, the initial
-    "grace" part kept in the cache indefinitely can be of different length for
-    each batch position and depends on the prompt content.
+    Advanced variant of :class:`LastRecentlyInsertedKVCache`. For each batch
+    dimension, there is a protected range of token positions, KV information
+    for which remains in the cache, namely
+    `range(protected_start[b], protected_end[b])` for each batch position `b`.
 
     A regular expression `end_initial_regex` is passed at construction.
-    The length of initial parts (in tokens) per batch position is kept in
-    `init_length`. It is determined in :meth:`prefill`. Namely,
-    `init_length[b]` is the smallest of:
+    Protected ranges are determined in :meth:`prefill`. Namely,
+    `protected_start[b]` is the position of the first non-padding token, while
+    `protected_end[b]` is the smallest of:
 
     * `end` (if `include_end_string == True`) or `start` (if
       `include_end_string == False`) if the first match of `end_initial_regex`
       in the string decoded from the token sequence `token_idx[b, :]` has span
       `(start, end)`.
-    * `int(max_initial_fraction * cache_length)`
+    * `protected_start[b] + int(max_initial_fraction * cache_length)`
     * Prefill length `key.shape[2]`
 
-    In other words, the initial parts are terminated by a certain string
-    pattern described by `end_initial_regex`, and the pattern is included in the
+    In other words, protected ranges are terminated by a certain string pattern
+    described by `end_initial_regex`, and the pattern is included in the
     initial parts iff `include_end_string == True`. However, both
     `int(max_initial_fraction * cache_length)` and the prefill length limit the
-    initial part lengths.
+    length of the ranges.
 
     ATTENTION: The regular expression `end_initial_regex` is matched against
     a string coming out of `tokenizer.decode(..., skip_special_tokens=True)`. It
@@ -230,10 +261,11 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
             )
         self.max_initial_fraction = max_initial_fraction
         self.include_end_string = include_end_string
-        # Lengths of initial parts (per batch dimension)
-        self.init_length = None
+        # Protected ranges
+        self.protected_start = None
+        self.protected_end = None
         # Note: We could generate `token_pos` on the fly from `input_pos`,
-        # `next_position` and `init_length`, but it is simpler just to maintain
+        # `next_position` and `protected_*`, but it is simpler just to maintain
         # it.
         device = self._default_device_for_new_params()
         self.register_buffer(
@@ -326,7 +358,9 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
         total_num = key.shape[2]
-        max_one_step = self.cache_length - max(self.init_length)
+        max_one_step = self.cache_length - max(
+            b - a for a, b in zip(self.protected_start, self.protected_end)
+        )
         if total_num <= max_one_step:
             offs_and_nums = ((0, total_num),)
         else:
@@ -337,20 +371,27 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
             )
         tp_kwargs = dict(device=self.device, dtype=torch.int)
         k_and_v = None
+        ntp = self.input_pos
         for off, num in offs_and_nums:
             # Determine `positions` for forward
             position_parts = [
-                positions_wrap_around(
-                    num=num,
-                    current=np,
-                    start=start,
-                    end=self.cache_length,
-                    batch_size=1,
-                    n_query_groups=self.n_query_groups,
-                    device=self.device,
-                    return_tensor=True,
+                index_to_3d(
+                    positions_outside_protected_range(
+                        num=num,
+                        current=np,
+                        end=self.cache_length,
+                        protected_start=pstart,
+                        protected_end=pend,
+                        **tp_kwargs,
+                    ),
+                    1,
+                    self.n_query_groups,
                 )
-                for start, np in zip(self.init_length, self.next_position)
+                for np, pstart, pend in zip(
+                    self.next_position,
+                    self.protected_start,
+                    self.protected_end,
+                )
             ]
             positions = torch.cat(position_parts, dim=0)
             k_and_v = self.kv_buffers.forward(
@@ -359,26 +400,19 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 value=value[:, :, off : (off + num), :],
             )
             # Update `token_pos` and `next_positions`
-            for bpos, (start, np) in enumerate(
-                zip(self.init_length, self.next_position)
+            for bpos, (pos_for_b, pstart, pend) in enumerate(
+                zip(positions[:, 0, :], self.protected_start, self.protected_end)
             ):
-                num1 = min(num, self.cache_length - np)
-                diff = num - num1
-                ntp = self.input_pos
-                self.token_pos[bpos, np : (np + num1)] = torch.arange(
-                    ntp,
-                    ntp + num1,
-                    **tp_kwargs,
+                self.token_pos[bpos, pos_for_b] = torch.arange(
+                    ntp, ntp + num, **tp_kwargs
                 )
-                np += num1
-                if diff > 0 or np == self.cache_length:
-                    self.token_pos[bpos, start : (start + diff)] = torch.arange(
-                        ntp + num1,
-                        ntp + num,
-                        **tp_kwargs,
-                    )
-                    np = start + diff
+                np = pos_for_b[-1] + 1
+                if np == self.cache_length:
+                    np = 0 if pstart > 0 else pend
+                elif np == pstart:
+                    np = pend % self.cache_length
                 self.next_position[bpos] = np
+            ntp += num
 
         if self._replay_log is not None:
             if not isinstance(self._replay_log, DefaultKVCacheReplayLog):
@@ -388,6 +422,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
             self._replay_log.append_token_chunk(token_idx)
         return k_and_v
 
+    # HIER
     def _set_init_length(self, token_idx: torch.Tensor):
         batch_size, max_init_length = token_idx.shape
         max_init_length = max(
@@ -401,12 +436,16 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         for bpos, tokens in enumerate(token_idx):
             tokens = tokens.tolist()
             try:
-                num_left_pad = next(i for i, t in enumerate(tokens) if t != self._pad_id)
+                num_left_pad = next(
+                    i for i, t in enumerate(tokens) if t != self._pad_id
+                )
                 tokens = tokens[num_left_pad:]
                 decoded = self.tokenizer.decode(tokens, skip_special_tokens=True)
                 match = re.search(self.end_initial_regex, decoded)
             except StopIteration:
-                print(f"SmartInitialLastRecentlyInsertedKVCache._set_init_length (bpos={bpos}): Sequence is all padding")
+                print(
+                    f"SmartInitialLastRecentlyInsertedKVCache._set_init_length (bpos={bpos}): Sequence is all padding"
+                )
                 num_left_pad = None
                 match = None
                 decoded = None
