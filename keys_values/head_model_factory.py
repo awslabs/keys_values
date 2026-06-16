@@ -44,7 +44,8 @@ class HeadModelFactory:
             name: Name of head model to create, see :const:`SUPPORTED_HEAD_MODELS`
             config: Config object for backbone model
             data: :class:`DataModule` object. Optional
-            kwargs: Extra arguments passed to head model constructor
+            kwargs: Extra arguments passed to head model constructor. For `data`
+                of type :class:`LongBenchV2`, can also pass the tokenizer here
 
         Returns:
             Head model object
@@ -57,7 +58,8 @@ class HeadModelFactory:
             )
         head_kwargs = dict()
         if data is not None and isinstance(data, LongBenchV2):
-            head_kwargs = data.head_model_kwargs(name)
+            tokenizer = kwargs.pop("tokenizer", None)
+            head_kwargs = data.head_model_kwargs(name, tokenizer=tokenizer)
         return model_cls(config, **head_kwargs, **kwargs)
 
     @staticmethod
