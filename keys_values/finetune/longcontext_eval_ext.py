@@ -464,6 +464,7 @@ def main(
                     print(
                         "LongBenchV2 does not support a sample-based metric. Switching to loss used during training"
                     )
+                    use_sample_metric = False
             elif _data_class_path.endswith("data.Helmet"):
                 data = Helmet(**_data_init_args)
                 if data.metadata_dir is None:
@@ -512,11 +513,16 @@ def main(
             torch.set_default_dtype(dtype)
             with torch.device(device):
                 gpt_model = create_gpt_model(model_config.config, **mha_kwargs)
+                if isinstance(data, LongBenchV2):
+                    extra_kwargs = dict(tokenizer=tokenizer)
+                else:
+                    extra_kwargs = dict()
                 head_model = HeadModelFactory.create(
                     name=model_config.head_model_name,
                     config=model_config.config,
                     data=data,
                     **model_config.head_model_kwargs,
+                    **extra_kwargs,
                 )
             adapt_requires_grad(gpt_model, head_model)
             model, _ = wrap_gpt_model(

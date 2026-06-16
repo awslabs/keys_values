@@ -240,16 +240,24 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         else:
             return get_seq_class_collate_fn()
 
-    def head_model_kwargs(self, name: str) -> Dict[str, Any]:
+    def head_model_kwargs(
+        self,
+        name: str,
+        tokenizer: Optional[Tokenizer] = None,
+    ) -> Dict[str, Any]:
         result = dict()
         if name == CrossEntropyOnLogits.NAME:
             result["ignore_index"] = self.ignore_index
         elif name == SequenceClassificationOnLogits.NAME:
-            if self.tokenizer is None:
-                raise IndexError("Need `connect` to be called first")
+            if tokenizer is None:
+                tokenizer = self.tokenizer
+            if tokenizer is None:
+                raise IndexError(
+                    "Need `tokenizer` to be passed, or `connect` to be called first"
+                )
             class_label_tokens = []
             for label in CLASS_LABELS:
-                token_idx = self.tokenizer.encode(label)
+                token_idx = tokenizer.encode(label)
                 if len(token_idx) != 1:
                     raise ValueError(
                         f"Class label {label} maps to tokens {token_idx}, but must map to a single token"
