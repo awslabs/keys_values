@@ -367,7 +367,7 @@ def encode(
     tokenizer: Union[Tokenizer, HFTokenizer],
     s: str,
     **kwargs,
-) -> List[int]:
+) -> Union[List[int], torch.Tensor]:
     if isinstance(tokenizer, Tokenizer):
         tokenizer = tokenizer.processor
     result = tokenizer.encode(s, **kwargs)

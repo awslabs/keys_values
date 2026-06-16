@@ -561,12 +561,19 @@ currently supported:
   cache is full, new information overwrites slots which have not been
   overwritten for the longest time.
 * `smart-lastrec`: [SmartInitialLastRecentlyInsertedKVCache](./keys_values/kvcache/smart_lastrec.py#130).
-  Variant of `lastrec`, where the initial (grace) part of the prompt, which is
+  Variant of `lastrec`, where the protected range of the prompt, which is
   kept in the cache, is defined by a regular expression determining the end of
   it. If you write prompts with important information up front (e.g., a
   "system prompt"), use a string which marks the end of this. This policy needs
   some configuration in `kv_cache.cache_kwargs`, defaults for which can be
-  provided with the dataset (see below).
+  provided with the dataset (see below).<br>
+  If `kv_cache.range_is_prefix` is set to `False`, the protected range need not
+  be a prefix. In fact, any left-padding tokens are excluded from the range,
+  so it starts with the first non-padding token. The idea is that padding
+  tokens should not be attended to.<br>
+  TODO: The default for this parameter is `True`, because some initial
+  experiments were not conclusive. This needs to be revisited. Why would
+  left-padding tokens be useful in the cache?
 * `h2o`: [H2OKVCache](./keys_values/kvcache/h2o.py#L28). Implements an improved
   variant of the heavy hitter oracle (H2O) strategy (for citation, see
   docstring). H2O scores each `(b, h, j)` by the sum of attention weights
