@@ -398,12 +398,18 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
             1,
         )
         self.init_length = []
-        for tokens in token_idx:
+        for bpos, tokens in enumerate(token_idx):
             tokens = tokens.tolist()
-            num_left_pad = next(i for i, t in enumerate(tokens) if t != self._pad_id)
-            tokens = tokens[num_left_pad:]
-            decoded = self.tokenizer.decode(tokens, skip_special_tokens=True)
-            match = re.search(self.end_initial_regex, decoded)
+            try:
+                num_left_pad = next(i for i, t in enumerate(tokens) if t != self._pad_id)
+                tokens = tokens[num_left_pad:]
+                decoded = self.tokenizer.decode(tokens, skip_special_tokens=True)
+                match = re.search(self.end_initial_regex, decoded)
+            except StopIteration:
+                print(f"SmartInitialLastRecentlyInsertedKVCache._set_init_length (bpos={bpos}): Sequence is all padding")
+                num_left_pad = None
+                match = None
+                decoded = None
             if match is not None:
                 raw_length = match.end(0) if self.include_end_string else match.start(0)
                 init_encoded = encode(self.tokenizer, decoded[:raw_length])
