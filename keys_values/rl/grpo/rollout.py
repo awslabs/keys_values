@@ -22,7 +22,7 @@ custom completion generation. This module provides the building blocks:
   ``batched_generate_fn``, exposing a simple tensor-in / tensor-out interface.
 
 This is phase 2 of the TRL integration (generation). It complements
-``keys_values.logprobs.compute_logprobs`` (phase 1, log-probs) so that both
+``keys_values.rl.logprobs.compute_logprobs`` (phase 1, log-probs) so that both
 the generation and scoring steps of GRPO run through the KV cache, keeping
 GPU memory bounded for long prompts.
 """

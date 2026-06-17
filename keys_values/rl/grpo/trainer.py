@@ -20,7 +20,7 @@ KV-cache forward pass, bounding GPU memory for arbitrarily long sequences.
 
 Usage::
 
-    from keys_values.finetune.grpo import GRPOLongContextTrainer
+    from keys_values.rl.grpo import GRPOLongContextTrainer
 
     trainer = GRPOLongContextTrainer(
         model="Qwen/Qwen2.5-0.5B-Instruct",
@@ -38,7 +38,7 @@ from __future__ import annotations
 import torch
 from trl.trainer.grpo_trainer import GRPOTrainer
 
-from keys_values.logprobs import compute_logprobs
+from keys_values.rl.logprobs import compute_logprobs
 from keys_values.model import GPT
 
 _UNWRAP_ATTRS = ("gpt_model", "model", "base_model", "module")

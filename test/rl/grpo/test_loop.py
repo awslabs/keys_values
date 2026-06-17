@@ -22,7 +22,7 @@ optimizer step.
 import torch
 
 from keys_values.config import Config
-from keys_values.finetune.grpo_loop import compute_group_advantages, grpo_step
+from keys_values.rl.grpo.loop import compute_group_advantages, grpo_step
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.model import GPT
 

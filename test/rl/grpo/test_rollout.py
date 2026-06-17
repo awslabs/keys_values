@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Tests for :mod:`keys_values.generate.trl_rollout`.
+Tests for :mod:`keys_values.rl.grpo.rollout`.
 
 Verifies that ``generate_completions`` produces correctly-shaped completion
 token IDs using KeysAndValues' KV-cache generation.
@@ -22,7 +22,7 @@ import pytest
 import torch
 
 from keys_values.config import Config
-from keys_values.generate.trl_rollout import generate_completions
+from keys_values.rl.grpo.rollout import generate_completions
 from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
 

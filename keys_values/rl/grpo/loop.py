@@ -25,7 +25,7 @@ step routed through KeysAndValues' KV-cache infrastructure:
    :class:`LongContextGradientModel` (memory-bounded backward).
 6. **Optimizer step**.
 
-Unlike :class:`keys_values.finetune.grpo.GRPOLongContextTrainer` (which plugs
+Unlike :class:`keys_values.rl.grpo.trainer.GRPOLongContextTrainer` (which plugs
 into TRL's ``GRPOTrainer`` and relies on its HuggingFace-model machinery), this
 loop uses only a ``keys_values.model.GPT``, so it runs anywhere the rest of
 the library does (including CPU).
@@ -37,10 +37,10 @@ from typing import Callable, Dict
 
 import torch
 
-from keys_values.finetune.grpo_loss import GRPOLossHeadModel
-from keys_values.generate.trl_rollout import generate_completions
+from keys_values.rl.grpo.loss import GRPOLossHeadModel
+from keys_values.rl.grpo.rollout import generate_completions
 from keys_values.kvcache.gradient.main import LongContextGradientModel
-from keys_values.logprobs import compute_logprobs
+from keys_values.rl.logprobs import compute_logprobs
 from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
 from keys_values.utils import VerbosityLevels

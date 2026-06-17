@@ -21,7 +21,7 @@ infrastructure handles everything — no new forward loop needed.
 
 Usage::
 
-    from keys_values.logprobs import compute_logprobs
+    from keys_values.rl.logprobs import compute_logprobs
 
     logps, entropies = compute_logprobs(
         gpt_model=model,
