@@ -787,22 +787,22 @@ class KVCacheReplayLog:
         device: Optional[torch.device] = None,
     ) -> torch.Tensor:
         """
-                Returns slice of the slot position index, of shape
-                `(batch_size, n_query_groups, num)` and values in
-                `[0, cache_length)`. The slot position index contains the slot
-                insert position for every token, which also depends on position in
-                batch and query group.
+        Returns slice of the slot position index, of shape
+        `(batch_size, n_query_groups, num)` and values in
+        `[0, cache_length)`. The slot position index contains the slot
+        insert position for every token, which also depends on position in
+        batch and query group.
 
-                Args:
-                    input_pos: Token position where slice starts. Must be
-        -               `>= cache_length`.
-                    num: Length of slice
-                    dtype: Data type for returned tensor
-                    device: Device for returned tensor. The default device is the one
-                        of the token chunks.
+        Args:
+            input_pos: Token position where slice starts. Must be
+-               `>= cache_length`.
+            num: Length of slice
+            dtype: Data type for returned tensor
+            device: Device for returned tensor. The default device is the one
+                of the token chunks.
 
-                Returns:
-                    See above.
+        Returns:
+            See above.
 
         """
         raise NotImplementedError

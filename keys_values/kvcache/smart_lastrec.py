@@ -81,6 +81,93 @@ def end_initial_regex_from_string(
     return result
 
 
+def update_next_position(
+    cache_length: int,
+    positions: torch.Tensor,
+    protected_start: List[Optional[int]],
+    protected_end: List[Optional[int]],
+    next_position: List[int],
+):
+    for bpos, (pos_for_b, pstart, pend) in enumerate(
+        zip(positions[:, 0, :], protected_start, protected_end)
+    ):
+        np = pos_for_b[-1] + 1
+        if pstart is None:
+            np = np % cache_length
+        elif np == cache_length:
+            np = 0 if pstart > 0 else pend
+        elif np == pstart:
+            np = pend % cache_length
+        next_position[bpos] = np
+
+
+def extract_index(
+    num: int,
+    cache_length: int,
+    protected_start: List[Optional[int]],
+    protected_end: List[Optional[int]],
+    next_position: List[int],
+    n_query_groups: int,
+    **index_kwargs,
+) -> List[Tuple[torch.Tensor, int, int]]:
+    max_one_step = cache_length - max(
+        b - a if a is not None else 0
+        for a, b in zip(protected_start, protected_end)
+    )
+    if num <= max_one_step:
+        offs_and_nums = ((0, num),)
+    else:
+        # Only happens if `num` is very large
+        offs_and_nums = (
+            (0, max_one_step),
+            (max_one_step, num - max_one_step),
+        )
+        next_position = copy.copy(next_position)
+    result = []
+    for off, _num in offs_and_nums:
+        # Determine `positions` for forward
+        # If there is no range yet for a batch position, cache positions
+        # are token positions module `cache_length`
+        position_parts = [
+            index_to_3d(
+                positions_outside_protected_range(
+                    num=_num,
+                    current=np,
+                    end=cache_length,
+                    protected_start=pstart,
+                    protected_end=pend,
+                    **index_kwargs,
+                ),
+                1,
+                n_query_groups,
+            ) if pstart is not None else positions_wrap_around(
+                num=_num,
+                current=np,
+                start=0,
+                end=cache_length,
+                batch_size=1,
+                n_query_groups=n_query_groups,
+                **index_kwargs,
+            )
+            for np, pstart, pend in zip(
+                next_position,
+                protected_start,
+                protected_end,
+            )
+        ]
+        positions = torch.cat(position_parts, dim=0)
+        result.append((positions, off, _num))
+        if len(offs_and_nums) > 1:
+            update_next_position(
+                cache_length=cache_length,
+                positions=positions,
+                protected_start=protected_start,
+                protected_end=protected_end,
+                next_position=next_position,
+            )
+    return result
+
+
 class SmartInitialLastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
     """
     Replay log for :class:`SmartInitialLastRecentlyInsertedKVCache`.
@@ -111,10 +198,31 @@ class SmartInitialLastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
         self.max_initial_fraction = max_initial_fraction
         self.include_end_string = include_end_string
         self.pad_id = pad_id
+        self.protected_start = None
+        self.protected_end = None
+        # Map of `input_pos` to `next_position`. This is needed because
+        # we cannot easily compute this map. It depends on when each
+        # protected range was fixed (this may happen during a chunk later
+        # than the prefill one).
+        self.next_position_for_input_pos = dict()
+        self.update(
+            protected_start=protected_start,
+            protected_end=protected_end,
+            input_pos=0,
+            next_position=[0] * len(protected_start),
+        )
+
+    def update(
+        self,
+        protected_start: List[Optional[int]],
+        protected_end: List[Optional[int]],
+        input_pos: int,
+        next_position: List[int],
+    ):
         self.protected_start = protected_start.copy()
         self.protected_end = protected_end.copy()
+        self.next_position_for_input_pos[input_pos] = next_position.copy()
 
-    # HIER!!
     def extract_index(
         self,
         input_pos: int,
@@ -133,44 +241,23 @@ class SmartInitialLastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
             )
         if device is None:
             device = torch.get_default_device()
-        max_one_step = self.cache_length - max(self.init_length)
-        if num <= max_one_step:
-            offs_and_nums = ((0, num),)
+        next_position = self.next_position_for_input_pos.get(input_pos)
+        if next_position is None:
+            raise IndexError(f"input_pos = {input_pos} not represented (keys are {list(self.next_position_for_input_pos.keys())})")
+        indexes = extract_index(
+            num=num,
+            cache_length=self.cache_length,
+            protected_start=self.protected_start,
+            protected_end=self.protected_end,
+            next_position=next_position,
+            n_query_groups=self.n_query_groups,
+            dtype=dtype,
+            device=device,
+        )
+        if len(indexes) == 1:
+            return indexes[0][0]
         else:
-            # Only happens if `num` is very large
-            # In this case, we create two indexes and concatenate them. This may
-            # not be exactly correct, because of duplicate entries. Very large
-            # chunks should be avoided!
-            offs_and_nums = (
-                (0, max_one_step),
-                (max_one_step, num - max_one_step),
-            )
-        positions = []
-        for off, _num in offs_and_nums:
-            _input_pos = input_pos + off
-            position_parts = []
-            for start in self.init_length:
-                mod = self.cache_length - start
-                current = (_input_pos - self.cache_length) % mod + start
-                position_parts.append(
-                    positions_wrap_around(
-                        num=num,
-                        current=current,
-                        start=start,
-                        end=self.cache_length,
-                        batch_size=1,
-                        n_query_groups=self.n_query_groups,
-                        device=device,
-                        return_tensor=True,
-                        dtype=dtype,
-                    )
-                )
-            positions.append(torch.cat(position_parts, dim=0))
-
-        if len(positions) == 1:
-            return positions[0]
-        else:
-            return torch.cat(positions, dim=-1)
+            return torch.cat([x[0] for x in indexes], dim=-1)
 
 
 def positions_outside_protected_range(
@@ -363,53 +450,33 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
         self._update_protected_ranges(token_idx)
-        total_num = key.shape[2]
-        max_one_step = self.cache_length - max(
-            b - a for a, b in zip(self.protected_start, self.protected_end)
-        )
-        if total_num <= max_one_step:
-            offs_and_nums = ((0, total_num),)
-        else:
-            # Only happens if `total_num` is very large
-            offs_and_nums = (
-                (0, max_one_step),
-                (max_one_step, total_num - max_one_step),
+        if self._replay_log is not None:
+            if not isinstance(self._replay_log, SmartInitialLastRecentlyInsertedKVCacheReplayLog):
+                raise IndexError(
+                    "Cannot switch on replay logging in the middle of inference run. Call 'prefill'."
+                )
+            self._replay_log.update(
+                protected_start=self.protected_start,
+                protected_end=self.protected_end,
+                input_pos=self.input_pos,
+                next_position=self.next_position,
             )
-        tp_kwargs = dict(device=self.device, dtype=torch.int)
+            self._replay_log.append_token_chunk(token_idx)
+
+        total_num = key.shape[2]
+        index_kwargs = dict(device=self.device, dtype=torch.int)
+        indexes = extract_index(
+            num=total_num,
+            cache_length=self.cache_length,
+            protected_start=self.protected_start,
+            protected_end=self.protected_end,
+            next_position=self.next_position,
+            n_query_groups=self.n_query_groups,
+            **index_kwargs,
+        )
         k_and_v = None
         ntp = self.input_pos
-        for off, num in offs_and_nums:
-            # Determine `positions` for forward
-            # If there is no range yet for a batch position, cache positions
-            # are token positions module `cache_length`
-            position_parts = [
-                index_to_3d(
-                    positions_outside_protected_range(
-                        num=num,
-                        current=np,
-                        end=self.cache_length,
-                        protected_start=pstart,
-                        protected_end=pend,
-                        **tp_kwargs,
-                    ),
-                    1,
-                    self.n_query_groups,
-                ) if pstart is not None else positions_wrap_around(
-                    num=num,
-                    current=np,
-                    start=0,
-                    end=self.cache_length,
-                    batch_size=1,
-                    n_query_groups=self.n_query_groups,
-                    **tp_kwargs,
-                )
-                for np, pstart, pend in zip(
-                    self.next_position,
-                    self.protected_start,
-                    self.protected_end,
-                )
-            ]
-            positions = torch.cat(position_parts, dim=0)
+        for positions, off, num in indexes:
             k_and_v = self.kv_buffers.forward(
                 positions=positions,
                 key=key[:, :, off : (off + num), :],
@@ -420,24 +487,16 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 zip(positions[:, 0, :], self.protected_start, self.protected_end)
             ):
                 self.token_pos[bpos, pos_for_b] = torch.arange(
-                    ntp, ntp + num, **tp_kwargs
+                    ntp, ntp + num, **index_kwargs
                 )
-                np = pos_for_b[-1] + 1
-                if pstart is None:
-                    np = np % self.cache_length
-                elif np == self.cache_length:
-                    np = 0 if pstart > 0 else pend
-                elif np == pstart:
-                    np = pend % self.cache_length
-                self.next_position[bpos] = np
+            update_next_position(
+                cache_length=self.cache_length,
+                positions=positions,
+                protected_start=self.protected_start,
+                protected_end=self.protected_end,
+                next_position=self.next_position,
+            )
             ntp += num
-
-        if self._replay_log is not None:
-            if not isinstance(self._replay_log, DefaultKVCacheReplayLog):
-                raise IndexError(
-                    "Cannot switch on replay logging in the middle of inference run. Call 'prefill'."
-                )
-            self._replay_log.append_token_chunk(token_idx)
         return k_and_v
 
     def _update_protected_ranges(
@@ -518,7 +577,6 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         token_idx: torch.Tensor,
     ):
         self._update_protected_ranges(token_idx)
-        # HIER!!
         init_length = key.shape[2]
         self.kv_buffers.prefill(key, value)
         if init_length < self.cache_length:
@@ -528,7 +586,10 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 init_length,
                 self.cache_length,
             )  # Sanity check
-            self.next_position = self.init_length.copy()
+            self.next_position = [
+                0 if pstart is None or pstart > 0 else pend
+                for pstart, pend in zip(self.protected_start, self.protected_end)
+            ]
         self.token_pos[: self.batch_size, :init_length] = (
             torch.arange(
                 init_length,
@@ -548,7 +609,8 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 max_initial_fraction=self.max_initial_fraction,
                 include_end_string=self.include_end_string,
                 pad_id=self._pad_id,
-                init_length=self.init_length,
+                protected_start=self.protected_start,
+                protected_end=self.protected_end,
             )
 
     def token_positions(self) -> torch.Tensor:
