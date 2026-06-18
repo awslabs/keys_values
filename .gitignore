@@ -17,3 +17,4 @@ out/
 checkpoints/
 test_tokenizer/
 keyval_venv/
+.kiro/
