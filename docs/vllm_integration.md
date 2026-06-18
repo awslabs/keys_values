@@ -107,12 +107,28 @@ proves the data flow end-to-end with idiomatic V1 machinery. Then evaluate
 whether H2O can be approximated at block granularity (Option A) or needs the
 dense-cache backend (Option B).
 
+## Spike results (Qwen2.5-0.5B-Instruct, 1× A10G, vLLM 0.23.0 / V1)
+
+Captured by `examples/vllm_spike.py`:
+- Architecture: `Qwen2ForCausalLM`; engine: V1; dtype: bfloat16.
+- Resolved attention backend: **FLASH_ATTN** (FlashAttention 2). Available on
+  this GPU: `['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION']`.
+- Cache geometry: `num_kv_heads=2`, `head_size=64`, `num_layers=24`,
+  `block_size=16`, `num_gpu_blocks=102197`, `cache_dtype=auto`.
+- KV cache capacity: 1,635,152 tokens; max concurrency 798x at 2048 tokens.
+- Generation works; engine init (profile + warmup) took ~161 s (one-time).
+
+Implications:
+- FlashAttention 2 does **not** return attention weights → confirms H2O (phase 3)
+  needs a different path. FLASHINFER is available, which aligns with the
+  FlashInfer machinery keys_values already uses for the weight-sum path.
+- GQA: 2 KV heads, head_size 64, 24 layers → the per-layer `KVCacheSpec` we
+  define must match `FullAttentionSpec(block_size=16, num_kv_heads=2,
+  head_size=64, dtype=bf16)`.
+
 ## Phased plan
 
-1. **Feasibility spike** (current): run Qwen2.5-0.5B on vLLM 0.23 (V1); dump
-   resolved attention backend, the per-layer `KVCacheSpec`, `KVCacheConfig`
-   (num_blocks, block_size, num_kv_heads, head_size), and confirm the V1
-   extension points against the installed source. Script: `examples/vllm_spike.py`.
+1. **Feasibility spike** (DONE): see results above. Script: `examples/vllm_spike.py`.
 2. **lastrec via Option A**: custom `KVCacheSpec` + manager; parity-check output
    vs. the LitGPT path on short sequences.
 3. **H2O**: decide block-granularity approximation vs. dense-cache backend;
