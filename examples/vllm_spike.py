@@ -12,21 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-vLLM integration feasibility spike.
+vLLM integration feasibility spike (vLLM 0.23 / V1 engine).
 
-Goal: stand up a baseline model in vLLM 0.6.5 and dump the runtime extension
-points that the keys_values KV-cache bridge will need to hook into (resolved
-attention backend, KV cache shape, attention metadata structure).
+Goal: stand up a baseline model in vLLM and dump the runtime extension points
+the keys_values KV-cache bridge needs (resolved attention backend, per-layer
+KV cache spec, KV cache config: num_blocks / block_size / num_kv_heads /
+head_size). See docs/vllm_integration.md for the design context.
 
-This script does NOT run on macOS / CPU-only machines. Run it on a Linux box
-with an NVIDIA GPU, in a venv with vLLM 0.6.5 installed:
+Run on a Linux + NVIDIA GPU box, in the combined env (vLLM 0.23 + keys_values):
 
-    python3 -m venv vllm_venv && . vllm_venv/bin/activate
-    pip install --upgrade pip
-    pip install "vllm==0.6.5"
     python examples/vllm_spike.py --model Qwen/Qwen2.5-0.5B-Instruct
 
-See docs/vllm_integration.md for the design context.
+V1 internals move between minor releases, so the introspection below is
+best-effort and defensive: it prints whatever it can reach and never hard-fails
+the run on a missing attribute.
 """
 
 from __future__ import annotations
@@ -37,84 +36,103 @@ import sys
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", default="Qwen/Qwen2.5-0.5B-Instruct")
+    parser.add_argument("--max-model-len", type=int, default=2048)
     parser.add_argument(
-        "--model",
-        default="Qwen/Qwen2.5-0.5B-Instruct",
-        help="HF model id to load (default: Qwen/Qwen2.5-0.5B-Instruct).",
-    )
-    parser.add_argument(
-        "--max-model-len",
-        type=int,
-        default=2048,
-        help="Maximum model/context length for the vLLM engine.",
-    )
-    parser.add_argument(
-        "--prompt",
-        default="The key idea behind selective KV caching is",
-        help="Prompt used for the smoke-test generation.",
+        "--prompt", default="The key idea behind selective KV caching is"
     )
     return parser.parse_args()
 
 
 def check_environment() -> None:
-    """Fail fast with a helpful message off-GPU instead of deep in vLLM."""
     try:
         import torch
     except ImportError:
         sys.exit("torch is not installed in this environment.")
-
     if not torch.cuda.is_available():
         sys.exit(
-            "No CUDA device available. vLLM 0.6.5 needs a Linux + NVIDIA GPU "
-            "box. This spike cannot run on macOS / CPU. See "
-            "docs/vllm_integration.md (Environment notes)."
+            "No CUDA device available. vLLM needs a Linux + NVIDIA GPU box. "
+            "This spike cannot run on macOS / CPU. See docs/vllm_integration.md."
         )
-
     try:
         import vllm  # noqa: F401
     except ImportError:
-        sys.exit(
-            "vllm is not installed. Create a dedicated venv and "
-            '`pip install "vllm==0.6.5"` (see this file\'s docstring).'
-        )
+        sys.exit("vllm is not installed. `pip install -U vllm` in this env.")
 
 
-def report_attention_backend() -> None:
-    """Print which attention backend vLLM resolves to for this platform.
+def _first_attr(obj, *names):
+    """Return the first attribute in *names* that exists on *obj*, else None."""
+    for name in names:
+        if obj is not None and hasattr(obj, name):
+            return getattr(obj, name)
+    return None
 
-    This is the class we will subclass / shadow for the keys_values cache
-    bridge (see docs/vllm_integration.md, Option A).
+
+def report_vllm_config(llm) -> None:
+    """Best-effort dump of the V1 engine's model + KV cache configuration.
+
+    These are the values phase 2 needs: the per-layer cache geometry that a
+    custom KVCacheSpec / KVCacheManager (Option A) must reproduce.
     """
     import vllm
 
     print(f"\n=== vLLM version: {vllm.__version__} ===")
+
+    engine = _first_attr(llm, "llm_engine", "engine")
+    vllm_config = _first_attr(engine, "vllm_config")
+    model_config = _first_attr(vllm_config, "model_config") or _first_attr(
+        engine, "model_config"
+    )
+    cache_config = _first_attr(vllm_config, "cache_config") or _first_attr(
+        engine, "cache_config"
+    )
+    parallel_config = _first_attr(vllm_config, "parallel_config") or _first_attr(
+        engine, "parallel_config"
+    )
+
+    print("\n=== Model / cache geometry ===")
     try:
-        from vllm.attention.selector import get_attn_backend
+        if model_config is not None:
+            # Signatures vary; try with parallel_config, then without.
+            def _call(fn_name, *args):
+                fn = getattr(model_config, fn_name, None)
+                if fn is None:
+                    return "n/a"
+                try:
+                    return fn(*args)
+                except TypeError:
+                    try:
+                        return fn()
+                    except Exception:
+                        return "n/a"
 
-        # Signature is version-sensitive; this matches the 0.6.x family. If it
-        # changes, the failure message tells us exactly what to update.
-        backend = get_attn_backend(
-            head_size=64,
-            dtype="float16",
-            kv_cache_dtype="auto",
-            block_size=16,
-            is_attention_free=False,
-        )
-        print(f"Resolved attention backend: {backend}")
-        print(f"  name              : {backend.get_name()}")
-        print(f"  impl class        : {backend.get_impl_cls()}")
-        print(f"  metadata class    : {backend.get_metadata_cls()}")
-        kv_shape = backend.get_kv_cache_shape(
-            num_blocks=1024, block_size=16, num_kv_heads=2, head_size=64
-        )
-        print(f"  kv_cache_shape    : {kv_shape}")
-    except Exception as exc:  # noqa: BLE001 - spike: surface whatever breaks
-        print(f"[warn] could not introspect attention backend directly: {exc}")
-        print("       (inspect vllm/attention/selector.py for this version)")
+            print(f"  num_kv_heads : {_call('get_num_kv_heads', parallel_config)}")
+            print(f"  head_size    : {_call('get_head_size')}")
+            print(f"  num_layers   : {_call('get_num_layers', parallel_config)}")
+            print(f"  dtype        : {getattr(model_config, 'dtype', 'n/a')}")
+        if cache_config is not None:
+            print(f"  block_size   : {getattr(cache_config, 'block_size', 'n/a')}")
+            print(
+                f"  num_gpu_blocks: "
+                f"{getattr(cache_config, 'num_gpu_blocks', 'n/a')}"
+            )
+            print(f"  cache_dtype  : {getattr(cache_config, 'cache_dtype', 'n/a')}")
+    except Exception as exc:  # noqa: BLE001 - spike: surface, don't crash
+        print(f"  [warn] config introspection partial: {exc}")
+
+    # The KVCacheSpec types live here; phase 2 subclasses one of these.
+    try:
+        from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+
+        print("\n=== V1 KV cache interface present ===")
+        print(f"  KVCacheSpec base : {KVCacheSpec}")
+        print(f"  FullAttentionSpec: {FullAttentionSpec}")
+        print("  (phase 2 registers a keys_values spec + manager alongside these)")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] could not import v1 kv_cache_interface: {exc}")
 
 
-def smoke_test_generation(args: argparse.Namespace) -> None:
-    """Confirm the baseline model generates, and dump engine KV cache config."""
+def smoke_test_generation(args: argparse.Namespace):
     from vllm import LLM, SamplingParams
 
     llm = LLM(
@@ -122,47 +140,22 @@ def smoke_test_generation(args: argparse.Namespace) -> None:
         max_model_len=args.max_model_len,
         enforce_eager=True,  # disable CUDA graphs for clearer introspection
     )
-
-    # Dig out the cache configuration the engine actually allocated.
-    try:
-        engine = llm.llm_engine
-        cache_config = engine.cache_config
-        model_config = engine.model_config
-        print("\n=== Engine cache config ===")
-        print(f"  block_size        : {cache_config.block_size}")
-        print(f"  num_gpu_blocks    : {cache_config.num_gpu_blocks}")
-        print(f"  num_cpu_blocks    : {cache_config.num_cpu_blocks}")
-        print(f"  cache_dtype       : {cache_config.cache_dtype}")
-        print(
-            f"  num_kv_heads      : "
-            f"{model_config.get_num_kv_heads(engine.parallel_config)}"
-        )
-        print(f"  head_size         : {model_config.get_head_size()}")
-        print(
-            f"  num_layers        : "
-            f"{model_config.get_num_layers(engine.parallel_config)}"
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[warn] could not read engine cache config: {exc}")
-
     print("\n=== Smoke-test generation ===")
-    out = llm.generate(
-        [args.prompt],
-        SamplingParams(max_tokens=32, temperature=0.0),
-    )
+    out = llm.generate([args.prompt], SamplingParams(max_tokens=32, temperature=0.0))
     print(f"Prompt: {args.prompt!r}")
     print(f"Output: {out[0].outputs[0].text!r}")
+    return llm
 
 
 def main() -> None:
     args = parse_args()
     check_environment()
-    report_attention_backend()
-    smoke_test_generation(args)
+    llm = smoke_test_generation(args)
+    report_vllm_config(llm)
     print(
-        "\nSpike complete. Next: scaffold keys_values/vllm/ with a custom "
-        "AttentionBackend hosting the `lastrec` policy (see "
-        "docs/vllm_integration.md, phase 2)."
+        "\nSpike complete. Next: phase 2 — a custom KVCacheSpec + "
+        "SingleTypeKVCacheManager hosting `lastrec` (see "
+        "docs/vllm_integration.md)."
     )
 
 

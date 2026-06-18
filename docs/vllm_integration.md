@@ -2,118 +2,130 @@
 
 Status: **early spike** (branch `vllm-integration`)
 
-Target vLLM version: **0.6.5** (pinned to match the reference docs:
-<https://docs.vllm.ai/en/v0.6.5/models/adding_model.html>). This is a V0-engine
-release; we deliberately avoid the experimental V1 engine for the first pass.
+Target vLLM version: **0.23.0** (latest), running on the **V1 engine**.
+
+> History: this was originally scoped against vLLM 0.6.5 (the version in the
+> reference docs). We retargeted to 0.23 because 0.6.5 hard-pins
+> `torch==2.5.1`, which conflicts with LitGPT (`torch>=2.7`) and would have
+> forced a second environment. vLLM 0.23 resolves onto a recent torch (2.11
+> in our setup), so **a single env can hold vLLM + LitGPT + keys_values**. The
+> tradeoff: the engine internals are completely different (V0 → V1), so the
+> old `AttentionBackend`/`AttentionImpl` extension map no longer applies.
 
 ## Goal
 
 Bring this library's *selective KV cache policies* (H2O, qH2O, smart-lastrec,
 lastrec, ...) to vLLM, so users can run long-context inference with advanced
-cache eviction while benefiting from vLLM's serving stack. The README states the
-strategy directly: reuse vLLM's fast kernels and multi-device machinery, but
-plug in our KV cache abstractions and eviction policies.
+cache eviction while benefiting from vLLM's serving stack. Reuse vLLM's fast
+kernels and multi-device machinery; plug in our cache abstractions and eviction
+policies.
 
-This is **not** primarily a "register a new model" task (which is what the linked
-doc describes). A Qwen2.5 model already runs in vLLM unchanged. The hard part is
-the **KV cache / attention layer**, because the two systems represent the cache
-in fundamentally different ways.
+This is **not** primarily a "register a new model" task. vLLM ships its own
+implementations of Qwen2/Llama/etc. (in `vllm/model_executor/models/`) and loads
+HF weights into them — LitGPT is never in the serving path. The work lives at
+the **KV cache + attention layer**.
 
-## The core impedance mismatch
+## Environment
 
-| Concern | keys_values | vLLM 0.6.5 |
+One combined env (no more split):
+
+```bash
+pip install -U vllm          # 0.23.0, pulls torch 2.11
+pip install -e .             # keys_values (torch-free deps)
+pip install -U outlines      # clears a stale 0.6.5-era pin
+```
+
+Verify: `python -c "import torch, vllm, litgpt, keys_values.kvcache.base"`.
+LitGPT (`torch>=2.7`) and vLLM 0.23 (torch 2.11) coexist; the keys_values
+`kvcache/` module is pure torch (zero litgpt imports), so it slots into either.
+
+## The impedance mismatch (still the core problem)
+
+| Concern | keys_values | vLLM V1 |
 |---|---|---|
-| Cache layout | dense `(batch, n_query_groups, cache_length, head_size)` + `token_pos` book-keeping | paged blocks, `get_kv_cache_shape(num_blocks, block_size, num_kv_heads, head_size)` |
-| Eviction granularity | per `(batch, head, slot)` | per block, managed by the scheduler / block manager |
-| Eviction decision | inside `KVCache.forward`, sometimes needs **attention weights** back from SDPA | none; PagedAttention kernels do not return attention weights |
-| Attention call | `KVCache.forward(query, key, value, token_idx)` does eviction + SDPA together | `AttentionImpl.forward(query, key, value, kv_cache, attn_metadata, ...)` |
+| Cache layout | dense `(batch, n_query_groups, cache_length, head_size)` + `token_pos` | paged blocks; per-layer `KVCacheSpec` (block_size, num_kv_heads, head_size, dtype) |
+| Eviction granularity | per `(batch, head, slot)` | per block, via a `KVCacheManager` / block pool |
+| Eviction decision | inside `KVCache.forward`, H2O needs **attention weights** | block managers decide by position/recency; kernels don't return weights |
+| Attention call | `KVCache.forward(query, key, value, token_idx)` does evict + SDPA | model calls `Attention` layer; V1 attention backend + metadata builder |
 
-Two consequences drive the design:
+Two hard constraints persist:
+1. **Attention weights.** H2O scores slots by summed attention weight; vLLM
+   kernels don't expose them. keys_values already solves this for its own stack
+   (`keys_values/attention/`, `kvcache/attn_weights.py` — vendored FlashInfer +
+   Triton score-sum). That has to be reachable from the vLLM attention path.
+2. **Granularity.** vLLM evicts whole blocks; our policies score per `(head,
+   slot)`. Block-level eviction can't reproduce per-head H2O exactly.
 
-1. **Attention weights.** H2O-family policies score slots by summed attention
-   weight. vLLM's PagedAttention kernels don't expose weights. The library
-   already solved this for its own stack via vendored FlashInfer kernels + a
-   Triton score-sum kernel (`keys_values/attention/`, `kvcache/attn_weights.py`).
-   That machinery has to be reachable from the vLLM attention path.
-2. **Eviction granularity.** vLLM's block manager owns the cache and evicts whole
-   blocks for *all* heads at once. Our policies evict per `(head, slot)`. These
-   models do not compose cleanly.
+## vLLM 0.23 / V1 extension points (mapped from source)
 
-## vLLM 0.6.5 extension points (mapped)
+KV cache description — `vllm/v1/kv_cache_interface.py`:
+- `KVCacheSpec` (frozen dataclass, base): `block_size`, `page_size_bytes`,
+  `max_memory_usage_bytes(...)`. Custom specs register via
+  `@register_kv_cache_spec`.
+- `AttentionSpec(KVCacheSpec)`: `num_kv_heads`, `head_size`, `dtype`,
+  `kv_quant_mode`.
+- `FullAttentionSpec`, `SlidingWindowSpec`, `ChunkedLocalAttentionSpec`,
+  `MLAAttentionSpec`, `MambaSpec`, ... — **these are the precedent**: vLLM V1
+  already expresses non-full-attention cache patterns as first-class specs.
+- `KVCacheConfig`: `num_blocks`, `kv_cache_tensors`, `kv_cache_groups`.
+- `KVCacheGroupSpec`: layers sharing one block table.
 
-From `vllm/attention/backends/abstract.py` (v0.6.5):
+KV cache management — `vllm/v1/core/`:
+- `kv_cache_manager.py` (`KVCacheManager`), `block_pool.py`,
+  `single_type_kv_cache_manager.py` with `SlidingWindowManager`,
+  `ChunkedLocalAttentionManager` — per-pattern managers that free/reuse blocks
+  according to the policy. **This is where selective eviction lives in V1.**
 
-- `AttentionBackend` — static factory: `get_name`, `get_impl_cls`,
-  `get_metadata_cls`, `get_state_cls`, `get_builder_cls`,
-  `get_kv_cache_shape(num_blocks, block_size, num_kv_heads, head_size)`,
-  `swap_blocks`, `copy_blocks`.
-- `AttentionImpl.forward(query, key, value, kv_cache, attn_metadata, k_scale,
-  v_scale, attn_type, output)` — the per-layer hot path. `query/key/value` are
-  flattened token tensors; `kv_cache` is the paged buffer; `attn_metadata`
-  carries `slot_mapping`, the prefill/decode split, block tables, seq lens.
-- `AttentionMetadata` — `num_prefills`, `num_prefill_tokens`,
-  `num_decode_tokens`, `slot_mapping`, plus `prefill_metadata` /
-  `decode_metadata` splits.
-- `AttentionMetadataBuilder.build(...)` — builds on-device metadata per step.
-- `AttentionState` — CUDA-graph lifecycle hooks.
+Attention — `vllm/v1/attention/backends/`:
+- Per-backend metadata builders (flash_attn, flashinfer, triton_attn, ...) plus
+  the `Attention` layer the model calls. Backend choice via
+  `VLLM_ATTENTION_BACKEND`.
 
-Related (not in abstract.py, to confirm against source during the spike):
-- `vllm/attention/selector.py` — backend selection (`VLLM_ATTENTION_BACKEND`).
-- `vllm/worker/cache_engine.py` — allocates KV tensors from `get_kv_cache_shape`.
-- `vllm/core/block_manager*` + scheduler — paged block lifecycle / eviction.
-- `ModelRegistry` / out-of-tree model plugins — only relevant if we register a
-  custom attention-bearing model.
+Model / registration:
+- `ModelRegistry` / out-of-tree plugins via entry points (only needed if we
+  register a custom model; likely we reuse vLLM's Qwen2 + a custom cache path).
 
-## Candidate architectures
+## Candidate architectures (revised for V1)
 
-**Option A — custom AttentionBackend that owns its own dense cache.**
-Implement an `AttentionImpl.forward` that ignores vLLM's paged `kv_cache` and
-instead maintains keys_values' dense KV buffers + `token_pos` per sequence,
-running our SDPA + eviction. Most faithful to the policies (keeps per-head
-eviction and attention-weight scoring). Cost: fights vLLM's memory model and
-scheduler, which assume they own the cache; CUDA graphs and block swapping need
-care. Highest fidelity, highest effort.
+**Option A — custom `KVCacheSpec` + `SingleTypeKVCacheManager`.** Model the
+keys_values policy as a V1 cache spec (à la `SlidingWindowSpec`) with a manager
+(à la `SlidingWindowManager`) that frees blocks per the eviction policy. This is
+the idiomatic V1 path and reuses vLLM's paged kernels. Works cleanly for
+**positional** policies (lastrec, sliding-window-like). Limitation: eviction is
+per-block, not per-head, and there are no attention weights — so it cannot do
+faithful H2O on its own.
 
-**Option B — block-level eviction hook on top of PagedAttention.**
-Keep PagedAttention and add scoring/eviction at the block-manager level. Much
-less invasive, but loses per-head granularity and cannot use attention-weight
-scoring (no weights from the kernel), so it cannot faithfully reproduce H2O.
+**Option B — custom attention backend owning a dense cache.** A V1 attention
+backend that bypasses paged storage and keeps keys_values' dense buffers +
+`token_pos`, running our SDPA + per-head eviction (and, for H2O, our
+attention-weight kernels). Highest fidelity, but fights vLLM's memory manager
+and CUDA-graph/scheduler assumptions. Highest effort.
 
-**Recommendation:** pursue Option A, validated incrementally. Start with the
-`lastrec` policy because it is **positional** — eviction depends only on
-`token_pos`, needs no attention weights — so it exercises the full data flow
-without the hardest dependency. Add H2O (attention-weight scoring) only after the
-dense-cache data flow is proven end to end.
+**Recommendation:** start with **Option A + `lastrec`** — positional, no
+attention weights, maps directly onto the `SlidingWindowManager` pattern. This
+proves the data flow end-to-end with idiomatic V1 machinery. Then evaluate
+whether H2O can be approximated at block granularity (Option A) or needs the
+dense-cache backend (Option B).
 
 ## Phased plan
 
-1. **Feasibility spike** (current): get baseline Qwen2.5-0.5B running in vLLM
-   0.6.5 on a GPU box; dump the resolved attention backend, KV cache shape, and
-   `attn_metadata` structure at runtime. Confirm the extension points above
-   against the installed source. Script: `examples/vllm_spike.py`.
-2. **Bridge module** `keys_values/vllm/`: a custom `AttentionBackend` /
-   `AttentionImpl` hosting `lastrec` over a dense per-sequence cache. Validate
-   output parity vs. the LitGPT path on short sequences.
-3. **H2O**: route attention-weight computation through the existing FlashInfer +
-   Triton score-sum machinery; wire summed weights into the H2O scorer.
-4. **Eval + parity tests** against the existing LitGPT inference path, then
-   long-context benchmarks.
-
-## Environment notes
-
-- Local dev machine is macOS / no CUDA: vLLM cannot run here. Use it for source
-  reading, design, and writing scripts only.
-- Real runs happen on a Linux + NVIDIA GPU box (the repo's docs reference AWS
-  A100 instances; see `docs/launch_instance.md`).
-- vLLM 0.6.5 pins an older torch (~2.5.x); keep it in a **separate venv** from
-  the main keys_values env (torch 2.12 here) to avoid clobbering it.
+1. **Feasibility spike** (current): run Qwen2.5-0.5B on vLLM 0.23 (V1); dump
+   resolved attention backend, the per-layer `KVCacheSpec`, `KVCacheConfig`
+   (num_blocks, block_size, num_kv_heads, head_size), and confirm the V1
+   extension points against the installed source. Script: `examples/vllm_spike.py`.
+2. **lastrec via Option A**: custom `KVCacheSpec` + manager; parity-check output
+   vs. the LitGPT path on short sequences.
+3. **H2O**: decide block-granularity approximation vs. dense-cache backend;
+   route attention-weight computation through the existing FlashInfer + Triton
+   score-sum machinery.
+4. **Eval + parity tests** vs. the LitGPT inference path, then long-context
+   benchmarks.
 
 ## Open questions
 
-- Can Option A coexist with vLLM's scheduler without rewriting the block
-  manager, or do we need a custom `cache_engine` too?
-- CUDA-graph capture with a non-paged, dynamically-evicting cache — feasible in
-  0.6.5, or run eager-only first?
-- Batch handling: keys_values fixes batch size at prefill; vLLM batches
-  heterogeneous requests. How do per-sequence dense caches map onto a batched
-  `AttentionImpl.forward`?
+- Can a `SingleTypeKVCacheManager` express keys_values eviction without touching
+  the block pool internals?
+- H2O at block granularity — acceptable accuracy, or is per-head eviction
+  (Option B) required?
+- Getting summed attention weights in V1 without a custom kernel per backend.
+- CUDA-graph capture with a dynamically-evicting custom manager.
