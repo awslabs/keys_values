@@ -42,7 +42,18 @@ logger = logging.getLogger(__name__)
 #   _POLICY_REGISTRATIONS.append((LastRecSpec, LastRecManager, LastRecSpec))
 def _policy_registrations() -> List[Tuple[type, type, type]]:
     registrations: List[Tuple[type, type, type]] = []
-    # Task 2: lastrec; Task 4: h2o. Imported lazily here once implemented.
+
+    # Task 2: lastrec. Behaviorally a sliding window, so it groups with the
+    # SlidingWindowSpec family (uniform_type_base_spec=SlidingWindowSpec) to
+    # inherit the recycling-aware admission cap in get_manager_for_kv_cache_spec.
+    from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+    from keys_values.vllm.managers import LastRecManager
+    from keys_values.vllm.specs import LastRecSpec
+
+    registrations.append((LastRecSpec, LastRecManager, SlidingWindowSpec))
+
+    # Task 4: h2o (score-based) registers here once implemented.
     return registrations
 
 
