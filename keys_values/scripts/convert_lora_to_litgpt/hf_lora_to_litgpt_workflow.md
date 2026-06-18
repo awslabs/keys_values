@@ -49,10 +49,14 @@ NOTE: Run this script in a common base directory. Otherwise, the Hugging Face
 checkpoint is downloaded again every time.
 
 ```bash
-python merge_qwen3_lora.py \
-  --base-model Qwen/Qwen3-4B-Instruct-2507 \
-  --adapter-dir <data-dir>/lora_adapter \
-  --output-dir <data-dir>/merged
+export CHECKPOINT_DIR="64k_baselines_v1"; \
+for d in nq_64k pop_qa_64k trivia_qa_64k hotpot_qa_64k
+do
+  python merge_qwen3_lora.py \
+    --base-model Qwen/Qwen3-4B-Instruct-2507 \
+    --adapter-dir ${CHECKPOINT_DIR}/$d/lora_adapter \
+    --output-dir ${CHECKPOINT_DIR}/$d/merged
+done
 ```
 
 The base model must be exactly the same model used during LoRA training.
@@ -82,7 +86,10 @@ model.safetensors.index.json
 Run:
 
 ```bash
-litgpt convert_to_litgpt <data-dir>/merged --model_name Qwen3-4B
+for d in nq_64k pop_qa_64k trivia_qa_64k hotpot_qa_64k
+do
+  litgpt convert_to_litgpt ${CHECKPOINT_DIR}/$d/merged --model_name Qwen3-4B
+done
 ```
 
 ## Step 5 Test LitGPT Checkpoint
@@ -106,9 +113,12 @@ training. These files depend mostly on the model and the dataset, while their
 `kvcache` and `sdpa` args can be overwritten in the evaluation script.
 
 ```bash
-cp model_config.yaml <data-dir>/merged/.
-cp generation_config.json <data-dir>/merged/.
-cp <data>/hyperparameters.yaml <data-dir>/merged/.
+for d in nq_64k pop_qa_64k trivia_qa_64k hotpot_qa_64k
+do
+  cp ~/git/keys_values/keys_values/scripts/convert_lora_to_litgpt/model_config.yaml ${CHECKPOINT_DIR}/$d/merged/.
+  cp ~/git/keys_values/keys_values/scripts/convert_lora_to_litgpt/generation_config.json ${CHECKPOINT_DIR}/$d/merged/.
+  cp ~/git/keys_values/keys_values/scripts/convert_lora_to_litgpt/$d/hyperparameters.yaml ${CHECKPOINT_DIR}/$d/merged/.
+done
 ```
 
 Here, <data> denotes the dataset.
