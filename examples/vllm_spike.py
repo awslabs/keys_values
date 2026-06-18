@@ -31,7 +31,14 @@ the run on a missing attribute.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+
+# vLLM V1 launches its EngineCore in a child process. If CUDA is already
+# initialized in the parent (e.g. by a torch.cuda call), a forked child cannot
+# re-initialize CUDA. Force 'spawn' so the worker starts a fresh interpreter.
+# Must be set before vllm is imported.
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 
 def parse_args() -> argparse.Namespace:
