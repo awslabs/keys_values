@@ -137,6 +137,29 @@ Implications:
 4. **Eval + parity tests** vs. the LitGPT inference path, then long-context
    benchmarks.
 
+## Serve-time wiring result (task 2.3)
+
+`lastrec` now runs end-to-end in vLLM 0.23 (V1) and is at output parity with
+native sliding window. Mechanism (see `examples/vllm_lastrec_experiment.py`):
+
+- Run the engine in-process (`VLLM_ENABLE_V1_MULTIPROCESSING=0`) so monkeypatches
+  apply to the worker.
+- Set each `Attention` layer's `sliding_window` to the window size (an **int** —
+  a tuple breaks `SlidingWindowSpec.max_admission_blocks_per_request`). vLLM then
+  derives a `SlidingWindowSpec` for each layer and masks attention to the window.
+- Wrap `GPUModelRunner.get_kv_cache_spec` to convert each derived
+  `SlidingWindowSpec` into our `LastRecSpec`, which routes to `LastRecManager`.
+
+Verified on 1x A10G, Qwen2.5-0.5B, window 256: `lastrec` output is byte-identical
+to `sliding` for the same prompt/seed. Note: a needle-recall test does NOT
+discriminate at window 256, because info diffuses forward ~`window x num_layers`
+(~6k tokens) through the residual stream; use a small window (e.g. 32) to make
+eviction observable.
+
+Open follow-up: this uses monkeypatches in an experiment harness. A production
+path should register via the `register_custom_kv_cache_specs` platform hook and a
+config flag rather than patching `get_kv_cache_spec`/layer attributes.
+
 ## Open questions
 
 - Can a `SingleTypeKVCacheManager` express keys_values eviction without touching
