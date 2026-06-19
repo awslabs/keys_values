@@ -58,9 +58,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--window", type=int, default=256, help="cache_length / window")
     p.add_argument(
         "--mode",
-        choices=["lastrec", "sliding", "both"],
+        choices=["lastrec", "sliding", "full", "both"],
         default="both",
-        help="Which policy to run; 'both' compares outputs for parity.",
+        help="Policy to run. 'full' is the no-window baseline; 'both' prints "
+        "guidance to compare lastrec vs sliding in separate processes.",
+    )
+    p.add_argument(
+        "--needle",
+        action="store_true",
+        help="Use a recall prompt: a secret code early, then filler past the "
+        "window, then a question. A windowed policy cannot recall it; the "
+        "'full' baseline can. Makes windowing observable.",
     )
     p.add_argument(
         "--prompt",
@@ -72,6 +80,22 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--max-tokens", type=int, default=48)
     return p.parse_args()
+
+
+_SECRET_CODE = "42819"
+
+
+def _build_prompt(args) -> str:
+    if not args.needle:
+        return args.prompt
+    # Secret code up front, then filler that pushes it out of a small window,
+    # then the question at the end (inside the window).
+    filler = "The quick brown fox jumps over the lazy dog. " * 400
+    return (
+        f"Remember this: the secret code is {_SECRET_CODE}. "
+        f"{filler}"
+        "What is the secret code? Answer with only the number. Answer:"
+    )
 
 
 def _check_env() -> None:
@@ -142,8 +166,8 @@ def _install_attention_window(window: int) -> None:
     original_load = GPUModelRunner.load_model
 
     def _get_attention_layers(vllm_config):
-        # get_layers_from_vllm_config / Attention have moved between versions;
-        # try the known locations.
+        # get_layers_from_vllm_config and the Attention class have moved
+        # between versions; try the known locations.
         get_layers = None
         for modpath in ("vllm.config", "vllm.model_executor.models.utils"):
             try:
@@ -152,11 +176,20 @@ def _install_attention_window(window: int) -> None:
                 break
             except (ImportError, AttributeError):
                 continue
-        from vllm.attention import Attention
-
         if get_layers is None:
             raise ImportError("could not locate get_layers_from_vllm_config")
-        return get_layers(vllm_config, Attention)
+
+        attention_cls = None
+        for modpath in ("vllm.model_executor.layers.attention", "vllm.attention"):
+            try:
+                attention_cls = __import__(modpath, fromlist=["Attention"]).Attention
+                break
+            except (ImportError, AttributeError):
+                continue
+        if attention_cls is None:
+            raise ImportError("could not locate the Attention layer class")
+
+        return get_layers(vllm_config, attention_cls)
 
     def patched_load(self, *args, **kwargs):
         result = original_load(self, *args, **kwargs)
@@ -174,14 +207,14 @@ def _install_attention_window(window: int) -> None:
     GPUModelRunner.load_model = patched_load
 
 
-def _generate(args, use_lastrec: bool) -> str:
-    # Fresh interpreter state is not available across modes in one process;
-    # callers should run modes separately if monkeypatch collisions appear.
+def _generate(args, mode: str) -> str:
     from keys_values.vllm.registration import register_policies
 
-    register_policies()
-    _install_spec_override(args.window, use_lastrec=use_lastrec)
-    _install_attention_window(args.window)
+    if mode in ("lastrec", "sliding"):
+        register_policies()
+        _install_spec_override(args.window, use_lastrec=(mode == "lastrec"))
+        _install_attention_window(args.window)
+    # mode == "full": no overrides -> stock full-attention baseline.
 
     from vllm import LLM, SamplingParams
 
@@ -192,7 +225,8 @@ def _generate(args, use_lastrec: bool) -> str:
         enable_prefix_caching=False,  # windowed eviction + prefix cache don't mix
     )
     out = llm.generate(
-        [args.prompt], SamplingParams(max_tokens=args.max_tokens, temperature=0.0)
+        [_build_prompt(args)],
+        SamplingParams(max_tokens=args.max_tokens, temperature=0.0),
     )
     return out[0].outputs[0].text
 
@@ -202,22 +236,26 @@ def main() -> None:
     _check_env()
 
     if args.mode == "both":
-        # Run in separate subprocesses would be cleaner; for a first pass we
-        # note that running both in one process may hit monkeypatch state. Start
-        # with the two single-mode runs and compare their printed outputs.
         print(
-            "For a clean comparison, run the two modes in separate processes:\n"
-            "  python examples/vllm_lastrec_experiment.py --mode lastrec "
-            f"--window {args.window}\n"
-            "  python examples/vllm_lastrec_experiment.py --mode sliding "
-            f"--window {args.window}\n"
-            "then diff the printed Output lines."
+            "For a clean comparison, run each mode in a separate process "
+            "(monkeypatch state does not reset within one process):\n"
+            f"  python examples/vllm_lastrec_experiment.py --mode lastrec "
+            f"--window {args.window}"
+            f"{' --needle' if args.needle else ''}\n"
+            f"  python examples/vllm_lastrec_experiment.py --mode sliding "
+            f"--window {args.window}"
+            f"{' --needle' if args.needle else ''}\n"
+            f"  python examples/vllm_lastrec_experiment.py --mode full"
+            f"{' --needle' if args.needle else ''}\n"
+            "Parity: lastrec vs sliding outputs should match (Property 5).\n"
+            "Effect: with --needle, full recalls the code; lastrec/sliding "
+            "should not."
         )
-        text = _generate(args, use_lastrec=True)
+        text = _generate(args, mode="lastrec")
         print(f"\n[lastrec] Output: {text!r}")
         return
 
-    text = _generate(args, use_lastrec=(args.mode == "lastrec"))
+    text = _generate(args, mode=args.mode)
     print(f"\n[{args.mode}] Output: {text!r}")
 
 
