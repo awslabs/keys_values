@@ -123,8 +123,6 @@ def _install_spec_override(window: int, use_lastrec: bool) -> None:
 
     from keys_values.vllm.specs import LastRecSpec
 
-    target_cls = LastRecSpec if use_lastrec else SlidingWindowSpec
-
     if getattr(GPUModelRunner.get_kv_cache_spec, "_kv_patched", False):
         return
     original = GPUModelRunner.get_kv_cache_spec
@@ -133,17 +131,22 @@ def _install_spec_override(window: int, use_lastrec: bool) -> None:
         specs = original(self)
         converted = {}
         for name, spec in specs.items():
-            if isinstance(spec, FullAttentionSpec) and not isinstance(
-                spec, SlidingWindowSpec
-            ):
-                converted[name] = target_cls(
+            win = getattr(spec, "sliding_window", None)
+            is_windowable = isinstance(
+                spec, (FullAttentionSpec, SlidingWindowSpec)
+            ) and not isinstance(spec, LastRecSpec)
+            if use_lastrec and is_windowable:
+                converted[name] = LastRecSpec(
                     block_size=spec.block_size,
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
                     dtype=spec.dtype,
-                    sliding_window=window,
+                    sliding_window=win if isinstance(win, int) else window,
                 )
-                print(f"[spec] {name}: FullAttentionSpec -> {target_cls.__name__}")
+                print(
+                    f"[spec] {name}: {type(spec).__name__} -> "
+                    f"LastRecSpec(window={converted[name].sliding_window})"
+                )
             else:
                 converted[name] = spec
         return converted
@@ -197,8 +200,8 @@ def _install_attention_window(window: int) -> None:
             layers = _get_attention_layers(self.vllm_config)
             for name, attn in layers.items():
                 if getattr(attn, "sliding_window", None) in (None, (-1, -1)):
-                    attn.sliding_window = (window - 1, 0)
-                    print(f"[mask] {name}: sliding_window <- {(window - 1, 0)}")
+                    attn.sliding_window = window
+                    print(f"[mask] {name}: sliding_window <- {window}")
         except Exception as exc:  # noqa: BLE001 - experiment: surface it
             print(f"[mask][warn] could not set sliding_window: {exc}")
         return result
