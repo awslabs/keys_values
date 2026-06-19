@@ -17,7 +17,7 @@ vLLM, and check parity against vLLM's native sliding window.
 
 How it works (and why):
 - vLLM builds each layer's ``KVCacheSpec`` in the worker via
-  ``GpuModelRunner.get_kv_cache_spec`` (which calls each ``Attention``
+  ``GPUModelRunner.get_kv_cache_spec`` (which calls each ``Attention``
   layer's ``get_kv_cache_spec``). We wrap that method to convert the model's
   full-attention specs into ``LastRecSpec`` (or ``SlidingWindowSpec``), so the
   block manager recycles old blocks.
@@ -88,22 +88,22 @@ def _check_env() -> None:
 
 
 def _install_spec_override(window: int, use_lastrec: bool) -> None:
-    """Wrap GpuModelRunner.get_kv_cache_spec to emit our windowed spec.
+    """Wrap GPUModelRunner.get_kv_cache_spec to emit our windowed spec.
 
     Converts each FullAttentionSpec the model would produce into either
     LastRecSpec (our policy) or SlidingWindowSpec (vLLM native, for parity),
     preserving block_size / num_kv_heads / head_size / dtype.
     """
-    from vllm.v1.worker.gpu_model_runner import GpuModelRunner
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
     from keys_values.vllm.specs import LastRecSpec
 
     target_cls = LastRecSpec if use_lastrec else SlidingWindowSpec
 
-    if getattr(GpuModelRunner.get_kv_cache_spec, "_kv_patched", False):
+    if getattr(GPUModelRunner.get_kv_cache_spec, "_kv_patched", False):
         return
-    original = GpuModelRunner.get_kv_cache_spec
+    original = GPUModelRunner.get_kv_cache_spec
 
     def patched(self):
         specs = original(self)
@@ -125,7 +125,7 @@ def _install_spec_override(window: int, use_lastrec: bool) -> None:
         return converted
 
     patched._kv_patched = True
-    GpuModelRunner.get_kv_cache_spec = patched
+    GPUModelRunner.get_kv_cache_spec = patched
 
 
 def _install_attention_window(window: int) -> None:
@@ -135,19 +135,33 @@ def _install_attention_window(window: int) -> None:
     version (int vs (left, right) tuple). This is the most likely spot to
     adjust during box iteration; we log every layer we touch.
     """
-    from vllm.v1.worker.gpu_model_runner import GpuModelRunner
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-    if getattr(GpuModelRunner.load_model, "_kv_window_patched", False):
+    if getattr(GPUModelRunner.load_model, "_kv_window_patched", False):
         return
-    original_load = GpuModelRunner.load_model
+    original_load = GPUModelRunner.load_model
+
+    def _get_attention_layers(vllm_config):
+        # get_layers_from_vllm_config / Attention have moved between versions;
+        # try the known locations.
+        get_layers = None
+        for modpath in ("vllm.config", "vllm.model_executor.models.utils"):
+            try:
+                mod = __import__(modpath, fromlist=["get_layers_from_vllm_config"])
+                get_layers = mod.get_layers_from_vllm_config
+                break
+            except (ImportError, AttributeError):
+                continue
+        from vllm.attention import Attention
+
+        if get_layers is None:
+            raise ImportError("could not locate get_layers_from_vllm_config")
+        return get_layers(vllm_config, Attention)
 
     def patched_load(self, *args, **kwargs):
         result = original_load(self, *args, **kwargs)
         try:
-            from vllm.attention import Attention
-            from vllm.config import get_layers_from_vllm_config
-
-            layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+            layers = _get_attention_layers(self.vllm_config)
             for name, attn in layers.items():
                 if getattr(attn, "sliding_window", None) in (None, (-1, -1)):
                     attn.sliding_window = (window - 1, 0)
@@ -157,7 +171,7 @@ def _install_attention_window(window: int) -> None:
         return result
 
     patched_load._kv_window_patched = True
-    GpuModelRunner.load_model = patched_load
+    GPUModelRunner.load_model = patched_load
 
 
 def _generate(args, use_lastrec: bool) -> str:
