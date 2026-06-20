@@ -88,17 +88,53 @@ def update_next_position(
     protected_end: List[Optional[int]],
     next_position: List[int],
 ):
+    assert positions.ndim == 2  # Sanity check
     for bpos, (pos_for_b, pstart, pend) in enumerate(
-        zip(positions[:, 0, :], protected_start, protected_end)
+        zip(positions, protected_start, protected_end)
     ):
         np = pos_for_b[-1] + 1
         if pstart is None:
             np = np % cache_length
         elif np == cache_length:
+            # If `pstart == 0`, must have `pend < cache_length`
             np = 0 if pstart > 0 else pend
         elif np == pstart:
+            # If `pend == cache_length`, must have `pstart > 0`
             np = pend % cache_length
         next_position[bpos] = np
+
+
+def positions_outside_protected_range(
+    num: int,
+    current: int,
+    end: int,
+    protected_start: int,
+    protected_end: int,
+    **index_kwargs,
+) -> torch.Tensor:
+    assert 0 <= protected_start < protected_end <= end
+    assert 0 <= current < protected_start or protected_end <= current < end
+    assert protected_end - protected_start < end
+    parts = []
+    remainder = num
+    while remainder > 0:
+        diff = protected_start - current
+        if diff > 0:
+            # Left of `protected_start`
+            diff = min(diff, remainder)
+            part = torch.arange(current, current + diff, **index_kwargs)
+            remainder -= diff
+            # Only used again if `remainder > 0`
+            current = protected_end % end
+        else:
+            # Right of `protected_end`
+            diff = min(end - current, remainder)
+            part = torch.arange(current, current + diff, **index_kwargs)
+            remainder -= diff
+            # Only used again if `remainder > 0`
+            current = 0 if protected_start > 0 else protected_end
+        parts.append(part)
+    return torch.cat(parts, dim=0)
 
 
 def extract_index(
@@ -110,6 +146,8 @@ def extract_index(
     n_query_groups: int,
     **index_kwargs,
 ) -> List[Tuple[torch.Tensor, int, int]]:
+    # Maximum number of slots which can be written in a single
+    # step, without writing to some slot twice
     max_one_step = cache_length - max(
         b - a if a is not None else 0
         for a, b in zip(protected_start, protected_end)
@@ -118,6 +156,7 @@ def extract_index(
         offs_and_nums = ((0, num),)
     else:
         # Only happens if `num` is very large
+        assert num <= 2 * max_one_step, f"Internal error: num = {num}, max_one_step = {max_one_step}"
         offs_and_nums = (
             (0, max_one_step),
             (max_one_step, num - max_one_step),
@@ -160,7 +199,7 @@ def extract_index(
         if len(offs_and_nums) > 1:
             update_next_position(
                 cache_length=cache_length,
-                positions=positions,
+                positions=positions[:, 0, :],
                 protected_start=protected_start,
                 protected_end=protected_end,
                 next_position=next_position,
@@ -171,6 +210,11 @@ def extract_index(
 class SmartInitialLastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
     """
     Replay log for :class:`SmartInitialLastRecentlyInsertedKVCache`.
+
+    `next_position_for_input_pos` maps `input_pos` values to `next_position`
+    lists. Entries are passed with :meth:`update`. We need to store these,
+    because we cannot easily compute `next_position` from `input_pos`: this
+    depends on the chunk for which the protected range was set.
     """
 
     def __init__(
@@ -258,35 +302,6 @@ class SmartInitialLastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
             return indexes[0][0]
         else:
             return torch.cat([x[0] for x in indexes], dim=-1)
-
-
-def positions_outside_protected_range(
-    num: int,
-    current: int,
-    end: int,
-    protected_start: int,
-    protected_end: int,
-    **index_kwargs,
-) -> torch.Tensor:
-    assert 0 <= protected_start < protected_end <= end
-    assert 0 <= current < protected_start or protected_end <= current < end
-    assert protected_end - protected_start < end
-    parts = []
-    remainder = num
-    while remainder > 0:
-        diff = protected_start - current
-        if diff > 0:
-            diff = min(diff, remainder)
-            part = torch.arange(current, current + diff, **index_kwargs)
-            remainder -= diff
-            current = protected_end % end
-        else:
-            diff = min(end - current, remainder)
-            part = torch.arange(current, current + diff, **index_kwargs)
-            remainder -= diff
-            current = 0 if protected_start > 0 else protected_end
-        parts.append(part)
-    return torch.cat(parts, dim=0)
 
 
 class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
@@ -482,16 +497,17 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 key=key[:, :, off : (off + num), :],
                 value=value[:, :, off : (off + num), :],
             )
+            positions_2d = positions[:, 0, :]
             # Update `token_pos` and `next_positions`
             for bpos, (pos_for_b, pstart, pend) in enumerate(
-                zip(positions[:, 0, :], self.protected_start, self.protected_end)
+                zip(positions_2d, self.protected_start, self.protected_end)
             ):
                 self.token_pos[bpos, pos_for_b] = torch.arange(
                     ntp, ntp + num, **index_kwargs
                 )
             update_next_position(
                 cache_length=self.cache_length,
-                positions=positions,
+                positions=positions_2d,
                 protected_start=self.protected_start,
                 protected_end=self.protected_end,
                 next_position=self.next_position,

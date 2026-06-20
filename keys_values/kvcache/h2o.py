@@ -348,8 +348,8 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
     attention weights. The instantaneous score is:
 
     ..math::
-        S(j) = n_Q * m_j |v_j| / Z,  Z = \sum_j m_j |v_j|,
-         m_j = \sum_i m_{i,j}
+        S(j) = n_Q * m_j |v_j| / Z,  Z = sum_j m_j |v_j|,
+         m_j = sum_i m_{i,j}
 
     Namely, `m_j` is `attn_weights` summed over the query axis, `|v_j|` the
     norm of the v vector, n_Q the length of the query axis (`query_length`
@@ -358,7 +358,6 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
     Different to H2O, this score takes the length of v vectors into account as
     well, which in the end determine the attention outputs alongside the
     attention weights.
-
     """
 
     def __init__(
