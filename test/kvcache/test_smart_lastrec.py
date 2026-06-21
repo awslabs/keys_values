@@ -170,7 +170,11 @@ def test_smart_lastrec_update_protected_ranges(
         encoded_seqs = [
             encode(tokenizer, seq, return_tensors="pt").squeeze(0) for seq in sequences
         ]
-        bogus_tokens = encode(tokenizer, "xyz", return_tensors="pt")
+        # We also append "xyz" a random number of times on the left. Need to be
+        # careful with BOS and EOS tokens
+        bogus_tokens = encode(
+            tokenizer, "xyz", return_tensors="pt", add_special_tokens=False,
+        )
         random_left = [
             bogus_tokens.expand(num, -1).flatten()
             for num in torch.randint(0, 8, (batch_size,)).tolist()
@@ -181,7 +185,9 @@ def test_smart_lastrec_update_protected_ranges(
         kwargs = dict(dtype=encoded_seqs[0].dtype)
         input_ids = torch.cat(
             [
-                torch.cat((torch.zeros(nlp, **kwargs), y, x)).unsqueeze(0)
+                torch.cat(
+                    (torch.zeros(nlp, **kwargs), x[0:1], y, x[1:])
+                ).unsqueeze(0)
                 for x, y, nlp in zip(encoded_seqs, random_left, num_left_pad)
             ],
             dim=0,
