@@ -401,12 +401,16 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         for bpos, tokens in enumerate(token_idx):
             tokens = tokens.tolist()
             try:
-                num_left_pad = next(i for i, t in enumerate(tokens) if t != self._pad_id)
+                num_left_pad = next(
+                    i for i, t in enumerate(tokens) if t != self._pad_id
+                )
                 tokens = tokens[num_left_pad:]
                 decoded = self.tokenizer.decode(tokens, skip_special_tokens=True)
                 match = re.search(self.end_initial_regex, decoded)
             except StopIteration:
-                print(f"SmartInitialLastRecentlyInsertedKVCache._set_init_length (bpos={bpos}): Sequence is all padding")
+                print(
+                    f"SmartInitialLastRecentlyInsertedKVCache._set_init_length (bpos={bpos}): Sequence is all padding"
+                )
                 num_left_pad = None
                 match = None
                 decoded = None
