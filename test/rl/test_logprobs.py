@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Tests for :mod:`keys_values.logprobs`.
+Tests for :mod:`keys_values.rl.logprobs`.
 
 Verifies that ``compute_logprobs`` produces correct per-token
 log-probabilities using the LongContextInferenceModel infrastructure.
@@ -22,7 +22,7 @@ import pytest
 import torch
 
 from keys_values.config import Config
-from keys_values.logprobs import compute_logprobs
+from keys_values.rl.logprobs import compute_logprobs
 
 
 def _small_config() -> Config:
