@@ -131,8 +131,15 @@ def load_tokenizer(
     """
     if cache_dir is None:
         cache_dir = os.getenv("HF_HOME", "./test_tokenizer")
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
+    if os.path.exists(cache_dir):
+        print(
+            f"Detected tokenizer cache at {cache_dir}, will not access internet."
+            " If this fails, remove this directory and try again."
+        )
+        kwargs = dict(local_files_only=True)
+    else:
+        kwargs = dict()
+    tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir, **kwargs)
     return tokenizer
 
 

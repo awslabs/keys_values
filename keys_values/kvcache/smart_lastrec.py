@@ -92,15 +92,20 @@ def update_next_position(
     for bpos, (pos_for_b, pstart, pend) in enumerate(
         zip(positions, protected_start, protected_end)
     ):
-        np = pos_for_b[-1] + 1
+        np = pos_for_b[-1].item() + 1
         if pstart is None:
             np = np % cache_length
-        elif np == cache_length:
-            # If `pstart == 0`, must have `pend < cache_length`
-            np = 0 if pstart > 0 else pend
-        elif np == pstart:
-            # If `pend == cache_length`, must have `pstart > 0`
-            np = pend % cache_length
+        else:
+            wrap_around = pstart > pend
+            if not wrap_around:
+                if np == cache_length:
+                    # If `pstart == 0`, must have `pend < cache_length`
+                    np = 0 if pstart > 0 else pend
+                elif np == pstart:
+                    # If `pend == cache_length`, must have `pstart > 0`
+                    np = pend % cache_length
+            elif np == pstart:
+                np = pend
         next_position[bpos] = np
 
 
@@ -112,9 +117,14 @@ def positions_outside_protected_range(
     protected_end: int,
     **index_kwargs,
 ) -> torch.Tensor:
-    assert 0 <= protected_start < protected_end <= end
-    assert 0 <= current < protected_start or protected_end <= current < end
-    assert protected_end - protected_start < end
+    wrap_around = protected_start > protected_end
+    if not wrap_around:
+        assert 0 <= protected_start < protected_end <= end
+        assert 0 <= current < protected_start or protected_end <= current < end
+        assert protected_end - protected_start < end
+    else:
+        assert 0 < protected_end < protected_start < end
+        assert protected_end <= current < protected_start
     parts = []
     remainder = num
     while remainder > 0:
@@ -126,8 +136,9 @@ def positions_outside_protected_range(
             remainder -= diff
             # Only used again if `remainder > 0`
             current = protected_end % end
-        else:
-            # Right of `protected_end`
+        elif not wrap_around:
+            # Right of `protected_end` (only different from the other case
+            # if not wrap around)
             diff = min(end - current, remainder)
             part = torch.arange(current, current + diff, **index_kwargs)
             remainder -= diff
@@ -186,6 +197,7 @@ def extract_index(
                 end=cache_length,
                 batch_size=1,
                 n_query_groups=n_query_groups,
+                return_tensor=True,
                 **index_kwargs,
             )
             for np, pstart, pend in zip(
@@ -332,6 +344,10 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
     length of the ranges. Also, the protected range must lie within a chunk
     and also not wrap around (for simplicity).
 
+    The projected range may wrap around. If `protected_start[b] > protected_end[b]`,
+    it is in fact `range(protected_start[b], cache_length)` plus
+    `range(0, protected_end[b])`.
+
     ATTENTION: The regular expression `end_initial_regex` is matched against
     a string coming out of `tokenizer.decode(..., skip_special_tokens=True)`. It
     needs to account for the fact that in general, `decode(encode(text)) != text`,
@@ -464,7 +480,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
-        self._update_protected_ranges(token_idx)
+        use_range = self._update_protected_ranges(token_idx)
         if self._replay_log is not None:
             if not isinstance(self._replay_log, SmartInitialLastRecentlyInsertedKVCacheReplayLog):
                 raise IndexError(
@@ -478,13 +494,21 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
             )
             self._replay_log.append_token_chunk(token_idx)
 
+        # If a protected range has just been set in `_update_protected_ranges`,
+        # it must not be used in `extract_index`
+        pstart_copy = [
+            ps if ur else None for ps, ur in zip(self.protected_start, use_range)
+        ]
+        pend_copy = [
+            pe if ur else None for pe, ur in zip(self.protected_end, use_range)
+        ]
         total_num = key.shape[2]
         index_kwargs = dict(device=self.device, dtype=torch.int)
         indexes = extract_index(
             num=total_num,
             cache_length=self.cache_length,
-            protected_start=self.protected_start,
-            protected_end=self.protected_end,
+            protected_start=pstart_copy,
+            protected_end=pend_copy,
             next_position=self.next_position,
             n_query_groups=self.n_query_groups,
             **index_kwargs,
@@ -499,9 +523,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
             )
             positions_2d = positions[:, 0, :]
             # Update `token_pos` and `next_positions`
-            for bpos, (pos_for_b, pstart, pend) in enumerate(
-                zip(positions_2d, self.protected_start, self.protected_end)
-            ):
+            for bpos, pos_for_b in enumerate(positions_2d):
                 self.token_pos[bpos, pos_for_b] = torch.arange(
                     ntp, ntp + num, **index_kwargs
                 )
@@ -517,18 +539,13 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
 
     def _update_protected_ranges(
         self, token_idx: torch.Tensor,
-    ):
-        batch_size, max_init_length = token_idx.shape
-        # New protected range cannot wrap around. Note that for batch
-        # positions where the range is not yet determined, the current cache
-        # position is `self.input_pos % self.cache_length`.
-        max_init_length = min(
-            max_init_length,
-            self.cache_length - self.input_pos % self.cache_length,
-        )
-        max_init_length = max(
+    ) -> List[bool]:
+        batch_size, max_range_length = token_idx.shape
+        # Note that for batch positions where the range is not yet determined,
+        # the current cache position is `self.input_pos % self.cache_length`.
+        max_range_length = max(
             min(
-                max_init_length,
+                max_range_length,
                 int(self.cache_length * self.max_initial_fraction),
             ),
             1,
@@ -536,6 +553,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         if self.protected_start is None:
             self.protected_start = [None] * batch_size
             self.protected_end = [None] * batch_size
+        use_range = [pstart is not None for pstart in self.protected_start]
         for bpos, (tokens, pstart, pend) in enumerate(
             zip(token_idx, self.protected_start, self.protected_end)
         ):
@@ -548,6 +566,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                     )
                 except StopIteration:
                     # All tokens are padding
+                    print(f"bpos={bpos}: All tokens are padding")  # DEBUG
                     continue
                 tokens = tokens[num_left_pad:]
                 decoded = self.tokenizer.decode(tokens, skip_special_tokens=True)
@@ -577,14 +596,17 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                             new_length = max(diff_pos, 1)
                     except StopIteration:
                         pass
-                    new_length = min(new_length, max_init_length)
+                    print(f"bpos={bpos}: Match. len = {new_length} -> {min(new_length, max_range_length)}")  # DEBUG
+                    new_length = min(new_length, max_range_length)
                 else:
-                    new_length = min(max_init_length, len(tokens))
+                    new_length = min(max_range_length, len(tokens))
+                    print(f"bpos={bpos}: No match. len = {new_length}")  # DEBUG
                 pstart = (self.input_pos + num_left_pad) % self.cache_length
-                pend = pstart + new_length
-                assert pend <= self.cache_length, (pstart, pend, self.cache_length)
+                pend = (pstart + new_length) % self.cache_length
+                assert pstart != pend, (pstart, pend, self.cache_length)
                 self.protected_start[bpos] = pstart
                 self.protected_end[bpos] = pend
+        return use_range
 
     def _prefill_internal(
         self,
@@ -603,7 +625,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 self.cache_length,
             )  # Sanity check
             self.next_position = [
-                0 if pstart is None or pstart > 0 else pend
+                0 if pstart is None or 0 < pstart < pend else pend
                 for pstart, pend in zip(self.protected_start, self.protected_end)
             ]
         self.token_pos[: self.batch_size, :init_length] = (
