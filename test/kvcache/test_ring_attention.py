@@ -85,15 +85,16 @@ def _equalize_token_pos(
     assert token_pos.ndim == 1
     kv_len = token_pos.numel()
     assert kv_len % num_devices == 0
-    tp_2d = token_pos.view(kv_len // num_devices, num_devices)
+    kv_per_rank = kv_len // num_devices
+    tp_2d = token_pos.view(kv_per_rank, num_devices)
     kwargs = dict(dtype=token_pos.dtype, device=token_pos.device)
     uval = (num_devices - input_pos % num_devices) % num_devices
     for rank in range(num_devices):
-        rel_pos = tp_2d[:, rank] >= input_pos
         start = input_pos + (uval + rank) % num_devices
         new_vals = torch.arange(start, input_pos + q_len, num_devices, **kwargs)
-        rand_order = torch.randperm(new_vals.numel(), **kwargs)
-        tp_2d[rel_pos, rank] = new_vals[rand_order]
+        sz = new_vals.numel()
+        rand_pos = torch.randperm(kv_per_rank)[:sz]
+        tp_2d[rand_pos, rank] = new_vals
 
 
 @_RunIf(min_cuda_gpus=1)
@@ -158,30 +159,20 @@ def test_sdpa_distributed_vs_single_on_chunk(
     # distributed correctly between the ranks, so that the new KV information
     # is for the same tokens (per rank) than the query information. This is
     # guaranteed by equalization.
+    index_kwargs = dict(dtype=torch.int64, device=device)
     if not is_1d:
-        tp = sample_token_positions(
-            batch_size=batch_size,
-            n_query_groups=n_query_groups,
-            q_len=q_len,
-            kv_len=kv_len,
-            input_pos=input_pos,
-            device=device,
+        tp = torch.zeros(
+            (batch_size, n_query_groups, kv_len), **index_kwargs,
         )
         for b in range(batch_size):
             for h in range(n_query_groups):
+                tp[b, h, :] = torch.randperm(input_pos, **index_kwargs)[:kv_len]
                 _equalize_token_pos(tp[b, h, :], input_pos, q_len, num_devices)
         data_all["token_pos"] = tp
     else:
-        tp = sample_token_positions(
-            batch_size=1,
-            n_query_groups=1,
-            q_len=q_len,
-            kv_len=kv_len,
-            input_pos=input_pos,
-            device=device,
-        )
-        _equalize_token_pos(tp[0, 0, :], input_pos, q_len, num_devices)
-        data_all["token_pos"] = tp.expand(batch_size, n_query_groups, -1)
+        tp = torch.randperm(input_pos, **index_kwargs)[:kv_len]
+        _equalize_token_pos(tp, input_pos, q_len, num_devices)
+        data_all["token_pos"] = tp.view(1, 1, -1).expand(batch_size, n_query_groups, -1)
 
     # Distributed computation
     data, q_inds = _distribute_and_reorder_data(data_all, num_devices, input_pos)
