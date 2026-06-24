@@ -76,6 +76,26 @@ def _distribute_and_reorder_data(
     return result, q_inds
 
 
+def _equalize_token_pos(
+    token_pos: torch.Tensor,
+    input_pos: int,
+    q_len: int,
+    num_devices: int,
+):
+    assert token_pos.ndim == 1
+    kv_len = token_pos.numel()
+    assert kv_len % num_devices == 0
+    tp_2d = token_pos.view(kv_len // num_devices, num_devices)
+    kwargs = dict(dtype=token_pos.dtype, device=token_pos.device)
+    uval = (num_devices - input_pos % num_devices) % num_devices
+    for rank in range(num_devices):
+        rel_pos = tp_2d[:, rank] >= input_pos
+        start = input_pos + (uval + rank) % num_devices
+        new_vals = torch.arange(start, input_pos + q_len, num_devices, **kwargs)
+        rand_order = torch.randperm(new_vals.numel(), **kwargs)
+        tp_2d[rel_pos, rank] = new_vals[rand_order]
+
+
 @_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
     "n_head, n_query_groups, q_len, kv_len_per_rank, dtype, input_pos, num_devices, do_q_lens, is_1d",
@@ -134,30 +154,34 @@ def test_sdpa_distributed_vs_single_on_chunk(
         device=device,
     )
     data_all["query"] = data_all["query"][:, :, :q_len, :].contiguous()
-    # DEBUG:
-    #if not is_1d:
-    #    data_all["token_pos"] = sample_token_positions(
-    #        batch_size=batch_size,
-    #        n_query_groups=n_query_groups,
-    #        q_len=q_len,
-    #        kv_len=kv_len,
-    #        input_pos=input_pos,
-    #        device=device,
-    #    )
-    #else:
-    #    tp = sample_token_positions(
-    #        batch_size=1,
-    #        n_query_groups=1,
-    #        q_len=q_len,
-    #        kv_len=kv_len,
-    #        input_pos=input_pos,
-    #        device=device,
-    #    )
-    #    data_all["token_pos"] = tp.expand(batch_size, n_query_groups, -1)
-    tp_end = input_pos + q_len
-    tp = torch.arange(tp_end - kv_len, tp_end, dtype=torch.int64, device=device).view(1, 1, -1)
-    data_all["token_pos"] = tp.expand(batch_size, n_query_groups, -1)
-    # END DEBUG
+    # For `token_pos`, we need to make sure that values `>= input_pos` are
+    # distributed correctly between the ranks, so that the new KV information
+    # is for the same tokens (per rank) than the query information. This is
+    # guaranteed by equalization.
+    if not is_1d:
+        tp = sample_token_positions(
+            batch_size=batch_size,
+            n_query_groups=n_query_groups,
+            q_len=q_len,
+            kv_len=kv_len,
+            input_pos=input_pos,
+            device=device,
+        )
+        for b in range(batch_size):
+            for h in range(n_query_groups):
+                _equalize_token_pos(tp[b, h, :], input_pos, q_len, num_devices)
+        data_all["token_pos"] = tp
+    else:
+        tp = sample_token_positions(
+            batch_size=1,
+            n_query_groups=1,
+            q_len=q_len,
+            kv_len=kv_len,
+            input_pos=input_pos,
+            device=device,
+        )
+        _equalize_token_pos(tp[0, 0, :], input_pos, q_len, num_devices)
+        data_all["token_pos"] = tp.expand(batch_size, n_query_groups, -1)
 
     # Distributed computation
     data, q_inds = _distribute_and_reorder_data(data_all, num_devices, input_pos)
