@@ -55,6 +55,7 @@ def main(
     result_path,
     final_table: bool,
     multiple_tasks: bool,
+    metric_name: str = "sub_exact_match",
 ):
     if not multiple_tasks and not final_table:
         raise ValueError("If multiple_tasks=False, then final_table must be True")
@@ -76,7 +77,7 @@ def main(
             else:
                 df = pd.read_csv(csv_path)
                 if multiple_tasks:
-                    avg = df.groupby("task")["sub_exact_match"].mean()
+                    avg = df.groupby("task")[metric_name].mean()
                     row.append(
                         _sort_entries(
                             [
@@ -90,7 +91,7 @@ def main(
                         )
                     )
                 else:
-                    avg = df["sub_exact_match"].mean()
+                    avg = df[metric_name].mean()
                     row.append([(None, avg.item())])
         table.append(row)
 

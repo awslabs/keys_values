@@ -754,6 +754,7 @@ def eval_for_setup_internal(
             # One entry per batch dimension:
             input_ids = batch[INPUT_IDS_NAME]
             targets = batch["targets"]
+            prompt_len = input_ids.shape[1] - targets.shape[1] + 1
             if evaluator is None:
                 with torch.no_grad():
                     metric_values = model(input_ids, targets)
@@ -762,7 +763,6 @@ def eval_for_setup_internal(
                 raw_targets = None
             else:
                 metric_name = evaluator.metrics[0]
-                prompt_len = input_ids.shape[1] - targets.shape[1] + 1
                 prompts = input_ids[:, :prompt_len]
                 raw_targets = batch[TARGETS_STRINGS_NAME]
                 metric_values, generated_samples = evaluator(
@@ -785,6 +785,7 @@ def eval_for_setup_internal(
                     metric_values,
                     batch,
                     eval_metrics_path,
+                    prompt_len,
                     multiple_tasks,
                 )
             if store_generated_batch:
@@ -951,22 +952,23 @@ def store_eval_metrics(
     metric_values: torch.Tensor,
     batch: dict[str, Any],
     eval_metrics_path: Path,
+    prompt_length: int,
     multiple_tasks: bool = True,
 ):
     if multiple_tasks:
-        fieldnames = ["idx", "task", metric_name]
+        fieldnames = ["idx", "task", "prompt_length", metric_name]
         task = batch[TASK_NAME]
     else:
-        fieldnames = ["idx", metric_name]
+        fieldnames = ["idx", "prompt_length", metric_name]
         task = None
     with eval_metrics_path.open("w") as fp:
         writer = csv.writer(fp, delimiter=",")
         writer.writerow(fieldnames)
         for idx, loss in zip(batch[ORIG_IDX_NAME], metric_values):
             if multiple_tasks:
-                row = [idx, task, loss.item()]
+                row = [idx, task, prompt_length, loss.item()]
             else:
-                row = [idx, loss.item()]
+                row = [idx, prompt_length, loss.item()]
             writer.writerow(row)
 
 
