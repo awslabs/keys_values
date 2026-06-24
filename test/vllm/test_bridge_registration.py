@@ -19,6 +19,8 @@ part requires vLLM and is skipped where vLLM is not installed.
 """
 
 import importlib
+import subprocess
+import sys
 
 import pytest
 
@@ -31,13 +33,27 @@ def test_import_bridge_without_vllm():
 
 
 def test_bridge_does_not_import_litgpt():
-    """The bridge must stay litgpt-free so it can live in a vLLM serving env."""
-    import sys
+    """The bridge must stay litgpt-free so it can live in a vLLM serving env.
 
-    # Import the bridge submodules and assert litgpt was not pulled in by them.
-    importlib.import_module("keys_values.vllm.config")
-    importlib.import_module("keys_values.vllm.registration")
-    assert "litgpt" not in sys.modules
+    This is checked in a fresh interpreter via a subprocess: asserting against
+    the in-process ``sys.modules`` would be unreliable, since other tests in the
+    same session legitimately import litgpt and leave it cached there.
+    """
+    script = (
+        "import sys, importlib;"
+        "importlib.import_module('keys_values.vllm.config');"
+        "importlib.import_module('keys_values.vllm.registration');"
+        "sys.exit('litgpt' in sys.modules)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        "importing the vLLM bridge pulled in litgpt:\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
 
 
 def test_parse_policy_lastrec():

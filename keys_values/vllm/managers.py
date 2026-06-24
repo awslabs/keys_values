@@ -23,6 +23,13 @@ carefully written ``remove_skipped_blocks`` / ``free`` / ``find_longest_cache_hi
 logic, and override only :meth:`get_num_skipped_tokens` to state the lastrec
 rule explicitly. A distinct class lets the registry route ``LastRecSpec`` here
 and gives smart-lastrec a place to extend.
+
+Next step (see ``docs/vllm_integration.md`` phased plan): a
+``SmartLastRecManager`` subclass for the ``smart-lastrec`` policy. It is the
+first policy unique to keys_values that still needs no attention weights; its
+eviction depends on the batch dimension (per-request initial / grace regions)
+but not on head position, so it fits the paged block model (per-request block
+tables) without per-head divergence.
 """
 
 from __future__ import annotations

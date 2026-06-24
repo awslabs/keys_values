@@ -12,6 +12,30 @@ Target vLLM version: **0.23.0** (latest), running on the **V1 engine**.
 > tradeoff: the engine internals are completely different (V0 → V1), so the
 > old `AttentionBackend`/`AttentionImpl` extension map no longer applies.
 
+### Why target the latest stable, and what it costs
+
+Agreed: we track the most recent stable vLLM and do not try to stay compatible
+with older lines. Integrating against the latest is *easier* on the axis that
+matters most here — dependencies. A recent vLLM resolves onto a recent torch,
+so vLLM + LitGPT + keys_values share one environment (the original driver for
+the retarget).
+
+The drawback is not difficulty of integration but **stability of the seams we
+hook**. The V1 extension points we rely on (`KVCacheSpec`, the
+`SingleTypeKVCacheManager` family, `GPUModelRunner.get_kv_cache_spec`, the
+`register_custom_kv_cache_specs` platform hook) are engine internals, not a
+frozen public plugin API. They can and do shift between minor releases, so:
+
+- We pin a known-good vLLM (currently 0.23.0) and bump deliberately, not
+  automatically.
+- We keep the bridge surface small and isolated in `keys_values/vllm/` so a
+  vLLM bump touches few files.
+- Parity tests (phase 4) guard against silent behavior drift after a bump.
+
+So "harder against the recent one" is really "we accept a moving-target
+internal API in exchange for a single, modern environment" — a good trade for
+this library, which has no reason to serve on an old vLLM.
+
 ## Goal
 
 Bring this library's *selective KV cache policies* (H2O, qH2O, smart-lastrec,
@@ -24,6 +48,15 @@ This is **not** primarily a "register a new model" task. vLLM ships its own
 implementations of Qwen2/Llama/etc. (in `vllm/model_executor/models/`) and loads
 HF weights into them — LitGPT is never in the serving path. The work lives at
 the **KV cache + attention layer**.
+
+**Design principle — minimize what we impose on users.** Users should get only
+the part that is genuinely ours and not already in vLLM: the selective
+eviction policies (H2O, qH2O, smart-lastrec, ...). Anything vLLM already does
+well — paging, scheduling, kernels, model loading — we reuse rather than
+re-implement or wrap. Concretely: no forked vLLM, no custom model registration
+where vLLM's own model works, and the bridge stays torch-only and litgpt-free
+so it adds no LitGPT footprint to a serving environment. The ideal user-facing
+surface is a single policy/config flag.
 
 ## Environment
 
@@ -55,6 +88,64 @@ Two hard constraints persist:
    Triton score-sum). That has to be reachable from the vLLM attention path.
 2. **Granularity.** vLLM evicts whole blocks; our policies score per `(head,
    slot)`. Block-level eviction can't reproduce per-head H2O exactly.
+
+## vLLM paged KV layout: what a "block" is
+
+This answers the questions raised in review about how vLLM stores KV and how it
+differs from the dense keys_values layout.
+
+**Dense (keys_values).** One dense tensor per layer,
+`(batch, n_query_groups, cache_length, head_size)`, plus `token_pos` of shape
+`(batch, n_query_groups, cache_length)` recording which logical token sits in
+each slot. Eviction is per `(batch, head, slot)`: any single slot can be
+overwritten independently.
+
+**Paged (vLLM V1).** KV is stored in fixed-size **blocks** drawn from a shared
+pool. For one KV cache group (a set of layers with the same spec) the physical
+storage is, per layer, a tensor shaped like:
+
+```
+(2, num_blocks, block_size, num_kv_heads, head_size)
+ ^K/V  ^pool     ^tokens/blk ^heads       ^feature
+```
+
+A **block** is therefore a contiguous slab holding `block_size` consecutive
+tokens' keys and values for **all** KV heads of that layer. In the spike
+(Qwen2.5-0.5B) `block_size = 16`, `num_kv_heads = 2`, `head_size = 64`,
+`num_gpu_blocks = 102197`.
+
+**Indexing.** To address a single KV vector you need:
+`(layer/group, physical block_id, offset ∈ [0, block_size), kv_head, feature)`.
+A request does not own a dense range; it owns a **block table** per group — an
+ordered list of physical `block_id`s. A logical token at position `t` maps as:
+
+```
+logical_block = t // block_size
+physical_block = block_table[logical_block]
+offset         = t % block_size
+```
+
+Blocks are reference-counted in the `BlockPool`; "eviction" means returning a
+block to the pool (and, for prefix caching, possibly sharing it across
+requests).
+
+**Granularity (the line-56 question).** The smallest allocatable / evictable
+unit is **one block = `block_size` tokens (16 here), for an entire layer across
+all KV heads**, uniform within a KV cache group. It is a per-model config value,
+not something we choose per policy. Two consequences for us:
+
+- **Per-request length can vary** — each sequence has its own block table and
+  its own block count, so effective `cache_length` differs per request. This is
+  the one axis where vLLM is *more* flexible than our dense form.
+- **Per-head length cannot vary** — the block table and `block_size` are shared
+  across all KV heads in a layer, so you cannot free a block for one head while
+  keeping it for another. This is exactly why faithful per-head H2O is
+  impossible at block granularity and pushes H2O toward either a block-level
+  approximation (Option A) or the dense-cache backend (Option B).
+
+Positional policies (lastrec, smart-lastrec) only need to decide *which logical
+positions to drop*, which maps cleanly onto freeing blocks — so they fit the
+paged model well. Score-based per-head policies (H2O) are the hard case.
 
 ## vLLM 0.23 / V1 extension points (mapped from source)
 
@@ -103,7 +194,10 @@ and CUDA-graph/scheduler assumptions. Highest effort.
 
 **Recommendation:** start with **Option A + `lastrec`** — positional, no
 attention weights, maps directly onto the `SlidingWindowManager` pattern. This
-proves the data flow end-to-end with idiomatic V1 machinery. Then evaluate
+proves the data flow end-to-end with idiomatic V1 machinery (done in task 2.3).
+Next, extend to **`smart-lastrec`** — still positional and weight-free, but with
+per-request (batch-dependent, not head-dependent) initial regions, which is the
+first policy that is genuinely unique to keys_values. Only then evaluate
 whether H2O can be approximated at block granularity (Option A) or needs the
 dense-cache backend (Option B).
 
@@ -129,12 +223,22 @@ Implications:
 ## Phased plan
 
 1. **Feasibility spike** (DONE): see results above. Script: `examples/vllm_spike.py`.
-2. **lastrec via Option A**: custom `KVCacheSpec` + manager; parity-check output
-   vs. the LitGPT path on short sequences.
-3. **H2O**: decide block-granularity approximation vs. dense-cache backend;
-   route attention-weight computation through the existing FlashInfer + Triton
-   score-sum machinery.
-4. **Eval + parity tests** vs. the LitGPT inference path, then long-context
+2. **lastrec via Option A** (DONE, task 2.3): custom `KVCacheSpec` + manager;
+   output parity vs. native sliding window confirmed (see below).
+3. **smart-lastrec via Option A** (NEXT): the recommended next policy. It is
+   genuinely *not* something vLLM already provides, and — crucially — it needs
+   **no attention weights**, so it sidesteps the hardest constraint for now. Its
+   eviction decisions depend on the **batch** dimension (per-request initial /
+   "grace" regions) but **not** on head position, which fits the paged
+   block model: per-request block tables already give us per-request variation,
+   and we never need to diverge across heads. Implement `SmartLastRecManager` as
+   a subclass of `LastRecManager` (`keys_values/vllm/managers.py` is structured
+   to extend here). Upstream `smart-lastrec` is being refactored for left
+   padding; align the bridge with that once it lands.
+4. **H2O**: only after the positional policies land. Decide block-granularity
+   approximation vs. dense-cache backend; route attention-weight computation
+   through the existing FlashInfer + Triton score-sum machinery.
+5. **Eval + parity tests** vs. the LitGPT inference path, then long-context
    benchmarks.
 
 ## Serve-time wiring result (task 2.3)

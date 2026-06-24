@@ -31,6 +31,15 @@ dependencies = [
 cuda = ["flashinfer-python"]
 trl = ["trl>=1.0.0"]
 
+[tool.black]
+# Pin the target versions so Black does not auto-detect the newest version it
+# supports (e.g. py315). When the detected target is newer than the Python
+# running Black (e.g. 3.13 on CI), Black's AST-equivalence safety check fails
+# with "cannot parse code formatted for Python 3.x" and reports otherwise
+# well-formatted files as needing reformatting. Keeping this in sync with
+# `requires-python` keeps formatting deterministic across interpreters.
+target-version = ["py38"]
+
 [tool.setuptools.packages.find]
 include = [
     "keys_values",
