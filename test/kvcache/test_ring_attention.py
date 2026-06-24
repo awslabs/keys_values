@@ -170,11 +170,12 @@ def test_sdpa_distributed_vs_single_on_chunk(
     index_kwargs = dict(dtype=torch.int64, device=device)
     bs = 1 if is_1d else batch_size
     nqg = 1 if is_1d else n_query_groups
-    tp = torch.zeros((bs, nqg, kv_len), **index_kwargs)
-    for b in range(bs):
-        for h in range(nqg):
-            tp[b, h, :] = torch.randperm(input_pos, **index_kwargs)[:kv_len]
-            _equalize_token_pos(tp[b, h, :], input_pos, q_len, num_devices)
+    tp = random_choices(
+        (bs, nqg, kv_len),
+        size_range=input_pos,
+        device=device,
+    )
+    _equalize_token_pos(tp, input_pos, q_len, num_devices)
     if not is_1d:
         data_all["token_pos"] = tp
     else:
