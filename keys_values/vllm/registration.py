@@ -53,7 +53,15 @@ def _policy_registrations() -> List[Tuple[type, type, type]]:
 
     registrations.append((LastRecSpec, LastRecManager, SlidingWindowSpec))
 
-    # Task 4: h2o (score-based) registers here once implemented.
+    # Task 4: h2o (score-based eviction). Subclasses FullAttentionSpec, so it
+    # groups with the full-attention family. Until task 4.3 wires the eviction
+    # hook, H2OManager behaves like full attention (no eviction).
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    from keys_values.vllm.managers import H2OManager
+    from keys_values.vllm.specs import H2OSpec
+
+    registrations.append((H2OSpec, H2OManager, FullAttentionSpec))
     return registrations
 
 
