@@ -17,7 +17,6 @@ import pytest
 import torch
 from litgpt.utils import _RunIf
 
-from keys_values.attention.attention_utils import sample_token_positions
 from keys_values.attention.flex_attention import (
     scaled_dot_product_attention_flexatt,
     FlexAttentionArgs,
@@ -31,6 +30,7 @@ from keys_values.kvcache.parallel.flex_for_ring import (
 )
 from keys_values.kvcache.parallel.ring_attention import RingAttentionDriver
 from keys_values.kvcache.test_utils import random_args_cache_forward
+from keys_values.utils import random_choices, index_to_3d
 
 
 def _distribute_and_reorder_data(
@@ -82,19 +82,27 @@ def _equalize_token_pos(
     q_len: int,
     num_devices: int,
 ):
-    assert token_pos.ndim == 1
-    kv_len = token_pos.numel()
+    assert token_pos.ndim == 3
+    batch_size, n_query_groups, kv_len = token_pos.shape
     assert kv_len % num_devices == 0
     kv_per_rank = kv_len // num_devices
-    tp_2d = token_pos.view(kv_per_rank, num_devices)
+    tp_4d = token_pos.view(batch_size, n_query_groups, kv_per_rank, num_devices)
     kwargs = dict(dtype=token_pos.dtype, device=token_pos.device)
     uval = (num_devices - input_pos % num_devices) % num_devices
     for rank in range(num_devices):
         start = input_pos + (uval + rank) % num_devices
         new_vals = torch.arange(start, input_pos + q_len, num_devices, **kwargs)
         sz = new_vals.numel()
-        rand_pos = torch.randperm(kv_per_rank)[:sz]
-        tp_2d[rand_pos, rank] = new_vals
+        rand_pos = random_choices(
+            (batch_size, n_query_groups, sz),
+            size_range=kv_per_rank,
+            device=token_pos.device,
+        )
+        tp_4d[:, :, :, rank].scatter_(
+            2,
+            rand_pos,
+            index_to_3d(new_vals, batch_size, n_query_groups),
+        )
 
 
 @_RunIf(min_cuda_gpus=1)
@@ -105,7 +113,7 @@ def _equalize_token_pos(
         (4, 4, 8, 256, torch.bfloat16, 256 * 2 + 11, 2, False, False),
         (8, 4, 64, 128, torch.float16, 128 * 8 + 5, 8, True, True),
         (12, 4, 16, 512, torch.bfloat16, 512 * 3 + 127, 3, False, True),
-        (24, 8, 8, 256, torch.float16, 256 * 5 + 15, 5, True, False),
+        (24, 8, 8, 256, torch.float16, 256 * 5 + 15, 5, True, False),  # FAILS!
         (9, 3, 128, 256, torch.bfloat16, 256 * 4 + 27, 4, False, True),
         (12, 4, 16, 256, torch.float16, 256 * 8 + 513, 8, True, False),
     ],
