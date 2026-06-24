@@ -31,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-from vllm.v1.kv_cache_interface import SlidingWindowSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -73,4 +73,52 @@ def build_lastrec_spec(
         head_size=head_size,
         dtype=dtype,
         sliding_window=cache_length,
+    )
+
+
+@dataclass(frozen=True, kw_only=True)
+class H2OSpec(FullAttentionSpec):
+    """keys_values H2O cache spec (task 4).
+
+    A full-attention spec carrying the H2O policy parameters. Eviction is
+    score-based and handled by ``H2OManager``; the spec inherits full-attention
+    memory sizing for now (safe over-provisioning), since the manager performs
+    the actual bounding at runtime.
+
+    Attributes:
+        cache_length: Target number of token slots to retain.
+        recent_window: Newest tokens always retained (never score-evicted).
+        grace_tokens: Oldest tokens always retained (e.g. a system prompt).
+    """
+
+    cache_length: int = 0
+    recent_window: int = 0
+    grace_tokens: int = 0
+
+
+def build_h2o_spec(
+    *,
+    cache_length: int,
+    recent_window: int,
+    block_size: int,
+    num_kv_heads: int,
+    head_size: int,
+    dtype: "torch.dtype",
+    grace_tokens: int = 0,
+) -> "H2OSpec":
+    """Build an :class:`H2OSpec` from policy params and layer geometry."""
+    if cache_length <= 0:
+        raise ValueError(f"cache_length must be positive, got {cache_length}")
+    if recent_window < 0 or grace_tokens < 0:
+        raise ValueError("recent_window and grace_tokens must be non-negative")
+    if recent_window + grace_tokens > cache_length:
+        raise ValueError("recent_window + grace_tokens must not exceed cache_length")
+    return H2OSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        cache_length=cache_length,
+        recent_window=recent_window,
+        grace_tokens=grace_tokens,
     )
