@@ -134,25 +134,30 @@ def test_sdpa_distributed_vs_single_on_chunk(
         device=device,
     )
     data_all["query"] = data_all["query"][:, :, :q_len, :].contiguous()
-    if not is_1d:
-        data_all["token_pos"] = sample_token_positions(
-            batch_size=batch_size,
-            n_query_groups=n_query_groups,
-            q_len=q_len,
-            kv_len=kv_len,
-            input_pos=input_pos,
-            device=device,
-        )
-    else:
-        tp = sample_token_positions(
-            batch_size=1,
-            n_query_groups=1,
-            q_len=q_len,
-            kv_len=kv_len,
-            input_pos=input_pos,
-            device=device,
-        )
-        data_all["token_pos"] = tp.expand(batch_size, n_query_groups, -1)
+    # DEBUG:
+    #if not is_1d:
+    #    data_all["token_pos"] = sample_token_positions(
+    #        batch_size=batch_size,
+    #        n_query_groups=n_query_groups,
+    #        q_len=q_len,
+    #        kv_len=kv_len,
+    #        input_pos=input_pos,
+    #        device=device,
+    #    )
+    #else:
+    #    tp = sample_token_positions(
+    #        batch_size=1,
+    #        n_query_groups=1,
+    #        q_len=q_len,
+    #        kv_len=kv_len,
+    #        input_pos=input_pos,
+    #        device=device,
+    #    )
+    #    data_all["token_pos"] = tp.expand(batch_size, n_query_groups, -1)
+    tp_end = input_pos + q_len
+    tp = torch.arange(tp_end - kv_len, tp_end, dtype=torch.int64, device=device).view(1, 1, -1)
+    data_all["token_pos"] = tp.expand(batch_size, n_query_groups, -1)
+    # END DEBUG
 
     # Distributed computation
     data, q_inds = _distribute_and_reorder_data(data_all, num_devices, input_pos)
