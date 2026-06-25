@@ -105,6 +105,10 @@ def _equalize_token_pos(
         )
 
 
+# Failing case: Issue seems to be `num_devices` choice:
+# - 2, 3, 4, 8 works
+# - 5, 6, 7 fails
+# TODO!!
 @_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
     "n_head, n_query_groups, q_len, kv_len_per_rank, dtype, input_pos, num_devices, do_q_lens, is_1d",
