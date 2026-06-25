@@ -114,9 +114,9 @@ def _equalize_token_pos(
         ( 8, 4,  64, 128,  torch.float16,   128 * 8 + 5, 8,  True,  True),
         (12, 4,  16, 512, torch.bfloat16, 512 * 3 + 127, 3, False,  True),
         (24, 8,   8, 256,  torch.float16,  256 * 5 + 15, 5,  True, False),  # FAILS!
+        (24, 8,   8, 256,  torch.float16,  256 * 4 + 15, 4,  True, False),
         ( 9, 3, 128, 256, torch.bfloat16,  256 * 4 + 27, 4, False,  True),
         (12, 4,  16, 256,  torch.float16, 256 * 8 + 513, 8,  True, False),
-        (16, 8, 8, 256, torch.float16, 256 * 5 + 15, 5, True, False),
     ],
 )
 def test_sdpa_distributed_vs_single_on_chunk(
