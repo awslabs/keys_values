@@ -24,7 +24,7 @@ from keys_values.kvcache.parallel.flex_for_ring import (
 )
 
 
-class RingAttentionDriver:
+class RingAttentionComputation:
     """
     Implements the computations needed to drive RingAttention.
 

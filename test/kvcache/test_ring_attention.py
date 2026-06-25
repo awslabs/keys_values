@@ -28,7 +28,7 @@ from keys_values.kvcache.parallel.flex_for_ring import (
     RingOffdiagFlexAttentionArgs,
     RingDiagFlexAttentionArgs,
 )
-from keys_values.kvcache.parallel.ring_attention import RingAttentionDriver
+from keys_values.kvcache.parallel.ring_attention_utils import RingAttentionComputation
 from keys_values.kvcache.test_utils import random_args_cache_forward
 from keys_values.utils import random_choices, index_to_3d
 
@@ -105,10 +105,6 @@ def _equalize_token_pos(
         )
 
 
-# Failing case: Issue seems to be `num_devices` choice:
-# - 2, 3, 4, 8 works
-# - 5, 6, 7 fails
-# TODO!!
 @_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
     "n_head, n_query_groups, q_len, kv_len_per_rank, dtype, input_pos, num_devices, do_q_lens, is_1d",
@@ -198,7 +194,7 @@ def test_sdpa_distributed_vs_single_on_chunk(
         num_devices=num_devices, q_lens=q_lens,
     )
     drivers = [
-        RingAttentionDriver(
+        RingAttentionComputation(
             rank_r=r,
             flexatt_args_diag=flexatt_args_diag,
             flexatt_args_offdiag=flexatt_args_offdiag,
@@ -303,7 +299,7 @@ def test_sdpa_distributed_vs_single_on_prefill(
     flexatt_args_diag = RingDiagFlexAttentionArgs()
     flexatt_args_offdiag = RingOffdiagFlexAttentionArgs(num_devices=num_devices)
     drivers = [
-        RingAttentionDriver(
+        RingAttentionComputation(
             rank_r=r,
             flexatt_args_diag=flexatt_args_diag,
             flexatt_args_offdiag=flexatt_args_offdiag,
