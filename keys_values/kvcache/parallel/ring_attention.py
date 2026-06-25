@@ -12,40 +12,53 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import contextlib
-from typing import List, Optional, Any, Iterable
+from typing import List, Optional, Any, Iterable, Tuple
 
 import torch
 
+from keys_values.config import Config
 from keys_values.kvcache.parallel.ring_attention_utils import RingAttentionComputation
 
 
 class DoubleBuffer:
     """
     Maintains two `torch.Tensor` objects, where in each cycle, one of them
-    is read, the other is written. With :meth:`flip`, the cycle is switched, so
-    that write becomes read and vice versa. An object is first written, then read
-    after the flip, then overwritten after the next flip.
+    is read, the other is written to. With :meth:`flip`, the cycle is switched,
+    so that write becomes read and vice versa.
 
-    If `single_only=True`, we only maintain one object. This is a dummy to be
-    used if no double buffering is needed.
+    One tensor is passed at construction, the other is created (same device,
+    dtype). The buffer passed starts in read.
     """
 
-    def __init__(self, single_only: bool = False):
-        self._buffers: List[Optional[torch.Tensor]] = (
-            [None] if single_only else [None, None]
-        )
-        self._write_pos = 0
-        self._single_only = single_only
+    def __init__(self, x: torch.Tensor):
+        other = torch.zeros_like(x)
+        self._buffers = (x, other)
+        self._read_pos = 0
 
-    def write(self, x: torch.Tensor):
-        self._buffers[self._write_pos] = x
+    def write(self) -> torch.Tensor:
+        assert self._buffers is not None, "Don't use after `cleanup`"
+        return self._buffers[1 - self._read_pos]
 
-    def read(self) -> Optional[torch.Tensor]:
-        return self._buffers[0 if self._single_only else 1 - self._write_pos]
+    def read(self) -> torch.Tensor:
+        assert self._buffers is not None, "Don't use after `cleanup`"
+        return self._buffers[self._read_pos]
 
     def flip(self):
-        if not self._single_only:
-            self._write_pos = 1 - self._write_pos
+        assert self._buffers is not None, "Don't use after `cleanup`"
+        self._read_pos = 1 - self._read_pos
+
+    def cleanup(self):
+        """
+        At the end, the object with read status should be the one passed
+        at construction. This is the case iff `_read_pos == 0`. Otherwise,
+        we copy.
+
+        """
+        if self._read_pos == 1:
+            self._buffers[0].copy_(self._buffers[1])
+            self._read_pos = 0
+        del self._buffers[1]
+        self._buffers = None
 
 
 def stream_decorator(s: Optional[torch.cuda.Stream]) -> Any:
@@ -67,3 +80,72 @@ def streams_wait_for_event(
         # iteration to finish
         for s in streams:
             s.wait_event(event)
+
+
+class RingAttentionDriver:
+    """
+    Implements RingAttention. This consists of a loop with `num_devices`
+    iterations. In each iteration, each rank runs local computations and
+    accumulation (done by an :class:`RingAttentionComputation` object),
+    as well as peer-to-peer communication, sending keys and values to the
+    next rank in the ring and receiving them from the previous rank. These
+    three operations run in parallel, using different streams. Each rank
+    uses a :class:`DoubleBuffer` for keys and values.
+
+    Equalization, splitting per rank, and reordering must have been done on
+    keys and values before :meth:`__call__` is called.
+    """
+
+    def __init__(self, ring_att_comp: RingAttentionComputation):
+        self.ring_att_comp = ring_att_comp
+
+    @property
+    def num_devices(self) -> int:
+        return self.ring_att_comp.num_devices
+
+    @property
+    def rank(self) -> int:
+        return self.ring_att_comp.rank_r
+
+    def __call__(
+        self,
+        queries: torch.Tensor,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        scale: Optional[float],
+        input_pos: int,
+        num_new_tokens: int,
+        config: Config,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Runs RingAttention computation on rank `rank`. This is a loop of
+        `num_devices` iterations, where ranks are synchronized at the end
+        of each iteration.
+
+        `keys`, `values` are overwritten along the loop, but are restored at
+        the end.
+
+        Args:
+            queries: Queries for this rank
+            keys: Keys for this rank
+            values: Values for this rank
+            scale: Scale parameter for MHA
+            input_pos: Position of first new tokens
+            num_new_tokens: Total number of new tokens (over all ranks)
+             config: Model configuration
+
+        Returns:
+            `(attn_outputs, attn_lse)`, attention outputs for `queries` and
+            logsumexp values
+
+        """
+        self.ring_att_comp.reset(
+            queries, scale, input_pos, num_new_tokens, config,
+        )
+        buff_keys = DoubleBuffer(keys)
+        buff_values = DoubleBuffer(values)
+        rank_send = (self.rank + 1) % self.num_devices
+        rank_recv = (self.rank - 1) % self.num_devices
+        # Main loop
+        for iter in range(self.num_devices):
+            # TODO!
