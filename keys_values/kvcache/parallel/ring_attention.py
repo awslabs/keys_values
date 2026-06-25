@@ -118,7 +118,7 @@ class RingAttentionDriver:
         if num_p1 > 0:
             q_len_max = q_len_min + 1
             start = self.input_pos % ndevs
-            end = min(start + num_p1, q_len_min)
+            end = min(start + num_p1, ndevs)
             for i in range(start, end):
                 result[i] = q_len_max
             num_rem = start + num_p1 - end
