@@ -98,6 +98,8 @@ class RingAttentionDriver:
 
     def __init__(self, ring_att_comp: RingAttentionComputation):
         self.ring_att_comp = ring_att_comp
+        self._send_stream = torch.cuda.Stream()
+        self._recv_stream = torch.cuda.Stream()
 
     @property
     def num_devices(self) -> int:
@@ -107,6 +109,8 @@ class RingAttentionDriver:
     def rank(self) -> int:
         return self.ring_att_comp.rank_r
 
+    # TODO:
+    # Several streams do not make sense. Check example how to sync
     def __call__(
         self,
         queries: torch.Tensor,
@@ -148,4 +152,24 @@ class RingAttentionDriver:
         rank_recv = (self.rank - 1) % self.num_devices
         # Main loop
         for iter in range(self.num_devices):
-            # TODO!
+            events_for_wait: List[torch.Event] = []
+            # Computation
+            self.ring_att_comp(buff_keys.read(), buff_values.read())
+            main_event = torch.cuda.current_stream().record_event()
+            # Send KV
+            with stream_decorator(self._send_stream):
+                # TODO! buff_*.read()
+                events_for_wait.append(self._send_stream.record_event())
+            # Receive KV
+            with stream_decorator(self._recv_stream):
+                # TODO! buff_*.write()
+                events_for_wait.append(self._recv_stream.record_event())
+            # Wait for sync
+            # TODO: Is this really here??
+            main_stream_waits_for_events(events_for_wait)
+            streams_wait_for_event(
+                (self._send_stream, self._recv_stream),
+                main_event,
+            )
+            buff_keys.flip()
+            buff_values.flip()
