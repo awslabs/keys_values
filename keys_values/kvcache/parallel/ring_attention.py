@@ -15,6 +15,7 @@ import contextlib
 from typing import List, Optional, Any, Iterable, Tuple
 
 import torch
+import torch.distributed as dist
 
 from keys_values.config import Config
 from keys_values.kvcache.parallel.ring_attention_utils import RingAttentionComputation
@@ -50,14 +51,15 @@ class DoubleBuffer:
     def cleanup(self):
         """
         At the end, the object with read status should be the one passed
-        at construction. This is the case iff `_read_pos == 0`. Otherwise,
-        we copy.
+        at construction. This is the case iff `_read_pos == 0`, i.e. if
+        :meth:`flip` was called an even number of times. Otherwise, we copy.
 
         """
         if self._read_pos == 1:
             self._buffers[0].copy_(self._buffers[1])
             self._read_pos = 0
-        del self._buffers[1]
+        other = self._buffers[1]
+        del other
         self._buffers = None
 
 
@@ -109,8 +111,6 @@ class RingAttentionDriver:
     def rank(self) -> int:
         return self.ring_att_comp.rank_r
 
-    # TODO:
-    # Several streams do not make sense. Check example how to sync
     def __call__(
         self,
         queries: torch.Tensor,
@@ -150,26 +150,42 @@ class RingAttentionDriver:
         buff_values = DoubleBuffer(values)
         rank_send = (self.rank + 1) % self.num_devices
         rank_recv = (self.rank - 1) % self.num_devices
+
         # Main loop
         for iter in range(self.num_devices):
-            events_for_wait: List[torch.Event] = []
+            # First try: Use `reqs` returned by `isend`, `irecv`, but no events
+            # at end of transfer streams
+            # events_for_wait: List[torch.Event] = []
+            reqs = []
+            # Send KV
+            with stream_decorator(self._send_stream):
+                reqs.append(dist.isend(tensor=buff_keys.read(), dst=rank_send))
+                reqs.append(dist.isend(tensor=buff_values.read(), dst=rank_send))
+                # events_for_wait.append(self._send_stream.record_event())
+            # Receive KV
+            with stream_decorator(self._recv_stream):
+                reqs.append(dist.irecv(tensor=buff_keys.write(), src=rank_recv))
+                reqs.append(dist.irecv(tensor=buff_values.write(), src=rank_recv))
+                # events_for_wait.append(self._recv_stream.record_event())
             # Computation
             self.ring_att_comp(buff_keys.read(), buff_values.read())
             main_event = torch.cuda.current_stream().record_event()
-            # Send KV
-            with stream_decorator(self._send_stream):
-                # TODO! buff_*.read()
-                events_for_wait.append(self._send_stream.record_event())
-            # Receive KV
-            with stream_decorator(self._recv_stream):
-                # TODO! buff_*.write()
-                events_for_wait.append(self._recv_stream.record_event())
             # Wait for sync
-            # TODO: Is this really here??
-            main_stream_waits_for_events(events_for_wait)
+            # - Main stream waits for all transfers to be complete (`reqs`)
+            # - Transfer streams wait for `main_event`
+            # main_stream_waits_for_events(events_for_wait)
+            for req in reqs:
+                req.wait()
             streams_wait_for_event(
                 (self._send_stream, self._recv_stream),
                 main_event,
             )
+            # At this point, all point-to-point transfers and computations have
+            # finished. Now, flip the roles of buffers
             buff_keys.flip()
             buff_values.flip()
+
+        # Finish
+        buff_keys.cleanup()
+        buff_values.cleanup()
+        return self.ring_att_comp.results()
