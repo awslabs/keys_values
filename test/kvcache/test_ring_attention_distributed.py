@@ -286,7 +286,7 @@ def run_sdpa_distributed_vs_single_on_prefill(
     data_for_rank, q_inds = distribute_and_reorder_data(data_all, num_devices, input_pos)
     data = data_for_rank[rank]  # will be overwritten for ranks > 0
     reqs = []
-    names = ("query", "key", "value", "token_idx")
+    names = ("query", "key", "value")
     if rank == 0:
         for name in names:
             for dst in range(1, num_devices):
