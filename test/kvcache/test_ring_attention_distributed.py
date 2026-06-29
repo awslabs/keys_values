@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import pytest
-import torch
 import lightning as L
+import torch
+import torch.distributed as dist
 
 from litgpt.utils import _RunIf
 
@@ -224,7 +225,6 @@ def test_sdpa_distributed_vs_single_on_prefill(
     batch_size = 2
     head_size = 32
     kv_len = kv_len_per_rank * num_devices
-    input_pos = 0
 
     config = Config.from_name(
         "gemma-2-27b",
@@ -242,12 +242,6 @@ def test_sdpa_distributed_vs_single_on_prefill(
         cache_length=kv_len,
         dtype=dtype,
     )
-    # Sample data for comparison
-    data_all = random_args_cache_forward(
-        params,
-        num=kv_len,
-        vocab_size=config.vocab_size,
-    )
 
     # Distributed computation
     fabric = L.Fabric(
@@ -259,8 +253,7 @@ def test_sdpa_distributed_vs_single_on_prefill(
     fabric.launch(
         run_sdpa_distributed_vs_single_on_prefill,
         config=config,
-        kv_len=kv_len,
-        data_all=data_all,
+        params=params,
         atol=atol,
         rtol=rtol,
     )
@@ -269,17 +262,45 @@ def test_sdpa_distributed_vs_single_on_prefill(
 def run_sdpa_distributed_vs_single_on_prefill(
     fabric: L.Fabric,
     config: Config,
-    kv_len,
-    data_all,
+    params: KVCacheParams,
     atol,
     rtol,
 ):
     rank = fabric.local_rank
     num_devices = fabric.world_size
     device = torch.device("cuda", rank)
+    prefix = f"[Rank {rank}]: "
+    kv_len = params.cache_length
     input_pos = 0
-    data, q_inds = distribute_and_reorder_data(data_all, num_devices, input_pos)
-    data = {k: v.to(device=device) for k, v in data[rank].items()}
+
+    # Sample data on master rank, transfer to other ranks
+    # We are lazy here, creating `data_all` on all ranks to get tensors of
+    # correct shape, dtype, device, but then transmit values from rank 0 to
+    # others, so sampled values are not used for the other ranks.
+    data_all = random_args_cache_forward(
+        params,
+        num=kv_len,
+        vocab_size=config.vocab_size,
+    )
+    data_for_rank, q_inds = distribute_and_reorder_data(data_all, num_devices, input_pos)
+    data = data_for_rank[rank]  # will be overwritten for ranks > 0
+    reqs = []
+    names = ("query", "key", "value", "token_idx")
+    if rank == 0:
+        for name in names:
+            for dst in range(1, num_devices):
+                reqs.append(
+                    (dist.isend(data_for_rank[dst][name], dst=dst), f"{name}: 0->{dst}")
+                )
+    else:
+        # Note that `data` has tensors of correct shape, but entries are
+        # overwritten
+        for name in names:
+            reqs.append((dist.irecv(data[name], src=0), f"{name}: 0->{rank}"))
+    for req, tag in reqs:
+        req.wait()
+        print(prefix + "Done: " + tag)
+
     # Distributed computation
     flexatt_args_diag = RingDiagFlexAttentionArgs()
     flexatt_args_offdiag = RingOffdiagFlexAttentionArgs(num_devices=num_devices)
@@ -289,6 +310,7 @@ def run_sdpa_distributed_vs_single_on_prefill(
         flexatt_args_offdiag=flexatt_args_offdiag,
     )
     driver = RingAttentionDriver(ring_att_comp)
+    print(prefix + "Created driver")
     outputs = driver(
         queries=data["query"],
         keys=data["key"],
@@ -298,7 +320,9 @@ def run_sdpa_distributed_vs_single_on_prefill(
         num_new_tokens=kv_len,
         config=config,
     )
+    print(prefix + "Done computation")
     dist_outputs = [x for x in fabric.all_gather(outputs)]
+    print(prefix + "Gathered outputs")
 
     # Only on master rank
     if rank == 0:
