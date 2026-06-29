@@ -176,7 +176,7 @@ class RingAttentionDriver:
         buff_values = DoubleBuffer(values)
         # If `retain_others == True`, we try to re-use the other arrays here
         self._other_keys = buff_keys.set_other(self._other_keys)
-        self._other_values = buff_keys.set_other(self._other_values)
+        self._other_values = buff_values.set_other(self._other_values)
         rank_send = (self.rank + 1) % self.num_devices
         rank_recv = (self.rank - 1) % self.num_devices
 

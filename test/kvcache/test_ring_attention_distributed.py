@@ -249,7 +249,6 @@ def test_sdpa_distributed_vs_single_on_prefill(
         vocab_size=config.vocab_size,
     )
 
-    # HIER!!!
     # Distributed computation
     fabric = L.Fabric(
         devices=num_devices,
