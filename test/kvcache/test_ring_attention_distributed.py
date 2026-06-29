@@ -322,3 +322,7 @@ def run_sdpa_distributed_vs_single_on_prefill(
         ):
             print(f"Outputs for rank {_rank}")
             torch.testing.assert_close(d_output, s_output, atol=atol, rtol=rtol)
+
+
+if __name__ == "__main__":
+    test_sdpa_distributed_vs_single_on_prefill(4, 2, 512, torch.float16, 3)
