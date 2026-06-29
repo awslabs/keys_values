@@ -281,6 +281,7 @@ def run_sdpa_distributed_vs_single_on_prefill(
         params,
         num=kv_len,
         vocab_size=config.vocab_size,
+        device=device,
     )
     data_for_rank, q_inds = distribute_and_reorder_data(data_all, num_devices, input_pos)
     data = data_for_rank[rank]  # will be overwritten for ranks > 0
