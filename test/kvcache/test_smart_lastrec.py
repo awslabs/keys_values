@@ -149,6 +149,7 @@ def test_smart_lastrec_update_protected_ranges(
         end_initial_regex=smart_lastrec_info.end_initial_regex,
         max_initial_fraction=smart_lastrec_info.max_initial_fraction,
         include_end_string=smart_lastrec_info.include_end_string,
+        range_is_prefix=False,
         device=device,
         dtype=dtype,
     )
@@ -405,6 +406,7 @@ def test_smart_lastrec_update_ranges_several_chunks(
         end_initial_regex=smart_lastrec_info.end_initial_regex,
         max_initial_fraction=smart_lastrec_info.max_initial_fraction,
         include_end_string=smart_lastrec_info.include_end_string,
+        range_is_prefix=False,
         device=device,
         dtype=dtype,
     )
