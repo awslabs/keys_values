@@ -437,12 +437,16 @@ class InferenceSmartInitialLastRecentlyInsertedReplayCache(
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ) -> KeysAndValues:
-        if self.init_length != self.replay_log.init_length:
-            raise AssertionError(
-                f"init_length:            {self.init_length}\n"
-                f"replay_log.init_length: {self.replay_log.init_length}\n"
-                "Must be the same!"
-            )
+        for v1, v2, name in [
+            (self.protected_start, self.replay_log.protected_start, "protected_start"),
+            (self.protected_end, self.replay_log.protected_end, "protected_end"),
+        ]:
+            if v1 != v2:
+                raise AssertionError(
+                    f"{name}:            {v1}\n"
+                    f"replay_log.{name}: {v2}\n"
+                    "Must be the same!"
+                )
         return super()._forward_internal(key, value, token_idx)
 
 

@@ -544,6 +544,7 @@ SMART_LASTREC_REMKEYS = (
     "include_end_string",
     "max_initial_fraction",
     "tokenizer",
+    "range_is_prefix",
 )
 
 ATTN_WEIGHTS_REMKEYS = (

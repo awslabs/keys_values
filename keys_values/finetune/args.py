@@ -52,6 +52,7 @@ _CACHE_KWARGS_NAMES = (
     "grace_period",
     "init_grace_tokens",
     "normalize_scores",
+    "range_is_prefix",
 )
 
 
@@ -88,6 +89,13 @@ class KVCacheArgs:
         normalize_scores: Only for H2O and q-H2O cache policies. If `True`,
             score values are normalized by the number of token positions an
             entry is in the cache already.
+        range_is_prefix: Only for `smart-lastrec` cache policy. If `False`, the
+            protected range per batch position need not be a prefix. In fact,
+            all left-padding tokens are excluded from the protected range.
+            TODO: Intuitively, `range_is_prefix=False` should work better,
+            because left-padding tokens should not be attended to. Initial
+            experiments did not show an advantage though. Needs to be revisited
+            (maybe some of the left-pad tokens are useful, as attention sinks?).
     """
 
     name: str
@@ -100,6 +108,7 @@ class KVCacheArgs:
     init_grace_tokens: int = 0
     cpu_offload: bool = False
     normalize_scores: bool = False
+    range_is_prefix: bool = True
     # Legacy (these are global args now)
     verbose: Optional[str] = None
     attention_forward_temp_size_gb: Optional[float] = None
