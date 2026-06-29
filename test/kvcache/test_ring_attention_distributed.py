@@ -323,7 +323,8 @@ def run_sdpa_distributed_vs_single_on_prefill(
         config=config,
     )
     print(prefix + "Done computation")
-    dist_outputs = [x for x in fabric.all_gather(outputs)]
+    dist_outputs = fabric.all_gather(outputs)
+    dist_outputs = [dist_outputs[i] for i in range(num_devices)]
     print(prefix + "Gathered outputs")
 
     # Only on master rank
