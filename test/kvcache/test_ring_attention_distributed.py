@@ -287,17 +287,18 @@ def run_sdpa_distributed_vs_single_on_prefill(
     data = data_for_rank[rank]  # will be overwritten for ranks > 0
     reqs = []
     names = ("query", "key", "value")
+    p2p_group = dist.new_group(list(range(num_devices)))
     if rank == 0:
         for name in names:
             for dst in range(1, num_devices):
                 reqs.append(
-                    (dist.isend(data_for_rank[dst][name], dst=dst), f"{name}: 0->{dst}")
+                    (dist.isend(data_for_rank[dst][name], dst=dst, group=p2p_group), f"{name}: 0->{dst}")
                 )
     else:
         # Note that `data` has tensors of correct shape, but entries are
         # overwritten
         for name in names:
-            reqs.append((dist.irecv(data[name], src=0), f"{name}: 0->{rank}"))
+            reqs.append((dist.irecv(data[name], src=0, group=p2p_group), f"{name}: 0->{rank}"))
     for req, tag in reqs:
         req.wait()
         print(prefix + "Done: " + tag)
