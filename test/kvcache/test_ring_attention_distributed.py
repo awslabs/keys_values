@@ -14,7 +14,6 @@
 import pytest
 import lightning as L
 import torch
-import torch.distributed as dist
 
 from litgpt.utils import _RunIf
 
@@ -273,35 +272,35 @@ def run_sdpa_distributed_vs_single_on_prefill(
     kv_len = params.cache_length
     input_pos = 0
 
-    # Sample data on master rank, transfer to other ranks
-    # We create `data_all` on all ranks to get tensors of correct shape, dtype,
-    # device, but then transmit values from rank 0 to others, so sampled values
-    # are not used for the other ranks.
-    data_all = random_args_cache_forward(
-        params,
-        num=kv_len,
-        vocab_size=config.vocab_size,
-        device=device,
-    )
-    data_for_rank, q_inds = distribute_and_reorder_data(data_all, num_devices, input_pos)
-    data = data_for_rank[rank]  # will be overwritten for ranks > 0
-    reqs = []
+    # Sample data on master rank, transfer to other ranks. We are using
+    # broadcasts, which is simpler than P2P.
     names = ("query", "key", "value")
-    p2p_group = dist.new_group(list(range(num_devices)))
     if rank == 0:
-        for name in names:
-            for dst in range(1, num_devices):
-                reqs.append(
-                    (dist.isend(data_for_rank[dst][name], dst=dst, group=p2p_group), f"{name}: 0->{dst}")
-                )
+        print(prefix + "Sampling data")
+        data_all = random_args_cache_forward(
+            params,
+            num=kv_len,
+            vocab_size=config.vocab_size,
+            device=device,
+        )
+        data_for_rank, q_inds = distribute_and_reorder_data(data_all, num_devices, input_pos)
+        data_trans = {
+            name: torch.cat(
+                [x[name].unsqueeze(0) for x in data_for_rank],
+                dim=0,
+            )
+            for name in names
+        }
     else:
-        # Note that `data` has tensors of correct shape, but entries are
-        # overwritten
-        for name in names:
-            reqs.append((dist.irecv(data[name], src=0, group=p2p_group), f"{name}: 0->{rank}"))
-    for req, tag in reqs:
-        req.wait()
-        print(prefix + "Done: " + tag)
+        data_trans = {name: None for name in names}
+        data_all = None
+        q_inds = None
+    print(prefix + "Broadcasting data")
+    data_trans = {
+        name: fabric.broadcast(vals) for name, vals in data_trans.items()
+    }
+    data = {name: data_trans[name][rank].clone() for name in names}
+    del data_trans
 
     # Distributed computation
     flexatt_args_diag = RingDiagFlexAttentionArgs()
