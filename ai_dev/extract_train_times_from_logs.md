@@ -1,11 +1,11 @@
-# Write `extract_times_from_logs.py` script
+# Write `extract_train_times_from_logs.py` script
 
 ## Initial prompt
 
 Please write a Python script which extracts time values from log files, stores
 them into a result CSV file, and creates a table with statistics in LaTeX.
 
-* Extend the code `keys_values/scripts/extract_times_from_logs.py` by the
+* Extend the code `keys_values/scripts/extract_train_times_from_logs.py` by the
   `main` function. `main` should iterate over all combinations
   `dataset in datasets, policy in policies`. For each, define
   `base_dir = base_path / dataset / policy` and `log_dir = base_dir / "logs"`.
