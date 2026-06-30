@@ -274,9 +274,9 @@ def run_sdpa_distributed_vs_single_on_prefill(
     input_pos = 0
 
     # Sample data on master rank, transfer to other ranks
-    # We are lazy here, creating `data_all` on all ranks to get tensors of
-    # correct shape, dtype, device, but then transmit values from rank 0 to
-    # others, so sampled values are not used for the other ranks.
+    # We create `data_all` on all ranks to get tensors of correct shape, dtype,
+    # device, but then transmit values from rank 0 to others, so sampled values
+    # are not used for the other ranks.
     data_all = random_args_cache_forward(
         params,
         num=kv_len,
