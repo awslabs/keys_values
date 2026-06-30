@@ -109,10 +109,29 @@ storage is, per layer, a tensor shaped like:
  ^K/V  ^pool     ^tokens/blk ^heads       ^feature
 ```
 
-A **block** is therefore a contiguous slab holding `block_size` consecutive
-tokens' keys and values for **all** KV heads of that layer. In the spike
+In vLLM's **V1 implementation** a block is a contiguous slab holding
+`block_size` consecutive tokens' keys and values for **all** KV heads of that
+layer (heads are the `num_kv_heads` axis *inside* the block, addressed by a
+single per-group block table — not a separate table per head). In the spike
 (Qwen2.5-0.5B) `block_size = 16`, `num_kv_heads = 2`, `head_size = 64`,
 `num_gpu_blocks = 102197`.
+
+**Paper design space vs. vLLM's implementation (review point).** The original
+PagedAttention paper notes two valid layouts and is explicit that they are
+interchangeable: KV for all heads can live in *one* block, **or** "the key and
+value vectors at different heads and layers can each have a separate block and
+be managed in separate block tables ... we choose the second one for easy
+implementation." So per-head block tables are *not* ruled out in principle, and
+the reviewer is right to flag the earlier categorical claim. The constraint we
+rely on is narrower and empirical: **vLLM's V1 attention specs as shipped**
+(`FullAttentionSpec`, `SlidingWindowSpec`, ...) use the all-heads-in-one-block
+layout with a single block table per KV-cache group — confirmed by the spike's
+per-layer tensor shape `(2, num_blocks, block_size, num_kv_heads, head_size)`
+and the single per-request block table. We integrate against that
+implementation, not the paper's full design space, so for our purposes the
+block is the smallest unit across all heads. Splitting per head would mean
+defining per-head KV-cache groups / specs (a much larger change to vLLM's
+manager and metadata machinery), which is out of scope for this bridge.
 
 **Indexing.** To address a single KV vector you need:
 `(layer/group, physical block_id, offset ∈ [0, block_size), kv_head, feature)`.
@@ -137,10 +156,13 @@ not something we choose per policy. Two consequences for us:
 - **Per-request length can vary** — each sequence has its own block table and
   its own block count, so effective `cache_length` differs per request. This is
   the one axis where vLLM is *more* flexible than our dense form.
-- **Per-head length cannot vary** — the block table and `block_size` are shared
-  across all KV heads in a layer, so you cannot free a block for one head while
-  keeping it for another. This is exactly why faithful per-head H2O is
-  impossible at block granularity and pushes H2O toward either a block-level
+- **Per-head length cannot vary** — in vLLM V1 as shipped, the block table and
+  `block_size` are shared across all KV heads in a layer, so you cannot free a
+  block for one head while keeping it for another. (This is an implementation
+  property of vLLM's standard specs, not a hard law of PagedAttention — see the
+  paper-design-space note above — but it is the reality the bridge targets.)
+  This is why faithful per-head H2O is not expressible at block granularity
+  under the existing specs and pushes H2O toward either a block-level
   approximation (Option A) or the dense-cache backend (Option B).
 
 Positional policies (lastrec, smart-lastrec) only need to decide *which logical
