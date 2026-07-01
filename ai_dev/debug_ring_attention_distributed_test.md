@@ -420,3 +420,89 @@ reqs = dist.batch_isend_irecv([
     dist.P2POp(dist.irecv, buff_values.write(), rank_recv, self._p2p_group),
 ])
 ```
+
+## Response 2
+
+Running this again gives:
+
+```bash
+You are using a CUDA device ('NVIDIA A100-SXM4-40GB') that has Tensor Cores. To properly utilize them, you should set `torch.set_float32_matmul_precision('medium' | 'high')` which will trade-off precision for performance. For more details, read https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision
+Initializing distributed: GLOBAL_RANK: 0, MEMBER: 1/3
+Initializing distributed: GLOBAL_RANK: 2, MEMBER: 3/3
+Initializing distributed: GLOBAL_RANK: 1, MEMBER: 2/3
+[Rank 1]: Broadcasting data
+----------------------------------------------------------------------------------------------------
+distributed_backend=nccl
+All distributed processes registered. Starting with 3 processes
+----------------------------------------------------------------------------------------------------
+
+[Rank 2]: Broadcasting data
+[Rank 0]: Sampling data
+[Rank 0]: Broadcasting data
+[Rank 0]: Created driver
+[Rank 2]: Created driver
+[Rank 1]: Created driver
+[rank1]: Traceback (most recent call last):
+[rank1]:   File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 355, in <module>
+[rank1]:     test_sdpa_distributed_vs_single_on_prefill(4, 2, 512, torch.float16, 3)
+[rank1]:   File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 253, in test_sdpa_distributed_vs_single_on_prefill
+[rank1]:     fabric.launch(
+[rank1]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/fabric.py", line 1010, in launch
+[rank1]:     return self._wrap_and_launch(function, self, *args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/fabric.py", line 1120, in _wrap_and_launch
+[rank1]:     return launcher.launch(to_run, *args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/strategies/launchers/subprocess_script.py", line 108, in launch
+[rank1]:     return function(*args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/fabric.py", line 1126, in _wrap_with_setup
+[rank1]:     return to_run(*args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 316, in run_sdpa_distributed_vs_single_on_prefill
+[rank1]:     outputs = driver(
+[rank1]:               ^^^^^^^
+[rank1]:   File "/home/ubuntu/git/keys_values/keys_values/kvcache/parallel/ring_attention.py", line 176, in __call__
+[rank1]:     reqs = dist.batch_isend_irecv([
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 2842, in batch_isend_irecv
+[rank1]:     p2p_op.op(
+[rank1]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 2491, in isend
+[rank1]:     return group.send([tensor], group_dst, tag)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]: RuntimeError: ncclComm != nullptr INTERNAL ASSERT FAILED at "/pytorch/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp":4043, please report a bug to PyTorch. Parent communicator missing in eager initialization mode.
+[rank2]: Traceback (most recent call last):
+[rank2]:   File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 355, in <module>
+[rank2]:     test_sdpa_distributed_vs_single_on_prefill(4, 2, 512, torch.float16, 3)
+[rank2]:   File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 253, in test_sdpa_distributed_vs_single_on_prefill
+[rank2]:     fabric.launch(
+[rank2]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/fabric.py", line 1010, in launch
+[rank2]:     return self._wrap_and_launch(function, self, *args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/fabric.py", line 1120, in _wrap_and_launch
+[rank2]:     return launcher.launch(to_run, *args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/strategies/launchers/subprocess_script.py", line 108, in launch
+[rank2]:     return function(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/fabric.py", line 1126, in _wrap_with_setup
+[rank2]:     return to_run(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 316, in run_sdpa_distributed_vs_single_on_prefill
+[rank2]:     outputs = driver(
+[rank2]:               ^^^^^^^
+[rank2]:   File "/home/ubuntu/git/keys_values/keys_values/kvcache/parallel/ring_attention.py", line 176, in __call__
+[rank2]:     reqs = dist.batch_isend_irecv([
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 2842, in batch_isend_irecv
+[rank2]:     p2p_op.op(
+[rank2]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 2491, in isend
+[rank2]:     return group.send([tensor], group_dst, tag)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]: RuntimeError: ncclComm != nullptr INTERNAL ASSERT FAILED at "/pytorch/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp":4043, please report a bug to PyTorch. Parent communicator missing in eager initialization mode.
+[rank: 1] Child process with PID 2083111 terminated with code 1. Forcefully terminating all other processes to avoid zombies 🧟
+```
+
+* Something else must be wrong
+* The test used Lightning Fabric to 
+* Append the summary of your findings to `ai_dev/debug_ring_attention_distributed_test.md`

@@ -247,7 +247,7 @@ def test_sdpa_distributed_vs_single_on_prefill(
     fabric = L.Fabric(
         devices=num_devices,
         num_nodes=1,
-        strategy="auto",
+        strategy=DDPStrategy(static_graph=True, broadcast_buffers=False),
         precision="bf16-true",
     )
     fabric.launch(
