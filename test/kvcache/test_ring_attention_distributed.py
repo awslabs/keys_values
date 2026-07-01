@@ -300,7 +300,7 @@ def run_sdpa_distributed_vs_single_on_prefill(
             input_pos=input_pos,
             num_new_tokens=kv_len * num_devices,
             config=config,
-        )
+        )[0]
 
         # Gather all per-rank outputs onto rank 0
         outputs_gathered = [torch.zeros_like(outputs) for _ in range(num_devices)]
