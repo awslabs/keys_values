@@ -278,6 +278,9 @@ def run_sdpa_distributed_vs_single_on_prefill(
     )
     prefix = f"[Rank {rank}]: "
     data_for_rank, q_inds = distribute_and_reorder_data(data_all, num_devices, input_pos=0)
+    if rank != 0:
+        del data_all
+        data_all = None
     try:
         kv_len = data_for_rank[rank]["key"].shape[2]
         input_pos = 0
