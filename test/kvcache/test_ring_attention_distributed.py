@@ -93,7 +93,9 @@ def test_sdpa_distributed_vs_single_on_chunk(
     # Sample data for comparison
     print("Sample data")
     data_all = random_args_cache_forward(
-        params, num=kv_len, vocab_size=config.vocab_size,
+        params,
+        num=kv_len,
+        vocab_size=config.vocab_size,
     )
     data_all["query"] = data_all["query"][:, :, :q_len, :].contiguous()
     # For `token_pos`, we need to make sure that values `>= input_pos` are
@@ -143,7 +145,9 @@ def run_sdpa_distributed_vs_single_on_chunk(
     )
     prefix = f"[Rank {rank}]: "
     data_for_rank, q_inds = distribute_and_reorder_data(
-        data_all, num_devices, input_pos=input_pos,
+        data_all,
+        num_devices,
+        input_pos=input_pos,
     )
     if rank != 0:
         del data_all
@@ -194,8 +198,11 @@ def run_sdpa_distributed_vs_single_on_chunk(
         my_q_len = outputs.shape[2]
         if my_q_len < max_q_per_rank:
             pad = torch.zeros(
-                *outputs.shape[:2], max_q_per_rank - my_q_len, outputs.shape[3],
-                device=outputs.device, dtype=outputs.dtype,
+                *outputs.shape[:2],
+                max_q_per_rank - my_q_len,
+                outputs.shape[3],
+                device=outputs.device,
+                dtype=outputs.dtype,
             )
             outputs_padded = torch.cat([outputs, pad], dim=2)
         else:
@@ -204,7 +211,7 @@ def run_sdpa_distributed_vs_single_on_chunk(
         dist.all_gather(recv_bufs, outputs_padded)
         # Strip padding and move to CPU; q_inds tells us the real length per rank.
         outputs_gathered = [
-            buff[:, :, :len(q_ind), :].cpu() for buff, q_ind in zip(recv_bufs, q_inds)
+            buff[:, :, : len(q_ind), :].cpu() for buff, q_ind in zip(recv_bufs, q_inds)
         ]
     finally:
         dist.destroy_process_group()
@@ -283,7 +290,9 @@ def test_sdpa_distributed_vs_single_on_prefill(
     # Workers receive their slice via the mp.spawn args tuple.
     print("Sample data")
     data_all = random_args_cache_forward(
-        params, num=kv_len, vocab_size=config.vocab_size,
+        params,
+        num=kv_len,
+        vocab_size=config.vocab_size,
     )
 
     mp.spawn(
@@ -315,7 +324,9 @@ def run_sdpa_distributed_vs_single_on_prefill(
     prefix = f"[Rank {rank}]: "
     input_pos = 0
     data_for_rank, q_inds = distribute_and_reorder_data(
-        data_all, num_devices, input_pos=input_pos,
+        data_all,
+        num_devices,
+        input_pos=input_pos,
     )
     if rank != 0:
         del data_all
@@ -384,4 +395,6 @@ def run_sdpa_distributed_vs_single_on_prefill(
 
 if __name__ == "__main__":
     # test_sdpa_distributed_vs_single_on_prefill(4, 2, 512, torch.float16, 3)
-    test_sdpa_distributed_vs_single_on_chunk(4, 2, 128, 512, torch.float16, 512 * 3, 3, False, False)
+    test_sdpa_distributed_vs_single_on_chunk(
+        4, 2, 128, 512, torch.float16, 512 * 3, 3, False, False
+    )
