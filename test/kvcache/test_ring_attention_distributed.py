@@ -247,12 +247,12 @@ def test_sdpa_distributed_vs_single_on_prefill(
     )
     # Generate all data on the main process (CPU) and distribute per rank.
     # Workers receive their slice via the mp.spawn args tuple.
+    print("Sample data")
     data_all = random_args_cache_forward(params, num=kv_len, vocab_size=config.vocab_size)
-    data_for_rank, q_inds = distribute_and_reorder_data(data_all, num_devices, input_pos=0)
 
     mp.spawn(
         run_sdpa_distributed_vs_single_on_prefill,
-        args=(num_devices, config, data_all, data_for_rank, q_inds, atol, rtol),
+        args=(num_devices, config, data_all, atol, rtol),
         nprocs=num_devices,
         join=True,
     )
@@ -263,8 +263,6 @@ def run_sdpa_distributed_vs_single_on_prefill(
     num_devices: int,
     config: Config,
     data_all,
-    data_for_rank,
-    q_inds,
     atol,
     rtol,
 ):
@@ -278,12 +276,18 @@ def run_sdpa_distributed_vs_single_on_prefill(
         world_size=num_devices,
         rank=rank,
     )
+    prefix = f"[Rank {rank}]: "
+    data_for_rank, q_inds = distribute_and_reorder_data(data_all, num_devices, input_pos=0)
     try:
         kv_len = data_for_rank[rank]["key"].shape[2]
         input_pos = 0
-        data = {k: v.to(device=device) for k, v in data_for_rank[rank].items()
-                if k in ("query", "key", "value")}
+        data = {
+            k: v.to(device=device) for k, v in data_for_rank[rank].items()
+            if k in ("query", "key", "value")
+        }
+        del data_for_rank
 
+        print(prefix + "Create driver")
         flexatt_args_diag = RingDiagFlexAttentionArgs()
         flexatt_args_offdiag = RingOffdiagFlexAttentionArgs(num_devices=num_devices)
         ring_att_comp = RingAttentionComputation(
@@ -292,6 +296,7 @@ def run_sdpa_distributed_vs_single_on_prefill(
             flexatt_args_offdiag=flexatt_args_offdiag,
         )
         driver = RingAttentionDriver(ring_att_comp)
+        print(prefix + "Distributed computation")
         outputs = driver(
             queries=data["query"],
             keys=data["key"],
@@ -303,10 +308,12 @@ def run_sdpa_distributed_vs_single_on_prefill(
         )[0]
 
         # Gather all per-rank outputs onto rank 0
+        print(prefix + "Gather outputs")
         outputs_gathered = [torch.zeros_like(outputs) for _ in range(num_devices)]
         dist.all_gather(outputs_gathered, outputs)
 
         if rank == 0:
+            print(prefix + "Compute outputs on single node")
             flexatt_args = FlexAttentionArgs()
             output_all = scaled_dot_product_attention_flexatt(
                 flexatt_args=flexatt_args,
@@ -323,7 +330,7 @@ def run_sdpa_distributed_vs_single_on_prefill(
             for _rank, (d_output, s_output) in enumerate(
                 zip(outputs_gathered, single_outputs)
             ):
-                print(f"Outputs for rank {_rank}")
+                print(f"Comparison for rank {_rank}")
                 torch.testing.assert_close(d_output, s_output, atol=atol, rtol=rtol)
     finally:
         dist.destroy_process_group()
