@@ -62,6 +62,8 @@ def test_sdpa_distributed_vs_single_on_chunk(
     do_q_lens,
     is_1d,
 ):
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", "29500")
     seed = 31415927
     torch.manual_seed(seed)
     atol = 0.0005 if dtype == torch.float16 else 0.005
@@ -250,6 +252,8 @@ def test_sdpa_distributed_vs_single_on_prefill(
     dtype,
     num_devices,
 ):
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", "29500")
     seed = 31415927
     torch.manual_seed(seed)
     atol = 0.0005 if dtype == torch.float16 else 0.005
@@ -379,7 +383,5 @@ def run_sdpa_distributed_vs_single_on_prefill(
 
 
 if __name__ == "__main__":
-    os.environ.setdefault("MASTER_ADDR", "localhost")
-    os.environ.setdefault("MASTER_PORT", "29500")
     # test_sdpa_distributed_vs_single_on_prefill(4, 2, 512, torch.float16, 3)
     test_sdpa_distributed_vs_single_on_chunk(4, 2, 128, 512, torch.float16, 512 * 3, 3, False, False)
