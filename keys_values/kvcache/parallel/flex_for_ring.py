@@ -418,7 +418,8 @@ class RingDiagFlexAttentionArgs:
         # Different to :class:`FlexAttentionArgs`: Also prefill returns log_sum_exp:
         self.attn_prefill_manager = FlexAttnForPrefillManager(forward_return_lse=True)
         self.attn_chunk_manager = FlexAttnForChunkManager(
-            q_lens, forward_return_lse=True,
+            q_lens,
+            forward_return_lse=True,
         )
         self.extend_kv = extend_kv
 

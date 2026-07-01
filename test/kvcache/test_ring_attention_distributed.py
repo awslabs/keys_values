@@ -11,15 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Dict, Any
 import os
+
 import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from litgpt.utils import _RunIf
-import lightning as L
-from lightning.fabric.strategies import DDPStrategy
 
 from keys_values.attention.flex_attention import (
     scaled_dot_product_attention_flexatt,
@@ -41,19 +41,15 @@ from keys_values.kvcache.test_utils import (
 from keys_values.utils import random_choices
 
 
-# TODO: Less cases!
 @_RunIf(min_cuda_gpus=3)
 @pytest.mark.parametrize(
     "n_head, n_query_groups, q_len, kv_len_per_rank, dtype, input_pos, num_devices, do_q_lens, is_1d",
     [
-        ( 4, 2, 128, 512,  torch.float16,       512 * 3, 3, False, False),
-        ( 4, 4,   8, 256, torch.bfloat16,  256 * 2 + 11, 2, False, False),
-        ( 8, 4,  64, 128,  torch.float16,   128 * 3 + 5, 3,  True,  True),
-        (12, 4,  16, 512, torch.bfloat16, 512 * 2 + 127, 2, False,  True),
-        (24, 8,   8, 256,  torch.float16,  256 * 3 + 15, 3,  True, False),
-        (24, 8,   8, 256,  torch.float16,  256 * 3 + 15, 3,  True, False),
-        ( 9, 3, 128, 256, torch.bfloat16,  256 * 2 + 27, 2, False,  True),
-        (12, 4,  16, 256,  torch.float16, 256 * 3 + 513, 3,  True, False),
+        (4, 2, 128, 512, torch.float16, 512 * 3, 3, False, False),
+        (4, 4, 8, 256, torch.bfloat16, 256 * 2 + 11, 2, False, False),
+        (8, 4, 64, 128, torch.float16, 128 * 3 + 5, 3, True, True),
+        (12, 4, 16, 512, torch.bfloat16, 512 * 2 + 127, 2, False, True),
+        (24, 8, 8, 256, torch.float16, 256 * 3 + 15, 3, True, False),
     ],
 )
 def test_sdpa_distributed_vs_single_on_chunk(
@@ -92,11 +88,11 @@ def test_sdpa_distributed_vs_single_on_chunk(
         cache_length=kv_len,
         dtype=dtype,
     )
+
     # Sample data for comparison
+    print("Sample data")
     data_all = random_args_cache_forward(
-        params,
-        num=kv_len,
-        vocab_size=config.vocab_size,
+        params, num=kv_len, vocab_size=config.vocab_size,
     )
     data_all["query"] = data_all["query"][:, :, :q_len, :].contiguous()
     # For `token_pos`, we need to make sure that values `>= input_pos` are
@@ -115,92 +111,110 @@ def test_sdpa_distributed_vs_single_on_chunk(
     else:
         data_all["token_pos"] = tp.expand(batch_size, n_query_groups, -1)
 
-    # Distributed computation
-    fabric = L.Fabric(
-        devices=num_devices,
-        num_nodes=1,
-        strategy=DDPStrategy(static_graph=True, broadcast_buffers=False),
-        precision="bf16-true",
-    )
-    fabric.launch(
+    mp.spawn(
         run_sdpa_distributed_vs_single_on_chunk,
-        config=config,
-        q_len=q_len,
-        input_pos=input_pos,
-        do_q_lens=do_q_lens,
-        data_all=data_all,
-        atol=atol,
-        rtol=rtol,
+        args=(num_devices, config, q_len, input_pos, do_q_lens, data_all, atol, rtol),
+        nprocs=num_devices,
+        join=True,
     )
 
 
 def run_sdpa_distributed_vs_single_on_chunk(
-    fabric: L.Fabric,
+    rank: int,
+    num_devices: int,
     config: Config,
-    q_len,
-    input_pos,
-    do_q_lens,
-    data_all,
-    atol,
-    rtol,
+    q_len: int,
+    input_pos: int,
+    do_q_lens: bool,
+    data_all: Dict[str, Any],
+    atol: float,
+    rtol: float,
 ):
-    rank = fabric.local_rank
-    num_devices = fabric.world_size
+    # Set the device BEFORE init_process_group so NCCL registers its
+    # communicator under the correct device for this rank.
+    torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
-    data, q_inds = distribute_and_reorder_data(data_all, num_devices, input_pos)
-    data = {k: v.to(device=device) for k, v in data[rank].items()}
-    # Distributed computation
-    if do_q_lens:
-        max_val = data["query"].shape[2]
-        q_lens = [max_val + 4]
-    else:
-        q_lens = None
-    flexatt_args_diag = RingDiagFlexAttentionArgs(q_lens=q_lens)
-    flexatt_args_offdiag = RingOffdiagFlexAttentionArgs(
-        num_devices=num_devices, q_lens=q_lens,
+    dist.init_process_group(
+        backend="nccl",
+        init_method="env://",
+        world_size=num_devices,
+        rank=rank,
     )
-    ring_att_comp = RingAttentionComputation(
-        rank_r=rank,
-        flexatt_args_diag=flexatt_args_diag,
-        flexatt_args_offdiag=flexatt_args_offdiag,
+    prefix = f"[Rank {rank}]: "
+    data_for_rank, q_inds = distribute_and_reorder_data(
+        data_all, num_devices, input_pos,
     )
-    driver = RingAttentionDriver(ring_att_comp)
-    outputs = driver(
-        queries=data["query"],
-        keys=data["key"],
-        values=data["value"],
-        scale=None,
-        input_pos=input_pos,
-        num_new_tokens=q_len,
-        config=config,
-    )
-    dist_outputs = [x for x in fabric.all_gather(outputs)]
+    if rank != 0:
+        del data_all
+        data_all = None
+    try:
+        data = {
+            k: v.to(device=device)
+            for k, v in data_for_rank[rank].items()
+            if k in ("query", "key", "value")
+        }
+        del data_for_rank
 
-    # Only on master rank
-    if rank == 0:
-        # Single computation
-        flexatt_args = FlexAttentionArgs()
-        output_all = scaled_dot_product_attention_flexatt(
-            flexatt_args=flexatt_args,
-            query=data_all["query"],
-            key=data_all["key"],
-            value=data_all["value"],
-            scale_factor=None,
-            sliding_window_size=None,
-            attention_logit_softcapping=None,
-            input_pos=input_pos,
-            token_positions=data_all["token_pos"],
+        # Distributed computation
+        print(prefix + "Create driver")
+        if do_q_lens:
+            max_val = data["query"].shape[2]
+            q_lens = [max_val + 4]
+        else:
+            q_lens = None
+        flexatt_args_diag = RingDiagFlexAttentionArgs(q_lens=q_lens)
+        flexatt_args_offdiag = RingOffdiagFlexAttentionArgs(
+            num_devices=num_devices,
+            q_lens=q_lens,
         )
-        single_outputs = [output_all[:, :, q_ind, :] for q_ind in q_inds]
-        # Comparison
-        for _rank, (d_output, s_output) in enumerate(
-            zip(dist_outputs, single_outputs)
-        ):
-            print(f"Outputs for rank {_rank}")
-            torch.testing.assert_close(d_output, s_output, atol=atol, rtol=rtol)
+        ring_att_comp = RingAttentionComputation(
+            rank_r=rank,
+            flexatt_args_diag=flexatt_args_diag,
+            flexatt_args_offdiag=flexatt_args_offdiag,
+        )
+        driver = RingAttentionDriver(ring_att_comp)
+        print(prefix + "Distributed computation")
+        outputs = driver(
+            queries=data["query"],
+            keys=data["key"],
+            values=data["value"],
+            scale=None,
+            input_pos=input_pos,
+            num_new_tokens=q_len,
+            config=config,
+        )[0]
+
+        # Gather all per-rank outputs onto rank 0
+        print(prefix + "Gather outputs")
+        outputs_gathered = [torch.zeros_like(outputs) for _ in range(num_devices)]
+        dist.all_gather(outputs_gathered, outputs)
+
+        if rank == 0:
+            # Single computation
+            print(prefix + "Compute outputs on single node")
+            flexatt_args = FlexAttentionArgs()
+            output_all = scaled_dot_product_attention_flexatt(
+                flexatt_args=flexatt_args,
+                query=data_all["query"].to(device=device),
+                key=data_all["key"].to(device=device),
+                value=data_all["value"].to(device=device),
+                scale_factor=None,
+                sliding_window_size=None,
+                attention_logit_softcapping=None,
+                input_pos=input_pos,
+                token_positions=data_all["token_pos"].to(device=device),
+            )
+            single_outputs = [output_all[:, :, q_ind, :] for q_ind in q_inds]
+            # Comparison
+            for _rank, (d_output, s_output) in enumerate(
+                zip(outputs_gathered, single_outputs)
+            ):
+                print(f"Comparison for rank {_rank}")
+                torch.testing.assert_close(d_output, s_output, atol=atol, rtol=rtol)
+    finally:
+        dist.destroy_process_group()
 
 
-# TODO: Less cases
 @_RunIf(min_cuda_gpus=3)
 @pytest.mark.parametrize(
     "n_head, n_query_groups, kv_len_per_rank, dtype, num_devices",
@@ -209,9 +223,7 @@ def run_sdpa_distributed_vs_single_on_chunk(
         (4, 4, 256, torch.bfloat16, 2),
         (8, 4, 128, torch.float16, 3),
         (12, 4, 512, torch.bfloat16, 2),
-        (24, 8, 256, torch.float16, 3),
-        (9, 3, 256, torch.bfloat16, 3),
-    ][0:1],
+    ],
 )
 def test_sdpa_distributed_vs_single_on_prefill(
     n_head,
@@ -248,7 +260,9 @@ def test_sdpa_distributed_vs_single_on_prefill(
     # Generate all data on the main process (CPU) and distribute per rank.
     # Workers receive their slice via the mp.spawn args tuple.
     print("Sample data")
-    data_all = random_args_cache_forward(params, num=kv_len, vocab_size=config.vocab_size)
+    data_all = random_args_cache_forward(
+        params, num=kv_len, vocab_size=config.vocab_size,
+    )
 
     mp.spawn(
         run_sdpa_distributed_vs_single_on_prefill,
@@ -262,9 +276,9 @@ def run_sdpa_distributed_vs_single_on_prefill(
     rank: int,
     num_devices: int,
     config: Config,
-    data_all,
-    atol,
-    rtol,
+    data_all: Dict[str, Any],
+    atol: float,
+    rtol: float,
 ):
     # Set the device BEFORE init_process_group so NCCL registers its
     # communicator under the correct device for this rank.
@@ -277,7 +291,9 @@ def run_sdpa_distributed_vs_single_on_prefill(
         rank=rank,
     )
     prefix = f"[Rank {rank}]: "
-    data_for_rank, q_inds = distribute_and_reorder_data(data_all, num_devices, input_pos=0)
+    data_for_rank, q_inds = distribute_and_reorder_data(
+        data_all, num_devices, input_pos=0
+    )
     if rank != 0:
         del data_all
         data_all = None
@@ -285,7 +301,8 @@ def run_sdpa_distributed_vs_single_on_prefill(
         kv_len = data_for_rank[rank]["key"].shape[2]
         input_pos = 0
         data = {
-            k: v.to(device=device) for k, v in data_for_rank[rank].items()
+            k: v.to(device=device)
+            for k, v in data_for_rank[rank].items()
             if k in ("query", "key", "value")
         }
         del data_for_rank
@@ -342,4 +359,5 @@ def run_sdpa_distributed_vs_single_on_prefill(
 if __name__ == "__main__":
     os.environ.setdefault("MASTER_ADDR", "localhost")
     os.environ.setdefault("MASTER_PORT", "29500")
-    test_sdpa_distributed_vs_single_on_prefill(4, 2, 512, torch.float16, 3)
+    # test_sdpa_distributed_vs_single_on_prefill(4, 2, 512, torch.float16, 3)
+    test_sdpa_distributed_vs_single_on_chunk(4, 2, 128, 512, torch.float16, 512 * 3, 3, False, False)

@@ -375,10 +375,7 @@ def distribute_and_reorder_data(
     assert cache_length % num_devices == 0
     local_cl = cache_length // num_devices
     new_shape = shape[:2] + (local_cl, num_devices, shape[-1])
-    _data = {
-        name: data[name].view(*new_shape)
-        for name in ("key", "value")
-    }
+    _data = {name: data[name].view(*new_shape) for name in ("key", "value")}
     if input_pos > 0:
         _data["token_pos"] = data["token_pos"].view(*new_shape[:-1])
     q_len = data["query"].shape[2]

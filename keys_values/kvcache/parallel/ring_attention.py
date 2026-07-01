@@ -47,7 +47,12 @@ class DoubleBuffer:
         if len(self._buffers) == 2:
             raise IndexError("`set_other` can be called only once")
         x = self._buffers[0]
-        if other is None or other.shape != x.shape or other.dtype != x.dtype or other.device != x.device:
+        if (
+            other is None
+            or other.shape != x.shape
+            or other.dtype != x.dtype
+            or other.device != x.device
+        ):
             other = torch.zeros_like(x)
         self._buffers = (x, other)
         return other
@@ -147,7 +152,11 @@ class RingAttentionDriver:
 
         """
         self.ring_att_comp.reset(
-            queries, scale, input_pos, num_new_tokens, config,
+            queries,
+            scale,
+            input_pos,
+            num_new_tokens,
+            config,
         )
         buff_keys = DoubleBuffer(keys)
         buff_values = DoubleBuffer(values)
@@ -159,12 +168,14 @@ class RingAttentionDriver:
 
         # Main loop
         for iter in range(self.num_devices):
-            reqs = dist.batch_isend_irecv([
-                dist.P2POp(dist.isend, buff_keys.read(),    rank_send),
-                dist.P2POp(dist.isend, buff_values.read(),  rank_send),
-                dist.P2POp(dist.irecv, buff_keys.write(),   rank_recv),
-                dist.P2POp(dist.irecv, buff_values.write(), rank_recv),
-            ])
+            reqs = dist.batch_isend_irecv(
+                [
+                    dist.P2POp(dist.isend, buff_keys.read(), rank_send),
+                    dist.P2POp(dist.isend, buff_values.read(), rank_send),
+                    dist.P2POp(dist.irecv, buff_keys.write(), rank_recv),
+                    dist.P2POp(dist.irecv, buff_values.write(), rank_recv),
+                ]
+            )
             # Computation
             self.ring_att_comp(buff_keys.read(), buff_values.read())
             # Main stream waits for all transfers to be complete (`reqs`)

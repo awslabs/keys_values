@@ -208,9 +208,7 @@ class RingAttentionComputation:
             output_part1 = self._accum_output * torch.exp(
                 self._accum_lse - new_accum_lse
             ).unsqueeze(-1)
-            output_part2 = new_output * torch.exp(
-                new_lse - new_accum_lse
-            ).unsqueeze(-1)
+            output_part2 = new_output * torch.exp(new_lse - new_accum_lse).unsqueeze(-1)
             self._accum_output = output_part1 + output_part2
             self._accum_lse = new_accum_lse
 
