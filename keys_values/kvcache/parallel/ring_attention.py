@@ -159,14 +159,15 @@ class RingAttentionDriver:
 
         # Main loop
         for iter in range(self.num_devices):
-            # Send KV and receive KV
-            reqs = []
-            # Send KV
-            reqs.append(dist.isend(tensor=buff_keys.read(), dst=rank_send))
-            reqs.append(dist.isend(tensor=buff_values.read(), dst=rank_send))
-            # Receive KV
-            reqs.append(dist.irecv(tensor=buff_keys.write(), src=rank_recv))
-            reqs.append(dist.irecv(tensor=buff_values.write(), src=rank_recv))
+            # Send and receive KV in a single batched P2P operation.
+            # batch_isend_irecv is required in NCCL eager initialization mode;
+            # individual isend/irecv fail with "parent communicator missing".
+            reqs = dist.batch_isend_irecv([
+                dist.P2POp(dist.isend, buff_keys.read(),    rank_send),
+                dist.P2POp(dist.isend, buff_values.read(),  rank_send),
+                dist.P2POp(dist.irecv, buff_keys.write(),   rank_recv),
+                dist.P2POp(dist.irecv, buff_values.write(), rank_recv),
+            ])
             # Computation
             self.ring_att_comp(buff_keys.read(), buff_values.read())
             # Main stream waits for all transfers to be complete (`reqs`)

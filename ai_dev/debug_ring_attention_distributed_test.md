@@ -159,3 +159,123 @@ elsewhere.
 
 The double buffering and `req.wait()` synchronization logic is otherwise correct and
 should be left as-is.
+
+## Response
+
+I did as you said and ran the test again. Get a similar failure:
+```bash
+You are using a CUDA device ('NVIDIA A100-SXM4-40GB') that has Tensor Cores. To properly utilize them, you should set `torch.set_float32_matmul_precision('medium' | 'high')` which will trade-off precision for performance. For more details, read https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision
+Initializing distributed: GLOBAL_RANK: 0, MEMBER: 1/3
+Initializing distributed: GLOBAL_RANK: 2, MEMBER: 3/3
+Initializing distributed: GLOBAL_RANK: 1, MEMBER: 2/3
+----------------------------------------------------------------------------------------------------
+distributed_backend=nccl
+All distributed processes registered. Starting with 3 processes
+----------------------------------------------------------------------------------------------------
+
+[Rank 0]: Sampling data
+[Rank 2]: Broadcasting data
+[Rank 1]: Broadcasting data
+[Rank 0]: Broadcasting data
+[Rank 0]: Created driver
+[rank0]:[W701 09:33:37.745071077 ProcessGroupNCCL.cpp:4025] Warning: [PG ID 0 PG GUID 0(default_pg) Rank 0] An unbatched P2P op (send/recv) was called on this ProcessGroup with size 3.  In eager initialization mode, unbatched P2P ops are treated as independent collective ops, and are thus serialized with all other ops on this ProcessGroup, including other P2P ops. To avoid serialization, either create additional independent ProcessGroups for the P2P ops or use batched P2P ops. You can squash this warning by setting the environment variable TORCH_NCCL_SHOW_EAGER_INIT_P2P_SERIALIZATION_WARNING to false. (function operator())
+[Rank 1]: Created driver
+[rank1]:[W701 09:33:37.179345078 ProcessGroupNCCL.cpp:4025] Warning: [PG ID 0 PG GUID 0(default_pg) Rank 1] An unbatched P2P op (send/recv) was called on this ProcessGroup with size 3.  In eager initialization mode, unbatched P2P ops are treated as independent collective ops, and are thus serialized with all other ops on this ProcessGroup, including other P2P ops. To avoid serialization, either create additional independent ProcessGroups for the P2P ops or use batched P2P ops. You can squash this warning by setting the environment variable TORCH_NCCL_SHOW_EAGER_INIT_P2P_SERIALIZATION_WARNING to false. (function operator())
+[rank1]: Traceback (most recent call last):
+[rank1]:   File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 355, in <module>
+[rank1]:     test_sdpa_distributed_vs_single_on_prefill(4, 2, 512, torch.float16, 3)
+[rank1]:   File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 253, in test_sdpa_distributed_vs_single_on_prefill
+[rank1]:     fabric.launch(
+[rank1]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/fabric.py", line 1010, in launch
+[rank1]:     return self._wrap_and_launch(function, self, *args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/fabric.py", line 1120, in _wrap_and_launch
+[rank1]:     return launcher.launch(to_run, *args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/strategies/launchers/subprocess_script.py", line 108, in launch
+[rank1]:     return function(*args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/fabric.py", line 1126, in _wrap_with_setup
+[rank1]:     return to_run(*args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 316, in run_sdpa_distributed_vs_single_on_prefill
+[rank1]:     outputs = driver(
+[rank1]:               ^^^^^^^
+[rank1]:   File "/home/ubuntu/git/keys_values/keys_values/kvcache/parallel/ring_attention.py", line 165, in __call__
+[rank1]:     reqs.append(dist.isend(tensor=buff_keys.read(), dst=rank_send))
+[rank1]:                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 2491, in isend
+[rank1]:     return group.send([tensor], group_dst, tag)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]: RuntimeError: ncclComm != nullptr INTERNAL ASSERT FAILED at "/pytorch/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp":4043, please report a bug to PyTorch. Parent communicator missing in eager initialization mode.
+[Rank 2]: Created driver
+[rank2]:[W701 09:33:37.189965554 ProcessGroupNCCL.cpp:4025] Warning: [PG ID 0 PG GUID 0(default_pg) Rank 2] An unbatched P2P op (send/recv) was called on this ProcessGroup with size 3.  In eager initialization mode, unbatched P2P ops are treated as independent collective ops, and are thus serialized with all other ops on this ProcessGroup, including other P2P ops. To avoid serialization, either create additional independent ProcessGroups for the P2P ops or use batched P2P ops. You can squash this warning by setting the environment variable TORCH_NCCL_SHOW_EAGER_INIT_P2P_SERIALIZATION_WARNING to false. (function operator())
+[rank2]: Traceback (most recent call last):
+[rank2]:   File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 355, in <module>
+[rank2]:     test_sdpa_distributed_vs_single_on_prefill(4, 2, 512, torch.float16, 3)
+[rank2]:   File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 253, in test_sdpa_distributed_vs_single_on_prefill
+[rank2]:     fabric.launch(
+[rank2]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/fabric.py", line 1010, in launch
+[rank2]:     return self._wrap_and_launch(function, self, *args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/fabric.py", line 1120, in _wrap_and_launch
+[rank2]:     return launcher.launch(to_run, *args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/strategies/launchers/subprocess_script.py", line 108, in launch
+[rank2]:     return function(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/lightning/fabric/fabric.py", line 1126, in _wrap_with_setup
+[rank2]:     return to_run(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 316, in run_sdpa_distributed_vs_single_on_prefill
+[rank2]:     outputs = driver(
+[rank2]:               ^^^^^^^
+[rank2]:   File "/home/ubuntu/git/keys_values/keys_values/kvcache/parallel/ring_attention.py", line 165, in __call__
+[rank2]:     reqs.append(dist.isend(tensor=buff_keys.read(), dst=rank_send))
+[rank2]:                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 2491, in isend
+[rank2]:     return group.send([tensor], group_dst, tag)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]: RuntimeError: ncclComm != nullptr INTERNAL ASSERT FAILED at "/pytorch/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp":4043, please report a bug to PyTorch. Parent communicator missing in eager initialization mode.
+```
+
+* Something else must be wrong
+* Append the summary of your findings to `ai_dev/debug_ring_attention_distributed_test.md`
+
+## Second round findings
+
+The stream-wrapper removal was a correct but insufficient fix. The second run confirms this:
+the error still occurs at bare `dist.isend` at line 165, with the same "parent communicator
+missing" assert. The PyTorch warning printed before the crash contains the actual answer:
+
+> *"To avoid serialization, either create additional independent ProcessGroups for the P2P
+> ops or **use batched P2P ops**."*
+
+### Root cause (revised)
+
+In NCCL eager initialization mode, **individual `isend`/`irecv` are not supported for
+process groups with more than 2 ranks**. NCCL requires that P2P operations on a group of
+size N > 2 go through `dist.batch_isend_irecv`. That function creates a properly-scoped
+P2P sub-communicator derived from the parent collective communicator. Calling standalone
+`isend`/`irecv` skips this derivation, so NCCL has no communicator to use and asserts.
+
+The stream wrapper issue was real (calling NCCL ops from a non-default stream context is
+wrong), but even after fixing that, the underlying use of individual `isend`/`irecv` still
+fails for the same fundamental reason.
+
+### Fix applied
+
+Replaced the four individual `isend`/`irecv` calls with a single `dist.batch_isend_irecv`
+call using `dist.P2POp` descriptors:
+
+```python
+reqs = dist.batch_isend_irecv([
+    dist.P2POp(dist.isend, buff_keys.read(),    rank_send),
+    dist.P2POp(dist.isend, buff_values.read(),  rank_send),
+    dist.P2POp(dist.irecv, buff_keys.write(),   rank_recv),
+    dist.P2POp(dist.irecv, buff_values.write(), rank_recv),
+])
+```
+
+`batch_isend_irecv` returns a list of work handles, so `for req in reqs: req.wait()`
+continues to work unchanged.
