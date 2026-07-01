@@ -562,5 +562,112 @@ the inputs `(4, 2, 128, 512, torch.float16, 512 * 3, 3, False, False)`, it hangs
 
 I am getting this output:
 ```bash
-
+Sample data
+[Rank 2]: Create driver
+[Rank 2]: Distributed computation
+[Rank 0]: Create driver
+[Rank 0]: Distributed computation
+[Rank 1]: Create driver
+[Rank 1]: Distributed computation
+[Rank 2]: Gather outputs
+[Rank 1]: Gather outputs
+[Rank 0]: Gather outputs
+[Rank 0]: Compute outputs on single node
+^CTraceback (most recent call last):
+  File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 364, in <module>
+    test_sdpa_distributed_vs_single_on_chunk(4, 2, 128, 512, torch.float16, 512 * 3, 3, False, False)
+  File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 114, in test_sdpa_distributed_vs_single_on_chunk
+    mp.spawn(
+  File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 340, in spawn
+    return start_processes(fn, args, nprocs, join, daemon, start_method="spawn")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 296, in start_processes
+    while not context.join():
+              ^^^^^^^^^^^^^^
+  File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 140, in join
+    ready = multiprocessing.connection.wait(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/multiprocessing/connection.py", line 1136, in wait
+    ready = selector.select(timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/selectors.py", line 415, in select
+    fd_event_list = self._selector.poll(timeout)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+^CException ignored in atexit callback: <function _exit_function at 0x7c2a8ea46de0>
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/multiprocessing/util.py", line 360, in _exit_function
+    p.join()
+  File "/usr/lib/python3.12/multiprocessing/process.py", line 149, in join
+    res = self._popen.wait(timeout)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/multiprocessing/popen_fork.py", line 43, in wait
+    return self.poll(os.WNOHANG if timeout == 0.0 else 0)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/multiprocessing/popen_fork.py", line 27, in poll
+    pid, sts = os.waitpid(self.pid, flag)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
 ```
+The code hangs after "[Rank 0]: Compute outputs on single node". I terminated it
+with Ctrl-C.
+
+* Please figure out what is wrong in this test, whereas `test_sdpa_distributed_vs_single_on_prefill` works fine.
+* Append the summary of your findings to `ai_dev/debug_ring_attention_distributed_test.md`
+
+## Fifth round findings — chunk test hang
+
+### Observation
+
+All three ranks complete the distributed computation and `all_gather` successfully (all
+print "Gather outputs"). Then rank 0 prints "Compute outputs on single node" and hangs.
+Ranks 1 and 2 are silent from that point on.
+
+### Root cause
+
+`dist.destroy_process_group()` is a collective operation — it issues an internal barrier
+and blocks until all ranks call it. The code structure was:
+
+```python
+try:
+    ...
+    dist.all_gather(...)          # collective — all ranks pass
+    if rank == 0:
+        <long single-rank work>   # only rank 0 does this
+finally:
+    dist.destroy_process_group()  # collective — DEADLOCK
+```
+
+Ranks 1 and 2 finish `all_gather`, skip the `if rank == 0` block, and immediately call
+`destroy_process_group`. They block there waiting for rank 0. But rank 0 is stuck inside
+`scaled_dot_product_attention_flexatt`, which invokes `torch.compile`
+(`FlexAttnForChunkManager.__call__`) on its first call for this `input_pos > 0` case.
+The compilation is time-consuming (or indefinitely blocking in a subprocess context), so
+rank 0 never reaches `destroy_process_group`. Classic deadlock.
+
+### Why the prefill test did not hang
+
+In the prefill test (`input_pos == 0`), the same `FlexAttnForPrefillManager` is used both
+inside `RingAttentionDriver` (during distributed computation) and for the rank-0
+single-node reference. By the time rank 0 calls the reference, the compiled graph is
+already cached, so the call returns instantly and rank 0 reaches `destroy_process_group`
+before the others time out. This was an accidental fix — the underlying structural problem
+(single-rank work inside a collective-bounded try/finally) was present in both tests.
+
+### Fix applied
+
+Move `dist.destroy_process_group()` to immediately after `all_gather` (before any
+single-rank work), and move the rank-0 comparison entirely outside the `try` block. The
+gathered tensors are moved to CPU before the process group is destroyed so they remain
+accessible:
+
+```python
+        outputs_gathered = [t.cpu() for t in outputs_gathered]
+    finally:
+        dist.destroy_process_group()   # all ranks reach this together
+
+if rank == 0:
+    # reference computation and assert_close — no distributed ops, no deadlock
+```
+
+The same fix was applied to `run_sdpa_distributed_vs_single_on_prefill` for structural
+correctness, even though it did not visibly hang.

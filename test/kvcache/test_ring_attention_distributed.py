@@ -188,31 +188,36 @@ def run_sdpa_distributed_vs_single_on_chunk(
         print(prefix + "Gather outputs")
         outputs_gathered = [torch.zeros_like(outputs) for _ in range(num_devices)]
         dist.all_gather(outputs_gathered, outputs)
-
-        if rank == 0:
-            # Single computation
-            print(prefix + "Compute outputs on single node")
-            flexatt_args = FlexAttentionArgs()
-            output_all = scaled_dot_product_attention_flexatt(
-                flexatt_args=flexatt_args,
-                query=data_all["query"].to(device=device),
-                key=data_all["key"].to(device=device),
-                value=data_all["value"].to(device=device),
-                scale_factor=None,
-                sliding_window_size=None,
-                attention_logit_softcapping=None,
-                input_pos=input_pos,
-                token_positions=data_all["token_pos"].to(device=device),
-            )
-            single_outputs = [output_all[:, :, q_ind, :] for q_ind in q_inds]
-            # Comparison
-            for _rank, (d_output, s_output) in enumerate(
-                zip(outputs_gathered, single_outputs)
-            ):
-                print(f"Comparison for rank {_rank}")
-                torch.testing.assert_close(d_output, s_output, atol=atol, rtol=rtol)
+        # Move outputs to CPU before releasing the process group, so the
+        # single-node comparison below does not race with destroy.
+        outputs_gathered = [t.cpu() for t in outputs_gathered]
     finally:
         dist.destroy_process_group()
+
+    if rank == 0:
+        # Single computation — done after destroy_process_group so that ranks
+        # 1/2 are not blocked in the destroy barrier while rank 0 compiles and
+        # runs the reference attention (which can take significant time).
+        print(prefix + "Compute outputs on single node")
+        flexatt_args = FlexAttentionArgs()
+        output_all = scaled_dot_product_attention_flexatt(
+            flexatt_args=flexatt_args,
+            query=data_all["query"].to(device=device),
+            key=data_all["key"].to(device=device),
+            value=data_all["value"].to(device=device),
+            scale_factor=None,
+            sliding_window_size=None,
+            attention_logit_softcapping=None,
+            input_pos=input_pos,
+            token_positions=data_all["token_pos"].to(device=device),
+        )
+        single_outputs = [output_all[:, :, q_ind, :].cpu() for q_ind in q_inds]
+        # Comparison
+        for _rank, (d_output, s_output) in enumerate(
+            zip(outputs_gathered, single_outputs)
+        ):
+            print(f"Comparison for rank {_rank}")
+            torch.testing.assert_close(d_output, s_output, atol=atol, rtol=rtol)
 
 
 @_RunIf(min_cuda_gpus=3)
@@ -331,30 +336,33 @@ def run_sdpa_distributed_vs_single_on_prefill(
         print(prefix + "Gather outputs")
         outputs_gathered = [torch.zeros_like(outputs) for _ in range(num_devices)]
         dist.all_gather(outputs_gathered, outputs)
-
-        if rank == 0:
-            # Single computation
-            print(prefix + "Compute outputs on single node")
-            flexatt_args = FlexAttentionArgs()
-            output_all = scaled_dot_product_attention_flexatt(
-                flexatt_args=flexatt_args,
-                query=data_all["query"].to(device=device),
-                key=data_all["key"].to(device=device),
-                value=data_all["value"].to(device=device),
-                scale_factor=None,
-                sliding_window_size=None,
-                attention_logit_softcapping=None,
-                input_pos=input_pos,
-                token_positions=None,
-            )
-            single_outputs = [output_all[:, :, q_ind, :] for q_ind in q_inds]
-            for _rank, (d_output, s_output) in enumerate(
-                zip(outputs_gathered, single_outputs)
-            ):
-                print(f"Comparison for rank {_rank}")
-                torch.testing.assert_close(d_output, s_output, atol=atol, rtol=rtol)
+        outputs_gathered = [t.cpu() for t in outputs_gathered]
     finally:
         dist.destroy_process_group()
+
+    if rank == 0:
+        # Single computation — done after destroy_process_group so that ranks
+        # 1/2 are not blocked in the destroy barrier while rank 0 compiles and
+        # runs the reference attention.
+        print(prefix + "Compute outputs on single node")
+        flexatt_args = FlexAttentionArgs()
+        output_all = scaled_dot_product_attention_flexatt(
+            flexatt_args=flexatt_args,
+            query=data_all["query"].to(device=device),
+            key=data_all["key"].to(device=device),
+            value=data_all["value"].to(device=device),
+            scale_factor=None,
+            sliding_window_size=None,
+            attention_logit_softcapping=None,
+            input_pos=input_pos,
+            token_positions=None,
+        )
+        single_outputs = [output_all[:, :, q_ind, :].cpu() for q_ind in q_inds]
+        for _rank, (d_output, s_output) in enumerate(
+            zip(outputs_gathered, single_outputs)
+        ):
+            print(f"Comparison for rank {_rank}")
+            torch.testing.assert_close(d_output, s_output, atol=atol, rtol=rtol)
 
 
 if __name__ == "__main__":
