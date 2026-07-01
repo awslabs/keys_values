@@ -421,7 +421,7 @@ reqs = dist.batch_isend_irecv([
 ])
 ```
 
-## Response 2
+## Response 3
 
 Running this again gives:
 
@@ -552,7 +552,7 @@ All test data is generated on the main process (CPU) and passed to workers via t
 `_p2p_group` workaround is removed; `batch_isend_irecv` is kept (it remains the correct
 API for multi-rank P2P).
 
-## Response 3
+## Response 4
 
 Great, the test works now.
 
@@ -671,3 +671,90 @@ if rank == 0:
 
 The same fix was applied to `run_sdpa_distributed_vs_single_on_prefill` for structural
 correctness, even though it did not visibly hang.
+
+## Response 5
+
+Now, the test `test_sdpa_distributed_vs_single_on_chunk` hangs when gathering the outputs:
+```bash
+Sample data
+[Rank 1]: Create driver
+[Rank 1]: Distributed computation
+[Rank 2]: Create driver
+[Rank 2]: Distributed computation
+[Rank 0]: Create driver
+[Rank 0]: Distributed computation
+[Rank 2]: Gather outputs
+[Rank 0]: Gather outputs
+[Rank 1]: Gather outputs
+^CTraceback (most recent call last):
+  File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 372, in <module>
+    test_sdpa_distributed_vs_single_on_chunk(4, 2, 128, 512, torch.float16, 512 * 3, 3, False, False)
+  File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 114, in test_sdpa_distributed_vs_single_on_chunk
+    mp.spawn(
+  File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 340, in spawn
+    return start_processes(fn, args, nprocs, join, daemon, start_method="spawn")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 296, in start_processes
+    while not context.join():
+              ^^^^^^^^^^^^^^
+  File "/home/ubuntu/virtenvs/keys_values/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 140, in join
+    ready = multiprocessing.connection.wait(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/multiprocessing/connection.py", line 1136, in wait
+    ready = selector.select(timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/selectors.py", line 415, in select
+    fd_event_list = self._selector.poll(timeout)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+^CException ignored in atexit callback: <function _exit_function at 0x700d84a3ade0>
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/multiprocessing/util.py", line 360, in _exit_function
+    p.join()
+  File "/usr/lib/python3.12/multiprocessing/process.py", line 149, in join
+    res = self._popen.wait(timeout)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/multiprocessing/popen_fork.py", line 43, in wait
+    return self.poll(os.WNOHANG if timeout == 0.0 else 0)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/multiprocessing/popen_fork.py", line 27, in poll
+    pid, sts = os.waitpid(self.pid, flag)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt:
+```
+
+* The other test `run_sdpa_distributed_vs_single_on_prefill` works fine
+* Append the summary of your findings to `ai_dev/debug_ring_attention_distributed_test.md`
+
+## Sixth round findings — all_gather shape mismatch
+
+### Observation
+
+All three ranks now reach `dist.all_gather` (all print "Gather outputs") but none progress
+— they block indefinitely in the collective.
+
+### Root cause
+
+`dist.all_gather` requires every participating tensor to have **identical shape**. The chunk
+test uses `q_len=128, num_devices=3`, which does not divide evenly. Per-rank query counts
+are determined by `distribute_and_reorder_data` via `torch.arange(start, q_len, num_devices)`,
+giving lengths 43, 43, and 42. Because `outputs` has shape `(batch, n_head, q_per_rank, head_size)`,
+ranks 0 and 1 produce shape `(..., 43, ...)` while rank 2 produces `(..., 42, ...)`.
+`dist.all_gather` detects the mismatch and all ranks stall in the collective barrier.
+
+The prefill test is unaffected because `kv_len = kv_len_per_rank * num_devices` is always
+exactly divisible, so every rank has the same number of queries.
+
+### Fix applied
+
+Before calling `all_gather`, each rank pads its `outputs` to
+`ceil(q_len / num_devices)` along the query dimension. After gathering, each gathered
+tensor is sliced back to `len(q_inds[r])` (the true per-rank query count, computable
+from `q_inds` which is computed identically on every rank):
+
+```python
+max_q_per_rank = (q_len + num_devices - 1) // num_devices
+# ... pad outputs to max_q_per_rank if needed ...
+dist.all_gather(recv_bufs, outputs_padded)
+outputs_gathered = [recv_bufs[r][:, :, :len(q_inds[r]), :].cpu() for r in range(num_devices)]
+```

@@ -39,7 +39,7 @@ from keys_values.utils import random_choices
 @pytest.mark.parametrize(
     "n_head, n_query_groups, q_len, kv_len_per_rank, dtype, input_pos, num_devices, do_q_lens, is_1d",
     [
-        (4, 2, 128, 512, torch.float16, 512 * 4, 4, False, False),
+        (4, 2, 128, 512, torch.float16, 512 * 3, 3, False, False),
         (4, 4, 8, 256, torch.bfloat16, 256 * 2 + 11, 2, False, False),
         (8, 4, 64, 128, torch.float16, 128 * 8 + 5, 8, True, True),
         (12, 4, 16, 512, torch.bfloat16, 512 * 3 + 127, 3, False, True),
