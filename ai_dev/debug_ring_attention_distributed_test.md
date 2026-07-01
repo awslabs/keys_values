@@ -551,3 +551,16 @@ All test data is generated on the main process (CPU) and passed to workers via t
 `mp.spawn` args tuple, avoiding any broadcast-before-init ordering issues. The
 `_p2p_group` workaround is removed; `batch_isend_irecv` is kept (it remains the correct
 API for multi-rank P2P).
+
+## Response 3
+
+Great, the test works now.
+
+Consider the test `test_sdpa_distributed_vs_single_on_chunk`
+in `test/kvcache/test_ring_attention_distributed.py`. When running this test with
+the inputs `(4, 2, 128, 512, torch.float16, 512 * 3, 3, False, False)`, it hangs.
+
+I am getting this output:
+```bash
+
+```
