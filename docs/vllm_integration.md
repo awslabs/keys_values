@@ -174,6 +174,24 @@ Positional policies (lastrec, smart-lastrec) only need to decide *which logical
 positions to drop*, which maps cleanly onto freeing blocks — so they fit the
 paged model well. Score-based per-head policies (H2O) are the hard case.
 
+**Upstream confirmation (vLLM forum + RFCs).** This is not just our reading of
+the code — it is a known, acknowledged vLLM limitation. Per the vLLM forum
+thread [*Sparse attention (e.g., H2O)*](https://discuss.vllm.ai/t/sparse-attention-e-g-h2o/2745),
+vLLM allocates and manages KV blocks at the sequence level and **all heads in a
+layer share the same block layout**, so eviction/compaction is performed at the
+block level affecting all heads together; per-head sparse KV eviction (as in
+H2O) is *not* natively supported in mainline, and the only current workaround
+(`block_size=1`) is inefficient and not production-scalable. Supporting head- or
+layer-wise sparse KV would require redesigning the block manager and memory
+layout. This is tracked upstream in:
+
+- [RFC #10646 — Support KV Cache Compaction](https://github.com/vllm-project/vllm/issues/10646)
+- [RFC #12254 — Sparse KV cache management framework](https://github.com/vllm-project/vllm/issues/12254)
+- [RFC #5751 — Support sparse KV cache framework](https://github.com/vllm-project/vllm/issues/5751)
+
+So the block-level H2O plan (below) is the correct target given current vLLM;
+true per-head eviction depends on upstream work landing one of these RFCs.
+
 ## vLLM 0.23 / V1 extension points (mapped from source)
 
 KV cache description — `vllm/v1/kv_cache_interface.py`:
@@ -274,8 +292,9 @@ Implications:
    block model: per-request block tables already give us per-request variation,
    and we never need to diverge across heads. Implement `SmartLastRecManager` as
    a subclass of `LastRecManager` (`keys_values/vllm/managers.py` is structured
-   to extend here). Upstream `smart-lastrec` is being refactored for left
-   padding; align the bridge with that once it lands.
+   to extend here). The upstream `smart-lastrec` (`slr`) refactor for left
+   padding has now landed (per review, it "does not buy much"), so there is no
+   remaining upstream dependency — the bridge can integrate it directly.
 4. **H2O** (block-granularity, per review decision): only after the positional
    policies land. Score and evict **whole blocks** (aggregate H2O scores over
    the block's tokens and over heads in the group); route attention-weight
@@ -308,6 +327,32 @@ Open follow-up: this uses monkeypatches in an experiment harness. A production
 path should register via the `register_custom_kv_cache_specs` platform hook and a
 config flag rather than patching `get_kv_cache_spec`/layer attributes.
 
+## Attention-weight extraction (task 3, implemented)
+
+H2O scores each KV slot by the attention mass it receives, summed over the query
+axis (and over the query heads sharing a KV head, for GQA). The bridge now ships
+this in `keys_values/vllm/attention.py`:
+
+- `reference_summed_attention(...)` — a pure-torch reference (the contract),
+  returning `(attn_output, summed_weights)` with `summed_weights` of shape
+  `(batch, n_kv_heads, kv_len)` in float32. GPU-free and unit-tested as the
+  source of truth (`test/vllm/test_attn_weights.py`).
+- `summed_attention_weights(...)` — dispatches to keys_values' existing
+  FlashInfer + Triton score-sum path when available (CUDA + fp16/bf16 + vendored
+  kernels), and falls back to the reference otherwise. Validated against the
+  reference on GPU.
+
+Key point for the "how do we get summed weights in vLLM?" question: this path
+returns the weights in a **single** FlashInfer SDPA call (`return_attn_weights=
+True`), not two attention passes — vLLM's V1 FlashInfer backend already runs its
+wrappers with `return_lse=True`, so the log-sum-exp needed to normalize is
+available on the same call. So we neither need a vLLM feature request nor a
+second attention pass; the remaining work is purely *wiring* this into the
+in-engine attention path and mapping per-position scores to blocks (prototyped
+in `examples/vllm_h2o_score_probe.py` on the follow-up branch — gathers a
+request's paged K/V and computes correct per-position mass in-engine for the
+single-sequence decode case).
+
 ## Open questions
 
 - Can a `SingleTypeKVCacheManager` express keys_values eviction without touching
@@ -316,5 +361,9 @@ config flag rather than patching `get_kv_cache_spec`/layer attributes.
   whole blocks rather than per-head/per-token; remaining question is how much
   accuracy that costs vs. the dense LitGPT reference, measured in phase 5.
   Option B (per-head dense backend) is a fallback only.
-- Getting summed attention weights in V1 without a custom kernel per backend.
+- Getting summed attention weights in V1 — **addressed** for the FlashInfer
+  backend: keys_values' FlashInfer + Triton score-sum path returns them in a
+  single SDPA call (see "Attention-weight extraction" above). Open part is
+  per-backend coverage (only FlashInfer is wired; FlashAttention still exposes
+  nothing) and in-engine wiring of the score → block mapping.
 - CUDA-graph capture with a dynamically-evicting custom manager.
