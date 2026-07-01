@@ -430,7 +430,6 @@ You are using a CUDA device ('NVIDIA A100-SXM4-40GB') that has Tensor Cores. To 
 Initializing distributed: GLOBAL_RANK: 0, MEMBER: 1/3
 Initializing distributed: GLOBAL_RANK: 2, MEMBER: 3/3
 Initializing distributed: GLOBAL_RANK: 1, MEMBER: 2/3
-[Rank 1]: Broadcasting data
 ----------------------------------------------------------------------------------------------------
 distributed_backend=nccl
 All distributed processes registered. Starting with 3 processes
@@ -438,10 +437,11 @@ All distributed processes registered. Starting with 3 processes
 
 [Rank 2]: Broadcasting data
 [Rank 0]: Sampling data
+[Rank 1]: Broadcasting data
 [Rank 0]: Broadcasting data
+[Rank 1]: Created driver
 [Rank 0]: Created driver
 [Rank 2]: Created driver
-[Rank 1]: Created driver
 [rank1]: Traceback (most recent call last):
 [rank1]:   File "/home/ubuntu/git/keys_values/test/kvcache/test_ring_attention_distributed.py", line 355, in <module>
 [rank1]:     test_sdpa_distributed_vs_single_on_prefill(4, 2, 512, torch.float16, 3)
@@ -500,9 +500,54 @@ All distributed processes registered. Starting with 3 processes
 [rank2]:     return group.send([tensor], group_dst, tag)
 [rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 [rank2]: RuntimeError: ncclComm != nullptr INTERNAL ASSERT FAILED at "/pytorch/torch/csrc/distributed/c10d/ProcessGroupNCCL.cpp":4043, please report a bug to PyTorch. Parent communicator missing in eager initialization mode.
-[rank: 1] Child process with PID 2083111 terminated with code 1. Forcefully terminating all other processes to avoid zombies 🧟
+[rank: 1] Child process with PID 2084751 terminated with code 1. Forcefully terminating all other processes to avoid zombies 🧟
 ```
 
 * Something else must be wrong
-* The test used Lightning Fabric to 
+* The test used Lightning Fabric to start processes on the different ranks. In case
+  you think this gets in the way, feel free to replace it with something elementary?
 * Append the summary of your findings to `ai_dev/debug_ring_attention_distributed_test.md`
+
+## Fourth round findings
+
+### Observation
+
+The `dist.new_group()` fix also failed: the third run still crashes for ranks 1 and 2 at
+`batch_isend_irecv` → `isend` → `group.send`, while rank 0 is always forcefully killed as
+collateral. The pattern is consistent across all three runs.
+
+### Root cause (confirmed)
+
+The asymmetry — rank 0 always survives, ranks 1 and 2 always fail — points unambiguously to
+**the CUDA device being wrong at the time `dist.init_process_group` is called**. Neither
+`batch_isend_irecv` nor `new_group()` can work around this: the NCCL parent communicator
+that PyTorch creates when the default group is first used is keyed on the device that was
+current **at `init_process_group` call time**.
+
+Lightning Fabric's subprocess launcher calls `init_process_group` before calling user code,
+and before setting each rank's `cuda:rank` device. All ranks therefore register their
+communicator under `cuda:0` (the default). When ranks 1 and 2 later try to do P2P on
+tensors living on `cuda:1`/`cuda:2`, NCCL can't find a matching parent communicator.
+
+Neither `batch_isend_irecv` nor `new_group()` circumvent this: both still ultimately call
+into the same broken default-process-group NCCL communicator hierarchy.
+
+### Fix applied
+
+Replaced Lightning Fabric with `torch.multiprocessing.spawn`, which gives full control over
+process initialization order. The worker function now does:
+
+```python
+torch.cuda.set_device(rank)          # set device FIRST
+dist.init_process_group(             # THEN init NCCL — communicator registers under cuda:rank
+    backend="nccl",
+    init_method="env://",
+    world_size=num_devices,
+    rank=rank,
+)
+```
+
+All test data is generated on the main process (CPU) and passed to workers via the
+`mp.spawn` args tuple, avoiding any broadcast-before-init ordering issues. The
+`_p2p_group` workaround is removed; `batch_isend_irecv` is kept (it remains the correct
+API for multi-rank P2P).

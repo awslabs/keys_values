@@ -11,12 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import pytest
-import lightning as L
-from lightning.fabric.strategies import DDPStrategy
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from litgpt.utils import _RunIf
+import lightning as L
+from lightning.fabric.strategies import DDPStrategy
 
 from keys_values.attention.flex_attention import (
     scaled_dot_product_attention_flexatt,
@@ -242,114 +245,91 @@ def test_sdpa_distributed_vs_single_on_prefill(
         cache_length=kv_len,
         dtype=dtype,
     )
+    # Generate all data on the main process (CPU) and distribute per rank.
+    # Workers receive their slice via the mp.spawn args tuple.
+    data_all = random_args_cache_forward(params, num=kv_len, vocab_size=config.vocab_size)
+    data_for_rank, q_inds = distribute_and_reorder_data(data_all, num_devices, input_pos=0)
 
-    # Distributed computation
-    fabric = L.Fabric(
-        devices=num_devices,
-        num_nodes=1,
-        strategy=DDPStrategy(static_graph=True, broadcast_buffers=False),
-        precision="bf16-true",
-    )
-    fabric.launch(
+    mp.spawn(
         run_sdpa_distributed_vs_single_on_prefill,
-        config=config,
-        params=params,
-        atol=atol,
-        rtol=rtol,
+        args=(num_devices, config, data_all, data_for_rank, q_inds, atol, rtol),
+        nprocs=num_devices,
+        join=True,
     )
 
 
 def run_sdpa_distributed_vs_single_on_prefill(
-    fabric: L.Fabric,
+    rank: int,
+    num_devices: int,
     config: Config,
-    params: KVCacheParams,
+    data_all,
+    data_for_rank,
+    q_inds,
     atol,
     rtol,
 ):
-    rank = fabric.local_rank
-    num_devices = fabric.world_size
+    # Set the device BEFORE init_process_group so NCCL registers its
+    # communicator under the correct device for this rank.
+    torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
-    prefix = f"[Rank {rank}]: "
-    kv_len = params.cache_length
-    input_pos = 0
+    dist.init_process_group(
+        backend="nccl",
+        init_method="env://",
+        world_size=num_devices,
+        rank=rank,
+    )
+    try:
+        kv_len = data_for_rank[rank]["key"].shape[2]
+        input_pos = 0
+        data = {k: v.to(device=device) for k, v in data_for_rank[rank].items()
+                if k in ("query", "key", "value")}
 
-    # Sample data on master rank, transfer to other ranks. We are using
-    # broadcasts, which is simpler than P2P.
-    names = ("query", "key", "value")
-    if rank == 0:
-        print(prefix + "Sampling data")
-        data_all = random_args_cache_forward(
-            params,
-            num=kv_len,
-            vocab_size=config.vocab_size,
-            device=device,
+        flexatt_args_diag = RingDiagFlexAttentionArgs()
+        flexatt_args_offdiag = RingOffdiagFlexAttentionArgs(num_devices=num_devices)
+        ring_att_comp = RingAttentionComputation(
+            rank_r=rank,
+            flexatt_args_diag=flexatt_args_diag,
+            flexatt_args_offdiag=flexatt_args_offdiag,
         )
-        data_for_rank, q_inds = distribute_and_reorder_data(data_all, num_devices, input_pos)
-        data_trans = {
-            name: torch.cat(
-                [x[name].unsqueeze(0) for x in data_for_rank],
-                dim=0,
-            )
-            for name in names
-        }
-    else:
-        data_trans = {name: None for name in names}
-        data_all = None
-        q_inds = None
-    print(prefix + "Broadcasting data")
-    data_trans = {
-        name: fabric.broadcast(vals) for name, vals in data_trans.items()
-    }
-    data = {name: data_trans[name][rank].clone() for name in names}
-    del data_trans
-
-    # Distributed computation
-    flexatt_args_diag = RingDiagFlexAttentionArgs()
-    flexatt_args_offdiag = RingOffdiagFlexAttentionArgs(num_devices=num_devices)
-    ring_att_comp = RingAttentionComputation(
-        rank_r=rank,
-        flexatt_args_diag=flexatt_args_diag,
-        flexatt_args_offdiag=flexatt_args_offdiag,
-    )
-    driver = RingAttentionDriver(ring_att_comp)
-    print(prefix + "Created driver")
-    outputs = driver(
-        queries=data["query"],
-        keys=data["key"],
-        values=data["value"],
-        scale=None,
-        input_pos=input_pos,
-        num_new_tokens=kv_len,
-        config=config,
-    )
-    print(prefix + "Done computation")
-    dist_outputs = fabric.all_gather(outputs)
-    dist_outputs = [dist_outputs[i] for i in range(num_devices)]
-    print(prefix + "Gathered outputs")
-
-    # Only on master rank
-    if rank == 0:
-        # Single computation
-        flexatt_args = FlexAttentionArgs()
-        output_all = scaled_dot_product_attention_flexatt(
-            flexatt_args=flexatt_args,
-            query=data_all["query"],
-            key=data_all["key"],
-            value=data_all["value"],
-            scale_factor=None,
-            sliding_window_size=None,
-            attention_logit_softcapping=None,
+        driver = RingAttentionDriver(ring_att_comp)
+        outputs = driver(
+            queries=data["query"],
+            keys=data["key"],
+            values=data["value"],
+            scale=None,
             input_pos=input_pos,
-            token_positions=None,
+            num_new_tokens=kv_len * num_devices,
+            config=config,
         )
-        single_outputs = [output_all[:, :, q_ind, :] for q_ind in q_inds]
-        # Comparison
-        for _rank, (d_output, s_output) in enumerate(
-            zip(dist_outputs, single_outputs)
-        ):
-            print(f"Outputs for rank {_rank}")
-            torch.testing.assert_close(d_output, s_output, atol=atol, rtol=rtol)
+
+        # Gather all per-rank outputs onto rank 0
+        outputs_gathered = [torch.zeros_like(outputs) for _ in range(num_devices)]
+        dist.all_gather(outputs_gathered, outputs)
+
+        if rank == 0:
+            flexatt_args = FlexAttentionArgs()
+            output_all = scaled_dot_product_attention_flexatt(
+                flexatt_args=flexatt_args,
+                query=data_all["query"].to(device=device),
+                key=data_all["key"].to(device=device),
+                value=data_all["value"].to(device=device),
+                scale_factor=None,
+                sliding_window_size=None,
+                attention_logit_softcapping=None,
+                input_pos=input_pos,
+                token_positions=None,
+            )
+            single_outputs = [output_all[:, :, q_ind, :] for q_ind in q_inds]
+            for _rank, (d_output, s_output) in enumerate(
+                zip(outputs_gathered, single_outputs)
+            ):
+                print(f"Outputs for rank {_rank}")
+                torch.testing.assert_close(d_output, s_output, atol=atol, rtol=rtol)
+    finally:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", "29500")
     test_sdpa_distributed_vs_single_on_prefill(4, 2, 512, torch.float16, 3)

@@ -105,13 +105,6 @@ class RingAttentionDriver:
         self._retain_others = retain_others
         self._other_keys = None
         self._other_values = None
-        # A dedicated process group for P2P ops.  In NCCL eager initialization
-        # mode, P2P ops on the default process group fail when tensors live on
-        # a non-default device (the parent communicator is keyed on the device
-        # that was current at init_process_group time, i.e. cuda:0).  Creating
-        # a new group here — after Lightning has already set each rank's device
-        # — causes ncclCommInitRank to register against the correct device.
-        self._p2p_group = dist.new_group()
 
     @property
     def num_devices(self) -> int:
@@ -166,18 +159,11 @@ class RingAttentionDriver:
 
         # Main loop
         for iter in range(self.num_devices):
-            # Send and receive KV via a dedicated P2P process group.
-            # The default group's NCCL communicator is keyed on the device
-            # current at init_process_group time (cuda:0), so P2P ops on
-            # cuda:1/2/... would fail with "parent communicator missing".
-            # self._p2p_group is created after the device is already set,
-            # so its communicator is correctly associated with each rank's
-            # actual device.
             reqs = dist.batch_isend_irecv([
-                dist.P2POp(dist.isend, buff_keys.read(),    rank_send, self._p2p_group),
-                dist.P2POp(dist.isend, buff_values.read(),  rank_send, self._p2p_group),
-                dist.P2POp(dist.irecv, buff_keys.write(),   rank_recv, self._p2p_group),
-                dist.P2POp(dist.irecv, buff_values.write(), rank_recv, self._p2p_group),
+                dist.P2POp(dist.isend, buff_keys.read(),    rank_send),
+                dist.P2POp(dist.isend, buff_values.read(),  rank_send),
+                dist.P2POp(dist.irecv, buff_keys.write(),   rank_recv),
+                dist.P2POp(dist.irecv, buff_values.write(), rank_recv),
             ])
             # Computation
             self.ring_att_comp(buff_keys.read(), buff_values.read())
