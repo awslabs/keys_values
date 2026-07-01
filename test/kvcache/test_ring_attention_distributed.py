@@ -13,6 +13,7 @@
 # limitations under the License.
 import pytest
 import lightning as L
+from lightning.fabric.strategies import DDPStrategy
 import torch
 
 from litgpt.utils import _RunIf
@@ -115,7 +116,7 @@ def test_sdpa_distributed_vs_single_on_chunk(
     fabric = L.Fabric(
         devices=num_devices,
         num_nodes=1,
-        strategy="auto",
+        strategy=DDPStrategy(static_graph=True, broadcast_buffers=False),
         precision="bf16-true",
     )
     fabric.launch(
