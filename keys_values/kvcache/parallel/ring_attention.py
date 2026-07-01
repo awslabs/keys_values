@@ -78,27 +78,6 @@ class DoubleBuffer:
         self._buffers = None
 
 
-def stream_decorator(s: Optional[torch.cuda.Stream]) -> Any:
-    return torch.cuda.stream(s) if s is not None else contextlib.nullcontext()
-
-
-def main_stream_waits_for_events(events: List[torch.Event]):
-    for event in events:
-        torch.cuda.current_stream().wait_event(event)
-    events.clear()
-
-
-def streams_wait_for_event(
-    streams: Iterable[torch.cuda.Stream],
-    event: Optional[torch.Event],
-):
-    if event is not None:
-        # Streams need to wait for GPU computation from previous
-        # iteration to finish
-        for s in streams:
-            s.wait_event(event)
-
-
 class RingAttentionDriver:
     """
     Implements RingAttention. This consists of a loop with `num_devices`
@@ -124,8 +103,6 @@ class RingAttentionDriver:
     ):
         self.ring_att_comp = ring_att_comp
         self._retain_others = retain_others
-        self._send_stream = torch.cuda.Stream()
-        self._recv_stream = torch.cuda.Stream()
         self._other_keys = None
         self._other_values = None
 
@@ -182,33 +159,19 @@ class RingAttentionDriver:
 
         # Main loop
         for iter in range(self.num_devices):
-            # First try: Use `reqs` returned by `isend`, `irecv`, but no events
-            # at end of transfer streams
-            # events_for_wait: List[torch.Event] = []
+            # Send KV and receive KV
             reqs = []
             # Send KV
-            with stream_decorator(self._send_stream):
-                reqs.append(dist.isend(tensor=buff_keys.read(), dst=rank_send))
-                reqs.append(dist.isend(tensor=buff_values.read(), dst=rank_send))
-                # events_for_wait.append(self._send_stream.record_event())
+            reqs.append(dist.isend(tensor=buff_keys.read(), dst=rank_send))
+            reqs.append(dist.isend(tensor=buff_values.read(), dst=rank_send))
             # Receive KV
-            with stream_decorator(self._recv_stream):
-                reqs.append(dist.irecv(tensor=buff_keys.write(), src=rank_recv))
-                reqs.append(dist.irecv(tensor=buff_values.write(), src=rank_recv))
-                # events_for_wait.append(self._recv_stream.record_event())
+            reqs.append(dist.irecv(tensor=buff_keys.write(), src=rank_recv))
+            reqs.append(dist.irecv(tensor=buff_values.write(), src=rank_recv))
             # Computation
             self.ring_att_comp(buff_keys.read(), buff_values.read())
-            main_event = torch.cuda.current_stream().record_event()
-            # Wait for sync
-            # - Main stream waits for all transfers to be complete (`reqs`)
-            # - Transfer streams wait for `main_event`
-            # main_stream_waits_for_events(events_for_wait)
+            # Main stream waits for all transfers to be complete (`reqs`)
             for req in reqs:
                 req.wait()
-            streams_wait_for_event(
-                (self._send_stream, self._recv_stream),
-                main_event,
-            )
             # At this point, all point-to-point transfers and computations have
             # finished. Now, flip the roles of buffers
             buff_keys.flip()
