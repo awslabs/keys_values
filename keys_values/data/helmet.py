@@ -160,6 +160,7 @@ class Helmet(SequenceLengthFilteredDataModule):
         metadata_dir: Optional[str] = None,
         trainloader_longest_first: bool = False,
         trainloader_shortest_first: bool = False,
+        recompute_lengths: bool = False,
     ):
         """
         Args:
@@ -186,6 +187,9 @@ class Helmet(SequenceLengthFilteredDataModule):
                 contains the longest sequences (useful for early OOM detection).
             trainloader_shortest_first: If ``True``, the first training batch
                 contains the shortest sequences.
+            recompute_lengths: If `True`, sequence lengths are recomputed even
+                if they are in the metadata file. The previous information is
+                overwritten.
 
         """
         super().__init__(
@@ -206,6 +210,7 @@ class Helmet(SequenceLengthFilteredDataModule):
         self.max_length = max_length
         self.dataset_parent_dir = dataset_parent_dir
         self.metadata_dir = metadata_dir
+        self._recompute_lengths = recompute_lengths
 
     def _metadata_keys(
         self,
@@ -320,7 +325,10 @@ class Helmet(SequenceLengthFilteredDataModule):
     def _get_seq_lengths(
         self, metadata: Optional[Dict[str, Any]], split: str
     ) -> Optional[List[int]]:
-        return get_dict(metadata, self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, split))
+        if not self._recompute_lengths:
+            return get_dict(metadata, self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, split))
+        else:
+            return None
 
     def _load_metadata(self) -> Optional[Dict[str, Any]]:
         if self.metadata_dir is None:

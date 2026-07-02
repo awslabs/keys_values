@@ -92,6 +92,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         trainloader_longest_first: bool = False,
         trainloader_shortest_first: bool = False,
         test_set_tag: Optional[str] = None,
+        recompute_lengths: bool = False,
     ):
         """
         Args:
@@ -124,6 +125,9 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
                 set is chosen. Current choices:
                 - "rest": All cases with sequence length > `max_seq_length`,
                     sorted by token sequence length (non-decreasing).
+            recompute_lengths: If `True`, sequence lengths are recomputed even
+                if they are in the metadata file. The previous information is
+                overwritten.
 
         """
         if test_set_tag is not None and test_set_tag not in SUPPORTED_TEST_SET_TAGS:
@@ -148,6 +152,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         self._is_sequence_classification = None
         self.debug_num_cases = debug_num_cases
         self.test_set_tag = test_set_tag
+        self._recompute_lengths = recompute_lengths
 
     def connect(
         self,
@@ -306,7 +311,10 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
     def _get_seq_lengths(
         self, metadata: Optional[Dict[str, Any]]
     ) -> Optional[List[int]]:
-        return get_dict(metadata, self._metadata_keys())
+        if not self._recompute_lengths:
+            return get_dict(metadata, self._metadata_keys())
+        else:
+            return None
 
     def _load_metadata(self, num_records: int) -> Optional[Dict[str, Any]]:
         if self.metadata_dir is None:
