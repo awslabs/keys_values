@@ -101,7 +101,6 @@ def _compare_contents(
         torch.testing.assert_close(sorted_contents[0][name], sorted_contents[1][name])
 
 
-# TODO: Variant where communications run in parallel
 @pytest.mark.parametrize(*args_equalize_before_after())
 def test_equalize_before_after(device, name, kwargs):
     """
@@ -286,3 +285,7 @@ def test_equalize_before_after(device, name, kwargs):
         contents=contents,
         essentially_1d=essentially_1d,
     )
+
+
+if __name__ == "__main__":
+    test_equalize_before_after(torch.device("cpu"), "lastrec-default", dict())

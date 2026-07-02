@@ -29,6 +29,13 @@ def _get_q_len_for_rank(
     input_pos: int,
     **kwargs,
 ) -> torch.Tensor:
+    """
+    Consider the values `j % num_devices`, where
+    `j in range(input_pos, input_pos + q_len)`. Return tensor
+    `q_len_for_rank`, so that `q_len_for_rank[r]` is the number of values
+    equal to `r`, for `r in range(num_devices)`.
+
+    """
     min_ql = q_len // num_devices
     num_plus1 = q_len - min_ql * num_devices
     q_len_for_rank = torch.full((num_devices,), min_ql, **kwargs)
@@ -51,6 +58,7 @@ def _get_communication_plan(
     """
     The communication plan maps `(from_device, to_device)` to a matrix whose
     rows are `[b, h, num_vecs]`, meaning that for `(b, h)`, `num_vecs` KV
+    vectors need to be transferred.
 
     If the KV cache is essentially 1D (`active_dimensions == ()`), matrices are
     single rows `[0, 0, num_vecs]`. But in other cases of
@@ -242,10 +250,7 @@ def _get_allocations(
             mass = row[-1]
             print(f"({src_rank}, {trg_rank}): ind={ind}, {b_h} -- {mass}")  # DEBUG
             pos = rel_pos[ind][b_h]
-            new_cols = torch.tensor(
-                positions[ind][b_h][pos : (pos + mass)],
-                **kwargs,
-            )
+            new_cols = positions[ind][b_h][pos : (pos + mass)].to(**kwargs)
             if not essentially_1d:
                 new_cols = torch.cat(
                     (
@@ -420,9 +425,12 @@ def equalize_cache_content(
     `(batch_size, n_query_groups, q_len)`, containing the overwrite positions
     for the virtual cache. Entries are in `range(num_devices * cache_length)`.
     A position `p` is assigned to rank `p % cache_length`, referring to local
-    position `p // cache_length` there. `overwrite_pos` must be compatible with
-    `kv_cache.active_dimensions()`. With less active dimensions, transfers are
-    more constrained.
+    position `p // cache_length` there. For each `(b, h)`, the overwrite positions
+    `overwrite_pos[b, h, :]` are mapped to the different ranks by
+    `overwrite_pos[b, h, :] % cache_length`. If the numbers of positions per rank
+    are different from `q_len(r)`, we need equalization for `(b, h)`.
+    `overwrite_pos` must be compatible with `kv_cache.active_dimensions()`. With
+    less active dimensions, transfers are more constrained.
 
     Args:
         rank: Rank of device
