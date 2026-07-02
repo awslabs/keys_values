@@ -45,6 +45,7 @@ from datasets import (
     load_dataset,
 )
 from tokenizers import Tokenizer as HFTokenizer
+from transformers import PreTrainedTokenizerFast
 
 enable_progress_bars()  # make sure bars aren't globally disabled
 load_dotenv()  # reads .env into environment
@@ -211,6 +212,8 @@ def load_helmet_dev_eval(
         A tuple of (dev_data, eval_data) datasets. Each data instance will contain at least "input", "output", "query_id", "max_length" fields.
 
     """
+    if tokenizer is not None:
+        tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer)
     dataset_parent_dir = Path(
         dataset_parent_dir
     ).expanduser()  # to ensure ~ can also exist in the given path
@@ -913,7 +916,7 @@ def load_long_doc_qa(
         "narrative_qa", "infinite_bench_qa", "infinite_bench_mc"
     ],
     max_length: Literal["8k", "16k", "32k", "64k", "128k"],
-    tokenizer: HFTokenizer,
+    tokenizer: PreTrainedTokenizerFast,
 ):
     """Load dataset that belongs to the long document question answering task."""
     shots = 2
@@ -1095,7 +1098,7 @@ def load_long_doc_qa(
 def load_summarization(
     dataset_key: Literal["infinite_bench_sum", "multi_lex_sum"],
     max_length: Literal["8k", "16k", "32k", "64k", "128k"],
-    tokenizer: HFTokenizer,
+    tokenizer: PreTrainedTokenizerFast,
 ):
     """Load dataset that belongs to the summarization task."""
     shots = 2
