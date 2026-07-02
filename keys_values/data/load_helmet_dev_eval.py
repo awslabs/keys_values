@@ -26,7 +26,7 @@ import tarfile
 import tempfile
 import zipfile
 from functools import partial
-from typing import Literal, Tuple
+from typing import Literal, Tuple, Optional
 import random
 from pathlib import Path
 from dotenv import load_dotenv
@@ -44,7 +44,7 @@ from datasets import (
     load_from_disk,
     load_dataset,
 )
-from transformers import AutoTokenizer
+from tokenizers import Tokenizer as HFTokenizer
 
 enable_progress_bars()  # make sure bars aren't globally disabled
 load_dotenv()  # reads .env into environment
@@ -195,6 +195,7 @@ def download_source_data(download_dir: str) -> None:
 
 def load_helmet_dev_eval(
     dataset_key,
+    tokenizer: Optional[HFTokenizer] = None,
     max_length: Literal["8k", "16k", "32k", "64k", "128k"] = "8k",
     dataset_parent_dir: str = DATASET_PARENT_DIR,
 ):
@@ -243,9 +244,17 @@ def load_helmet_dev_eval(
     elif dataset_key in ["trec_coarse", "trec_fine", "nlu", "banking77", "clinc150"]:
         dev_data, eval_data = load_icl(dataset_key, max_length)
     elif dataset_key in ["narrative_qa", "infinite_bench_qa", "infinite_bench_mc"]:
-        dev_data, eval_data = load_long_doc_qa(dataset_key, max_length)
+        if tokenizer is None:
+            raise ValueError("tokenizer must be provided")
+        dev_data, eval_data = load_long_doc_qa(
+            dataset_key, max_length, tokenizer,
+        )
     elif dataset_key in ["infinite_bench_sum", "multi_lex_sum"]:
-        dev_data, eval_data = load_summarization(dataset_key, max_length)
+        if tokenizer is None:
+            raise ValueError("tokenizer must be provided")
+        dev_data, eval_data = load_summarization(
+            dataset_key, max_length, tokenizer,
+        )
     elif dataset_key in ["json_kv", "ruler_mk_needle", "ruler_mk_uuid", "ruler_mv"]:
         dev_data, eval_data = load_synthetic(
             dataset_key, max_length, dataset_parent_dir
@@ -902,8 +911,9 @@ def _truncate_context_to_length(instance, tokenizer, length=131072, text_key="co
 def load_long_doc_qa(
     dataset_key: Literal[
         "narrative_qa", "infinite_bench_qa", "infinite_bench_mc"
-    ] = "narrative_qa",
-    max_length: Literal["8k", "16k", "32k", "64k", "128k"] = "8k",
+    ],
+    max_length: Literal["8k", "16k", "32k", "64k", "128k"],
+    tokenizer: HFTokenizer,
 ):
     """Load dataset that belongs to the long document question answering task."""
     shots = 2
@@ -933,9 +943,6 @@ def load_long_doc_qa(
         },
     }  # the max len can only be stored in this way, as they are hard-coded from the original code
     max_len = max_len_map[dataset_key][max_length]
-    tokenizer = AutoTokenizer.from_pretrained(
-        "meta-llama/Llama-2-7b-hf", token=HF_TOKEN
-    )
     eval_questions_num = 100
 
     instruction_template = get_instruction_template(dataset_key)[0]
@@ -1086,8 +1093,9 @@ def load_long_doc_qa(
 
 
 def load_summarization(
-    dataset_key: Literal["infinite_bench_sum", "multi_lex_sum"] = "infinite_bench_sum",
-    max_length: Literal["8k", "16k", "32k", "64k", "128k"] = "8k",
+    dataset_key: Literal["infinite_bench_sum", "multi_lex_sum"],
+    max_length: Literal["8k", "16k", "32k", "64k", "128k"],
+    tokenizer: HFTokenizer,
 ):
     """Load dataset that belongs to the summarization task."""
     shots = 2
@@ -1110,9 +1118,6 @@ def load_summarization(
         },
     }  # the max len can only be stored in this way, as they are hard-coded from the original code
     max_len = max_len_map[dataset_key][max_length]
-    tokenizer = AutoTokenizer.from_pretrained(
-        "meta-llama/Llama-2-7b-hf", token=HF_TOKEN
-    )
 
     instruction_template = get_instruction_template(dataset_key)[0]
     if dataset_key == "infinite_bench_sum":

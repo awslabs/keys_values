@@ -228,6 +228,7 @@ class Helmet(SequenceLengthFilteredDataModule):
     def _get_dataset(self) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
         dev_data, eval_data = load_helmet_dev_eval(
             self.dataset_key,
+            tokenizer=self.tokenizer.processor,
             max_length=self.max_length,
             dataset_parent_dir=self.dataset_parent_dir,
         )
