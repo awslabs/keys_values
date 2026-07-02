@@ -50,7 +50,6 @@ def _get_q_len_for_rank(
 
 def _get_communication_plan(
     num_devices: int,
-    cache_length: int,
     input_pos: int,
     overwrite_pos: torch.Tensor,
     active_dimensions: Tuple[int, ...],
@@ -61,12 +60,12 @@ def _get_communication_plan(
     vectors need to be transferred.
 
     If the KV cache is essentially 1D (`active_dimensions == ()`), matrices are
-    single rows `[0, 0, num_vecs]`. But in other cases of
+    single rows `[0, 0, num_vecs]`, which means that `num_vecs` KV vectors need
+    to be transferred for every `(b, h)`. But in other cases of
     `active_dimensions != (0, 1)`, we "flatten" content into the form above.
 
     Args:
         num_devices: Total number of ranks
-        cache_length: Length of cache on each rank
         input_pos: Token position where new content starts
         overwrite_pos: See :func:`equalize_cache_content`
         active_dimensions: Property of KV cache logic
@@ -97,8 +96,8 @@ def _get_communication_plan(
         )
     # Shapes: (bs, n_kv, num_devices) or (num_devices,)
     # Note: If `len(active_dimensions) == 1`, we do redundant work along the
-    # inactive dimension, but this does not matter.
-    # Determine the communications
+    # inactive dimension.
+    # Determine the communications (using greedy algorithm)
     communications = None
     while not torch.all(delta_per_rank == 0).item():
         # (bs, n_kv, 1) or (1,):
@@ -291,14 +290,11 @@ def _send(
     values: torch.Tensor,
     token_pos: torch.Tensor,
 ) -> Callable[[], bool]:
-    req_keys = dist.isend(keys, dst=trg_rank)
-    req_values = dist.isend(values, dst=trg_rank)
-    req_tps = dist.isend(token_pos, dst=trg_rank)
+    reqs = [dist.isend(x, src=trg_rank) for x in (keys, values, token_pos)]
 
     def wait() -> bool:
-        req_keys.wait()
-        req_values.wait()
-        req_tps.wait()
+        for req in reqs:
+            req.wait()
         return True
 
     return wait
@@ -311,14 +307,11 @@ def _receive(
     values: torch.Tensor,
     token_pos: torch.Tensor,
 ) -> Callable[[], bool]:
-    req_keys = dist.irecv(keys, src=src_rank)
-    req_values = dist.irecv(values, src=src_rank)
-    req_tps = dist.irecv(token_pos, src=src_rank)
+    reqs = [dist.irecv(x, src=src_rank) for x in (keys, values, token_pos)]
 
     def wait() -> bool:
-        req_keys.wait()
-        req_values.wait()
-        req_tps.wait()
+        for req in reqs:
+            req.wait()
         return True
 
     return wait
@@ -463,10 +456,9 @@ def equalize_cache_content(
             f"shape = {overwrite_pos.shape}\n"
             f"active_dimensions = {active_dimensions}"
         )
-    # Create communication plan
+    # Create communication plan: How many slots need to be transferred?
     comm_plan = _get_communication_plan(
         num_devices,
-        cache_length,
         input_pos,
         overwrite_pos,
         active_dimensions,
