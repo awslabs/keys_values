@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Tuple, Dict, Callable
+from collections import Counter
+from typing import List, Tuple, Dict, Callable, Set
 from unittest import mock
 
 import pytest
@@ -26,7 +27,13 @@ from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.smart_lastrec import SmartInitialLastRecentlyInsertedKVCache
-from keys_values.kvcache.parallel.equalize import equalize_cache_content
+from keys_values.kvcache.parallel.equalize import (
+    equalize_cache_content,
+    _get_delta_per_rank,
+    _get_communication_plan,
+    _get_allocations,
+    _get_q_len_for_rank,
+)
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     product_with_devices,
@@ -36,6 +43,238 @@ from keys_values.kvcache.test_utils import (
 )
 from keys_values.kvcache.test_utils_advanced import cache_kwargs_for_smart_lastrec
 from keys_values.utils import randint_torch, random_choices, index_to_3d
+
+
+def _sample_overwrite_pos(
+    batch_size: int,
+    n_query_groups: int,
+    q_len: int,
+    cache_length: int,
+    num_devices: int,
+    active_dimensions: Tuple[int, ...],
+    device: torch.device,
+) -> torch.Tensor:
+    shape = (batch_size, n_query_groups, q_len)
+    virtual_length = cache_length * num_devices
+    inner_shape = tuple(shape[i] for i in active_dimensions + (2,))
+    _inner = random_choices(inner_shape, size_range=virtual_length, device=device)
+    view_dims = list(shape)
+    exp_dims = list(shape[:-1]) + [-1]
+    for i in range(2):
+        if i in active_dimensions:
+            exp_dims[i] = -1
+        else:
+            view_dims[i] = 1
+    return _inner.view(*view_dims).expand(*exp_dims)
+
+
+@pytest.mark.parametrize(
+    "batch_size, n_query_groups, q_len, cache_length, input_pos, num_devices, essentially_1d",
+    [
+        (2, 4, 8, 256, 256 * 2 + 11, 2, False),
+        (4, 2, 64, 128, 128 * 4 + 5, 4, False),
+        (3, 4, 16, 512, 512 * 8 + 127, 8, False),
+        (5, 8, 13, 256, 256 * 3 + 15, 3, False),
+        (1, 4, 21, 256, 256 * 5 + 15, 5, False),
+        (4, 2, 15, 256, 256 * 7 + 15, 7, False),
+        (5, 8, 13, 256, 256 * 3 + 15, 3, True),
+        (1, 4, 21, 256, 256 * 5 + 15, 5, True),
+        (4, 2, 15, 256, 256 * 7 + 15, 7, True),
+    ],
+)
+def test_communication_plan(batch_size, n_query_groups, q_len, cache_length, input_pos, num_devices, essentially_1d):
+    active_dimensions = () if essentially_1d else (0, 1)
+    device = torch.device("cpu")
+
+    overwrite_pos = _sample_overwrite_pos(
+        batch_size,
+        n_query_groups,
+        q_len,
+        cache_length,
+        num_devices,
+        active_dimensions,
+        device,
+    )
+    comm_plan = _get_communication_plan(
+        num_devices=num_devices,
+        input_pos=input_pos,
+        overwrite_pos=overwrite_pos,
+        active_dimensions=active_dimensions,
+    )
+
+    # Test correctness of plan
+    # (1) Does the plan really equalize?
+    delta_per_rank = _get_delta_per_rank(
+        num_devices=num_devices,
+        q_len=q_len,
+        input_pos=input_pos,
+        overwrite_pos=overwrite_pos,
+        essentially_1d=essentially_1d,
+    )
+    if essentially_1d:
+        delta_per_rank = delta_per_rank.view(1, 1, -1)
+    print("delta_per_rank:")
+    if essentially_1d:
+        bh_range = [(0, 0)]
+    else:
+        bh_range = [(b, h) for b in range(batch_size) for h in range(n_query_groups)]
+    print(
+        "\n".join(
+            f"{(b, h)}: {delta_per_rank[b, h, :].tolist()}"
+            for b, h in bh_range
+        )
+    )
+    print("\ncommunication_plan:")
+    print("\n".join(f"{k}: {v.numpy()}" for k, v in comm_plan.items()))
+    for (src_rank, trg_rank), plan in comm_plan.items():
+        for row in plan:
+            b, h, num = tuple(int(x) for x in row)
+            assert num > 0, (src_rank, trg_rank, b, h, num)
+            delta_per_rank[b, h, src_rank] += num
+            delta_per_rank[b, h, trg_rank] -= num
+    assert torch.all(delta_per_rank == 0).item()
+    # (2) Communication must not go in both directions for any (b, h)
+    check: Dict[Tuple[int, int], Set[Tuple[int, int]]] = dict()
+    for (src_rank, trg_rank), plan in comm_plan.items():
+        ranks = (src_rank, trg_rank) if src_rank < trg_rank else (trg_rank, src_rank)
+        for row in plan:
+            b_h = (int(row[0]), int(row[1]))
+            vals = check.get(b_h, set())
+            assert ranks not in vals, (b_h, ranks, vals)
+            vals.add(ranks)
+            check[b_h] = vals
+
+
+@pytest.mark.parametrize(
+    "batch_size, n_query_groups, q_len, cache_length, input_pos, num_devices, essentially_1d",
+    [
+        (2, 4, 8, 256, 256 * 2 + 11, 2, False),
+        (4, 2, 64, 128, 128 * 4 + 5, 4, False),
+        (3, 4, 16, 512, 512 * 8 + 127, 8, False),
+        (5, 8, 13, 256, 256 * 3 + 15, 3, False),
+        (1, 4, 21, 256, 256 * 5 + 15, 5, False),
+        (4, 2, 15, 256, 256 * 7 + 15, 7, False),
+        (5, 8, 13, 256, 256 * 3 + 15, 3, True),
+        (1, 4, 21, 256, 256 * 5 + 15, 5, True),
+        (4, 2, 15, 256, 256 * 7 + 15, 7, True),
+    ],
+)
+def test_allocations_from_plan(batch_size, n_query_groups, q_len, cache_length, input_pos, num_devices, essentially_1d):
+    active_dimensions = () if essentially_1d else (0, 1)
+    device = torch.device("cpu")
+
+    overwrite_pos = _sample_overwrite_pos(
+        batch_size,
+        n_query_groups,
+        q_len,
+        cache_length,
+        num_devices,
+        active_dimensions,
+        device,
+    )
+    comm_plan = _get_communication_plan(
+        num_devices=num_devices,
+        input_pos=input_pos,
+        overwrite_pos=overwrite_pos,
+        active_dimensions=active_dimensions,
+    )
+    source_allocations, target_allocations = zip(
+        *[
+            _get_allocations(
+                rank=rank,
+                num_devices=num_devices,
+                input_pos=input_pos,
+                cache_length=cache_length,
+                overwrite_pos=overwrite_pos,
+                comm_plan=comm_plan,
+                active_dimensions=active_dimensions,
+            )
+            for rank in range(num_devices)
+        ]
+    )
+
+    # Test correctness of allocations.
+    # (1) Match sources with targets
+    for rank1 in range(num_devices):
+        for rank2 in range(num_devices):
+            if rank1 != rank2:
+                if rank2 in source_allocations[rank1]:
+                    assert rank1 in target_allocations[rank2]
+                    src = source_allocations[rank1][rank2]
+                    trg = target_allocations[rank2][rank1]
+                    assert src.shape == trg.shape
+                    if essentially_1d:
+                        assert src.ndim == trg.ndim == 1
+                    else:
+                        assert src.ndim == trg.ndim == 2
+                        assert src.shape[0] == 3
+                        cnt_src = Counter(
+                            (int(row[0]), int(row[1])) for row in src
+                        )
+                        cnt_trg = Counter(
+                            (int(row[0]), int(row[1])) for row in trg
+                        )
+                        assert cnt_src == cnt_trg
+                else:
+                    assert rank1 not in target_allocations[rank2]
+
+    # (2) We run over all communications, modifying `overwrite_pos` accordingly.
+    # We must end up with a balanced situations, where for all ranks and
+    # all `(b, h)`, there are as many local overwrite positions as stated
+    # by `_get_q_len_for_rank`.
+    bs = 1 if essentially_1d else batch_size
+    nh = 1 if essentially_1d else n_query_groups
+    local_overwrite_pos = []
+    for rank in range(num_devices):
+        is_for_me = (overwrite_pos % num_devices) == rank
+        local_overwrite_pos.append(
+            {
+                (b, h): overwrite_pos[b, h, is_for_me[b, h, :]] // num_devices
+                for b in range(bs)
+                for h in range(nh)
+            }
+        )
+    # HIER!
+
+    delta_per_rank = _get_delta_per_rank(
+        num_devices=num_devices,
+        q_len=q_len,
+        input_pos=input_pos,
+        overwrite_pos=overwrite_pos,
+        essentially_1d=essentially_1d,
+    )
+    if essentially_1d:
+        delta_per_rank = delta_per_rank.view(1, 1, -1)
+    print("delta_per_rank:")
+    if essentially_1d:
+        bh_range = [(0, 0)]
+    else:
+        bh_range = [(b, h) for b in range(batch_size) for h in range(n_query_groups)]
+    print(
+        "\n".join(
+            f"{(b, h)}: {delta_per_rank[b, h, :].tolist()}"
+            for b, h in bh_range
+        )
+    )
+    print("\ncommunication_plan:")
+    print("\n".join(f"{k}: {v.numpy()}" for k, v in comm_plan.items()))
+    for (src_rank, trg_rank), plan in comm_plan.items():
+        for row in plan:
+            b, h, num = tuple(int(x) for x in row)
+            assert num > 0, (src_rank, trg_rank, b, h, num)
+            delta_per_rank[b, h, src_rank] += num
+            delta_per_rank[b, h, trg_rank] -= num
+    assert torch.all(delta_per_rank == 0).item()
+    # (2) Communication must not go in both directions for any (b, h)
+    check: Dict[Tuple[int, int], Set[Tuple[int, int]]] = dict()
+    for (src_rank, trg_rank), plan in comm_plan.items():
+        ranks = (src_rank, trg_rank) if src_rank < trg_rank else (trg_rank, src_rank)
+        for row in plan:
+            b_h = (int(row[0]), int(row[1]))
+            vals = check.get(b_h, set())
+            assert ranks not in vals, (b_h, ranks, vals)
+            vals.add(ranks)
+            check[b_h] = vals
 
 
 def args_equalize_before_after() -> Tuple[str, List[tuple]]:
@@ -184,18 +423,15 @@ def test_equalize_before_after(device, name, kwargs):
     contents = [_extract_content(kv_caches)]
 
     # Equalization (parallel computation is mocked, see above)
-    shape = (batch_size, n_query_groups, q_len)
-    inner_shape = tuple(shape[i] for i in active_dimensions + (2,))
-    _inner = random_choices(inner_shape, size_range=virtual_length, device=device)
-    view_dims = list(shape)
-    exp_dims = list(shape[:-1]) + [-1]
-    for i in range(2):
-        if i in active_dimensions:
-            exp_dims[i] = -1
-        else:
-            view_dims[i] = 1
-    overwrite_pos = _inner.view(*view_dims).expand(*exp_dims)
-
+    overwrite_pos = _sample_overwrite_pos(
+        batch_size,
+        n_query_groups,
+        q_len,
+        cache_length,
+        num_devices,
+        active_dimensions,
+        device,
+    )
     # Mock proceeds in two phases. First phase 1 (send)
     source_stats = []
     target_stats = []

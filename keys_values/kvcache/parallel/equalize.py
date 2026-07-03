@@ -48,6 +48,33 @@ def _get_q_len_for_rank(
     return q_len_for_rank
 
 
+def _get_delta_per_rank(
+    num_devices: int,
+    q_len: int,
+    input_pos: int,
+    overwrite_pos: torch.Tensor,
+    essentially_1d: bool,
+) -> torch.Tensor:
+    kwargs = dict(dtype=overwrite_pos.dtype, device=overwrite_pos.device)
+    q_len_for_rank = _get_q_len_for_rank(num_devices, q_len, input_pos, **kwargs)
+    # Determine the Delta numbers
+    if essentially_1d:
+        shape = ()
+        overwrite_pos = overwrite_pos[0, 0, :]
+    else:
+        shape = (1, 1)
+    num_per_rank = (
+        (overwrite_pos % num_devices).unsqueeze(-1)
+        == torch.arange(num_devices, **kwargs).view(*shape, 1, -1)
+    ).sum(dim=-2)
+    delta_per_rank = num_per_rank - q_len_for_rank.view(*shape, -1)
+    if not torch.all(delta_per_rank.sum(dim=-1) == 0).item():
+        raise ValueError(
+            f"delta_per_rank must sum to 0 for each (b, h), but got:\n{delta_per_rank}"
+        )
+    return delta_per_rank
+
+
 def _get_communication_plan(
     num_devices: int,
     input_pos: int,
@@ -78,22 +105,13 @@ def _get_communication_plan(
     essentially_1d = active_dimensions == ()
     q_len = overwrite_pos.shape[-1]
     kwargs = dict(dtype=overwrite_pos.dtype, device=overwrite_pos.device)
-    q_len_for_rank = _get_q_len_for_rank(num_devices, q_len, input_pos, **kwargs)
-    # Determine the Delta numbers
-    if essentially_1d:
-        shape = ()
-        overwrite_pos = overwrite_pos[0, 0, :]
-    else:
-        shape = (1, 1)
-    num_per_rank = (
-        (overwrite_pos % num_devices).unsqueeze(-1)
-        == torch.arange(num_devices, **kwargs).view(*shape, 1, -1)
-    ).sum(dim=-2)
-    delta_per_rank = num_per_rank - q_len_for_rank.view(*shape, -1)
-    if not torch.all(delta_per_rank.sum(dim=-1) == 0).item():
-        raise ValueError(
-            f"delta_per_rank must sum to 0 for each (b, h), but got:\n{delta_per_rank}"
-        )
+    delta_per_rank = _get_delta_per_rank(
+        num_devices=num_devices,
+        q_len=q_len,
+        input_pos=input_pos,
+        overwrite_pos=overwrite_pos,
+        essentially_1d=essentially_1d,
+    )
     # Shapes: (bs, n_kv, num_devices) or (num_devices,)
     # Note: If `len(active_dimensions) == 1`, we do redundant work along the
     # inactive dimension.
@@ -106,17 +124,8 @@ def _get_communication_plan(
         smallest = delta_per_rank.gather(-1, ranks_smallest)
         largest = delta_per_rank.gather(-1, ranks_largest)
         min_vals = torch.minimum(largest, -smallest)
-        args1 = torch.cat(
-            (ranks_smallest, ranks_largest),
-            dim=-1,
-        )
-        args2 = torch.cat(
-            (ranks_largest, ranks_smallest),
-            dim=-1,
-        )
-        # (bs, n_kv, 3, 1) or (3, 1):
         extra = torch.cat(
-            (torch.where(largest >= -smallest, args1, args2), min_vals),
+            (ranks_smallest, ranks_largest, min_vals),
             dim=-1,
         ).unsqueeze(-1)
         if communications is None:
@@ -171,6 +180,8 @@ def _get_communication_plan(
         }
 
 
+# HIER: What IS an allocation?
+# ==> Another test!
 def _get_allocations(
     rank: int,
     num_devices: int,
@@ -183,12 +194,17 @@ def _get_allocations(
     """
     Return source and target allocations for rank `rank`.
 
-    Source allocations apply when `rank` is the source in a communication,
-    listing cache positions which are not to be overwritten. They are indexed
-    by `trg_rank`, the target rank in the communication.
-    Target allocations apply when `rank` is the target in a communication,
-    listing overwriting positions. They are indexed by `src_rank`, the source
-    rank in the communication.
+    Source allocations apply when `rank` is the source rank in a communication.
+    `source_allocations` is a dictionary, mapping target rank to positions of
+    shape `(3, num)`, or `(num,)` if `essentially_1d`. These are positions to
+    read from cache buffers. The content is sent to the target rank in order
+    not to be evicted.
+
+    Target allocations apply when `rank` is the target rank in a communication.
+    `target_allocations` is a dictionary, mapping source rank to positions of
+    shape `(3, num)`, or `(num,)` if `essentially_1d`. These are positions to
+    write into cache buffers. The content is received from the source rank and
+    overwrites slots to be evicted here.
 
     Args:
         rank: Rank of device
@@ -211,7 +227,11 @@ def _get_allocations(
     else:
         # In this case, the dictionaries have a single entry with key (0, 0)
         batch_size, n_query_groups, q_len = 1, 1, overwrite_pos.shape[-1]
-    # Lists of size two: First target, then source
+    # Lists of size two: First for target, then for source
+    # - `positions[0][(b, h)]`: Local overwrite positions for `rank`. These
+    #   positions can become target for a communication
+    # - `positions[1][(b, h)]`: Local positions for `rank` not to be overwritten.
+    #   These positions can become source for a communication
     positions = [
         {
             (b, h): overwrite_pos[b, h, is_for_me[b, h, :]] // num_devices
@@ -222,20 +242,25 @@ def _get_allocations(
     q_len_for_me = _get_q_len_for_rank(num_devices, q_len, input_pos, **kwargs)[rank]
     _other_pos = dict()
     for b_h, ow_pos in positions[0].items():
+        # Only if local overwrite positions less than `q_len_for_me`, so that
+        # `rank` is a source for `b_h`
         num = q_len_for_me - ow_pos.shape[0]
         if num > 0:
             ow_set = set(ow_pos.tolist())
+            # `num` positions which can be source
             _other_pos[b_h] = torch.tensor(
                 list(islice((x for x in range(cache_length) if x not in ow_set), num)),
                 **kwargs,
             )
-    positions.append(_other_pos)
+    positions.append(_other_pos)  # source part
+    # `rel_pos[k][b_h]` entries in `positions[k][b_h]` have been used already:
     rel_pos = [
         {(b, h): 0 for b in range(batch_size) for h in range(n_query_groups)}
         for _ in range(2)
     ]
     allocations = [dict(), dict()]
     for (src_rank, trg_rank), plan in comm_plan.items():
+        # `positions[ind]`, `rel_pos[ind]` pertains to `rank`
         if trg_rank == rank:
             ind = 0
             other_rank = src_rank
@@ -245,12 +270,25 @@ def _get_allocations(
         else:
             continue
         for row in plan:
+            # `b_h`: Transfer `mass` from `src_rank` -> `trg_rank`
             b_h = (int(row[0]), int(row[1]))
-            mass = row[-1]
+            mass = int(row[-1])
             print(f"({src_rank}, {trg_rank}): ind={ind}, {b_h} -- {mass}")  # DEBUG
             pos = rel_pos[ind][b_h]
+            if ind == 1 and b_h not in positions[ind]:
+                raise IndexError(
+                    f"Internal error: b_h={b_h}, positions[0]={positions[0][b_h]}, q_len_for_me={q_len_for_me}"
+                )
+            if positions[ind][b_h].numel() < pos + mass:
+                raise IndexError(
+                    f"Internal error: b_h={b_h}, positions[{ind}]={positions[ind][b_h]}, pos={pos}, mass={mass}"
+                )
+            # Local positions to read from (`ind == 1`) or write to (`ind == 0`)
+            # Shape: `(mass,)`
             new_cols = positions[ind][b_h][pos : (pos + mass)].to(**kwargs)
             if not essentially_1d:
+                # Must be `[[b, h, p0], [b, h, p1], ...]`
+                # Shape: `(3, mass)`
                 new_cols = torch.cat(
                     (
                         torch.tensor(b_h, **kwargs).unsqueeze(-1).expand(-1, mass),
@@ -265,7 +303,7 @@ def _get_allocations(
                 )
             else:
                 allocations[ind][other_rank] = new_cols
-            rel_pos[ind][b_h] += mass
+            rel_pos[ind][b_h] = pos + mass
     return allocations[1], allocations[0]
 
 
