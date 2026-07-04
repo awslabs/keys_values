@@ -198,7 +198,7 @@ def _get_allocations(
     `source_allocations` is a dictionary, mapping target rank to positions of
     shape `(3, num)`, or `(num,)` if `essentially_1d`. These are positions to
     read from cache buffers. The content is sent to the target rank in order
-    not to be evicted.
+    not to be evicted. Their slots become overwrite positions here,
 
     Target allocations apply when `rank` is the target rank in a communication.
     `target_allocations` is a dictionary, mapping source rank to positions of
@@ -273,7 +273,6 @@ def _get_allocations(
             # `b_h`: Transfer `mass` from `src_rank` -> `trg_rank`
             b_h = (int(row[0]), int(row[1]))
             mass = int(row[-1])
-            print(f"({src_rank}, {trg_rank}): ind={ind}, {b_h} -- {mass}")  # DEBUG
             pos = rel_pos[ind][b_h]
             if ind == 1 and b_h not in positions[ind]:
                 raise IndexError(

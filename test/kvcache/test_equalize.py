@@ -172,6 +172,7 @@ def test_allocations_from_plan(batch_size, n_query_groups, q_len, cache_length, 
         active_dimensions,
         device,
     )
+    kwargs = dict(dtype=overwrite_pos.dtype, device=device)
     comm_plan = _get_communication_plan(
         num_devices=num_devices,
         input_pos=input_pos,
@@ -209,19 +210,19 @@ def test_allocations_from_plan(batch_size, n_query_groups, q_len, cache_length, 
                         assert src.ndim == trg.ndim == 2
                         assert src.shape[0] == 3
                         cnt_src = Counter(
-                            (int(row[0]), int(row[1])) for row in src
+                            (int(row[0]), int(row[1])) for row in src.T
                         )
                         cnt_trg = Counter(
-                            (int(row[0]), int(row[1])) for row in trg
+                            (int(row[0]), int(row[1])) for row in trg.T
                         )
-                        assert cnt_src == cnt_trg
+                        assert cnt_src == cnt_trg, (cnt_src, cnt_trg)
                 else:
                     assert rank1 not in target_allocations[rank2]
 
-    # (2) We run over all communications, modifying `overwrite_pos` accordingly.
-    # We must end up with a balanced situations, where for all ranks and
-    # all `(b, h)`, there are as many local overwrite positions as stated
-    # by `_get_q_len_for_rank`.
+    # (2) We run over all communications, modifying a copy of local overwrite
+    # positions. We must end up with a balanced situations, where for all
+    # `(b, h)`, there are as many local overwrite positions as stated by
+    # `_get_q_len_for_rank`.
     bs = 1 if essentially_1d else batch_size
     nh = 1 if essentially_1d else n_query_groups
     local_overwrite_pos = []
@@ -234,47 +235,59 @@ def test_allocations_from_plan(batch_size, n_query_groups, q_len, cache_length, 
                 for h in range(nh)
             }
         )
-    # HIER!
-
-    delta_per_rank = _get_delta_per_rank(
-        num_devices=num_devices,
-        q_len=q_len,
-        input_pos=input_pos,
-        overwrite_pos=overwrite_pos,
-        essentially_1d=essentially_1d,
+    for src_rank, src_allocs in enumerate(source_allocations):
+        for trg_rank, src_alloc in src_allocs.items():
+            trg_alloc = target_allocations[trg_rank][src_rank]
+            if essentially_1d:
+                src_alloc = torch.cat(
+                    (
+                        torch.zeros((1, 1), **kwargs).expand(2, src_alloc.shape[-1]),
+                        src_alloc.unsqueeze(0),
+                    ),
+                    dim=0,
+                )
+                trg_alloc = torch.cat(
+                    (
+                        torch.zeros((1, 1), **kwargs).expand(2, trg_alloc.shape[-1]),
+                        trg_alloc.unsqueeze(0),
+                    ),
+                    dim=0,
+                )
+            # src_rank -> trg_rank
+            append_me = dict()
+            for row in src_alloc.T:
+                b_h = (0, 0) if essentially_1d else (int(row[0]), int(row[1]))
+                vals = append_me.get(b_h, [])
+                vals.append(int(row[-1]))
+                append_me[b_h] = vals
+            for b_h, vals in append_me.items():
+                current = local_overwrite_pos[src_rank][b_h]
+                local_overwrite_pos[src_rank][b_h] = torch.cat(
+                    (current, torch.tensor(vals, **kwargs))
+                )
+            remove_me = dict()
+            for row in trg_alloc.T:
+                b_h = (0, 0) if essentially_1d else (int(row[0]), int(row[1]))
+                vals = remove_me.get(b_h, [])
+                vals.append(int(row[-1]))
+                remove_me[b_h] = vals
+            for b_h, vals in remove_me.items():
+                sz = len(vals)
+                current = local_overwrite_pos[trg_rank][b_h]
+                start = (current == vals[0]).nonzero(as_tuple=True)[0]
+                assert start.numel() > 0, (src_rank, trg_rank, b_h, vals, current)
+                start = start.item()
+                assert current.numel() >= start + sz and current[start:(start + sz)].tolist() == vals, (src_rank, trg_rank, b_h, vals, current)
+                local_overwrite_pos[trg_rank][b_h] = torch.cat(
+                    (current[:start], current[start + sz:])
+                )
+    q_len_for_rank = _get_q_len_for_rank(
+        num_devices, q_len, input_pos, **kwargs,
     )
-    if essentially_1d:
-        delta_per_rank = delta_per_rank.view(1, 1, -1)
-    print("delta_per_rank:")
-    if essentially_1d:
-        bh_range = [(0, 0)]
-    else:
-        bh_range = [(b, h) for b in range(batch_size) for h in range(n_query_groups)]
-    print(
-        "\n".join(
-            f"{(b, h)}: {delta_per_rank[b, h, :].tolist()}"
-            for b, h in bh_range
-        )
-    )
-    print("\ncommunication_plan:")
-    print("\n".join(f"{k}: {v.numpy()}" for k, v in comm_plan.items()))
-    for (src_rank, trg_rank), plan in comm_plan.items():
-        for row in plan:
-            b, h, num = tuple(int(x) for x in row)
-            assert num > 0, (src_rank, trg_rank, b, h, num)
-            delta_per_rank[b, h, src_rank] += num
-            delta_per_rank[b, h, trg_rank] -= num
-    assert torch.all(delta_per_rank == 0).item()
-    # (2) Communication must not go in both directions for any (b, h)
-    check: Dict[Tuple[int, int], Set[Tuple[int, int]]] = dict()
-    for (src_rank, trg_rank), plan in comm_plan.items():
-        ranks = (src_rank, trg_rank) if src_rank < trg_rank else (trg_rank, src_rank)
-        for row in plan:
-            b_h = (int(row[0]), int(row[1]))
-            vals = check.get(b_h, set())
-            assert ranks not in vals, (b_h, ranks, vals)
-            vals.add(ranks)
-            check[b_h] = vals
+    for rank, local_opos in enumerate(local_overwrite_pos):
+        should_be = q_len_for_rank[rank].item()
+        for b_h, vals in local_opos.items():
+            assert vals.numel() == should_be, (rank, should_be, b_h, vals)
 
 
 def args_equalize_before_after() -> Tuple[str, List[tuple]]:
