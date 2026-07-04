@@ -180,8 +180,6 @@ def _get_communication_plan(
         }
 
 
-# HIER: What IS an allocation?
-# ==> Another test!
 def _get_allocations(
     rank: int,
     num_devices: int,
@@ -327,7 +325,7 @@ def _send(
     values: torch.Tensor,
     token_pos: torch.Tensor,
 ) -> Callable[[], bool]:
-    reqs = [dist.isend(x, src=trg_rank) for x in (keys, values, token_pos)]
+    reqs = [dist.isend(x, dst=trg_rank) for x in (keys, values, token_pos)]
 
     def wait() -> bool:
         for req in reqs:
@@ -372,7 +370,6 @@ def _execute_communication(
     assert rank in (src_rank, trg_rank)
     active_dimensions = kv_cache.active_dimensions()
     essentially_1d = active_dimensions == ()
-    result = None
     dtype = kv_cache.dtype
     device = kv_cache.device
     head_size = kv_cache.head_size
@@ -416,6 +413,8 @@ def _execute_communication(
             values=values,
             token_pos=token_pos,
         )
+    else:
+        result = None
     return result
 
 
@@ -546,6 +545,12 @@ def equalize_cache_content(
     for result in results:
         src_rank = result.src_rank
         index = target_allocations[src_rank]
+        num_vecs = index.shape[-1]
+        sz = num_vecs * shape[0] * shape[1] if essentially_1d else num_vecs
+        if result.keys.shape != (sz, head_size) or result.token_pos.shape != (num_vecs,):
+            raise IndexError(
+                f"src_rank {src_rank}: keys {result.keys.shape} vs {(sz, head_size)}, token_pos {result.token_pos.shape} vs {(num_vecs,)}"
+            )
         if not essentially_1d:
             kv_cache.kv_buffers.set_vectors(
                 index=index,

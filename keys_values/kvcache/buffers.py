@@ -569,6 +569,7 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         self._check_index(index)
         res_k = self.k[index[0], index[1], index[2], :]
         res_v = self.v[index[0], index[1], index[2], :]
+        assert res_k.shape == (index.shape[-1], self.k.shape[[-1]])  # DEBUG
         if out_key is None:
             out_key = res_k
         else:

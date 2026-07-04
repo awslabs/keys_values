@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections import Counter
+from functools import partial
 from typing import List, Tuple, Dict, Callable, Set
 from unittest import mock
 
@@ -290,13 +291,78 @@ def test_allocations_from_plan(batch_size, n_query_groups, q_len, cache_length, 
             assert vals.numel() == should_be, (rank, should_be, b_h, vals)
 
 
-def args_equalize_before_after() -> Tuple[str, List[tuple]]:
-    names = [
-        (name, dict())
-        for name in KVCacheFactory.supported_names()
-        if name.endswith("-default") and not name.startswith("dense")
-    ]
-    return product_with_devices(names[1:2], "name, kwargs")
+def _mock_send_phase1(
+    src_rank: int,
+    trg_rank: int,
+    keys: torch.Tensor,
+    values: torch.Tensor,
+    token_pos: torch.Tensor,
+    communications: Dict[Tuple[int, int], Dict[str, torch.Tensor]],
+) -> Callable[[], bool]:
+    communications[(src_rank, trg_rank)] = {
+        "keys": keys,
+        "values": values,
+        "token_pos": token_pos,
+    }
+    return lambda: True
+
+
+def _mock_receive_phase1(
+    src_rank: int,
+    trg_rank: int,
+    keys: torch.Tensor,
+    values: torch.Tensor,
+    token_pos: torch.Tensor,
+) -> Callable[[], bool]:
+    return lambda: False
+
+
+def _mock_send_phase2(
+    src_rank: int,
+    trg_rank: int,
+    keys: torch.Tensor,
+    values: torch.Tensor,
+    token_pos: torch.Tensor,
+) -> Callable[[], bool]:
+    return lambda: True
+
+def _mock_receive_phase2(
+    src_rank: int,
+    trg_rank: int,
+    keys: torch.Tensor,
+    values: torch.Tensor,
+    token_pos: torch.Tensor,
+    communications: Dict[Tuple[int, int], Dict[str, torch.Tensor]],
+) -> Callable[[], bool]:
+    entry = communications[(src_rank, trg_rank)]
+    keys.copy_(entry["keys"])
+    values.copy_(entry["values"])
+    token_pos.copy_(entry["token_pos"])
+    return lambda: True
+
+
+@pytest.mark.parametrize(
+    "batch_size, n_query_groups, q_len, cache_length, input_pos, num_devices, essentially_1d",
+    [
+        (2, 4, 8, 256, 256 * 2 + 11, 2, False),
+        (4, 2, 64, 128, 128 * 4 + 5, 4, False),
+        (3, 4, 16, 512, 512 * 8 + 127, 8, False),
+        (5, 8, 13, 256, 256 * 3 + 15, 3, False),
+        (1, 4, 21, 256, 256 * 5 + 15, 5, False),
+        (4, 2, 15, 256, 256 * 7 + 15, 7, False),
+        (5, 8, 13, 256, 256 * 3 + 15, 3, True),
+        (1, 4, 21, 256, 256 * 5 + 15, 5, True),
+        (4, 2, 15, 256, 256 * 7 + 15, 7, True),
+    ],
+)
+def test_retain_content(batch_size, n_query_groups, q_len, cache_length, input_pos, num_devices, essentially_1d):
+    # Idea:
+    # - Cache dependent on essentially_1d, no quantization
+    # - Use regular token_pos, keys, values, random overwrite_pos
+    # - Mock communication
+    # - Check that all content is retained afterwards in union of caches,
+    #   just different ordering
+    # TODO!
 
 
 def _extract_content(
@@ -351,6 +417,15 @@ def _compare_contents(
     for name in ("token_pos", "key", "value"):
         print(name)
         torch.testing.assert_close(sorted_contents[0][name], sorted_contents[1][name])
+
+
+def args_equalize_before_after() -> Tuple[str, List[tuple]]:
+    names = [
+        (name, dict())
+        for name in KVCacheFactory.supported_names()
+        if name.endswith("-default") and not name.startswith("dense")
+    ]
+    return product_with_devices(names[1:2], "name, kwargs")
 
 
 @pytest.mark.parametrize(*args_equalize_before_after())
@@ -450,32 +525,12 @@ def test_equalize_before_after(device, name, kwargs):
     target_stats = []
     communications = dict()
 
-    def mock_send_phase1(
-        src_rank: int,
-        trg_rank: int,
-        keys: torch.Tensor,
-        values: torch.Tensor,
-        token_pos: torch.Tensor,
-    ) -> Callable[[], bool]:
-        communications[(src_rank, trg_rank)] = {
-            "keys": keys,
-            "values": values,
-            "token_pos": token_pos,
-        }
-        return lambda: True
-
-    def mock_receive_phase1(
-        src_rank: int,
-        trg_rank: int,
-        keys: torch.Tensor,
-        values: torch.Tensor,
-        token_pos: torch.Tensor,
-    ) -> Callable[[], bool]:
-        return lambda: False
-
-    with mock.patch("keys_values.kvcache.parallel.equalize._send", mock_send_phase1):
+    with mock.patch(
+        "keys_values.kvcache.parallel.equalize._send",
+        partial(_mock_send_phase1, communications=communications),
+    ):
         with mock.patch(
-            "keys_values.kvcache.parallel.equalize._receive", mock_receive_phase1
+            "keys_values.kvcache.parallel.equalize._receive", _mock_receive_phase1
         ):
             for rank, kv_cache in enumerate(kv_caches):
                 _source_stats, _ = equalize_cache_content(
@@ -488,31 +543,10 @@ def test_equalize_before_after(device, name, kwargs):
                 source_stats.append(_source_stats)
 
     # Second phase 2 (receive)
-    def mock_send_phase2(
-        src_rank: int,
-        trg_rank: int,
-        keys: torch.Tensor,
-        values: torch.Tensor,
-        token_pos: torch.Tensor,
-    ) -> Callable[[], bool]:
-        return lambda: True
-
-    def mock_receive_phase2(
-        src_rank: int,
-        trg_rank: int,
-        keys: torch.Tensor,
-        values: torch.Tensor,
-        token_pos: torch.Tensor,
-    ) -> Callable[[], bool]:
-        entry = communications[(src_rank, trg_rank)]
-        keys.copy_(entry["keys"])
-        values.copy_(entry["values"])
-        token_pos.copy_(entry["token_pos"])
-        return lambda: True
-
-    with mock.patch("keys_values.kvcache.parallel.equalize._send", mock_send_phase2):
+    with mock.patch("keys_values.kvcache.parallel.equalize._send", _mock_send_phase2):
         with mock.patch(
-            "keys_values.kvcache.parallel.equalize._receive", mock_receive_phase2
+            "keys_values.kvcache.parallel.equalize._receive",
+            partial(_mock_receive_phase2, communications=communications),
         ):
             for rank, kv_cache in enumerate(kv_caches):
                 _, _target_stats = equalize_cache_content(
