@@ -341,6 +341,58 @@ def _mock_receive_phase2(
     return lambda: True
 
 
+def _run_equalization(
+    kv_caches: List[KVCacheWithBuffers],
+    overwrite_pos: torch.Tensor,
+    input_pos: int,
+    verbose: bool = True,
+):
+    num_devices = len(kv_caches)
+    # Mock proceeds in two phases. First phase 1 (send)
+    source_stats = []
+    target_stats = []
+    communications = dict()
+
+    with mock.patch(
+        "keys_values.kvcache.parallel.equalize._send",
+        partial(_mock_send_phase1, communications=communications),
+    ):
+        with mock.patch(
+            "keys_values.kvcache.parallel.equalize._receive", _mock_receive_phase1
+        ):
+            for rank, kv_cache in enumerate(kv_caches):
+                _source_stats, _ = equalize_cache_content(
+                    rank=rank,
+                    num_devices=num_devices,
+                    input_pos=input_pos,
+                    kv_cache=kv_cache,
+                    overwrite_pos=overwrite_pos,
+                )
+                source_stats.append(_source_stats)
+
+    # Second phase 2 (receive)
+    with mock.patch("keys_values.kvcache.parallel.equalize._send", _mock_send_phase2):
+        with mock.patch(
+            "keys_values.kvcache.parallel.equalize._receive",
+            partial(_mock_receive_phase2, communications=communications),
+        ):
+            for rank, kv_cache in enumerate(kv_caches):
+                _, _target_stats = equalize_cache_content(
+                    rank=rank,
+                    num_devices=num_devices,
+                    input_pos=input_pos,
+                    kv_cache=kv_cache,
+                    overwrite_pos=overwrite_pos,
+                )
+                target_stats.append(_target_stats)
+
+    if verbose:
+        for rank, (src, trg) in enumerate(zip(source_stats, target_stats)):
+            num_sent = sum(src.values())
+            num_recv = sum(trg.values())
+            print(f"{rank}: Sent {num_sent:3d}, received {num_recv:3d}")
+
+
 @pytest.mark.parametrize(
     "batch_size, n_query_groups, q_len, cache_length, input_pos, num_devices, essentially_1d",
     [
@@ -362,7 +414,79 @@ def test_retain_content(batch_size, n_query_groups, q_len, cache_length, input_p
     # - Mock communication
     # - Check that all content is retained afterwards in union of caches,
     #   just different ordering
-    # TODO!
+    seed = 31415927
+    torch.random.manual_seed(seed)
+    vocab_size = cache_length * num_devices * 2
+    dtype = torch.bfloat16
+    device = torch.device("cpu")
+    if essentially_1d:
+        name = "lastrec-default"
+    else:
+        name = "h2o-default"
+
+    head_size = 4
+    n_head = n_query_groups
+    params = KVCacheParams(
+        max_batch_size=batch_size,
+        n_query_groups=n_query_groups,
+        cache_length=cache_length,
+        head_size=head_size,
+        n_head=n_head,
+        dtype=dtype,
+    )
+    virtual_length = cache_length * num_devices
+    kv_caches = [create_kv_cache(name, params) for _ in range(num_devices)]
+    index_kwargs = dict(
+        dtype=kv_caches[0].token_positions().dtype, device=device,
+    )
+    active_dimensions = kv_caches[0].active_dimensions()
+    assert essentially_1d == (active_dimensions == ())
+    # Assign content to buffers
+    for rank, kv_cache in enumerate(kv_caches):
+        token_pos = torch.arange(
+            rank * cache_length,
+            (rank + 1) * cache_length,
+            **index_kwargs,
+        )
+        key = token_pos.to(dtype=dtype).view(1, 1, -1, 1).expand(
+            batch_size, n_query_groups, -1, head_size)
+        value = (
+            token_pos.unsqueeze(-1) * torch.arange(head_size, **index_kwargs)
+        ).to(dtype=dtype).view(1, 1, -1, head_size).expand(batch_size, n_query_groups, -1, -1)
+        query = torch.randn(
+            (batch_size, n_query_groups, cache_length, head_size),
+            dtype=dtype,
+            device=device,
+        )
+        kv_cache(
+            query=query,
+            key=key,
+            value=value,
+            token_idx=token_pos,
+        )
+        if essentially_1d:
+            kv_cache.token_pos.copy_(token_pos)
+        else:
+            kv_cache.token_pos.copy_(index_to_3d(token_pos, batch_size, n_query_groups))
+    # Sample overwrite positions at random
+    q_len = randint_torch(virtual_length // 8, (virtual_length * 3) // 4)
+    input_pos = randint_torch(virtual_length, virtual_length * 2)
+    overwrite_pos = _sample_overwrite_pos(
+        batch_size,
+        n_query_groups,
+        q_len,
+        cache_length,
+        num_devices,
+        active_dimensions,
+        device,
+    )
+    # Equalization (parallel computation is mocked)
+    _run_equalization(kv_caches, overwrite_pos, input_pos)
+
+    # Check consistency:
+    # - token_pos must cover all of range(virtual_length)
+    # - keys, values must be consistent with token_pos
+    # HIER!
 
 
 def _extract_content(
@@ -520,48 +644,7 @@ def test_equalize_before_after(device, name, kwargs):
         active_dimensions,
         device,
     )
-    # Mock proceeds in two phases. First phase 1 (send)
-    source_stats = []
-    target_stats = []
-    communications = dict()
-
-    with mock.patch(
-        "keys_values.kvcache.parallel.equalize._send",
-        partial(_mock_send_phase1, communications=communications),
-    ):
-        with mock.patch(
-            "keys_values.kvcache.parallel.equalize._receive", _mock_receive_phase1
-        ):
-            for rank, kv_cache in enumerate(kv_caches):
-                _source_stats, _ = equalize_cache_content(
-                    rank=rank,
-                    num_devices=num_devices,
-                    input_pos=input_pos,
-                    kv_cache=kv_cache,
-                    overwrite_pos=overwrite_pos,
-                )
-                source_stats.append(_source_stats)
-
-    # Second phase 2 (receive)
-    with mock.patch("keys_values.kvcache.parallel.equalize._send", _mock_send_phase2):
-        with mock.patch(
-            "keys_values.kvcache.parallel.equalize._receive",
-            partial(_mock_receive_phase2, communications=communications),
-        ):
-            for rank, kv_cache in enumerate(kv_caches):
-                _, _target_stats = equalize_cache_content(
-                    rank=rank,
-                    num_devices=num_devices,
-                    input_pos=input_pos,
-                    kv_cache=kv_cache,
-                    overwrite_pos=overwrite_pos,
-                )
-                target_stats.append(_target_stats)
-
-    for rank, (src, trg) in enumerate(zip(source_stats, target_stats)):
-        num_sent = sum(src.values())
-        num_recv = sum(trg.values())
-        print(f"{rank}: Sent {num_sent:3d}, received {num_recv:3d}")
+    _run_equalization(kv_caches, overwrite_pos, input_pos)
 
     contents.append(_extract_content(kv_caches))
     _compare_contents(
