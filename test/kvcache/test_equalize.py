@@ -402,10 +402,11 @@ def _run_equalization(
         (5, 8, 13, 256, 256 * 3 + 15, 3, False),
         (1, 4, 21, 256, 256 * 5 + 15, 5, False),
         (4, 2, 15, 256, 256 * 7 + 15, 7, False),
+        (2, 4, 8, 256, 256 * 2 + 11, 2, True),
         (5, 8, 13, 256, 256 * 3 + 15, 3, True),
         (1, 4, 21, 256, 256 * 5 + 15, 5, True),
         (4, 2, 15, 256, 256 * 7 + 15, 7, True),
-    ],
+    ][6:7],
 )
 def test_retain_content(batch_size, n_query_groups, q_len, cache_length, input_pos, num_devices, essentially_1d):
     # Idea:
@@ -436,9 +437,7 @@ def test_retain_content(batch_size, n_query_groups, q_len, cache_length, input_p
     )
     virtual_length = cache_length * num_devices
     kv_caches = [create_kv_cache(name, params) for _ in range(num_devices)]
-    index_kwargs = dict(
-        dtype=kv_caches[0].token_positions().dtype, device=device,
-    )
+    index_kwargs = dict(dtype=torch.int, device=device)
     active_dimensions = kv_caches[0].active_dimensions()
     assert essentially_1d == (active_dimensions == ())
     # Assign content to buffers
@@ -462,7 +461,7 @@ def test_retain_content(batch_size, n_query_groups, q_len, cache_length, input_p
             query=query,
             key=key,
             value=value,
-            token_idx=token_pos,
+            token_idx=token_pos.unsqueeze(0).expand(batch_size, -1),
         )
         if essentially_1d:
             kv_cache.token_pos.copy_(token_pos)
@@ -486,7 +485,37 @@ def test_retain_content(batch_size, n_query_groups, q_len, cache_length, input_p
     # Check consistency:
     # - token_pos must cover all of range(virtual_length)
     # - keys, values must be consistent with token_pos
-    # HIER!
+    if essentially_1d:
+        all_token_pos = torch.cat(
+            [kv_cache.token_positions()[0, 0, :] for kv_cache in kv_caches]
+        ).cpu().view(1, 1, -1)
+    else:
+        all_token_pos = torch.cat(
+            [kv_cache.token_positions().cpu() for kv_cache in kv_caches],
+            dim=-1,
+        )
+    assert all_token_pos.shape[-1] == virtual_length
+    torch.testing.assert_close(
+        torch.sort(all_token_pos, dim=-1).values,
+        torch.arange(
+            virtual_length, device=torch.device("cpu"), dtype=all_token_pos.dtype,
+        ).view(1, 1, -1).expand(*all_token_pos.shape),
+    )
+    all_keys = []
+    all_values = []
+    for kv_cache in kv_caches:
+        k_and_v = kv_cache.get_keys_values()
+        assert k_and_v is not None
+        all_keys.append(k_and_v.keys())
+        all_values.append(k_and_v.values())
+    all_keys = torch.cat(all_keys, dim=2)
+    all_values = torch.cat(all_values, dim=2)
+    cmp_keys = all_token_pos.to(dtype=dtype).unsqueeze(-1).expand(*all_keys.shape)
+    torch.testing.assert_close(all_keys, cmp_keys)
+    cmp_values = (
+        all_token_pos.unsqueeze(-1) * torch.arange(head_size, **index_kwargs).view(1, 1, 1, -1)
+    ).expand(*all_values.shape)
+    torch.testing.assert_close(all_values, cmp_values)
 
 
 def _extract_content(
