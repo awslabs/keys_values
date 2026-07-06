@@ -352,19 +352,77 @@ def _receive(
     return wait
 
 
+def _append_local_overwrite_pos(
+    local_overwrite_pos: Dict[Tuple[int, int], torch.Tensor],
+    index: torch.Tensor,
+    essentially_1d: bool,
+    **kwargs,
+):
+    append_me = dict()
+    for row in index.T:
+        b_h = (0, 0) if essentially_1d else (int(row[0]), int(row[1]))
+        vals = append_me.get(b_h, [])
+        vals.append(int(row[-1]))
+        append_me[b_h] = vals
+    for b_h, append_pos in append_me.items():
+        local_overwrite_pos[b_h] = torch.cat(
+            (local_overwrite_pos[b_h], torch.tensor(append_pos, **kwargs))
+        )
+
+
+def _remove_local_overwrite_pos(
+    local_overwrite_pos: Dict[Tuple[int, int], torch.Tensor],
+    index: torch.Tensor,
+    essentially_1d: bool,
+    src_rank: int,
+    trg_rank: int,
+):
+    remove_me = dict()
+    for row in index.T:
+        b_h = (0, 0) if essentially_1d else (int(row[0]), int(row[1]))
+        vals = remove_me.get(b_h, [])
+        vals.append(int(row[-1]))
+        remove_me[b_h] = vals
+    for b_h, remove_pos in remove_me.items():
+        sz = len(remove_pos)
+        current = local_overwrite_pos[b_h]
+        start = (current == remove_pos[0]).nonzero(as_tuple=True)[0]
+        if start.numel() != 1:
+            raise IndexError(
+                f"Internal error (don't find remove_pos): src_rank = {src_rank}, "
+                f"trg_rank = {trg_rank}, b_h = {b_h}, remove_pos = "
+                f"{remove_pos}, ow_pos = {current}"
+            )
+        start = start.item()
+        if current.numel() < start + sz or current[start:(start + sz)].tolist() != remove_pos:
+            raise IndexError(
+                f"Internal error (don't find remove_pos): src_rank = {src_rank}, "
+                f"trg_rank = {trg_rank}, b_h = {b_h}, remove_pos = "
+                f"{remove_pos}, ow_pos = {current}, start = {start}"
+            )
+        local_overwrite_pos[b_h] = torch.cat(
+            (current[:start], current[(start + sz):])
+        )
+
+
 def _execute_communication(
     rank: int,
     src_rank: int,
     trg_rank: int,
     source_allocations: Dict[int, torch.Tensor],
+    target_allocations: Dict[int, torch.Tensor],
     num_vecs: int,
     kv_cache: KVCacheWithBuffers,
     source_stats: Dict[int, int],
+    local_overwrite_pos: Dict[Tuple[int, int], torch.Tensor],
 ) -> Optional[WriteBackToBuffer]:
     """
     Note: If `len(active_dimensions) == 1`, one dimension in `token_pos` has
     stride 0, we could exploit this to transmit less data. But this is dwarfed
     by `keys, values`, so we don't bother here.
+
+    `local_overwrite_pos` maps `(b, h)` to local overwrite positions for rank
+    `rank`. This is updated here.
 
     """
     assert rank in (src_rank, trg_rank)
@@ -375,6 +433,7 @@ def _execute_communication(
     head_size = kv_cache.head_size
     int_dtype = kv_cache.token_positions().dtype
     kwargs = dict(dtype=dtype, device=device)
+    int_kwargs = dict(dtype=int_dtype, device=device)
     shape = (kv_cache.batch_size, kv_cache.n_query_groups)
     sz = num_vecs * shape[0] * shape[1] if essentially_1d else num_vecs
     keys = torch.zeros((sz, head_size), **kwargs)
@@ -398,11 +457,23 @@ def _execute_communication(
                 out_value=values.view(*shape, num_vecs, head_size),
             )
             token_pos.copy_(kv_cache.token_positions()[0, 0, index])
-        source_stats[trg_rank] = source_stats.get(trg_rank, 0) + sz
         callback = _send(src_rank, trg_rank, keys, values, token_pos)
+        source_stats[trg_rank] = source_stats.get(trg_rank, 0) + sz
+        # Update `local_overwrite_pos`
+        # `src_rank`: Positions are added to `local_overwrite_pos`, as their
+        # content is moved to `trg_rank` and can be overwritten
+        _append_local_overwrite_pos(
+            local_overwrite_pos, index, essentially_1d, **int_kwargs,
+        )
     else:
         # Receive from `src_rank`
         callback = _receive(src_rank, trg_rank, keys, values, token_pos)
+        # `trg_rank`: Positions are removed from `local_overwrite_pos`, as content
+        # just sent from `src_rank` must not be overwritten
+        index = target_allocations[src_rank]
+        _remove_local_overwrite_pos(
+            local_overwrite_pos, index, essentially_1d, src_rank, trg_rank,
+        )
     do_write_back = callback()
 
     # Write-back to`trg_rank` cache is delayed
@@ -424,7 +495,7 @@ def equalize_cache_content(
     input_pos: int,
     kv_cache: KVCacheWithBuffers,
     overwrite_pos: torch.Tensor,
-) -> Tuple[Dict[int, int], Dict[int, int]]:
+) -> Tuple[torch.Tensor, Dict[int, int], Dict[int, int]]:
     """
     In context parallelism, a "virtual" KV cache of length
     `num_devices * cache_length` is realized on `num_devices` devices, each
@@ -454,10 +525,8 @@ def equalize_cache_content(
     `(batch_size, n_query_groups, q_len)`, containing the overwrite positions
     for the virtual cache. Entries are in `range(num_devices * cache_length)`.
     A position `p` is assigned to rank `p % cache_length`, referring to local
-    position `p // cache_length` there. For each `(b, h)`, the overwrite positions
-    `overwrite_pos[b, h, :]` are mapped to the different ranks by
-    `overwrite_pos[b, h, :] % cache_length`. If the numbers of positions per rank
-    are different from `q_len(r)`, we need equalization for `(b, h)`.
+    position `p // cache_length` there. If for any `(b, h)`, the numbers of
+    positions per rank are different from `q_len(r)`, we need equalization.
     `overwrite_pos` must be compatible with `kv_cache.active_dimensions()`. With
     less active dimensions, transfers are more constrained.
 
@@ -466,11 +535,14 @@ def equalize_cache_content(
         num_devices: Total number of ranks
         input_pos: Token position where new content starts
         kv_cache: KV cache on rank `rank`
-        overwrite_pos: See above
+        overwrite_pos: See above.
 
     Returns:
-        `source_stats`, `target_stats`, which are dictionaries mapping
-        rank of communication partner to number of KV vectors transferred.
+        `(local_overwrite_pos, source_stats, target_stats)`, where
+        `local_overwrite_pos` are local overwrite positions for this rank
+        after equalization, shape `(batch_size, n_query_groups, q_len(rank))`.
+        `source_stats`, `target_stats` are dictionaries mapping rank of
+        communication partner to number of KV vectors transferred.
 
     """
     if num_devices <= 1:
@@ -512,6 +584,19 @@ def equalize_cache_content(
         comm_plan,
         active_dimensions,
     )
+    # Local overwrite positions
+    is_for_me = (overwrite_pos % num_devices) == rank
+    bs = 1 if essentially_1d else kv_cache.batch_size
+    nh = 1 if essentially_1d else kv_cache.n_query_groups
+    local_overwrite_pos = {
+        (b, h): overwrite_pos[b, h, is_for_me[b, h, :]] // num_devices
+        for b in range(bs)
+        for h in range(nh)
+    }
+    q_len = overwrite_pos.shape[-1]
+    q_len_for_me = _get_q_len_for_rank(
+        num_devices, q_len, input_pos, dtype=overwrite_pos.dtype, device=overwrite_pos.device,
+    )[rank]
 
     # Communication (each transfer can run in parallel)
     # Note: Results are first collected, then written back en bulk below.
@@ -532,16 +617,43 @@ def equalize_cache_content(
                 src_rank,
                 trg_rank,
                 source_allocations,
+                target_allocations,
                 num_vecs,
                 kv_cache,
                 source_stats,
+                local_overwrite_pos,
             )
             if result is not None:
                 results.append(result)
 
+    # Combine `local_overwrite_pos`
+    shape = (kv_cache.batch_size, kv_cache.n_query_groups)
+    for b_h, low_pos in local_overwrite_pos.items():
+        if low_pos.numel() != q_len_for_me:
+            raise IndexError(
+                "Internal error (local_overwrite_pos has wrong size): "
+                f"b_h={b_h}, low_pos.shape={low_pos.shape}, q_len_for_me={q_len_for_me}"
+            )
+    if essentially_1d:
+        local_overwrite_pos = index_to_3d(local_overwrite_pos[(0, 0)], *shape)
+    else:
+        local_overwrite_pos = torch.cat(
+            [
+                torch.cat(
+                    [
+                        vals.unsqueeze(0)
+                        for b_h, vals in local_overwrite_pos.items()
+                        if b_h[0] == b
+                    ],
+                    dim=0,
+                ).unsqueeze(0)
+                for b in range(kv_cache.batch_size)
+            ],
+            dim=0,
+        )
+
     # Write back to cache buffer
     target_stats = dict()
-    shape = (kv_cache.batch_size, kv_cache.n_query_groups)
     for result in results:
         src_rank = result.src_rank
         index = target_allocations[src_rank]
@@ -586,4 +698,4 @@ def equalize_cache_content(
             )
         target_stats[src_rank] = target_stats.get(src_rank, 0) + result.keys.shape[0]
 
-    return source_stats, target_stats
+    return local_overwrite_pos, source_stats, target_stats

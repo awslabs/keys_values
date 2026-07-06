@@ -34,6 +34,8 @@ from keys_values.kvcache.parallel.equalize import (
     _get_communication_plan,
     _get_allocations,
     _get_q_len_for_rank,
+    _append_local_overwrite_pos,
+    _remove_local_overwrite_pos,
 )
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
@@ -255,33 +257,19 @@ def test_allocations_from_plan(batch_size, n_query_groups, q_len, cache_length, 
                     dim=0,
                 )
             # src_rank -> trg_rank
-            append_me = dict()
-            for row in src_alloc.T:
-                b_h = (0, 0) if essentially_1d else (int(row[0]), int(row[1]))
-                vals = append_me.get(b_h, [])
-                vals.append(int(row[-1]))
-                append_me[b_h] = vals
-            for b_h, vals in append_me.items():
-                current = local_overwrite_pos[src_rank][b_h]
-                local_overwrite_pos[src_rank][b_h] = torch.cat(
-                    (current, torch.tensor(vals, **kwargs))
-                )
-            remove_me = dict()
-            for row in trg_alloc.T:
-                b_h = (0, 0) if essentially_1d else (int(row[0]), int(row[1]))
-                vals = remove_me.get(b_h, [])
-                vals.append(int(row[-1]))
-                remove_me[b_h] = vals
-            for b_h, vals in remove_me.items():
-                sz = len(vals)
-                current = local_overwrite_pos[trg_rank][b_h]
-                start = (current == vals[0]).nonzero(as_tuple=True)[0]
-                assert start.numel() > 0, (src_rank, trg_rank, b_h, vals, current)
-                start = start.item()
-                assert current.numel() >= start + sz and current[start:(start + sz)].tolist() == vals, (src_rank, trg_rank, b_h, vals, current)
-                local_overwrite_pos[trg_rank][b_h] = torch.cat(
-                    (current[:start], current[start + sz:])
-                )
+            _append_local_overwrite_pos(
+                local_overwrite_pos=local_overwrite_pos[src_rank],
+                index=src_alloc,
+                essentially_1d=essentially_1d,
+                **kwargs,
+            )
+            _remove_local_overwrite_pos(
+                local_overwrite_pos=local_overwrite_pos[trg_rank],
+                index=trg_alloc,
+                essentially_1d=essentially_1d,
+                src_rank=src_rank,
+                trg_rank=trg_rank,
+            )
     q_len_for_rank = _get_q_len_for_rank(
         num_devices, q_len, input_pos, **kwargs,
     )
@@ -402,7 +390,7 @@ def _run_equalization(
         (5, 8, 13, 256, 256 * 3 + 15, 3, False),
         (1, 4, 21, 256, 256 * 5 + 15, 5, False),
         (4, 2, 15, 256, 256 * 7 + 15, 7, False),
-        (2, 4, 8, 256, 256 * 2 + 11, 2, True),
+        (2, 4, 8, 32, 32 * 2 + 11, 2, True),
         (5, 8, 13, 256, 256 * 3 + 15, 3, True),
         (1, 4, 21, 256, 256 * 5 + 15, 5, True),
         (4, 2, 15, 256, 256 * 7 + 15, 7, True),
@@ -489,6 +477,9 @@ def test_retain_content(batch_size, n_query_groups, q_len, cache_length, input_p
         all_token_pos = torch.cat(
             [kv_cache.token_positions()[0, 0, :] for kv_cache in kv_caches]
         ).cpu().view(1, 1, -1)
+        for rank, kv_cache in enumerate(kv_caches):
+            print(f"Rank {rank}:")
+            print(kv_cache.token_positions()[0, 0, :].tolist())
     else:
         all_token_pos = torch.cat(
             [kv_cache.token_positions().cpu() for kv_cache in kv_caches],
