@@ -588,19 +588,29 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
             if pstart is None:
                 # Protected range not yet determined
                 tokens = tokens.tolist()
-                if self.range_is_prefix:
-                    num_left_pad = 0  # Ignore padding tokens
-                else:
-                    try:
-                        num_left_pad = next(
-                            i for i, t in enumerate(tokens) if t != self._pad_id
-                        )
-                    except StopIteration:
-                        # All tokens are padding
+                # Strip off left padding: Has to be done even if
+                # `range_is_prefix == True`, since the pad tokens derail the
+                # match for `end_initial_regex`. Have to add back `num_left_pad`
+                # below in this case.
+                try:
+                    num_left_pad = next(
+                        i for i, t in enumerate(tokens) if t != self._pad_id
+                    )
+                except StopIteration:
+                    # All tokens are padding
+                    if not self.range_is_prefix:
+                        # Skip this chunk, search in the next one
                         continue
-                tokens = tokens[num_left_pad:]
-                decoded = self.tokenizer.decode(tokens, skip_special_tokens=True)
-                match = re.search(self.end_initial_regex, decoded)
+                    else:
+                        # Protected range must be prefix, so must lie in first
+                        # chunk
+                        num_left_pad = -1
+                if num_left_pad != -1:
+                    tokens = tokens[num_left_pad:]
+                    decoded = self.tokenizer.decode(tokens, skip_special_tokens=True)
+                    match = re.search(self.end_initial_regex, decoded)
+                else:
+                    match = None
                 if match is not None:
                     raw_length = (
                         match.end(0) if self.include_end_string else match.start(0)
@@ -628,10 +638,17 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
                             new_length = max(diff_pos, 1)
                     except StopIteration:
                         pass
-                    new_length = min(new_length, max_range_length)
+                    if self.range_is_prefix:
+                        new_length += num_left_pad
                 else:
-                    new_length = min(max_range_length, len(tokens))
-                pstart = (self.input_pos + num_left_pad) % self.cache_length
+                    new_length = len(tokens)
+                    if self.range_is_prefix:
+                        new_length += num_left_pad
+                new_length = min(new_length, max_range_length)
+                if self.range_is_prefix:
+                    pstart = 0
+                else:
+                    pstart = (self.input_pos + num_left_pad) % self.cache_length
                 pend = pstart + new_length
                 if pend > self.cache_length:
                     pend -= self.cache_length
