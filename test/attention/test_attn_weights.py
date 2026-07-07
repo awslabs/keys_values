@@ -149,9 +149,7 @@ def eager_weights(query, key, scale, input_pos, token_positions):
 def get_variants(q_len: int):
     variants = (pytorch_reference_weights, eager_weights, flexatt_weights)
     names = ("PyTorch reference", "eager", "FlexAttention")
-    # TODO: Currently, FlashInfer is skipped for q_len = 1, because there is
-    # some bug. Fix it and remove this exclusion.
-    if _get_flashinfer_sdpa() is not None and q_len > 1:
+    if _get_flashinfer_sdpa() is not None:
         variants += (flashinfer_weights,)
         names += ("FlashInfer",)
     return variants, names
