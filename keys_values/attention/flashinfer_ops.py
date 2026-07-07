@@ -247,6 +247,14 @@ def sdpa_decode(
             "Vendored FlashInfer kernels are not available. " f"Error: {_load_error}"
         )
 
+    # The single query token is the last position, so causal masking is a
+    # no-op: it must attend to all of the KV cache. With return_weights=True,
+    # the tiled kernels are used, which default the query position to 0 if
+    # `input_pos` is not given, so `causal=True` would mask out everything
+    # except KV position 0 (issue #96). Pass `causal=False` in this case.
+    # With return_weights=False, keep `causal=True`, since the native
+    # FlashInfer decode kernel (which treats the query as the last position)
+    # is only dispatched for causal attention.
     attn_outputs, attn_weights = _ops.sdpa_decode(
         query,
         key,
@@ -255,7 +263,7 @@ def sdpa_decode(
         None,  # token_positions
         None,  # input_pos
         -1,  # sliding_window_size
-        True,  # causal
+        not return_weights,  # causal
         return_weights,
     )
     if return_weights:
