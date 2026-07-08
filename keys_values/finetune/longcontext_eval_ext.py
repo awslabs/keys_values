@@ -400,11 +400,6 @@ def main(
                     flex_extend_kv=False,
                 )
         sdpa = SDPAArgs(**sdpa)
-        if sdpa.flashinfer_attention:
-            print(
-                "FlashInfer SDPA not currently available for token generation: Setting sdpa.flashinfer_attention = False"
-            )
-            sdpa.flashinfer_attention = False
         if verbose is None:
             verbose = hyp_pars.get("verbose")
             if verbose is None:
