@@ -18,23 +18,31 @@ import torch
 from litgpt.tokenizer import Tokenizer
 
 from keys_values.evaluation.metrics import sub_exact_match, rouge_n_f1
-from keys_values.evaluation.evaluation import _eval_rerank, _eval_icl, _eval_infinite_mc
+from keys_values.evaluation.evaluation import (
+    _eval_rerank,
+    _eval_icl,
+    _eval_infinite_mc,
+    _eval_synthetic,
+    extract_value_token,
+)
 from keys_values.generate.base import batched_generate_fn
 from keys_values.long_context import LongContextInferenceModel
 
 METRICS_FOR_HELMET_TASKS = {
-    "nq": "sub_exact_match",
-    "trivia_qa": "sub_exact_match",
-    "pop_qa": "sub_exact_match",
-    "hotpot_qa": "sub_exact_match",
-    "ms_macro": "ndcg_at_10",
-    "trec_coarse": "exact_match",
-    "trec_fine": "exact_match",
-    "nlu": "exact_match",
     "banking77": "exact_match",
     "clinc150": "exact_match",
-    "infinite_bench_qa": "rouge_n_f1",
+    "hotpot_qa": "sub_exact_match",
     "infinite_bench_mc": "infinite_mc",
+    "infinite_bench_qa": "rouge_n_f1",
+    "json_kv": "synthetic_value_token",
+    "ms_macro": "ndcg_at_10",
+    "nlu": "exact_match",
+    "nq": "sub_exact_match",
+    "pop_qa": "sub_exact_match",
+    "ruler_mk_uuid": "synthetic_value_token",
+    "trec_coarse": "exact_match",
+    "trec_fine": "exact_match",
+    "trivia_qa": "sub_exact_match",
 }
 
 TargetType = Union[List[str], str]
@@ -61,16 +69,25 @@ def compute_metric(
             return float(any(sub_exact_match(output, target) for target in targets))
         else:
             return float(sub_exact_match(output, targets))
-    elif metric == "ndcg_at_10":
-        return _eval_rerank([output], [targets])
-    elif metric == "exact_match":
-        return _eval_icl([output], [targets])
-    elif metric == "rouge_n_f1":
-        return rouge_n_f1(output, targets)
-    elif metric == "exact_match":
-        return _eval_infinite_mc([output], [targets])
     else:
-        raise ValueError(f"Metric {metric} not supported")
+        if isinstance(targets, list):
+            raise ValueError(f"targets = {targets}, must be str, not list")
+        if metric == "rouge_n_f1":
+            return rouge_n_f1(output, targets)
+        elif metric == "ndcg_at_10":
+            return _eval_rerank([output], [targets])
+        elif metric == "exact_match":
+            return _eval_icl([output], [targets])
+        elif metric == "infinite_mc":
+            return _eval_infinite_mc([output], [targets])
+        elif metric == "synthetic_value_token":
+            return _eval_synthetic(
+                [output],
+                [targets],
+                extract_func=extract_value_token,
+            )
+        else:
+            raise ValueError(f"Metric {metric} not supported")
 
 
 class SampleBasedMetricsEvaluator:
