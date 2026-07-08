@@ -231,6 +231,10 @@ class GradientArgs:
         cachecp_pin_memory: If `True`, the CPU memory pages for KV cache
             checkpoints are pinned. This can run faster, but also needs more
             real CPU memory.
+        async_cpu_transfer: If `True`, CPU -> GPU and GPU -> CPU transfers
+            during gradient computation are run on separate CUDA streams, in
+            parallel with GPU computation. Requires `layercp_pin_memory=True`
+            and `cachecp_pin_memory=True`. Defaults to `False`.
         debug_print_annotations: If `True`, debug logging during `backward`
             computations are written which allow to track annotations for
             `autograd` saved tensors hooks.
@@ -245,6 +249,7 @@ class GradientArgs:
     max_match_trials_pack_arg: Optional[int] = None
     layercp_pin_memory: bool = True
     cachecp_pin_memory: bool = True
+    async_cpu_transfer: bool = False
     debug_print_annotations: bool = False
 
     def __post_init__(self):
@@ -262,6 +267,13 @@ class GradientArgs:
         elif self.cachecp_qname not in SUPPORTED_QUANTIZERS:
             raise ValueError(
                 f"cachecp_qname = {self.cachecp_qname} not supported, must be in {SUPPORTED_QUANTIZERS}"
+            )
+        if self.async_cpu_transfer and not (
+            self.layercp_pin_memory and self.cachecp_pin_memory
+        ):
+            raise ValueError(
+                "async_cpu_transfer=True requires layercp_pin_memory=True "
+                "and cachecp_pin_memory=True"
             )
         _check_int(self.max_match_trials_pack_arg, "max_match_trials_pack_arg")
 

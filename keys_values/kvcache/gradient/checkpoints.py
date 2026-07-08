@@ -527,8 +527,8 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         pos: int,
         out: DefaultKVCacheBuffers,
     ):
-        key = self.k[pos][:, ...]
-        value = self.v[pos][:, ...]
+        key = self.k[pos]
+        value = self.v[pos]
         device = out.device
         if device is not None:
             key = key.to(device, non_blocking=True)
