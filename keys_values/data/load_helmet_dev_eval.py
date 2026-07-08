@@ -250,13 +250,17 @@ def load_helmet_dev_eval(
         if tokenizer is None:
             raise ValueError("tokenizer must be provided")
         dev_data, eval_data = load_long_doc_qa(
-            dataset_key, max_length, tokenizer,
+            dataset_key,
+            max_length,
+            tokenizer,
         )
     elif dataset_key in ["infinite_bench_sum", "multi_lex_sum"]:
         if tokenizer is None:
             raise ValueError("tokenizer must be provided")
         dev_data, eval_data = load_summarization(
-            dataset_key, max_length, tokenizer,
+            dataset_key,
+            max_length,
+            tokenizer,
         )
     elif dataset_key in ["json_kv", "ruler_mk_needle", "ruler_mk_uuid", "ruler_mv"]:
         dev_data, eval_data = load_synthetic(
@@ -912,9 +916,7 @@ def _truncate_context_to_length(instance, tokenizer, length=131072, text_key="co
 
 
 def load_long_doc_qa(
-    dataset_key: Literal[
-        "narrative_qa", "infinite_bench_qa", "infinite_bench_mc"
-    ],
+    dataset_key: Literal["narrative_qa", "infinite_bench_qa", "infinite_bench_mc"],
     max_length: Literal["8k", "16k", "32k", "64k", "128k"],
     tokenizer: PreTrainedTokenizerFast,
 ):

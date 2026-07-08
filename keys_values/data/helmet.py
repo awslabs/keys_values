@@ -327,7 +327,9 @@ class Helmet(SequenceLengthFilteredDataModule):
         self, metadata: Optional[Dict[str, Any]], split: str
     ) -> Optional[List[int]]:
         if not self._recompute_lengths:
-            return get_dict(metadata, self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, split))
+            return get_dict(
+                metadata, self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, split)
+            )
         else:
             return None
 

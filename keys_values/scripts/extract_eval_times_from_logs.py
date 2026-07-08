@@ -16,7 +16,6 @@ import re
 import statistics
 from pathlib import Path
 
-
 _EVAL_RE = re.compile(
     r"\[rank (\d+) \|[^\]]*\]: Batch (?:(?:step-\d+|final), )?\[(\d+), (\d+)\]:.*eval_time = ([\d.]+) ms"
 )
@@ -35,11 +34,13 @@ def main(log_dir: Path, base_path: str) -> None:
     bp = re.escape(base_path.rstrip("/")) + "/"
     # subdir present (baseline/basemod): base_path/subdir/dataset/policy/eval/...
     store_re_subdir = re.compile(
-        bp + r"(baseline|basemod)/(helmet_[^/]+|longbench_[^/]+)/([^/]+)/eval/eval_metrics_\d+\.csv"
+        bp
+        + r"(baseline|basemod)/(helmet_[^/]+|longbench_[^/]+)/([^/]+)/eval/eval_metrics_\d+\.csv"
     )
     # subdir absent, task present: base_path/dataset/policy/task/eval/...
     store_re_task = re.compile(
-        bp + r"(helmet_[^/]+|longbench_[^/]+)/([^/]+)/(step-\d{6}|final)/eval/eval_metrics_\d+\.csv"
+        bp
+        + r"(helmet_[^/]+|longbench_[^/]+)/([^/]+)/(step-\d{6}|final)/eval/eval_metrics_\d+\.csv"
     )
     all_rows = []
 
@@ -133,7 +134,9 @@ def main(log_dir: Path, base_path: str) -> None:
                 times_by_combo[combo] = times
     else:
         for r in all_rows:
-            times_by_combo.setdefault((r["dataset"], r["policy"]), []).append(r["time_secs"])
+            times_by_combo.setdefault((r["dataset"], r["policy"]), []).append(
+                r["time_secs"]
+            )
 
     tex_lines = [
         r"\begin{tabular}{l" + "c" * len(datasets) + "}",
