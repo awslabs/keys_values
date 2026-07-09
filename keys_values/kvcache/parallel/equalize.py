@@ -359,6 +359,7 @@ def _append_local_overwrite_pos(
     **kwargs,
 ):
     append_me = dict()
+    index = index.T if index.ndim > 1 else index.unsqueeze(-1)
     for row in index.T:
         b_h = (0, 0) if essentially_1d else (int(row[0]), int(row[1]))
         vals = append_me.get(b_h, [])
@@ -378,7 +379,8 @@ def _remove_local_overwrite_pos(
     trg_rank: int,
 ):
     remove_me = dict()
-    for row in index.T:
+    index = index.T if index.ndim > 1 else index.unsqueeze(-1)
+    for row in index:
         b_h = (0, 0) if essentially_1d else (int(row[0]), int(row[1]))
         vals = remove_me.get(b_h, [])
         vals.append(int(row[-1]))
@@ -475,6 +477,10 @@ def _execute_communication(
             local_overwrite_pos, index, essentially_1d, src_rank, trg_rank,
         )
     do_write_back = callback()
+    # DEBUG
+    if essentially_1d:
+        print(f"Rank {rank}: local_overwrite_pos = {local_overwrite_pos[(0, 0)]}")
+    # END DEBUG
 
     # Write-back to`trg_rank` cache is delayed
     if do_write_back and rank == trg_rank:
@@ -597,6 +603,10 @@ def equalize_cache_content(
     q_len_for_me = _get_q_len_for_rank(
         num_devices, q_len, input_pos, dtype=overwrite_pos.dtype, device=overwrite_pos.device,
     )[rank]
+    # DEBUG
+    if essentially_1d:
+        print(f"Start: Rank {rank}: local_overwrite_pos = {local_overwrite_pos[(0, 0)]}, q_len_for_me = {q_len_for_me}")
+    # END DEBUG
 
     # Communication (each transfer can run in parallel)
     # Note: Results are first collected, then written back en bulk below.

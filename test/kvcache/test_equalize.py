@@ -13,7 +13,7 @@
 # limitations under the License.
 from collections import Counter
 from functools import partial
-from typing import List, Tuple, Dict, Callable, Set
+from typing import List, Tuple, Dict, Callable, Set, Optional
 from unittest import mock
 
 import pytest
@@ -334,7 +334,7 @@ def _run_equalization(
     overwrite_pos: torch.Tensor,
     input_pos: int,
     verbose: bool = True,
-):
+) -> torch.Tensor:
     num_devices = len(kv_caches)
     # Mock proceeds in two phases. First phase 1 (send)
     source_stats = []
@@ -349,7 +349,7 @@ def _run_equalization(
             "keys_values.kvcache.parallel.equalize._receive", _mock_receive_phase1
         ):
             for rank, kv_cache in enumerate(kv_caches):
-                _source_stats, _ = equalize_cache_content(
+                _, _source_stats, _ = equalize_cache_content(
                     rank=rank,
                     num_devices=num_devices,
                     input_pos=input_pos,
@@ -359,13 +359,14 @@ def _run_equalization(
                 source_stats.append(_source_stats)
 
     # Second phase 2 (receive)
+    local_overwrite_pos = []
     with mock.patch("keys_values.kvcache.parallel.equalize._send", _mock_send_phase2):
         with mock.patch(
             "keys_values.kvcache.parallel.equalize._receive",
             partial(_mock_receive_phase2, communications=communications),
         ):
             for rank, kv_cache in enumerate(kv_caches):
-                _, _target_stats = equalize_cache_content(
+                lop, _, _target_stats = equalize_cache_content(
                     rank=rank,
                     num_devices=num_devices,
                     input_pos=input_pos,
@@ -373,28 +374,141 @@ def _run_equalization(
                     overwrite_pos=overwrite_pos,
                 )
                 target_stats.append(_target_stats)
+                local_overwrite_pos.append(lop)
 
+    # Compile global new overwrite positions (ordering does not matter)
+    new_overwrite_pos = torch.cat(
+        [
+            lop * num_devices + rank
+            for rank, lop in enumerate(local_overwrite_pos)
+        ],
+        dim=-1,
+    )
+    if overwrite_pos.shape != new_overwrite_pos.shape:
+        raise IndexError(
+            "Internal error: new_overwrite_pos has wrong shape\n"
+            f"overwrite_pos:     {overwrite_pos.shape}\n"
+            f"new_overwrite_pos: {new_overwrite_pos.shape}\n"
+            f"lops: {[lop.shape for lop in local_overwrite_pos]}"
+        )
     if verbose:
         for rank, (src, trg) in enumerate(zip(source_stats, target_stats)):
             num_sent = sum(src.values())
             num_recv = sum(trg.values())
             print(f"{rank}: Sent {num_sent:3d}, received {num_recv:3d}")
+    return new_overwrite_pos
+
+
+def _extract_content(
+    kv_caches: List[KVCacheWithBuffers],
+    overwrite_pos: Optional[torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    """
+    If `overwrite_pos` is given, we exclude content to be overwritten.
+
+    In terms of ordering, we combine content from different caches by
+    concatenation.
+
+    """
+    num_devices = len(kv_caches)
+    cache_length = kv_caches[0].cache_length
+    parts = {
+        "key": [],
+        "value": [],
+        "token_pos": [],
+    }
+    for kv_cache in kv_caches:
+        k_and_v = kv_cache.kv_buffers.get_keys_values()
+        parts["key"].append(k_and_v.keys())
+        parts["value"].append(k_and_v.values())
+        parts["token_pos"].append(kv_cache.token_positions())
+    result = {k: torch.cat(v, dim=-1 if k == "token_pos" else -2) for k, v in parts.items()}
+    if overwrite_pos is not None:
+        shape = tuple(overwrite_pos.shape[:2])
+        kv_len = num_devices * cache_length
+        q_len = overwrite_pos.shape[-1]
+        head_size = result["key"].shape[-1]
+        # Convert positions (from interleaved ranks to one rank after the other)
+        kwargs = dict(dtype=torch.bool, device=overwrite_pos.device)
+        ov_pos = (overwrite_pos % num_devices) * cache_length + (overwrite_pos // num_devices)
+        mask = torch.zeros(shape + (kv_len,), **kwargs)
+        mask.scatter_(-1, ov_pos, torch.full(shape + (q_len,), True, **kwargs))
+        for name in ("key", "value"):
+            result[name] = result[name][~mask, :].reshape(*shape, -1, head_size)
+        result["token_pos"] = result["token_pos"][~mask].reshape(*shape, -1)
+    return result
+
+
+def _compare_contents(
+    contents: List[Dict[str, torch.Tensor]],
+    essentially_1d: bool,
+) -> None:
+    sorted_contents = []
+    for content in contents:
+        token_pos = content["token_pos"]
+        if essentially_1d:
+            token_pos = index_to_3d(token_pos, *content["key"].shape[:2])
+        sorted_key, sorted_value, extra_info = reorder_key_value(
+            key=content["key"],
+            value=content["value"],
+            token_positions=token_pos,
+            input_pos=8,  # not used
+            q_len=4,  # not used
+            sort_if_3d=True,
+        )
+        if essentially_1d:
+            sorted_token_pos = token_pos[0, 0, extra_info["sort_index"]]
+        else:
+            sorted_token_pos = reorder_buffer_given_extra_info(
+                buffer=token_pos,
+                **extra_info,
+            )
+        sorted_contents.append(
+            {
+                "key": sorted_key,
+                "value": sorted_value,
+                "token_pos": sorted_token_pos,
+            }
+        )
+    for name in ("token_pos", "key", "value"):
+        print(name)
+        torch.testing.assert_close(sorted_contents[0][name], sorted_contents[1][name])
+
+
+def _reorder_data(data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    new_key, new_value, extra_info = reorder_key_value(
+        data["key"],
+        data["value"],
+        data["token_pos"],
+        input_pos=data["key"].shape[2],
+        q_len=128,
+        sort_if_3d=True,
+    )
+    new_token_pos = reorder_buffer_given_extra_info(
+        buffer=data["token_pos"].unsqueeze(-1),
+        **extra_info,
+    ).squeeze(-1)
+    return {
+        "key": new_key,
+        "value": new_value,
+        "token_pos": new_token_pos,
+    }
 
 
 @pytest.mark.parametrize(
     "batch_size, n_query_groups, q_len, cache_length, input_pos, num_devices, essentially_1d",
     [
-        (2, 4, 8, 256, 256 * 2 + 11, 2, False),
-        (4, 2, 64, 128, 128 * 4 + 5, 4, False),
-        (3, 4, 16, 512, 512 * 8 + 127, 8, False),
-        (5, 8, 13, 256, 256 * 3 + 15, 3, False),
-        (1, 4, 21, 256, 256 * 5 + 15, 5, False),
-        (4, 2, 15, 256, 256 * 7 + 15, 7, False),
+        (2, 4, 8, 256, 256 * 2 + 11, 2, False),  # fails
+        (4, 2, 64, 128, 128 * 4 + 5, 4, False),  # fails
+        (3, 4, 16, 512, 512 * 8 + 127, 8, False),  # fails
+        (5, 8, 13, 256, 256 * 3 + 15, 3, False),  # fails
+        (1, 4, 21, 256, 256 * 5 + 15, 5, False),  # fails
+        (4, 2, 15, 256, 256 * 7 + 15, 7, False),  # fails
         (2, 4, 8, 32, 32 * 2 + 11, 2, True),
-        (5, 8, 13, 256, 256 * 3 + 15, 3, True),
-        (1, 4, 21, 256, 256 * 5 + 15, 5, True),
+        (5, 8, 13, 256, 256 * 3 + 15, 3, True),  # fails
+        (1, 4, 21, 256, 256 * 5 + 15, 5, True),  # fails
         (4, 2, 15, 256, 256 * 7 + 15, 7, True),
-    ][6:7],
+    ][7:8],
 )
 def test_retain_content(batch_size, n_query_groups, q_len, cache_length, input_pos, num_devices, essentially_1d):
     # Idea:
@@ -456,8 +570,6 @@ def test_retain_content(batch_size, n_query_groups, q_len, cache_length, input_p
         else:
             kv_cache.token_pos.copy_(index_to_3d(token_pos, batch_size, n_query_groups))
     # Sample overwrite positions at random
-    q_len = randint_torch(virtual_length // 8, (virtual_length * 3) // 4)
-    input_pos = randint_torch(virtual_length, virtual_length * 2)
     overwrite_pos = _sample_overwrite_pos(
         batch_size,
         n_query_groups,
@@ -467,100 +579,17 @@ def test_retain_content(batch_size, n_query_groups, q_len, cache_length, input_p
         active_dimensions,
         device,
     )
+    # Copy data not to be overwritten before equalization
+    data_before = _reorder_data(_extract_content(kv_caches, overwrite_pos))
+
     # Equalization (parallel computation is mocked)
-    _run_equalization(kv_caches, overwrite_pos, input_pos)
+    new_overwrite_pos = _run_equalization(kv_caches, overwrite_pos, input_pos)
 
-    # Check consistency:
-    # - token_pos must cover all of range(virtual_length)
-    # - keys, values must be consistent with token_pos
-    if essentially_1d:
-        all_token_pos = torch.cat(
-            [kv_cache.token_positions()[0, 0, :] for kv_cache in kv_caches]
-        ).cpu().view(1, 1, -1)
-        for rank, kv_cache in enumerate(kv_caches):
-            print(f"Rank {rank}:")
-            print(kv_cache.token_positions()[0, 0, :].tolist())
-    else:
-        all_token_pos = torch.cat(
-            [kv_cache.token_positions().cpu() for kv_cache in kv_caches],
-            dim=-1,
-        )
-    assert all_token_pos.shape[-1] == virtual_length
-    torch.testing.assert_close(
-        torch.sort(all_token_pos, dim=-1).values,
-        torch.arange(
-            virtual_length, device=torch.device("cpu"), dtype=all_token_pos.dtype,
-        ).view(1, 1, -1).expand(*all_token_pos.shape),
-    )
-    all_keys = []
-    all_values = []
-    for kv_cache in kv_caches:
-        k_and_v = kv_cache.get_keys_values()
-        assert k_and_v is not None
-        all_keys.append(k_and_v.keys())
-        all_values.append(k_and_v.values())
-    all_keys = torch.cat(all_keys, dim=2)
-    all_values = torch.cat(all_values, dim=2)
-    cmp_keys = all_token_pos.to(dtype=dtype).unsqueeze(-1).expand(*all_keys.shape)
-    torch.testing.assert_close(all_keys, cmp_keys)
-    cmp_values = (
-        all_token_pos.unsqueeze(-1) * torch.arange(head_size, **index_kwargs).view(1, 1, 1, -1)
-    ).expand(*all_values.shape)
-    torch.testing.assert_close(all_values, cmp_values)
-
-
-def _extract_content(
-    kv_caches: List[KVCacheWithBuffers],
-) -> Dict[str, torch.Tensor]:
-    essentially_1d = kv_caches[0].active_dimensions() == ()
-    parts = {
-        "key": [],
-        "value": [],
-        "token_pos": [],
-    }
-    for kv_cache in kv_caches:
-        k_and_v = kv_cache.kv_buffers.get_keys_values()
-        parts["key"].append(k_and_v.keys())
-        parts["value"].append(k_and_v.values())
-        tp = kv_cache.token_positions()
-        parts["token_pos"].append(tp[0, 0, :] if essentially_1d else tp)
-    return {k: torch.cat(v, dim=0 if k == "token_pos" else 2) for k, v in parts.items()}
-
-
-def _compare_contents(
-    contents: List[Dict[str, torch.Tensor]],
-    essentially_1d: bool,
-) -> None:
-    sorted_contents = []
-    for content in contents:
-        token_pos = content["token_pos"]
-        if essentially_1d:
-            token_pos = index_to_3d(token_pos, *content["key"].shape[:2])
-        sorted_key, sorted_value, extra_info = reorder_key_value(
-            key=content["key"],
-            value=content["value"],
-            token_positions=token_pos,
-            input_pos=8,  # not used
-            q_len=4,  # not used
-            sort_if_3d=True,
-        )
-        if essentially_1d:
-            sorted_token_pos = token_pos[0, 0, extra_info["sort_index"]]
-        else:
-            sorted_token_pos = reorder_buffer_given_extra_info(
-                buffer=token_pos,
-                **extra_info,
-            )
-        sorted_contents.append(
-            {
-                "key": sorted_key,
-                "value": sorted_value,
-                "token_pos": sorted_token_pos,
-            }
-        )
+    # Data after (not to be overwritten) must be the same as before, possibly
+    # ordered differently
+    data_after = _reorder_data(_extract_content(kv_caches, new_overwrite_pos))
     for name in ("token_pos", "key", "value"):
-        print(name)
-        torch.testing.assert_close(sorted_contents[0][name], sorted_contents[1][name])
+        torch.testing.assert_close(data_before[name], data_after[name])
 
 
 def args_equalize_before_after() -> Tuple[str, List[tuple]]:
