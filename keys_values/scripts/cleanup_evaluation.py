@@ -40,21 +40,35 @@ if __name__ == "__main__":
 
     # dataset_size = "64k"
     dataset_size = "128k"
-    # is_baseline = False
-    is_baseline = True
+    is_baseline = False
+    # is_baseline = True
     is_base_model = False
     # is_base_model = True
+    # extra_data = False
+    extra_data = True
     multiple_tasks = not is_baseline and not is_base_model
     if is_baseline:
         base_path = base_path / "baseline"
     elif is_base_model:
         base_path = base_path / "basemod"
-    datasets = [
-        f"helmet_nq_{dataset_size}",
-        f"helmet_trivia_qa_{dataset_size}",
-        f"helmet_hotpot_qa_{dataset_size}",
-        f"helmet_pop_qa_{dataset_size}",
-    ]
+    if not extra_data:
+        datasets = [
+            f"helmet_nq_{dataset_size}",
+            f"helmet_trivia_qa_{dataset_size}",
+            f"helmet_hotpot_qa_{dataset_size}",
+            f"helmet_pop_qa_{dataset_size}",
+        ]
+    else:
+        datasets = [
+            f"helmet_trec_coarse_{dataset_size}",
+            f"helmet_ms_macro_{dataset_size}",
+            f"helmet_nlu_{dataset_size}",
+            f"helmet_clinc150_{dataset_size}",
+            f"helmet_infinite_bench_qa_{dataset_size}",
+            f"helmet_infinite_bench_mc_{dataset_size}",
+            f"helmet_json_kv_{dataset_size}",
+            f"helmet_ruler_mk_uuid_{dataset_size}",
+        ]
     cases = [
         "lr_4gpu_cs2048_lr5",
         "slr_4gpu_cs2048_lr5",
@@ -67,7 +81,7 @@ if __name__ == "__main__":
         "h2onorm_4gpu_cs1024_lr5",
         "h2oorig_4gpu_cs1024_lr5",
     ]
-    if multiple_tasks:
+    if multiple_tasks and not extra_data:
         cases.extend(
             [
                 "qh2o_4gpu_cs2048_lr5",

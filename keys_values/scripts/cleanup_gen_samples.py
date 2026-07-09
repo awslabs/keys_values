@@ -42,8 +42,8 @@ if __name__ == "__main__":
     dataset_size = "128k"
     is_baseline = False
     # is_baseline = True
-    # is_base_model = False
-    is_base_model = True
+    is_base_model = False
+    # is_base_model = True
     multiple_tasks = not is_baseline and not is_base_model
     if is_baseline:
         extra = "bl_"

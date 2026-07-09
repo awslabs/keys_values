@@ -73,14 +73,28 @@ if __name__ == "__main__":
     # dataset_size = "128k"
     is_baseline = False
     # is_baseline = True
+    # extra_data = False
+    extra_data = True
     if is_baseline:
         base_path = base_path / "baseline"
-    datasets = [
-        f"helmet_nq_{dataset_size}",
-        f"helmet_trivia_qa_{dataset_size}",
-        f"helmet_hotpot_qa_{dataset_size}",
-        f"helmet_pop_qa_{dataset_size}",
-    ]
+    if not extra_data:
+        datasets = [
+            f"helmet_nq_{dataset_size}",
+            f"helmet_trivia_qa_{dataset_size}",
+            f"helmet_hotpot_qa_{dataset_size}",
+            f"helmet_pop_qa_{dataset_size}",
+        ]
+    else:
+        datasets = [
+            f"helmet_trec_coarse_{dataset_size}",
+            f"helmet_ms_macro_{dataset_size}",
+            f"helmet_nlu_{dataset_size}",
+            f"helmet_clinc150_{dataset_size}",
+            f"helmet_infinite_bench_qa_{dataset_size}",
+            f"helmet_infinite_bench_mc_{dataset_size}",
+            f"helmet_json_kv_{dataset_size}",
+            f"helmet_ruler_mk_uuid_{dataset_size}",
+        ]
     cases = [
         "lr_4gpu_cs2048_lr5",
         "slr_4gpu_cs2048_lr5",
