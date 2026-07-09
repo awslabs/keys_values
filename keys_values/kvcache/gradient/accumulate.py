@@ -698,9 +698,15 @@ class GradientAccumulator:
                 infer_replay_caches,
                 get_inputs_slice,
             )
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and not use_multi_streams:
                 # Synchronize here to make sure the checkpoints are properly
-                # written to CPU (host), before they are read below
+                # written to CPU (host), before they are read below.
+                # If multiple streams are used, this ordering is expressed
+                # by GPU-side events below instead (the transfer streams
+                # wait for an event recorded on the main stream after the
+                # checkpoint computation), so the host thread need not be
+                # blocked. This matters: profiling shows this synchronize
+                # blocks the host for ~1 second per row of cells.
                 torch.cuda.synchronize()
             # Remove caches (underlying buffers are kept)
             while infer_replay_caches:
