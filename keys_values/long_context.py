@@ -784,6 +784,23 @@ class LongContextInferenceModel(GPTAndHeadModel):
         """
         return False
 
+    def _checkpoint_layer_input_sync(
+        self,
+        layer_idx: int,
+    ):
+        """
+        Callback used together with :meth:`_checkpoint_layer_input`. While the
+        latter is called before the input (all chunks of the current cell) is
+        processed for layer `layer_idx`, this method is called after this
+        processing. Can be used to synchronize streams which have been running
+        in parallel.
+
+        Args:
+            layer_idx: Index of layer which has just been processed
+
+        """
+        pass
+
     def _forward_internal(
         self,
         input_ids: torch.Tensor,
@@ -941,6 +958,10 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         if not compute_loss and is_final_chunk and is_final_layer:
                             # We need the final layer output for the last chunk
                             logits_final_position = y[:, -1:, :].detach()
+                    # Callback which may deal with stream synchronization.
+                    # Must be called before `del embeddings`, since the
+                    # checkpoint copy may still read from `embeddings`.
+                    self._checkpoint_layer_input_sync(block_idx)
                     del embeddings
                     embeddings = torch.cat(new_embed_parts, dim=1)
                     assert embeddings.shape[1] == end - start, (
@@ -1000,6 +1021,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
                         logits_final_position = self.gpt_model.lm_head(
                             logits_final_position
                         )
+                self._checkpoint_layer_input_sync(self.config.n_layer)
 
         if compute_loss:
             if num_target_entries is not None:

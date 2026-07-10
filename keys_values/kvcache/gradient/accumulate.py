@@ -15,7 +15,7 @@ from collections import Counter
 import contextlib
 from functools import partial
 from itertools import accumulate
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Iterable
 
 import torch
 
@@ -73,6 +73,75 @@ def checkpoint_hook(
 
 def copy_requires_grad(x: torch.Tensor) -> torch.Tensor:
     return x.clone().detach().requires_grad_(True)
+
+
+class DoubleBuffer:
+    """
+    Maintains two `torch.Tensor` objects, where in each cycle, one of them
+    is read, the other is written. With :meth:`flip`, the cycle is switched, so
+    that write becomes read and vice versa. An object is first written, then read
+    after the flip, then overwritten after the next flip.
+
+    If `single_only=True`, we only maintain one object. This is a dummy to be
+    used if no double buffering is needed.
+    """
+
+    def __init__(self, single_only: bool = False):
+        self._buffers: List[Optional[torch.Tensor]] = (
+            [None] if single_only else [None, None]
+        )
+        self._write_pos = 0
+        self._single_only = single_only
+
+    def write(self, x: torch.Tensor):
+        self._buffers[self._write_pos] = x
+
+    def read(self) -> Optional[torch.Tensor]:
+        return self._buffers[0 if self._single_only else 1 - self._write_pos]
+
+    def flip(self):
+        if not self._single_only:
+            self._write_pos = 1 - self._write_pos
+
+
+def stream_decorator(s: Optional[torch.cuda.Stream]) -> Any:
+    return torch.cuda.stream(s) if s is not None else contextlib.nullcontext()
+
+
+def flip_all(
+    pair_cell_inputs: DoubleBuffer,
+    pair_head_gradients_top: DoubleBuffer,
+    pair_head_gradients_bottom: DoubleBuffer,
+    pair_k_buffers: List[DoubleBuffer],
+    pair_v_buffers: List[DoubleBuffer],
+):
+    pair_cell_inputs.flip()
+    pair_head_gradients_top.flip()
+    pair_head_gradients_bottom.flip()
+    for elem in pair_k_buffers:
+        elem.flip()
+    for elem in pair_v_buffers:
+        elem.flip()
+
+
+def main_stream_waits_for_events(events: List[torch.Event]):
+    """
+    The current (main) stream waits for `events` to have happened. This is a
+    GPU-side ordering constraint, the host thread is not blocked.
+    """
+    for event in events:
+        torch.cuda.current_stream().wait_event(event)
+    events.clear()
+
+
+def streams_wait_for_event(
+    streams: Iterable[Optional[torch.cuda.Stream]],
+    event: Optional[torch.Event],
+):
+    if event is not None:
+        for s in streams:
+            if s is not None:
+                s.wait_event(event)
 
 
 def select_entries(
@@ -486,12 +555,76 @@ class GradientAccumulator:
         else:
             return None
 
+    def _load_from_cpu(
+        self,
+        col_idx: int,
+        host_to_device_stream: Optional[torch.cuda.Stream],
+        pair_cell_inputs: DoubleBuffer,
+        pair_head_gradients_top: DoubleBuffer,
+        pair_k_buffers: List[DoubleBuffer],
+        pair_v_buffers: List[DoubleBuffer],
+        events_for_wait: List[torch.Event],
+        get_inputs_slice: GetInputSlice,
+        get_head_gradients_slice: GetInputSlice,
+        chunk_idxs: List[int],
+        cache_lengths: List[int],
+    ):
+        """
+        Loads inputs for the cell at `col_idx - 1` from CPU, writing into the
+        double buffers. If `host_to_device_stream` is given, this runs on that
+        stream, and an event is appended to `events_for_wait` which fires once
+        the loads are complete.
+        """
+        if col_idx > 0:
+            # Prefetching
+            start, end = self.inputs_ranges[col_idx - 1]
+            with stream_decorator(host_to_device_stream):
+                pair_cell_inputs.write(get_inputs_slice(start, end))
+                pair_head_gradients_top.write(get_head_gradients_slice(start, end))
+                if col_idx > 1:
+                    # Note: It is `chunk_idxs[col_idx - 1]`, since
+                    # `chunk_idxs[0] == 0` is a dummy entry
+                    k_buffs, v_buffs = self._get_checkpoints(
+                        chunk_idx=chunk_idxs[col_idx - 1],
+                        cache_lengths=cache_lengths,
+                    )
+                    for trg, src in zip(pair_k_buffers, k_buffs):
+                        trg.write(src)
+                    for trg, src in zip(pair_v_buffers, v_buffs):
+                        trg.write(src)
+                if host_to_device_stream is not None:
+                    events_for_wait.append(host_to_device_stream.record_event())
+
+    def _write_to_cpu(
+        self,
+        col_idx: int,
+        device_to_host_stream: Optional[torch.cuda.Stream],
+        pair_head_gradients_bottom: DoubleBuffer,
+        events_for_wait: List[torch.Event],
+        write_head_gradients_slice: WriteOutputsSlice,
+    ):
+        """
+        Writes the bottom head gradients for the cell at `col_idx + 1` to CPU,
+        reading from the double buffer. If `device_to_host_stream` is given,
+        this runs on that stream, and an event is appended to
+        `events_for_wait` which fires once the write is complete.
+        """
+        if col_idx < len(self.inputs_ranges) - 1:
+            # Write back bottom head gradient (delayed by one iteration)
+            start, _ = self.inputs_ranges[col_idx + 1]
+            with stream_decorator(device_to_host_stream):
+                write_head_gradients_slice(start, pair_head_gradients_bottom.read())
+                if device_to_host_stream is not None:
+                    events_for_wait.append(device_to_host_stream.record_event())
+
     def run(
         self,
         model_part: CellBlocks,
         get_inputs_slice: GetInputSlice,
         get_head_gradients_slice: GetInputSlice,
         write_head_gradients_slice: WriteOutputsSlice,
+        device_to_host_stream: Optional[torch.cuda.Stream] = None,
+        host_to_device_stream: Optional[torch.cuda.Stream] = None,
         record_gpu_memory_snapshots: Optional[RecordGPUMemory] = None,
     ):
         """
@@ -507,6 +640,15 @@ class GradientAccumulator:
         to the same checkpoint object. We guarantee that any slice is read
         before it is written to.
 
+        If `device_to_host_stream` and `host_to_device_stream` are provided,
+        we try to run CPU -> GPU (`host_to_device_stream`) and GPU -> CPU
+        (`device_to_host_stream`) transfers in parallel with GPU computation
+        (main stream). This is done using double buffering: loads from CPU
+        are prefetched (for the next cell), stores to CPU are delayed (from
+        the previous cell). This works only if all CPU buffers written to or
+        read from are pinned. Stream ordering is expressed with GPU-side
+        events, the host thread is never blocked.
+
         Args:
             model_part: Represents layers of model for the cell
             get_inputs_slice: Function `f(start, end)` which returns a slice
@@ -517,10 +659,17 @@ class GradientAccumulator:
             write_head_gradients_slice: Function `f(start, value)` which writes
                 a slice `range(start, end)` of the head gradients for output
                 of layer `first_layer_idx - 1`.
+            device_to_host_stream: See above.
+            host_to_device_stream: See above.
 
         """
         assert self.replay_logs is not None, "Call 'run_head_model' for a new batch"
         assert self._batch_size is not None
+        use_multi_streams = device_to_host_stream is not None
+        if use_multi_streams != (host_to_device_stream is not None):
+            raise ValueError(
+                "Either both or none of device_to_host_stream, host_to_device_stream must be given"
+            )
         first_layer_idx = model_part.first_layer_idx
         num_layers = model_part.num_layers
         self._check_run_args(first_layer_idx, num_layers)
@@ -549,9 +698,15 @@ class GradientAccumulator:
                 infer_replay_caches,
                 get_inputs_slice,
             )
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and not use_multi_streams:
                 # Synchronize here to make sure the checkpoints are properly
-                # written to CPU (host), before they are read below
+                # written to CPU (host), before they are read below.
+                # If multiple streams are used, this ordering is expressed
+                # by GPU-side events below instead (the transfer streams
+                # wait for an event recorded on the main stream after the
+                # checkpoint computation), so the host thread need not be
+                # blocked. This matters: profiling shows this synchronize
+                # blocks the host for ~1 second per row of cells.
                 torch.cuda.synchronize()
             # Remove caches (underlying buffers are kept)
             while infer_replay_caches:
@@ -585,34 +740,121 @@ class GradientAccumulator:
             chunk_idxs = [0]
             if self.do_checkpointing:
                 chunk_idxs += self._kv_cache_checkpoints[0].chunk_numbers
+            num_cells = len(self.inputs_ranges)
             if self._verbose_more:
                 print(f"Process row of {len(chunk_idxs)} cells in reverse order")
 
-            for col_idx, (first_chunk_idx, num_chunks, (start, end)) in reversed(
-                list(
-                    enumerate(zip(chunk_idxs, self.chunks_per_cell, self.inputs_ranges))
-                )
+            # Double buffering with multiple streams. Buffers are used for
+            # (1) inputs to gradient computation, loaded from CPU by
+            # `_load_from_cpu`, and (2) outputs of gradient computation,
+            # written to CPU by `_write_to_cpu`. The cycle of (1) buffers is
+            # opposite to the cycle of (2) buffers.
+            pair_cell_inputs = DoubleBuffer(single_only=not use_multi_streams)
+            pair_head_gradients_top = DoubleBuffer(single_only=not use_multi_streams)
+            pair_k_buffers = [
+                DoubleBuffer(single_only=not use_multi_streams)
+                for _ in range(num_layers)
+            ]
+            pair_v_buffers = [
+                DoubleBuffer(single_only=not use_multi_streams)
+                for _ in range(num_layers)
+            ]
+            pair_head_gradients_bottom = DoubleBuffer(single_only=not use_multi_streams)
+            events_for_wait: List[torch.Event] = []
+            main_event: Optional[torch.Event] = None
+            if use_multi_streams:
+                # The transfer streams must wait for (a) main stream work
+                # enqueued so far (e.g., `run_head_model`, KV cache checkpoint
+                # computation above, previous row of cells), and (b) previous
+                # writes on the d2h stream (e.g., layer input checkpoints from
+                # the forward pass, head gradients of the previous row), since
+                # the loads below read from the same CPU buffers.
+                ev_main = torch.cuda.current_stream().record_event()
+                ev_d2h = device_to_host_stream.record_event()
+                host_to_device_stream.wait_event(ev_main)
+                host_to_device_stream.wait_event(ev_d2h)
+                device_to_host_stream.wait_event(ev_main)
+            # Load inputs for the last cell (processed first)
+            self._load_from_cpu(
+                num_cells,
+                host_to_device_stream,
+                pair_cell_inputs,
+                pair_head_gradients_top,
+                pair_k_buffers,
+                pair_v_buffers,
+                events_for_wait,
+                get_inputs_slice,
+                get_head_gradients_slice,
+                chunk_idxs,
+                cache_lengths,
+            )
+            main_stream_waits_for_events(events_for_wait)
+            flip_all(
+                pair_cell_inputs,
+                pair_head_gradients_top,
+                pair_head_gradients_bottom,
+                pair_k_buffers,
+                pair_v_buffers,
+            )
+            # Cycle of `_write_to_cpu` state must be opposite to cycle of
+            # `_load_from_cpu` state
+            pair_head_gradients_bottom.flip()
+
+            for col_idx, (first_chunk_idx, num_chunks) in reversed(
+                list(enumerate(zip(chunk_idxs, self.chunks_per_cell)))
             ):
+                if use_multi_streams:
+                    # Transfer streams wait for GPU computation of the
+                    # previous iteration to finish before overwriting (h2d)
+                    # or reading (d2h) buffers involved there
+                    streams_wait_for_event(
+                        (host_to_device_stream, device_to_host_stream),
+                        main_event,
+                    )
+                    main_event = None
+                    # Prefetch inputs for the next cell (`col_idx - 1`), in
+                    # parallel with the computation for cell `col_idx` below
+                    self._load_from_cpu(
+                        col_idx,
+                        host_to_device_stream,
+                        pair_cell_inputs,
+                        pair_head_gradients_top,
+                        pair_k_buffers,
+                        pair_v_buffers,
+                        events_for_wait,
+                        get_inputs_slice,
+                        get_head_gradients_slice,
+                        chunk_idxs,
+                        cache_lengths,
+                    )
+
+                # Write back bottom head gradients of the previous cell
+                # (`col_idx + 1`), in parallel with the computation below
+                self._write_to_cpu(
+                    col_idx,
+                    device_to_host_stream,
+                    pair_head_gradients_bottom,
+                    events_for_wait,
+                    write_head_gradients_slice,
+                )
+
                 # Gather inputs and head gradients:
                 # - Inputs bottom:   cell_inputs
                 # - Inputs left:     k_buffers, v_buffers
                 # - Gradients top:   head_gradients_top
                 # - Gradients right: head_gradients_k, head_gradients_v
-                cell_inputs = copy_requires_grad(get_inputs_slice(start, end))
-                head_gradients_top = get_head_gradients_slice(start, end)
+                cell_inputs = copy_requires_grad(pair_cell_inputs.read())
+                head_gradients_top = pair_head_gradients_top.read()
                 if col_idx == 0:
                     k_buffers = None
                     v_buffers = None
                 else:
-                    # Note: It is `chunk_idxs[col_idx]`, not
-                    # `chunk_idxs[col_idx - 1]`, because `chunk_idxs[0] == 0` is a
-                    # dummy entry
-                    k_buffers, v_buffers = self._get_checkpoints(
-                        chunk_idx=chunk_idxs[col_idx],
-                        cache_lengths=cache_lengths,
-                    )
-                    k_buffers = [copy_requires_grad(x) for x in k_buffers]
-                    v_buffers = [copy_requires_grad(x) for x in v_buffers]
+                    k_buffers = [
+                        copy_requires_grad(k_buff.read()) for k_buff in pair_k_buffers
+                    ]
+                    v_buffers = [
+                        copy_requires_grad(v_buff.read()) for v_buff in pair_v_buffers
+                    ]
 
                 # Forward-backward, using the autograd hooks (if given)
                 scalar_output = None
@@ -638,10 +880,42 @@ class GradientAccumulator:
                         )
 
                     scalar_output.backward()
-                    write_head_gradients_slice(start, cell_inputs.grad)
                     if col_idx > 0:
                         head_gradients_k = [x.grad for x in k_buffers]
                         head_gradients_v = [x.grad for x in v_buffers]
+                    # Written to CPU in the next iteration (`_write_to_cpu`),
+                    # or after the loop for the first cell
+                    pair_head_gradients_bottom.write(cell_inputs.grad)
+                    if use_multi_streams:
+                        # Fires once the computation for this cell is done
+                        main_event = torch.cuda.current_stream().record_event()
+                    else:
+                        # Single stream: Load inputs for the next cell here
+                        # (after the computation, as before)
+                        self._load_from_cpu(
+                            col_idx,
+                            host_to_device_stream,
+                            pair_cell_inputs,
+                            pair_head_gradients_top,
+                            pair_k_buffers,
+                            pair_v_buffers,
+                            events_for_wait,
+                            get_inputs_slice,
+                            get_head_gradients_slice,
+                            chunk_idxs,
+                            cache_lengths,
+                        )
+
+                    # Main stream waits for the transfers dispatched above,
+                    # since the next iteration reads the loaded buffers
+                    main_stream_waits_for_events(events_for_wait)
+                    flip_all(
+                        pair_cell_inputs,
+                        pair_head_gradients_top,
+                        pair_head_gradients_bottom,
+                        pair_k_buffers,
+                        pair_v_buffers,
+                    )
                 finally:
                     del scalar_output
                     del cell_inputs
@@ -676,6 +950,18 @@ class GradientAccumulator:
                                 f"\nAnnotation usage log [{part}; chunks {first_chunk_idx} to {first_chunk_idx + num_chunks - 1}]"
                             )
                             print(self._annotation_usage_logs[first_chunk_idx].report())
+
+            # Write back bottom head gradients for the first cell (the
+            # delayed write scheme has not flushed this one yet)
+            streams_wait_for_event((device_to_host_stream,), main_event)
+            self._write_to_cpu(
+                -1,
+                device_to_host_stream,
+                pair_head_gradients_bottom,
+                events_for_wait,
+                write_head_gradients_slice,
+            )
+            main_stream_waits_for_events(events_for_wait)
 
         finally:
             if self.do_checkpointing:
