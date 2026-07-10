@@ -293,9 +293,14 @@ def causal_mask_for_chunk_reversed(
     kv_idx: torch.Tensor,
     offset: int,
 ) -> torch.Tensor:
-    left_arg = kv_idx + offset
-    result = left_arg >= q_idx
-    return result
+    return causal_mask_for_chunk(
+        batch=batch,
+        head=head,
+        q_idx=kv_idx,
+        kv_idx=q_idx,
+        offset=offset,
+        sliding_window_size=None,
+    )
 
 
 class FlexAttnForChunkManager(FlexAttnManager):

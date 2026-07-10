@@ -161,6 +161,24 @@ def causal_mask_for_chunk(
     )
 
 
+def causal_mask_for_chunk_reversed(
+    batch: torch.Tensor,
+    head: torch.Tensor,
+    q_idx: torch.Tensor,
+    kv_idx: torch.Tensor,
+    thresh: int,
+    offset_positive: bool,
+) -> torch.Tensor:
+    return causal_mask_for_chunk(
+        batch=batch,
+        head=head,
+        q_idx=kv_idx,
+        kv_idx=q_idx,
+        thresh=thresh,
+        offset_positive=offset_positive,
+    )
+
+
 class RingFlexAttnForChunkManager(FlexAttnForChunkManager):
     """
     RingAttention requires to compute MHA for cells `(r, s)`, `r` looping
@@ -185,6 +203,7 @@ class RingFlexAttnForChunkManager(FlexAttnForChunkManager):
             if name not in kwargs:
                 raise ValueError(f"{name} is required")
             unpacked_args.append(kwargs[name])
+        unpacked_args.append(kwargs.get("reverse", False))
         return tuple(unpacked_args)
 
     def _get_args(
@@ -248,19 +267,29 @@ class RingFlexAttnForChunkManager(FlexAttnForChunkManager):
         if sliding_window_size is not None:
             raise NotImplementedError("sliding_window_size not supported")
         q_len, _, _, reverse = self._unpack_kwargs(**kwargs)
-        if reverse:
-            raise NotImplementedError("reverse=True not supported")
         thresh, offset_positive = self._unpack_extra_kwargs(**kwargs)
-        q_len = self.transform_q_len(q_len)
-        if q_len > kv_len:
-            raise ValueError(
-                f"q_len={q_len}, kv_len={kv_len}: Must have q_len <= kv_len"
+        if not reverse:
+            q_len = self.transform_q_len(q_len)
+            if q_len > kv_len:
+                raise ValueError(
+                    f"q_len={q_len}, kv_len={kv_len}: Must have q_len <= kv_len"
+                )
+            mask_mod = partial(
+                causal_mask_for_chunk,
+                thresh=thresh,
+                offset_positive=offset_positive,
             )
-        mask_mod = partial(
-            causal_mask_for_chunk,
-            thresh=thresh,
-            offset_positive=offset_positive,
-        )
+        else:
+            kv_len = self.transform_q_len(kv_len)
+            if q_len < kv_len:
+                raise ValueError(
+                    f"q_len={q_len}, kv_len={kv_len}: Must have q_len >= kv_len"
+                )
+            mask_mod = partial(
+                causal_mask_for_chunk_reversed,
+                thresh=thresh,
+                offset_positive=offset_positive,
+            )
         return create_block_mask(
             mask_mod,
             B=None,
@@ -315,6 +344,7 @@ class RingOffdiagFlexAttentionArgs:
         rank_r: int,
         rank_s: int,
         q_len_for_s: int,
+        reverse: bool = False,
     ) -> Tuple[FlexAttnWithBlockMask, bool]:
         """
         We need to determine `thresh` and `offset_positive`. From the
@@ -361,7 +391,7 @@ class RingOffdiagFlexAttentionArgs:
                 q_len=q_len,
                 batch_size=batch_size,
                 n_head=n_head,
-                reverse=False,
+                reverse=reverse,
                 thresh=thresh,
                 offset_positive=offset_positive,
             )
@@ -432,6 +462,7 @@ class RingDiagFlexAttentionArgs:
         device: torch.device,
         dtype: torch.dtype,
         input_pos: int,
+        reverse: bool = False,
     ) -> Tuple[FlexAttnWithBlockMask, bool]:
         if input_pos == 0:
             return (
@@ -456,7 +487,7 @@ class RingDiagFlexAttentionArgs:
                 q_len=q_len,
                 batch_size=batch_size,
                 n_head=n_head,
-                reverse=False,
+                reverse=reverse,
             )
             return _attn_fn, extend_kv or self.extend_kv
 
@@ -572,9 +603,6 @@ def sdpa_ring_flexatt_offdiag(
         key = repeat_interleave(key, n_head)
         value = repeat_interleave(value, n_head)
         enable_gqa = False
-        extend_kv = True
-    else:
-        extend_kv = False
     q_len_tr = flexatt_args.transform_q_len(q_len)
     if q_len_tr > q_len:
         # Use zero padding
@@ -658,9 +686,6 @@ def sdpa_ring_flexatt_diag(
         key = repeat_interleave(key, n_head)
         value = repeat_interleave(value, n_head)
         enable_gqa = False
-        extend_kv = True
-    else:
-        extend_kv = False
     q_len_tr = flexatt_args.transform_q_len(q_len)
     if q_len_tr > q_len:
         # Use zero padding
