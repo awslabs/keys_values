@@ -19,6 +19,7 @@ import torch
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import MultiHeadSelfAttention
+from keys_values.attention.base import do_softcapping
 from keys_values.tools.intermediates import DebugIntermediates
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.base import DefaultKVCache
@@ -273,10 +274,10 @@ def compute_loss_with_limited_logits_tensor(
 ) -> torch.Tensor:
     """
     Helper for `LongContextGradientModel._forward_internal_no_check`, only if
-    `head_model.needs_logits() == True`. Here, `model_outputs_for_chunk` have
-    been computed with `skip_lm_head=True`. We ensure that the size of
-    intermediate logits tensors remain below
-    :const:`HEAD_OR_INITIAL_TENSORS_MAX_BYTES`.
+    `head_model.needs_logits() == True`. Here, `model_outputs_for_chunk` are
+    final layer outputs with `gpt_model.transformer.ln_f` applied, but not
+    `gpt_model.lm_head`. We ensure that the size of intermediate logits
+    tensors remain below :const:`HEAD_OR_INITIAL_TENSORS_MAX_BYTES`.
 
     """
     assert head_model.needs_logits()
@@ -291,7 +292,10 @@ def compute_loss_with_limited_logits_tensor(
     loss_all = 0.0
     for off in range(0, chunk_size, max_chunk_size):
         len = min(off + max_chunk_size, chunk_size) - off
-        x = gpt_model.lm_head(model_outputs_for_chunk[:, off : (off + len), :])
+        x = do_softcapping(
+            gpt_model.lm_head(model_outputs_for_chunk[:, off : (off + len), :]),
+            thresh=config.final_logit_softcapping,
+        )
         loss_all = (
             compute_loss_for_chunk(
                 head_model=head_model,
@@ -961,11 +965,15 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     )
 
                 if compute_loss:
-                    # Head model
+                    # Head model. The final layer norm `ln_f` is applied
+                    # here, just before the head (as in `GPT.forward`),
+                    # whereas layer input checkpoints store pre-norm outputs
                     input_pos = start
                     for rel_start, rel_end in chunks_for_cell.chunk_ranges:
                         ch_size = rel_end - rel_start
-                        output_chunk = embeddings[:, rel_start:rel_end, :]
+                        output_chunk = self.gpt_model.transformer.ln_f(
+                            embeddings[:, rel_start:rel_end, :]
+                        )
                         if self.head_model.needs_logits():
                             loss_part = compute_loss_with_limited_logits_tensor(
                                 gpt_model=self.gpt_model,
@@ -995,10 +1003,13 @@ class LongContextInferenceModel(GPTAndHeadModel):
                             )
                 else:
                     # `logits_final_position` has final layer outputs for last
-                    # position. Map to logits
+                    # position. Map to logits, as in `GPT.forward`
                     if logits_final_position is not None:
-                        logits_final_position = self.gpt_model.lm_head(
-                            logits_final_position
+                        logits_final_position = do_softcapping(
+                            self.gpt_model.lm_head(
+                                self.gpt_model.transformer.ln_f(logits_final_position)
+                            ),
+                            thresh=self.config.final_logit_softcapping,
                         )
 
         if compute_loss:
