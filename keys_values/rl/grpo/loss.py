@@ -79,21 +79,39 @@ class GRPOLossHeadModel(HeadModel):
         self.epsilon_high = epsilon_high
         self._old_logps: Optional[torch.Tensor] = None
         self._advantages: Optional[torch.Tensor] = None
+        self._mask: Optional[torch.Tensor] = None
         self._offset = 0
 
-    def set_batch(self, old_logps: torch.Tensor, advantages: torch.Tensor):
-        """Provide per-token old log-probs and per-sequence advantages.
+    def set_batch(
+        self,
+        advantages: torch.Tensor,
+        old_logps: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+    ):
+        """Provide per-sequence advantages and (optionally) old log-probs.
 
         Parameters
         ----------
-        old_logps : torch.Tensor
-            Shape ``(batch_size, completion_length)``. Detached log-probs of
-            the completion under the sampling (old) policy.
         advantages : torch.Tensor
             Shape ``(batch_size,)``. Group-relative advantage per sequence.
+        old_logps : torch.Tensor | None
+            Shape ``(batch_size, completion_length)``. Detached log-probs of
+            the completion under the sampling (old) policy. If ``None``
+            (single-epoch GRPO, the default), the old log-prob is taken to be
+            ``policy_logp.detach()`` computed in the same forward pass -- so the
+            importance ratio is exactly ``1`` and no separate scoring forward
+            pass is needed. Provide an explicit tensor only for multi-epoch
+            updates, where old and current policy genuinely differ.
+        mask : torch.Tensor | None
+            Optional completion mask, shape ``(batch_size, completion_length)``.
+            ``1`` for real completion tokens, ``0`` for padding after an early
+            stop. Masked positions contribute neither to the loss nor to the
+            per-sequence token count used for normalization. If ``None``, every
+            position counts.
         """
-        self._old_logps = old_logps
         self._advantages = advantages
+        self._old_logps = old_logps
+        self._mask = mask
 
     def needs_logits(self) -> bool:
         return True
@@ -108,7 +126,9 @@ class GRPOLossHeadModel(HeadModel):
             self._offset = 0
 
         diff = self._check_model_outputs_targets(
-            model_outputs, targets, final_dim=self._vocab_size
+            model_outputs,
+            targets,
+            final_dim=self._vocab_size,
         )
         if diff is None:
             return torch.zeros(
@@ -117,26 +137,28 @@ class GRPOLossHeadModel(HeadModel):
                 dtype=model_outputs.dtype,
             )
 
-        if self._old_logps is None or self._advantages is None:
+        if self._advantages is None:
             raise RuntimeError(
-                "Call set_batch(old_logps, advantages) before the forward pass."
+                "Call set_batch(advantages, ...) before the forward pass."
             )
 
         logits = model_outputs[:, diff:, :]
         num = targets.shape[1]
 
-        # Policy log-probs for the target tokens in this chunk
         log_probs = F.log_softmax(logits, dim=-1)
         policy_logp = torch.gather(
             log_probs, dim=-1, index=targets.unsqueeze(-1)
         ).squeeze(-1)
 
-        # Align old_logps to this chunk via a running offset
-        old_logp = self._old_logps[:, self._offset : self._offset + num].to(
-            policy_logp.device
-        )
+        start = self._offset
+        if self._old_logps is None:
+            # Single-epoch GRPO: old policy == current policy, so the ratio is
+            # exactly 1. Using the detached current log-prob keeps this exact
+            # and avoids a separate scoring forward pass.
+            old_logp = policy_logp.detach()
+        else:
+            old_logp = self._old_logps[:, start : start + num].to(policy_logp.device)
         self._offset += num
-
         advantages = self._advantages.to(policy_logp.device).unsqueeze(1)
 
         ratio = torch.exp(policy_logp - old_logp)
@@ -146,14 +168,17 @@ class GRPOLossHeadModel(HeadModel):
             * advantages
         )
         per_token_loss = -torch.min(unclipped, clipped)
-
-        # Sum over chunk tokens; LongContextGradientModel sums across chunks
+        if self._mask is not None:
+            mask = self._mask[:, start : start + num].to(per_token_loss.device)
+            per_token_loss = per_token_loss * mask
         return per_token_loss.sum(dim=-1)
 
     def num_target_entries(self, targets: torch.Tensor) -> Optional[torch.Tensor]:
-        # Normalize the summed loss by the number of completion tokens,
-        # giving the per-sequence mean (GRPO "grpo" loss type).
         assert 1 <= targets.ndim <= 2
+        if self._mask is not None:
+            # Normalize by the number of *real* (non-padding) completion tokens
+            # per sequence, clamped to >= 1 to avoid division by zero.
+            return self._mask.sum(dim=-1).clamp_min(1.0).to(dtype=torch.float32)
         return torch.full(
             (targets.shape[0],),
             float(targets.shape[-1]),
@@ -163,9 +188,8 @@ class GRPOLossHeadModel(HeadModel):
     def _empty_clone(self, device: Optional[torch.device] = None) -> "HeadModel":
         config = Config()
         config.padded_vocab_size = self._vocab_size
-        clone = GRPOLossHeadModel(
+        return GRPOLossHeadModel(
             config,
             epsilon_low=self.epsilon_low,
             epsilon_high=self.epsilon_high,
         )
-        return clone

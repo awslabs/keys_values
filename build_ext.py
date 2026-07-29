@@ -91,8 +91,12 @@ def main():
                     "-U__CUDA_NO_HALF_CONVERSIONS__",
                     "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
                     "-U__CUDA_NO_HALF2_OPERATORS__",
-                    "-gencode=arch=compute_80,code=sm_80",
-                    "-gencode=arch=compute_90,code=sm_90",
+                    # SASS for the common data-center / workstation GPUs, plus
+                    # PTX for forward-compatible JIT on newer architectures.
+                    "-gencode=arch=compute_80,code=sm_80",  # A100
+                    "-gencode=arch=compute_86,code=sm_86",  # A10G / A10 / RTX 30xx
+                    "-gencode=arch=compute_90,code=sm_90",  # H100
+                    "-gencode=arch=compute_90,code=compute_90",  # PTX (JIT fallback)
                 ],
             },
         )
