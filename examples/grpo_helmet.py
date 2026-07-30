@@ -90,7 +90,10 @@ def evaluate(gpt_model, records, tokenizer, prompt_style, pad_id, eos_id,
         comp = generate_completions(
             model=inf, prompt_ids=prompt, max_new_tokens=max_new,
             temperature=1.0, top_k=1, top_p=1.0,
-            eos_token_id=eos_id, pad_token_id=pad_id)
+            eos_token_id=eos_id, pad_token_id=pad_id,
+            # The cache buffers are shared with the training rollout/backward,
+            # which updates them in place: inference_mode would taint them.
+            no_inference_mode=True)
         text = decode_row(tokenizer, comp[0], pad_id)
         correct += int(any(sub_exact_match(text, t) for t in targets_of(rec)))
     return correct / max(len(records), 1)
