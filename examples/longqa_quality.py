@@ -66,10 +66,16 @@ def eval_accuracy(gpt_model, examples, cache_name, cache_length, dtype,
         batch = examples[i:i + batch_size]
         prompt_ids = left_pad([e.prompt_ids for e in batch], pad_id).to(fabric.device)
         gpt_model.max_seq_length = int(prompt_ids.shape[1]) + max_new
-        # A processing chunk cannot exceed the cache's forward capacity (which
-        # accounts for grace slots reserved by the eviction defaults).
-        max_fwd = gpt_model.kv_cache_max_forward_length() or chunk_size
-        eff_chunk = max(min(chunk_size, max_fwd), 1)
+        # A processing chunk cannot exceed the cache's forward capacity. Grace
+        # slots reserved by the eviction defaults reduce it (static bound:
+        # cache_length - grace; max_forward_length() needs a prefilled cache).
+        caps = [
+            kvc.cache_length
+            - (getattr(kvc, "grace_period", 0) or getattr(kvc, "init_grace_tokens", 0) or 0)
+            for kvc in gpt_model.get_kv_caches()
+            if kvc is not None
+        ]
+        eff_chunk = max(min([chunk_size] + caps), 1)
         inf = LongContextInferenceModel(gpt_model, head_model=None,
                                         chunk_size=eff_chunk, verbose=VerbosityLevels.NONE)
         completions = generate_completions(

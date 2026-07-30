@@ -175,11 +175,18 @@ def grpo_step(
     num_prompts, prompt_len = prompt_ids.shape
     times: Dict[str, float] = {}
 
-    # A processing chunk cannot exceed the caches' forward capacity (this
-    # accounts for grace slots reserved by the factory's eviction defaults).
-    max_fwd = gpt_model.kv_cache_max_forward_length()
-    if max_fwd is not None:
-        chunk_size = max(min(chunk_size, max_fwd), 1)
+    # A processing chunk cannot exceed the caches' forward capacity. Grace
+    # slots reserved by the factory's eviction defaults reduce it; compute the
+    # static bound cache_length - grace (kv_cache_max_forward_length() cannot
+    # be used here, as it requires an initialized/prefilled cache).
+    caps = [
+        kvc.cache_length
+        - (getattr(kvc, "grace_period", 0) or getattr(kvc, "init_grace_tokens", 0) or 0)
+        for kvc in gpt_model.get_kv_caches()
+        if kvc is not None
+    ]
+    if caps:
+        chunk_size = max(min(chunk_size, min(caps)), 1)
 
     # Expand each prompt into `group_size` completions (GRPO group layout).
     expanded_prompts = prompt_ids.repeat_interleave(group_size, dim=0).to(device)
