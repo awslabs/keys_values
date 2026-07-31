@@ -51,7 +51,7 @@ from litgpt.utils import auto_download_checkpoint, check_valid_checkpoint_dir, l
 from keys_values.config import Config
 from keys_values.data.constants import LIT_MODEL_FNAME
 from keys_values.data.load_helmet_dev_eval import load_helmet_dev_eval
-from keys_values.evaluation.metrics import sub_exact_match
+from keys_values.evaluation.metrics import rouge_n_f1, sub_exact_match
 from keys_values.kvcache.factory import KVCacheFactory, deallocate_kv_cache_buffers_of_model
 from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
@@ -63,6 +63,19 @@ from keys_values.utils import VerbosityLevels
 def targets_of(record) -> list[str]:
     out = record["output"]
     return [str(x) for x in out] if isinstance(out, (list, tuple)) else [str(out)]
+
+
+def shaped_reward(text: str, targets: list[str], kind: str) -> float:
+    """Reward for one completion.
+
+    ``em``: binary substring exact match (sparse signal).
+    ``f1``: max(EM, token-level F1) -- partial credit densifies the
+    within-group variance that GRPO's group-relative advantages need.
+    """
+    em = float(any(sub_exact_match(text, t) for t in targets))
+    if kind == "em" or em == 1.0:
+        return em
+    return max((rouge_n_f1(text, t, n=1) for t in targets), default=0.0)
 
 
 def decode_row(tokenizer, row: torch.Tensor, pad_id: int) -> str:
@@ -109,7 +122,9 @@ def main() -> None:
     p.add_argument("--kv-cache-name", default="h2o-torch-quantized8")
     p.add_argument("--cache-length", type=int, default=4096,
                    help="KV cache budget; 0 = size to the longest prompt (dense).")
-    p.add_argument("--group-size", type=int, default=4)
+    p.add_argument("--group-size", type=int, default=8)
+    p.add_argument("--reward", choices=["em", "f1"], default="f1",
+                   help="'f1' = max(exact-match, token-F1) partial credit (denser signal).")
     p.add_argument("--max-new-tokens", type=int, default=32)
     p.add_argument("--steps", type=int, default=150)
     p.add_argument("--lr", type=float, default=1e-6)
@@ -182,7 +197,7 @@ def main() -> None:
     def reward_fn(prompt_ids: torch.Tensor, completion_ids: torch.Tensor) -> torch.Tensor:
         rec = reward_fn.current_record
         tgts = targets_of(rec)
-        vals = [float(any(sub_exact_match(decode_row(tokenizer, row, pad_id), t) for t in tgts))
+        vals = [shaped_reward(decode_row(tokenizer, row, pad_id), tgts, args.reward)
                 for row in completion_ids]
         return torch.tensor(vals, dtype=torch.float32)
 
@@ -195,6 +210,7 @@ def main() -> None:
 
     # Training loop: one prompt per step, group_size rollouts.
     torch.manual_seed(args.seed)
+    n_signal = 0
     for step in range(1, args.steps + 1):
         i = rng.randrange(len(train_records))
         reward_fn.current_record = train_records[i]
@@ -209,13 +225,19 @@ def main() -> None:
         m["step"] = step
         m["step_time_s"] = round(time.perf_counter() - t0, 2)
         m["prompt_len"] = int(prompt_ids.shape[1])
+        # A group with zero reward variance produces zero advantage -> no
+        # gradient. Track how often steps carry real learning signal.
+        m["has_signal"] = int(m["advantage_std"] > 1e-6)
+        n_signal += m["has_signal"]
+        m["signal_rate"] = round(n_signal / step, 3)
         if step % args.eval_every == 0 or step == args.steps:
             m["eval_acc"] = evaluate(gpt_model, eval_records, tokenizer, prompt_style,
                                      pad_id, eos_id, args.max_new_tokens,
                                      args.chunk_size, fabric)
         with metrics_path.open("a") as f:
             f.write(json.dumps(m) + "\n")
-        line = (f"step {step:4d} | loss {m['loss']:+.4f} | reward {m['mean_reward']:.3f} "
+        line = (f"step {step:4d} | reward {m['mean_reward']:.3f} "
+                f"| adv_std {m['advantage_std']:.3f} | signal {m['signal_rate']:.2f} "
                 f"| ctx {m['prompt_len']} | {m['step_time_s']}s")
         if "eval_acc" in m:
             line += f" | eval_acc {m['eval_acc']:.3f}"
