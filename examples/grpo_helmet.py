@@ -123,6 +123,9 @@ def main() -> None:
     p.add_argument("--cache-length", type=int, default=4096,
                    help="KV cache budget; 0 = size to the longest prompt (dense).")
     p.add_argument("--group-size", type=int, default=8)
+    p.add_argument("--prompts-per-update", type=int, default=1,
+                   help="Gradient accumulation: prompts (each with group-size "
+                        "rollouts) folded into one optimizer update.")
     p.add_argument("--reward", choices=["em", "f1"], default="f1",
                    help="'f1' = max(exact-match, token-F1) partial credit (denser signal).")
     p.add_argument("--max-new-tokens", type=int, default=32)
@@ -208,26 +211,37 @@ def main() -> None:
     with metrics_path.open("a") as f:
         f.write(json.dumps({"step": 0, "eval_acc": acc0}) + "\n")
 
-    # Training loop: one prompt per step, group_size rollouts.
+    # Training loop: each update accumulates K prompts x group_size rollouts.
     torch.manual_seed(args.seed)
     n_signal = 0
+    K = max(args.prompts_per_update, 1)
     for step in range(1, args.steps + 1):
-        i = rng.randrange(len(train_records))
-        reward_fn.current_record = train_records[i]
-        prompt_ids = enc[i].unsqueeze(0).to(fabric.device)
         t0 = time.perf_counter()
-        m = grpo_step(
-            gpt_model=gpt_model, prompt_ids=prompt_ids, reward_fn=reward_fn,
-            optimizer=optimizer, group_size=args.group_size,
-            max_new_tokens=args.max_new_tokens, chunk_size=args.chunk_size,
-            layers_per_cell=args.layers_per_cell, temperature=args.temperature,
-            eos_token_id=eos_id, pad_token_id=pad_id)
-        m["step"] = step
+        micro = []
+        for k in range(K):
+            i = rng.randrange(len(train_records))
+            reward_fn.current_record = train_records[i]
+            prompt_ids = enc[i].unsqueeze(0).to(fabric.device)
+            micro.append(grpo_step(
+                gpt_model=gpt_model, prompt_ids=prompt_ids, reward_fn=reward_fn,
+                optimizer=optimizer, group_size=args.group_size,
+                max_new_tokens=args.max_new_tokens, chunk_size=args.chunk_size,
+                layers_per_cell=args.layers_per_cell, temperature=args.temperature,
+                eos_token_id=eos_id, pad_token_id=pad_id,
+                zero_grad=(k == 0), optimizer_step=(k == K - 1),
+                grad_scale=1.0 / K))
+            micro[-1]["prompt_len"] = int(prompt_ids.shape[1])
+        m = {
+            "step": step,
+            "mean_reward": sum(x["mean_reward"] for x in micro) / K,
+            "advantage_std": max(x["advantage_std"] for x in micro),
+            "loss": sum(x["loss"] for x in micro) / K,
+            "prompt_len": int(sum(x["prompt_len"] for x in micro) / K),
+        }
         m["step_time_s"] = round(time.perf_counter() - t0, 2)
-        m["prompt_len"] = int(prompt_ids.shape[1])
-        # A group with zero reward variance produces zero advantage -> no
-        # gradient. Track how often steps carry real learning signal.
-        m["has_signal"] = int(m["advantage_std"] > 1e-6)
+        # An update where every group has zero reward variance produces zero
+        # advantage -> no gradient. Track how often updates carry signal.
+        m["has_signal"] = int(any(x["advantage_std"] > 1e-6 for x in micro))
         n_signal += m["has_signal"]
         m["signal_rate"] = round(n_signal / step, 3)
         if step % args.eval_every == 0 or step == args.steps:

@@ -123,6 +123,9 @@ def grpo_step(
     epsilon_high: float = 0.2,
     rescore_old_logps: bool = False,
     profile: bool = False,
+    zero_grad: bool = True,
+    optimizer_step: bool = True,
+    grad_scale: float = 1.0,
     verbose: VerbosityLevels = VerbosityLevels.NONE,
 ) -> Dict[str, float]:
     """Run one GRPO optimization step end-to-end on a KeysAndValues model.
@@ -163,6 +166,11 @@ def grpo_step(
     profile : bool
         If ``True``, include per-phase wall-clock timings (ms) in the returned
         metrics: ``gen_time_ms``, ``score_time_ms``, ``grad_time_ms``.
+    zero_grad, optimizer_step, grad_scale
+        Gradient-accumulation controls. To accumulate K prompts into one
+        optimizer update, call ``grpo_step`` K times with
+        ``zero_grad=(k == 0)``, ``optimizer_step=(k == K-1)`` and
+        ``grad_scale=1/K``; gradients sum across the calls.
 
     Returns
     -------
@@ -258,13 +266,15 @@ def grpo_step(
         verbose=verbose,
     )
     grad_model.train()
-    optimizer.zero_grad(set_to_none=True)
+    if zero_grad:
+        optimizer.zero_grad(set_to_none=True)
 
-    # 6. Optimizer step.
+    # 6. Backward (+ optimizer step unless accumulating).
     with _phase_timer(times, "grad_time_ms", device):
-        loss = grad_model(model_input_ids, completions)
+        loss = grad_model(model_input_ids, completions, scale_factor=grad_scale)
         loss.backward()
-        optimizer.step()
+        if optimizer_step:
+            optimizer.step()
 
     metrics = {
         "loss": float(loss.detach().mean().item()),
