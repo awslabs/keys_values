@@ -21,7 +21,6 @@ import torch
 
 from keys_values.config import Config
 
-from keys_values.attention.base import do_softcapping
 from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.base import (
@@ -902,13 +901,6 @@ class GradientAccumulator:
             raise ValueError(
                 f"targets.shape[1] = {num_output_tokens} must in [1, seq_length = {self.seq_length}]"
             )
-        if head_model.needs_logits():
-            clamp_head = partial(
-                do_softcapping, thresh=self.config.final_logit_softcapping
-            )
-        else:
-            clamp_head = None
-        # Head model must be on the same device as the final outputs
         if self._verbose_more:
             print("\nGradient accumulation for head model")
         # Normalization (per batch dimension):
@@ -927,15 +919,14 @@ class GradientAccumulator:
         loss_full = 0
         for start, end in self.top_bottom_ranges:
             x = copy_requires_grad(get_inputs_slice(start, end))
-            model_outputs = gpt_model.transformer.ln_f(x)
-            if head_model.needs_logits():
-                model_outputs = clamp_head(gpt_model.lm_head(model_outputs))
             loss_part = compute_loss_for_chunk(
+                gpt_model=gpt_model,
                 head_model=head_model,
-                model_outputs_for_chunk=model_outputs,
+                model_outputs_for_chunk=x,
                 targets=targets,
                 num_input_tokens=self.seq_length,
                 input_pos=start,
+                limited_logits_tensor=False,
             )
             # Normalization
             loss_part = (loss_part * _scale).mean()

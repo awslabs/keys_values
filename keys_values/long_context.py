@@ -242,13 +242,79 @@ def get_chunk_of_targets(
 
 
 def compute_loss_for_chunk(
+    gpt_model: GPT,
+    head_model: HeadModel,
+    model_outputs_for_chunk: torch.Tensor,
+    targets: torch.Tensor,
+    num_input_tokens: int,
+    input_pos: int,
+    limited_logits_tensor: bool = True,
+) -> torch.Tensor:
+    """
+    Computes loss values (one entry per batch dimension) for final layer
+    output chunk `model_outputs_for_chunk`. This includes
+    `gpt_model.transformer.ln_f` as well as logit softcapping (if this is
+    used).
+
+    Args:
+        gpt_model: GPT model
+        head_model: Head model
+        model_outputs_for_chunk: See above
+        targets: Target values
+        num_input_tokens: Number of input tokens
+        input_pos: Input position
+        limited_logits_tensor: If `True`, we ensure that the size of
+            intermediate logits tensors remain below
+            :const:`HEAD_OR_INITIAL_TENSORS_MAX_BYTES`. Typically needed for
+            inference only, when chunk sizes can be large
+
+    Returns:
+        Loss function values, one entry per batch dimension. Loss values
+        are not normalized w.r.t. number of targets.
+
+    """
+    assert model_outputs_for_chunk.ndim == 3
+    model_outputs_for_chunk = gpt_model.transformer.ln_f(model_outputs_for_chunk)
+    config = gpt_model.config
+    batch_size, chunk_size, _ = model_outputs_for_chunk.shape
+    if head_model.needs_logits() and limited_logits_tensor:
+        weights_dtype = gpt_model.transformer.wte.weight.dtype
+        bytes_per_token = (
+            batch_size * config.padded_vocab_size * bytes_for_torch_dtype(weights_dtype)
+        )
+        max_chunk_size = max(HEAD_OR_INITIAL_TENSORS_MAX_BYTES // bytes_per_token, 1)
+    else:
+        # Process chunk in one piece
+        max_chunk_size = chunk_size
+    loss_all = 0.0
+    for off in range(0, chunk_size, max_chunk_size):
+        len = min(off + max_chunk_size, chunk_size) - off
+        x = model_outputs_for_chunk[:, off : (off + len), :]
+        if head_model.needs_logits():
+            x = do_softcapping(
+                gpt_model.lm_head(x),
+                thresh=config.final_logit_softcapping,
+            )
+        loss_all = (
+            _compute_loss_for_chunk_final(
+                head_model=head_model,
+                model_outputs_for_chunk=x,
+                targets=targets,
+                num_input_tokens=num_input_tokens,
+                input_pos=input_pos + off,
+            )
+            + loss_all
+        )
+    return loss_all
+
+
+def _compute_loss_for_chunk_final(
     head_model: HeadModel,
     model_outputs_for_chunk: torch.Tensor,
     targets: torch.Tensor,
     num_input_tokens: int,
     input_pos: int,
 ) -> torch.Tensor:
-    assert model_outputs_for_chunk.ndim == 3
     targets_chunk = get_chunk_of_targets(
         targets=targets,
         input_pos=input_pos,
@@ -262,51 +328,6 @@ def compute_loss_for_chunk(
         targets=targets_chunk,
         input_pos=input_pos,
     )
-
-
-def compute_loss_with_limited_logits_tensor(
-    gpt_model: GPT,
-    head_model: HeadModel,
-    model_outputs_for_chunk: torch.Tensor,
-    targets: torch.Tensor,
-    num_input_tokens: int,
-    input_pos: int,
-) -> torch.Tensor:
-    """
-    Helper for `LongContextGradientModel._forward_internal_no_check`, only if
-    `head_model.needs_logits() == True`. Here, `model_outputs_for_chunk` are
-    final layer outputs with `gpt_model.transformer.ln_f` applied, but not
-    `gpt_model.lm_head`. We ensure that the size of intermediate logits
-    tensors remain below :const:`HEAD_OR_INITIAL_TENSORS_MAX_BYTES`.
-
-    """
-    assert head_model.needs_logits()
-    assert model_outputs_for_chunk.ndim == 3
-    config = gpt_model.config
-    batch_size, chunk_size, _ = model_outputs_for_chunk.shape
-    weights_dtype = gpt_model.transformer.wte.weight.dtype
-    bytes_per_token = (
-        batch_size * config.padded_vocab_size * bytes_for_torch_dtype(weights_dtype)
-    )
-    max_chunk_size = max(HEAD_OR_INITIAL_TENSORS_MAX_BYTES // bytes_per_token, 1)
-    loss_all = 0.0
-    for off in range(0, chunk_size, max_chunk_size):
-        len = min(off + max_chunk_size, chunk_size) - off
-        x = do_softcapping(
-            gpt_model.lm_head(model_outputs_for_chunk[:, off : (off + len), :]),
-            thresh=config.final_logit_softcapping,
-        )
-        loss_all = (
-            compute_loss_for_chunk(
-                head_model=head_model,
-                model_outputs_for_chunk=x,
-                targets=targets,
-                num_input_tokens=num_input_tokens,
-                input_pos=input_pos + off,
-            )
-            + loss_all
-        )
-    return loss_all
 
 
 def oom_exception_action(
@@ -970,29 +991,17 @@ class LongContextInferenceModel(GPTAndHeadModel):
                     # whereas layer input checkpoints store pre-norm outputs
                     input_pos = start
                     for rel_start, rel_end in chunks_for_cell.chunk_ranges:
-                        ch_size = rel_end - rel_start
-                        output_chunk = self.gpt_model.transformer.ln_f(
-                            embeddings[:, rel_start:rel_end, :]
+                        loss_part = compute_loss_for_chunk(
+                            gpt_model=self.gpt_model,
+                            head_model=self.head_model,
+                            model_outputs_for_chunk=embeddings[:, rel_start:rel_end, :],
+                            targets=targets,
+                            num_input_tokens=num_input_tokens,
+                            input_pos=input_pos,
+                            limited_logits_tensor=True,
                         )
-                        if self.head_model.needs_logits():
-                            loss_part = compute_loss_with_limited_logits_tensor(
-                                gpt_model=self.gpt_model,
-                                head_model=self.head_model,
-                                model_outputs_for_chunk=output_chunk,
-                                targets=targets,
-                                num_input_tokens=num_input_tokens,
-                                input_pos=input_pos,
-                            )
-                        else:
-                            loss_part = compute_loss_for_chunk(
-                                head_model=self.head_model,
-                                model_outputs_for_chunk=output_chunk,
-                                targets=targets,
-                                num_input_tokens=num_input_tokens,
-                                input_pos=input_pos,
-                            )
                         loss_full = loss_part + loss_full
-                        input_pos += ch_size
+                        input_pos += rel_end - rel_start
                         if self.debug_intermediates is not None:
                             self.debug_intermediates.store_loss(
                                 loss_part,
