@@ -69,13 +69,21 @@ def shaped_reward(text: str, targets: list[str], kind: str) -> float:
     """Reward for one completion.
 
     ``em``: binary substring exact match (sparse signal).
-    ``f1``: max(EM, token-level F1) -- partial credit densifies the
-    within-group variance that GRPO's group-relative advantages need.
+    ``f1``: max(EM, token-level F1) -- dense signal, but the F1 term can
+    dominate and drift the answer *style* away from what substring-EM
+    rewards (observed: terse answers that drop the target's leading
+    preposition, e.g. "Super Bowl LII" vs target "in Super Bowl LII").
+    ``em_f1``: EM + 0.2 * F1 -- EM stays the primary objective (anchoring
+    style to the eval metric) while the small F1 term provides within-group
+    variance for GRPO's advantages when no rollout scores an EM hit.
     """
     em = float(any(sub_exact_match(text, t) for t in targets))
-    if kind == "em" or em == 1.0:
+    if kind == "em":
         return em
-    return max((rouge_n_f1(text, t, n=1) for t in targets), default=0.0)
+    f1 = max((rouge_n_f1(text, t, n=1) for t in targets), default=0.0)
+    if kind == "em_f1":
+        return em + 0.2 * f1
+    return max(em, f1)
 
 
 def decode_row(tokenizer, row: torch.Tensor, pad_id: int) -> str:
@@ -126,8 +134,9 @@ def main() -> None:
     p.add_argument("--prompts-per-update", type=int, default=1,
                    help="Gradient accumulation: prompts (each with group-size "
                         "rollouts) folded into one optimizer update.")
-    p.add_argument("--reward", choices=["em", "f1"], default="f1",
-                   help="'f1' = max(exact-match, token-F1) partial credit (denser signal).")
+    p.add_argument("--reward", choices=["em", "f1", "em_f1"], default="em_f1",
+                   help="'em_f1' = EM + 0.2*token-F1 (EM-anchored, dense signal); "
+                        "'f1' = max(EM, F1); 'em' = binary exact match.")
     p.add_argument("--max-new-tokens", type=int, default=32)
     p.add_argument("--steps", type=int, default=150)
     p.add_argument("--lr", type=float, default=1e-6)

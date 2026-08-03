@@ -66,12 +66,23 @@ SUPPORTED_CACHES = {
 }
 
 # Safe eviction defaults, applied by the factory if the caller does not
-# specify them. Trained LLMs use the initial tokens (BOS, template header) as
-# attention sinks, and evicting them collapses generation (immediate EOS /
-# garbage) -- see https://github.com/awslabs/keys_values/issues/140 and
-# Xiao et al., "Efficient Streaming Language Models with Attention Sinks".
-# Similarly, evicting the *most recent* tokens right after they are written
-# destroys local coherence for H2O-type caches; a grace period protects them.
+# specify them. Two distinct failure modes motivate them (see
+# https://github.com/awslabs/keys_values/issues/140):
+#
+# - lastrec evicts the *initial* tokens first. Trained LLMs use those tokens
+#   (BOS, template header) as attention sinks, and evicting them collapses
+#   generation to immediate EOS/garbage (Xiao et al., "Efficient Streaming
+#   Language Models with Attention Sinks"). `init_grace_tokens` pins them.
+#   (H2O-type caches are NOT affected by this: `keep_initial_fraction`
+#   preserves the initial tokens at the first eviction, and their accumulated
+#   attention scores keep them heavy afterwards.)
+# - H2O-type caches score slots by *accumulated* attention, so freshly
+#   inserted tokens carry the lowest scores and are evicted first. On inputs
+#   whose critical content is near the end of the prompt (recently read),
+#   that region is dropped before generation can use it. `grace_period`
+#   protects the most recent tokens (see the H2OKVCache docstring on score
+#   accumulation favoring earlier tokens).
+#
 # Pass explicit values (e.g. 0) in `cache_kwargs` to override.
 DEFAULT_INIT_GRACE_TOKENS = 16  # lastrec: initial tokens kept indefinitely
 DEFAULT_GRACE_PERIOD_FRACTION = 1 / 16  # h2o family: recent-token protection
