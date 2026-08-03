@@ -47,13 +47,10 @@ def create_kv_cache(
         n_layer=1,
     )
     # Unit tests exercise the raw eviction mechanics: switch off the factory's
-    # safe eviction defaults (attention-sink / grace protection) unless the
-    # test asks for them explicitly.
+    # lastrec attention-sink default unless the test asks for it explicitly.
     cname = name.split("-torch")[0].split("-bnb")[0].split("-default")[0]
     if cname == "lastrec":
         kwargs.setdefault("init_grace_tokens", 0)
-    elif cname in ("h2o", "h2o-vlen", "qh2o", "qh2o-vlen"):
-        kwargs.setdefault("grace_period", 0)
     return KVCacheFactory.create_single(
         name=name,
         config=config,

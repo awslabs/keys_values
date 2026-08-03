@@ -201,9 +201,15 @@ def main() -> None:
         gpt_model = GPT(config)
     load_checkpoint(fabric, gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
     gpt_model.to(fabric.device)
+    # Application-level cache tuning (factory defaults stay simple upstream):
+    # for H2O-family caches, protect the recently read tail -- question-at-the-
+    # end prompts under tight budgets lose it otherwise (issue #140 discussion).
+    cache_kwargs = {}
+    if args.kv_cache_name.startswith(("h2o", "qh2o")) and "orig" not in args.kv_cache_name:
+        cache_kwargs["grace_period"] = cache_length // 16
     gpt_model.assign_kv_caches(KVCacheFactory.create(
         gpt_model=gpt_model, name=args.kv_cache_name, max_batch_size=args.group_size,
-        cache_length=cache_length, dtype=dtype))
+        cache_length=cache_length, dtype=dtype, cache_kwargs=cache_kwargs))
     optimizer = torch.optim.AdamW(gpt_model.parameters(), lr=args.lr)
 
     def reward_fn(prompt_ids: torch.Tensor, completion_ids: torch.Tensor) -> torch.Tensor:

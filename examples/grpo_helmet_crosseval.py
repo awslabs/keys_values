@@ -153,9 +153,10 @@ def main() -> None:
         gpt_model.load_state_dict(sd, strict=True)
         for cache_tag, cache_name, cl in eval_caches:
             deallocate_kv_cache_buffers_of_model(gpt_model)
+            ckw = {"grace_period": cl // 16} if cache_name.startswith("h2o") else {}
             gpt_model.assign_kv_caches(KVCacheFactory.create(
                 gpt_model=gpt_model, name=cache_name, max_batch_size=1,
-                cache_length=cl, dtype=dtype))
+                cache_length=cl, dtype=dtype, cache_kwargs=ckw))
             em, f1 = eval_records(gpt_model, records, tokenizer, prompt_style,
                                   pad_id, eos_id, args.max_new_tokens,
                                   args.chunk_size, fabric)

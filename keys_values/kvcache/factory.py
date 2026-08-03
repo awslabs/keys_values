@@ -65,27 +65,23 @@ SUPPORTED_CACHES = {
     if do_def or quant != "default"
 }
 
-# Safe eviction defaults, applied by the factory if the caller does not
-# specify them. Two distinct failure modes motivate them (see
-# https://github.com/awslabs/keys_values/issues/140):
+# Safe eviction default for `lastrec`, applied by the factory if the caller
+# does not specify `init_grace_tokens`. `lastrec` evicts the *initial* tokens
+# first; trained LLMs use those tokens (BOS, template header) as attention
+# sinks, and evicting them collapses generation to immediate EOS/garbage
+# (Xiao et al., "Efficient Streaming Language Models with Attention Sinks";
+# see https://github.com/awslabs/keys_values/issues/140). Pinning a few
+# initial tokens restores generation.
 #
-# - lastrec evicts the *initial* tokens first. Trained LLMs use those tokens
-#   (BOS, template header) as attention sinks, and evicting them collapses
-#   generation to immediate EOS/garbage (Xiao et al., "Efficient Streaming
-#   Language Models with Attention Sinks"). `init_grace_tokens` pins them.
-#   (H2O-type caches are NOT affected by this: `keep_initial_fraction`
-#   preserves the initial tokens at the first eviction, and their accumulated
-#   attention scores keep them heavy afterwards.)
-# - H2O-type caches score slots by *accumulated* attention, so freshly
-#   inserted tokens carry the lowest scores and are evicted first. On inputs
-#   whose critical content is near the end of the prompt (recently read),
-#   that region is dropped before generation can use it. `grace_period`
-#   protects the most recent tokens (see the H2OKVCache docstring on score
-#   accumulation favoring earlier tokens).
+# H2O-type caches are not affected by sink eviction (`keep_initial_fraction`
+# preserves the initial tokens, and their accumulated attention scores keep
+# them resident), so their defaults are left unchanged. For applications
+# where the recently read tail matters (e.g. question-at-the-end prompts
+# under tight budgets), tune `grace_period` and/or `normalize_scores=True`
+# explicitly.
 #
-# Pass explicit values (e.g. 0) in `cache_kwargs` to override.
+# Pass an explicit value (e.g. 0) in `cache_kwargs` to override.
 DEFAULT_INIT_GRACE_TOKENS = 16  # lastrec: initial tokens kept indefinitely
-DEFAULT_GRACE_PERIOD_FRACTION = 1 / 16  # h2o family: recent-token protection
 
 
 def _apply_safe_eviction_defaults(
@@ -94,23 +90,15 @@ def _apply_safe_eviction_defaults(
     cache_kwargs: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    Injects safe eviction defaults into `cache_kwargs` (returns a copy) for
-    evicting cache families, unless the caller specified the corresponding
-    key. `cache_length` is the smallest cache length being created.
+    Injects the `lastrec` attention-sink default into `cache_kwargs` (returns
+    a copy), unless the caller specified `init_grace_tokens`. `cache_length`
+    is the smallest cache length being created.
     """
     cache_kwargs = dict(cache_kwargs)
     cname, _ = split_name(name)
     if cname == "lastrec" and "init_grace_tokens" not in cache_kwargs:
         cache_kwargs["init_grace_tokens"] = min(
             DEFAULT_INIT_GRACE_TOKENS, max(cache_length // 8, 1)
-        )
-    elif (
-        # Note: "h2o-orig" is excluded, it does not support grace_period.
-        cname in ("h2o", "h2o-vlen", "qh2o", "qh2o-vlen")
-        and "grace_period" not in cache_kwargs
-    ):
-        cache_kwargs["grace_period"] = int(
-            cache_length * DEFAULT_GRACE_PERIOD_FRACTION
         )
     return cache_kwargs
 

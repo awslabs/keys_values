@@ -54,10 +54,13 @@ from keys_values.utils import VerbosityLevels
 def eval_accuracy(gpt_model, examples, cache_name, cache_length, dtype,
                   max_new, chunk_size, batch_size, tokenizer, pad_id, eos_id, fabric):
     deallocate_kv_cache_buffers_of_model(gpt_model)
+    # H2O-family: protect the recently read tail (see issue #140 discussion).
+    ckw = ({"grace_period": cache_length // 16}
+           if cache_name.startswith(("h2o", "qh2o")) and "orig" not in cache_name else {})
     gpt_model.assign_kv_caches(
         KVCacheFactory.create(
             gpt_model=gpt_model, name=cache_name, max_batch_size=batch_size,
-            cache_length=cache_length, dtype=dtype,
+            cache_length=cache_length, dtype=dtype, cache_kwargs=ckw,
         )
     )
     gpt_model.eval()
