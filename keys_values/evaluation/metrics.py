@@ -93,8 +93,8 @@ def sub_exact_match(
         Is there a sub exact match?
 
     """
-    response = normalize_string_response(response)
-    target_value = str(target_value)
+    response = normalize_string_response(response).lower()
+    target_value = str(target_value).lower()
     is_match = target_value in response
     if not is_match and threshold is not None:
         match_score = sub_exact_similarity(response, target_value)
