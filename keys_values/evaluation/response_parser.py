@@ -198,15 +198,6 @@ def extract_choice_letter(
         if cue_re.search(window):
             score += 10
 
-        # Extra bonus if patterns like "answer: X" appear tightly
-        tight = text[max(0, start - 15) : min(len(text), end + 15)]
-        if re.search(
-            r"(answer|correct)\s*[:\-]?\s*$",
-            tight[: (start - max(0, start - 15))],
-            re.IGNORECASE,
-        ):
-            score += 5
-
         candidates.append((score, start, ch))
 
     if not candidates:
