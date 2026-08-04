@@ -17,7 +17,7 @@ from typing import List, Optional, Dict, Any
 import yaml
 
 from keys_values.evaluation.tasks import EvaluationTasks
-from keys_values.finetune.longcontext_eval_ext import GENERATED_SAMPLES_FILENAME
+from keys_values.evaluation.longcontext_eval_ext import GENERATED_SAMPLES_FILENAME
 
 GENERATED_SAMPLES_ALL_FILENAME = "generated_samples_all.yaml"
 

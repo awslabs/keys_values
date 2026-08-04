@@ -16,8 +16,7 @@ from pathlib import Path
 from typing import Literal, Optional, Union
 
 from keys_values.finetune.args import KVCacheArgs, SDPAArgs
-from keys_values.finetune.longcontext_eval_ext import setup_internal
-from keys_values.finetune.longcontext_full import setup_internal
+from keys_values.evaluation.longcontext_eval_ext import setup_internal
 
 
 def setup(
