@@ -14,7 +14,7 @@
 from pathlib import Path
 import yaml
 
-from keys_values.finetune.longcontext_eval_ext import GENERATED_SAMPLES_FILENAME
+from keys_values.evaluation.longcontext_eval_ext import GENERATED_SAMPLES_FILENAME
 
 
 def main(control_file: Path, multiple_tasks: bool):

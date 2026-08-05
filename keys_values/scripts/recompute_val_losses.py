@@ -40,6 +40,13 @@ from keys_values.data.constants import (
     LIT_MODEL_FNAME,
     HEAD_MODEL_FNAME,
 )
+from keys_values.evaluation.longcontext_eval_ext import (
+    load_configuration,
+    cleanup_kvcache_kwargs,
+    cleanup_longbench_v2_kwargs,
+    ModelConfiguration,
+    load_model_checkpoint,
+)
 from keys_values.finetune.args import (
     TrainArgs,
     EvalArgs,
@@ -47,13 +54,6 @@ from keys_values.finetune.args import (
     SDPAArgs,
 )
 from keys_values.finetune.batch_transform import BatchTransformFactory
-from keys_values.finetune.longcontext_eval_ext import (
-    load_configuration,
-    cleanup_kvcache_kwargs,
-    cleanup_longbench_v2_kwargs,
-    ModelConfiguration,
-    load_model_checkpoint,
-)
 from keys_values.finetune.longcontext_full import (
     wrap_gpt_model,
     get_mha_and_cache_kwargs,
@@ -82,7 +82,7 @@ from keys_values.utils import (
     fabric_precision_to_dtype,
 )
 
-RESULT_FILENAME = "eval_record.yaml"
+RESULT_FILENAME = "recomp_val_losses/eval_record.yaml"
 
 
 def get_checkpoint_path(
@@ -239,9 +239,10 @@ def setup_internal(
         raise ValueError(
             f"devices = {devices}, must be in [1, {torch.cuda.device_count()}]"
         )
-    verbose = VerbosityLevels(verbose)
 
     # Determine checkpoint indices where to compute validation loss
+    if not out_dir.exists():
+        raise ValueError(f"{out_dir}: Directory does not exist")
     checkpoint_indexes, old_topk_entries = get_checkpoints_to_evaluate(
         out_dir, top_k, delta,
     )
@@ -548,5 +549,6 @@ def eval_for_setup(
         "eval_tasks": [winn_task],
     }
     result_path = out_dir / RESULT_FILENAME
+    result_path.parent.mkdir(parents=True, exist_ok=True)
     with open(result_path, "w") as fp:
         yaml.safe_dump(eval_entry, fp)

@@ -263,8 +263,8 @@ of money on many GPUs, and we think that advanced selective KV cache policies
 are an important direction towards this goal.
 
 Scripts for evaluating fine-tuned models on long context test data are provided
-in [finetune/longcontext_eval.py](./keys_values/finetune/longcontext_eval.py) and
-[finetune/longcontext_eval_ext.py](./keys_values/finetune/longcontext_eval_ext.py),
+in [finetune/longcontext_eval.py](keys_values/evaluation/longcontext_eval.py) and
+[finetune/longcontext_eval_ext.py](keys_values/evaluation/longcontext_eval_ext.py),
 more details are given [below](#evaluation-of-fine-tuned-models).
 
 
@@ -1052,9 +1052,9 @@ from the loss which drives the training. Some naming:
 
 The following scripts can be used for evaluation:
 
-* [longcontext_eval](./keys_values/finetune/longcontext_eval.py): Short `eval_long`.
+* [longcontext_eval](keys_values/evaluation/longcontext_eval.py): Short `eval_long`.
   Run evaluation for a single setup.
-* [longcontext_eval_ext](./keys_values/finetune/longcontext_eval_ext.py): Short
+* [longcontext_eval_ext](keys_values/evaluation/longcontext_eval_ext.py): Short
   `eval_long_ext`. Run evaluation for several setups, each with its own tasks.
 
 ### Evaluation for Single Setup: `eval_long`
