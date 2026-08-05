@@ -560,7 +560,7 @@ def eval_for_setup(
     winn_ind = new_topk_entries[0][0]
     winn_task = get_checkpoint_path(out_dir, winn_ind).stem
     eval_entry = {
-        "out_dir": out_dir,
+        "out_dir": str(out_dir),
         "model_type": model_type,
         "eval_tasks": [winn_task],
     }
