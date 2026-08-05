@@ -474,7 +474,7 @@ class TrainArgs:
             Defaults to `True`.
     """
 
-    save_interval: Optional[int] = 1000
+    save_interval: Optional[int] = 50
     """Number of optimizer steps between saving checkpoints"""
     log_interval: int = 1
     """Number of iterations between logging calls"""
@@ -482,7 +482,7 @@ class TrainArgs:
     """Legacy argument: Do not use"""
     micro_batch_size: int = 4
     """Number of samples per data-parallel rank"""
-    lr_warmup_steps: Optional[int] = 100
+    lr_warmup_steps: Optional[int] = None
     """Number of iterations with learning rate warmup active"""
     lr_warmup_fraction: Optional[float] = None
     """The fraction of an epoch to use for learning rate warmup"""
