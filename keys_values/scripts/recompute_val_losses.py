@@ -97,7 +97,7 @@ def get_checkpoints_to_evaluate(
     top_k: int,
     delta: int,
     include_final: bool = True,
-) -> Tuple[List[int], List[Tuple[int, float]]]:
+) -> Tuple[List[int], List[Tuple[int, float]], int]:
     """
     Determine checkpoint indexes for which to recompute validation losses. We
     extract all old loss values, identify the `top_k` argmins, and use all
@@ -171,13 +171,15 @@ def get_checkpoints_to_evaluate(
     if include_final and final_entry is not None and -1 not in result:
         result.append(-1)
     best_entries = [(-1 if a == final_index else a, b) for a, b in best_entries]
+    if max_index == final_index:
+        max_index = -1
 
     # Validate
     for index in result:
         path = get_checkpoint_path(out_dir, index)
         if not path.exists():
             raise FileNotFoundError(f"{path}: Checkpoint does not exist")
-    return result, best_entries
+    return result, best_entries, max_index
 
 
 def setup(
@@ -243,7 +245,7 @@ def setup_internal(
     # Determine checkpoint indices where to compute validation loss
     if not out_dir.exists():
         raise ValueError(f"{out_dir}: Directory does not exist")
-    checkpoint_indexes, old_topk_entries = get_checkpoints_to_evaluate(
+    checkpoint_indexes, old_topk_entries, final_cp_index = get_checkpoints_to_evaluate(
         out_dir, top_k, delta,
     )
     if not checkpoint_indexes:
@@ -284,6 +286,7 @@ def setup_internal(
         devices=devices,
         checkpoint_indexes=checkpoint_indexes,
         old_topk_entries=old_topk_entries,
+        final_cp_index=final_cp_index,
         seed=seed,
         out_dir=out_dir,
         verbose=verbose,
@@ -297,13 +300,13 @@ def main(
     devices: int,
     checkpoint_indexes: List[int],
     old_topk_entries: List[Tuple[int, float]],
+    final_cp_index: int,
     seed: int,
     out_dir: Path,
     verbose: Optional[str],
     access_token: Optional[str],
 ) -> None:
     fabric.seed_everything(seed)
-    is_lora = model_type == "lora"
     # Load configuration from first checkpoint (the same for all)
     task_path = get_checkpoint_path(out_dir, checkpoint_indexes[0])
     # Copied from `keys_values.finetune.longcontext_eval_ext.main`:
@@ -311,7 +314,6 @@ def main(
         task_path=task_path,
         model_type=model_type,
     )
-    model_name = hyp_pars["checkpoint_dir"].split("/")[-1]
     # Base model checkpoint
     # - For LoRA, most model weights are loaded from there
     # - Tokenizer or generation params are loaded from there if they are
@@ -444,6 +446,7 @@ def main(
         fabric,
         checkpoint_indexes,
         old_topk_entries,
+        final_cp_index,
         model,
         data,
         train,
@@ -459,6 +462,7 @@ def eval_for_setup(
     fabric: L.Fabric,
     checkpoint_indexes: List[int],
     old_topk_entries: List[Tuple[int, float]],
+    final_cp_index: int,
     model: LongContextInferenceModel,
     data: DataModule,
     train: TrainArgs,
@@ -473,30 +477,42 @@ def eval_for_setup(
         "\n".join([get_checkpoint_path(out_dir, i).stem for i in checkpoint_indexes]),
         fabric,
     )
+    # Training state can be obtained from the last checkpoint written, usually
+    # removed for all other checkpoints. We only need the train/valid split,
+    # which is the same across all checkpoints
+    task_path = get_checkpoint_path(out_dir, final_cp_index)
+    try:
+        data_train_state = restore_dataset_from_training_state(data, task_path)
+        print_message(f"Training state loaded from {task_path}", fabric)
+    except FileNotFoundError:
+        print_message(
+            f"No training state found at {task_path}.\nContinue with new random split.",
+            fabric,
+        )
+        data_train_state = None
+    # Data loader for validation set: The train/valid split is obtained from
+    # the training state stored alongside the checkpoint
+    _, val_dataloader = get_dataloaders(
+        data=data,
+        tokenizer=tokenizer,
+        head_model=model_config.head_model_name,
+        train=train,
+        eval=evals,
+        fabric=fabric,
+        training_state=data_train_state,
+    )
+    ignore_index = getattr(data, "ignore_index", -100)
+    batch_transform = BatchTransformFactory.from_head_model(
+        head_model=model_config.head_model_name,
+        pad_id=0,
+        eos_id=tokenizer.eos_id,
+        ignore_index=ignore_index,
+    )
 
     new_records: List[Tuple[int, float]] = []
     for cp_ind in checkpoint_indexes:
         cp_path = get_checkpoint_path(out_dir, cp_ind)
         print_message(f"\nComputing validation loss for {cp_path}", fabric)
-        # Data loader for validation set: The train/valid split is obtained from
-        # the training state stored alongside the checkpoint
-        data_train_state = restore_dataset_from_training_state(data, cp_path)
-        _, val_dataloader = get_dataloaders(
-            data=data,
-            tokenizer=tokenizer,
-            head_model=model_config.head_model_name,
-            train=train,
-            eval=evals,
-            fabric=fabric,
-            training_state=data_train_state,
-        )
-        ignore_index = getattr(data, "ignore_index", -100)
-        batch_transform = BatchTransformFactory.from_head_model(
-            head_model=model_config.head_model_name,
-            pad_id=0,
-            eos_id=tokenizer.eos_id,
-            ignore_index=ignore_index,
-        )
         # Load checkpoint
         print_message("Loading checkpoint", fabric)
         load_model_checkpoint(
