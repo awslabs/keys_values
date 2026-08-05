@@ -322,7 +322,7 @@ def main(
     )
     check_valid_checkpoint_dir(checkpoint_dir)
     train = TrainArgs(**hyp_pars["train"])
-    evals = EvalArgs(**hyp_pars["evals"])
+    evals = EvalArgs(**hyp_pars["eval"])
     batch_size = evals.micro_batch_size
     if batch_size is None:
         batch_size = 2
