@@ -137,6 +137,16 @@ def get_checkpoints_to_evaluate(
                 m = final_pattern.search(line)
                 if m:
                     records[-1] = float(m.group(1))
+    # Filter out iter's for which checkpoints do not exist
+    num_before = len(records)
+    records = {
+        iter: val_loss
+        for iter, val_loss in records.items()
+        if get_checkpoint_path(out_dir, iter).exists()
+    }
+    num_removed = num_before - len(records)
+    if num_removed > 0:
+        print(f"Removed {num_removed} iters found in log because no checkpoints found for them")
 
     if not records:
         print(f"{out_dir}: No logs")
@@ -170,12 +180,6 @@ def get_checkpoints_to_evaluate(
     best_entries = [(-1 if a == final_index else a, b) for a, b in best_entries]
     if max_index == final_index:
         max_index = -1
-
-    # Validate
-    for index in result:
-        path = get_checkpoint_path(out_dir, index)
-        if not path.exists():
-            raise FileNotFoundError(f"{path}: Checkpoint does not exist")
     return result, best_entries, max_index
 
 
