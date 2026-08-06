@@ -123,7 +123,24 @@ def main() -> None:
     if args.dataset_parent_dir:
         load_kwargs["dataset_parent_dir"] = args.dataset_parent_dir
     _, eval_data = load_helmet_dev_eval(args.dataset_key, **load_kwargs)
-    records = list(eval_data)[: args.n_eval]
+    # Maximize question diversity: the eval split contains several context
+    # variants per question (e.g. 600 instances over 100 questions for the
+    # RAG tasks), and taking the first n in file order covers only a
+    # handful of distinct questions (17 at n=100 on nq), inflating variance
+    # far beyond the nominal-n standard error. Round-robin over questions
+    # instead: first one instance per distinct question, then seconds, etc.
+    by_qid: dict = {}
+    for rec in eval_data:
+        by_qid.setdefault(rec["query_id"], []).append(rec)
+    records = []
+    rank = 0
+    while len(records) < args.n_eval and any(rank < len(v) for v in by_qid.values()):
+        for variants in by_qid.values():
+            if rank < len(variants) and len(records) < args.n_eval:
+                records.append(variants[rank])
+        rank += 1
+    print(f"Selected {len(records)} records covering "
+          f"{len(set(r['query_id'] for r in records))} distinct questions")
     lens = [int(tokenizer.encode(prompt_style.apply(r["input"])).size(0)) for r in records]
     max_len = max(lens)
     print(f"HELMET {args.dataset_key}/{args.max_length}: {len(records)} eval records, "
