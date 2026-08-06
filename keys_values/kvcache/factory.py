@@ -65,6 +65,43 @@ SUPPORTED_CACHES = {
     if do_def or quant != "default"
 }
 
+# Safe eviction default for `lastrec`, applied by the factory if the caller
+# does not specify `init_grace_tokens`. `lastrec` evicts the *initial* tokens
+# first; trained LLMs use those tokens (BOS, template header) as attention
+# sinks, and evicting them collapses generation to immediate EOS/garbage
+# (Xiao et al., "Efficient Streaming Language Models with Attention Sinks";
+# see https://github.com/awslabs/keys_values/issues/140). Pinning a few
+# initial tokens restores generation.
+#
+# H2O-type caches are not affected by sink eviction (`keep_initial_fraction`
+# preserves the initial tokens, and their accumulated attention scores keep
+# them resident), so their defaults are left unchanged. For applications
+# where the recently read tail matters (e.g. question-at-the-end prompts
+# under tight budgets), tune `grace_period` and/or `normalize_scores=True`
+# explicitly.
+#
+# Pass an explicit value (e.g. 0) in `cache_kwargs` to override.
+DEFAULT_INIT_GRACE_TOKENS = 16  # lastrec: initial tokens kept indefinitely
+
+
+def _apply_safe_eviction_defaults(
+    name: str,
+    cache_length: int,
+    cache_kwargs: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Injects the `lastrec` attention-sink default into `cache_kwargs` (returns
+    a copy), unless the caller specified `init_grace_tokens`. `cache_length`
+    is the smallest cache length being created.
+    """
+    cache_kwargs = dict(cache_kwargs)
+    cname, _ = split_name(name)
+    if cname == "lastrec" and "init_grace_tokens" not in cache_kwargs:
+        cache_kwargs["init_grace_tokens"] = min(
+            DEFAULT_INIT_GRACE_TOKENS, max(cache_length // 8, 1)
+        )
+    return cache_kwargs
+
 
 class KVCacheFactory:
     """
@@ -138,6 +175,7 @@ class KVCacheFactory:
         )
         if cache_kwargs is None:
             cache_kwargs = dict()
+        cache_kwargs = _apply_safe_eviction_defaults(name, cache_length, cache_kwargs)
 
         cache_type = SUPPORTED_CACHES.get(name)
         if cache_type is not None:
@@ -257,6 +295,9 @@ class KVCacheFactory:
             raise ValueError(
                 f"cache_length = {cache_length}, must contain only positive integers"
             )
+        cache_kwargs = _apply_safe_eviction_defaults(
+            name, min(cache_length), cache_kwargs
+        )
 
         cache_type = SUPPORTED_CACHES.get(name)
         if cache_type is not None:
@@ -365,6 +406,7 @@ class KVCacheFactory:
             raise ValueError(
                 f"name = {name}: Offloading does not support default buffers, must be quantized"
             )
+        cache_kwargs = _apply_safe_eviction_defaults(name, cache_length, cache_kwargs)
         cache_type = SUPPORTED_CACHES.get(name)
         if cache_type is not None:
             max_num_ranges = cache_kwargs.get("max_num_ranges")
