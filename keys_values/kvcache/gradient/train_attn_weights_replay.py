@@ -98,7 +98,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
     since no quantization or dequantization are done. Since
     :class:`InferenceAttnWeightsReplayCache` is easily obtained from
     :class:`AttnWeightsReplayCache`, this is the simpler option.
-
     """
 
     def __init__(

@@ -95,7 +95,6 @@ def setup(
         layercp_qname=None,
         cachecp_qname=None,
         single_tokens_for_targets=False,
-        use_old_cache=False,
         max_match_trials_pack_arg=8,
     ),
     head_model: str = CrossEntropyOnLogits.NAME,
@@ -171,8 +170,7 @@ def setup(
             in naive SDPA. At present, naive SDPA is used with KV caches which
             require attention weights (e.g., H2O).
         attention_backward_temp_size_gb: Size of GPU memory buffers (in GB) used
-            in naive SDPA during backward computations. At present, naive SDPA
-            is used in backward if `grad.use_old_cache == True`.
+            in naive SDPA during backward computations.
         oom_error_recovery: If `True`, we try to recover from device out of
             memory errors by lowering `attention_forward_temp_size_gb`,
             `attention_backward_temp_size_gb` and trying again.

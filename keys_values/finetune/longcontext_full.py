@@ -201,7 +201,6 @@ def setup(
         layercp_qname=None,
         cachecp_qname=None,
         single_tokens_for_targets=False,
-        use_old_cache=False,
         max_match_trials_pack_arg=8,
         layercp_pin_memory=False,
         cachecp_pin_memory=False,
@@ -274,8 +273,7 @@ def setup(
             in naive SDPA. At present, naive SDPA is used with KV caches which
             require attention weights (e.g., H2O).
         attention_backward_temp_size_gb: Size of GPU memory buffers (in GB) used
-            in naive SDPA during backward computations. At present, naive SDPA
-            is used in backward if `grad.use_old_cache == True`.
+            in naive SDPA during backward computations.
         oom_error_recovery: If `True`, we try to recover from device out of
             memory errors by lowering `attention_forward_temp_size_gb`,
             `attention_backward_temp_size_gb` and trying again.
@@ -874,10 +872,8 @@ def main(
 
     if profile_grad_times > 0 and fabric.global_rank == 0:
         thresh = grad.max_match_trials_pack_arg
-        name = "old" if grad.use_old_cache else "new"
         profile_grad_params = {
-            "path": Path(out_dir) / f"profile_grad_times_{name}_{thresh}.csv",
-            "use_old_cache": grad.use_old_cache,
+            "path": Path(out_dir) / f"profile_grad_times_{thresh}.csv",
             "max_match_trials_pack_arg": thresh,
             "profile_grad_times": profile_grad_times,
             "cache_name": kv_cache.name,
@@ -1147,10 +1143,7 @@ def wrap_gpt_model(
             init_val=limit_gb,
             name="attention_backward_temp_size_gb",
         )
-        train_cache_kwargs = {
-            "sdpa_kernels": cache_kwargs["sdpa_kernels"],
-            "use_old_cache": grad.use_old_cache,
-        }
+        train_cache_kwargs = {"sdpa_kernels": cache_kwargs["sdpa_kernels"]}
         autograd_hooks_kwargs: Dict[str, Any] = dict(
             may_match_twice=may_match_twice_factory(grad, gpt_model),
             debug_print_annotations=grad.debug_print_annotations,
