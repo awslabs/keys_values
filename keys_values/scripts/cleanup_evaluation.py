@@ -40,14 +40,18 @@ if __name__ == "__main__":
 
     # dataset_size = "64k"
     dataset_size = "128k"
+    # is_rerun = False
+    is_rerun = True
     is_baseline = False
     # is_baseline = True
     is_base_model = False
     # is_base_model = True
-    # extra_data = False
-    extra_data = True
+    extra_data = False
+    # extra_data = True
     multiple_tasks = not is_baseline and not is_base_model
-    if is_baseline:
+    if is_rerun:
+        base_path = base_path / "rerun"
+    elif is_baseline:
         base_path = base_path / "baseline"
     elif is_base_model:
         base_path = base_path / "basemod"
