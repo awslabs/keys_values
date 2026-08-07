@@ -222,16 +222,9 @@ def args_training_replay():
 
 
 @pytest.mark.parametrize(
-    "cache_name, device, cache_kwargs, tol_kwargs, use_old_cache",
-    [
-        a + (b,)
-        for a, b in product(
-            args_training_replay(),
-            [False, True],
-        )
-    ],
+    "cache_name, device, cache_kwargs, tol_kwargs", args_training_replay(),
 )
-def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_old_cache):
+def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs):
     seed = 31415927
     torch.random.manual_seed(seed)
 
@@ -245,15 +238,11 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_old_c
     vocab_size = 48
     tokens_per_chunk = [cache_length, 8, 4, 8, 2, 8, 2, 8, 8]
     seq_length = sum(tokens_per_chunk)
-    if not use_old_cache:
-        replay_class = TrainingAttnWeightsReplayCache
-        # Eager SDPA never used
-        cache_kwargs = {
-            **cache_kwargs,
-            "use_eager_kernel": lambda kv_len, q_len: False,
-        }
-    else:
-        replay_class = TrainingAttnWeightsReplayCacheOld
+    # Eager SDPA never used
+    cache_kwargs = {
+        **cache_kwargs,
+        "use_eager_kernel": lambda kv_len, q_len: False,
+    }
     layer_outputs = dict()
 
     def start_of_layer_hook(x: torch.Tensor, l_ix: int, tag: str):
@@ -310,7 +299,7 @@ def test_training_replay(cache_name, device, cache_kwargs, tol_kwargs, use_old_c
             # Create training replay cache. We use the buffer of `kv_cache`
             # here.
             replay_log = get_replay_logs(model)[0]
-            tr_cache = replay_class(
+            tr_cache = TrainingAttnWeightsReplayCache(
                 config=config,
                 batch_size=batch_size,
                 cache_length=cache_length,

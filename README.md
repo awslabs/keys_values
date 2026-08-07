@@ -818,8 +818,7 @@ library (and would be very happy for help, see
   [scaled_dot_product_attention_in_blocks](keys_values/attention/base.py#L477).
   The computation is done in blocks so that no more than `tmp_array_limit_gb`
   GB of GPU memory is needed for the temporary buffers. These kernels are
-  used for `forward` when attention weights are required, and for `backward`
-  if `--grad.use_old_cache True`.
+  used for `forward` when attention weights are required.
 
 We ran an experiment for many different `kv_len` to determine from which
 `q_len` value onwards query-padded SDPA is faster than naive SDPA. However, if
@@ -1004,11 +1003,6 @@ Other arguments for fine-tuning are:
   Defaults to "torch-quantized8". For "default", the checkpoints are not
   quantized. This is more accurate, but needs more CPU memory and is slower,
   because more memory has to be transferred to CPU.
-* `--grad.use_old_cache`: If this is `True`, an older training replay cache is
-  used for gradient computations. This used a fused naive SDPA kernel, which
-  requires less GPU memory, but is also slower (if `flex_attention` is used).
-  It is an open issue to provide a fast SDPA kernel fused with `torch.scatter`,
-  the best of both worlds.
 * `--grad.single_tokens_for_targets`: If `True`, the targets part of a sequence
   is processed token per token (i.e., with chunk size 1). This is slower, but
   more realistic, mirroring how inference looks like. If the targets part is

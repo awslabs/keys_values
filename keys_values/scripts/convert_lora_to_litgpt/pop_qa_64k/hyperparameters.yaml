@@ -67,7 +67,6 @@ grad:
   layercp_qname: default
   cachecp_qname: torch-quantized8
   single_tokens_for_targets: false
-  use_old_cache: false
   max_match_trials_pack_arg: 8
   layercp_pin_memory: true
   cachecp_pin_memory: true
