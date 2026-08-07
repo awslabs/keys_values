@@ -17,6 +17,7 @@ import torch
 import pytest
 
 from keys_values.kvcache.base import KVCacheParams
+from keys_values.kvcache.basics import DEFAULT_INIT_GRACE_TOKENS
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     tensor_is_simple,
@@ -51,6 +52,9 @@ def test_last_recent(device, name):
     )
     cache_length = params.cache_length
     kv_cache = create_kv_cache(name, params)
+    assert kv_cache.init_grace_tokens == min(
+        DEFAULT_INIT_GRACE_TOKENS, max(params.cache_length // 8, 1),
+    )
     num_insert = randint_torch(cache_length, 3 * cache_length)
     max_prefill_length = kv_cache.max_prefill_length
     num_prefill = randint_torch(num_insert // 3, int(num_insert * 0.75))
@@ -78,7 +82,10 @@ def test_last_recent(device, name):
     assert tensor_is_simple(token_positions)
     positions = token_positions[0, 0, :].tolist()
     assert len(set(positions)) == current_length
-    assert all(num_insert - current_length <= x < num_insert for x in positions)
+    assert all(
+        x < kv_cache.init_grace_tokens or num_insert - current_length <= x < num_insert
+        for x in positions
+    )
 
 
 @pytest.mark.parametrize(
