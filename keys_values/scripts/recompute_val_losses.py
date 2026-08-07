@@ -146,7 +146,9 @@ def get_checkpoints_to_evaluate(
     }
     num_removed = num_before - len(records)
     if num_removed > 0:
-        print(f"Removed {num_removed} iters found in log because no checkpoints found for them")
+        print(
+            f"Removed {num_removed} iters found in log because no checkpoints found for them"
+        )
 
     if not records:
         print(f"{out_dir}: No logs")

@@ -105,7 +105,7 @@ class KVCacheArgs:
     randomize_chunk_sizes: bool = False
     allocate_buffers: bool = False
     grace_period: int = 0
-    init_grace_tokens: int = 0
+    init_grace_tokens: Optional[int] = None
     cpu_offload: bool = False
     normalize_scores: bool = False
     range_is_prefix: bool = True
@@ -125,7 +125,9 @@ class KVCacheArgs:
             raise ValueError(
                 f"grace_period = {self.grace_period}, must be in [0, {self.cache_length}])"
             )
-        if not (0 <= self.init_grace_tokens < self.cache_length):
+        if self.init_grace_tokens is not None and not (
+            0 <= self.init_grace_tokens < self.cache_length
+        ):
             raise ValueError(
                 f"init_grace_tokens = {self.init_grace_tokens}, must be in [0, {self.cache_length}])"
             )
@@ -213,11 +215,6 @@ class GradientArgs:
         single_tokens_for_targets: If `True`, the targets part of a sequence is
             processed token per token (i.e., with chunk size 1). This is slower,
             but more realistic, mirroring how inference looks like.
-        use_old_cache: If `True`, we use
-            :class:`TrainingAttnWeightsReplayCacheOld` instead of
-            :class:`TrainingAttnWeightsReplayCache`. The old code uses the
-            fused naive SDPA during backward, which is slower, but also needs
-            less GPU memory.
         max_match_trials_pack_arg: Parameter controlling autograd saved tensors
             hook mechanism, see :class:`CellComputationAutogradHooks`.
             Arguments of :meth:`pack_hook` are matched against annotations. A
@@ -241,7 +238,6 @@ class GradientArgs:
     layercp_qname: Optional[str] = None
     cachecp_qname: Optional[str] = None
     single_tokens_for_targets: bool = False
-    use_old_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
     layercp_pin_memory: bool = True
     cachecp_pin_memory: bool = True

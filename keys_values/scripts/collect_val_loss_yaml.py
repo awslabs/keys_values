@@ -39,8 +39,7 @@ def main(
                         result_paths.append(result_path)
     print(f"Found {len(result_paths)} result files")
     entry_list = [
-        yaml.safe_load(open(result_path, "r"))
-        for result_path in result_paths
+        yaml.safe_load(open(result_path, "r")) for result_path in result_paths
     ]
     print(f"Writing combined results into {control_path}")
     with open(control_path, "w") as fp:
@@ -78,9 +77,14 @@ if __name__ == "__main__":
             f"helmet_json_kv_{dataset_size}",
             f"helmet_ruler_mk_uuid_{dataset_size}",
         ]
-    control_path = Path.home() / ("sync" if is_instance1 else "git") / "keys_values" / CONTROL_FILENAME.format(
-        instance="inst1" if is_instance1 else "inst2_3",
-        extra="_extra" if extra_data else "",
-        dataset_size=dataset_size,
+    control_path = (
+        Path.home()
+        / ("sync" if is_instance1 else "git")
+        / "keys_values"
+        / CONTROL_FILENAME.format(
+            instance="inst1" if is_instance1 else "inst2_3",
+            extra="_extra" if extra_data else "",
+            dataset_size=dataset_size,
+        )
     )
     main(base_path, datasets, control_path)
