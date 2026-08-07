@@ -172,12 +172,59 @@ dense-eval | H2O-eval.
 5. **Training shrinks the sparse-inference penalty**: base loses 11pp EM
    under H2O eval on hotpot; trained models lose 3–5pp.
 
+## Reproducibility note (post-campaign): the eval split was not seeded
+
+Replicating the base-model cells on a fresh machine exposed two issues
+(fixed in #145 and in this PR's crosseval driver):
+
+1. **Unseeded dev/eval split.** `load_rag` drew the 100 eval questions
+   with bare `random.sample`, and the draw is cached to disk. Every
+   machine gets a *different* eval set, so the absolute numbers above are
+   internally consistent but not reproducible across hosts.
+2. **Narrow question coverage.** The eval split holds ~6 context variants
+   per question, and `records[:100]` in file order covered only **17
+   distinct questions** — the effective sample was far smaller than the
+   nominal n=100, so the true SE is roughly 2x the ~5pp assumed above.
+
+All tables above were measured on the original box's (pre-fix) split and
+should be read with those wider error bars. Re-baselining the full
+matrix under the seeded split and question-diverse selection is queued.
+
+## Base-model cache-budget sweep (seeded split, 100 distinct questions)
+
+First results under the fixed evaluation: base Qwen2.5-0.5B-Instruct,
+8k bucket (~7k-token prompts), n=100 with full question coverage,
+`grace_period = cache_length / 16`. EM / F1:
+
+| eval cache | nq | hotpot_qa |
+|---|---:|---:|
+| dense | 0.26 / 0.125 | 0.34 / 0.140 |
+| H2O @ 4096 | 0.16 / 0.094 | 0.27 / 0.131 |
+| H2O @ 2048 | 0.17 / 0.088 | 0.28 / 0.105 |
+| H2O @ 1024 | 0.07 / 0.045 | 0.05 / 0.017 |
+
+**Findings**
+
+1. **Sparse inference is not free on nq either.** Under the
+   question-diverse eval, H2O@4096 costs ~10pp EM on nq (0.26 → 0.16) —
+   the earlier "~1pp, essentially free" reading came from the
+   17-question subset. Hotpot costs ~7pp (0.34 → 0.27). The round-1
+   "sparse inference is essentially free" claim does **not** survive the
+   eval fix; the training-parity claims are unaffected in structure but
+   need re-baselining.
+2. **The penalty is flat from 4096 to 2048, then falls off a cliff at
+   1024** (~1/7 of prompt length): nq 0.16/0.17 → 0.07, hotpot
+   0.27/0.28 → 0.05. Between 55% and 28% compression the cache keeps
+   what matters; at 14% the evidence itself is evicted.
+
 ## Caveats
 
 - nq's substring-EM remains style-sensitive (F1-heavy arms drop nq EM while
   F1 rises); report both metrics.
 - Round-3/SFT/RLOO are single-seed (the round-2 pattern replicated across
-  2 seeds); n=100 (SE ≈ 5pp), so ±12pp deltas are ~2σ.
+  2 seeds); n=100 (SE ≈ 5pp), so ±12pp deltas are ~2σ. Per the
+  reproducibility note above, the *effective* n of the pre-fix eval is
+  smaller (17 distinct questions), widening these bars further.
 - 0.5B model, two tasks, 8k bucket; larger models and longer contexts are
   the natural next axis (see `docs/GRPO_CONTEXT_SCALING.md` for the memory
   scaling that motivates them).
