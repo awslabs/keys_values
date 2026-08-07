@@ -492,17 +492,22 @@ class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
         return result
 
 
+DEFAULT_INIT_GRACE_TOKENS = 16
+
+
 class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     """
     Baseline key-value cache which stores the last recently inserted
-    `cache_length` key and value tensors. When the cache is full,
-    those slots are overwritten whose content is in the cache for the
-    longest time.
+    `cache_length` key and value tensors. When the cache is full, those slots
+    are overwritten whose content is in the cache for the longest time.
 
-    If `init_grace_tokens > 0`, this number of initial keys and values are kept
-    in the cache indefinitely. Use this in order to cater for initial prompt
-    tokens which may be important.
+    Information for the initial `init_grace_tokens` tokens remains in the cache
+    indefinitely. The default is positive, see :const:`DEFAULT_INIT_GRACE_TOKENS`,
+    catering for the "attention sink" property exhibited by pre-trained LLMs:
 
+    Xiao etal.
+    Efficient Streaming Language Models with Attention Sinks
+    https://arxiv.org/abs/2309.17453
     """
 
     def __init__(
@@ -510,12 +515,16 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         config: Config,
         buffers: KVCacheBuffers,
         block_idx: int,
-        init_grace_tokens: int = 0,
+        init_grace_tokens: Optional[int] = None,
         **base_kwargs,
     ):
-        if init_grace_tokens < 0:
-            raise ValueError(f"init_grace_tokens={init_grace_tokens}, must be >= 0")
         super().__init__(config, buffers, block_idx, **base_kwargs)
+        if init_grace_tokens is None:
+            init_grace_tokens = min(
+                DEFAULT_INIT_GRACE_TOKENS, max(buffers.cache_length // 8, 1),
+            )
+        elif init_grace_tokens < 0:
+            raise ValueError(f"init_grace_tokens={init_grace_tokens}, must be >= 0")
         self.init_grace_tokens = init_grace_tokens
         # Note: We could generate `token_pos` on the fly from `input_pos`
         # and `next_position`, but it is simpler just to maintain it.
@@ -535,7 +544,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         max_batch_size: int,
         cache_length: int,
         block_idx: int,
-        init_grace_tokens: int = 0,
+        init_grace_tokens: Optional[int] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         **base_kwargs,
@@ -549,7 +558,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             cache_length: Number of slots (i.e., tokens) in cache
             block_idx: Block index
             init_grace_tokens: This number of initial keys and values are
-                kept in the cache indefinitely. Defaults to 0.
+                kept in the cache indefinitely.
             device: Device for buffers. If not given, it is set with the
                 first :meth:`forward` call, based on the input arguments.
             dtype: Data type for buffers. If not given, it is set with the

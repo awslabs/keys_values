@@ -59,7 +59,6 @@ kv_cache:
   randomize_chunk_sizes: false
   allocate_buffers: false
   grace_period: 0
-  init_grace_tokens: 0
   cpu_offload: false
   verbose: some
 grad:

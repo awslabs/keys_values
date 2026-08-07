@@ -105,7 +105,7 @@ class KVCacheArgs:
     randomize_chunk_sizes: bool = False
     allocate_buffers: bool = False
     grace_period: int = 0
-    init_grace_tokens: int = 0
+    init_grace_tokens: Optional[int] = None
     cpu_offload: bool = False
     normalize_scores: bool = False
     range_is_prefix: bool = True
@@ -125,7 +125,7 @@ class KVCacheArgs:
             raise ValueError(
                 f"grace_period = {self.grace_period}, must be in [0, {self.cache_length}])"
             )
-        if not (0 <= self.init_grace_tokens < self.cache_length):
+        if self.init_grace_tokens is not None and not (0 <= self.init_grace_tokens < self.cache_length):
             raise ValueError(
                 f"init_grace_tokens = {self.init_grace_tokens}, must be in [0, {self.cache_length}])"
             )
