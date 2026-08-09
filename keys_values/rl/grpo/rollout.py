@@ -33,6 +33,38 @@ from keys_values.generate.base import batched_generate_fn
 from keys_values.long_context import LongContextInferenceModel
 
 
+def sampled_token_logprobs(
+    logits_stack: torch.Tensor,
+    tokens: torch.Tensor,
+    sample_args_list: list[dict],
+) -> torch.Tensor:
+    """Log-probs of the sampled ``tokens`` under the (temperature-scaled) policy.
+
+    Uses the *full* softmax over the vocabulary (no top-k/top-p truncation), so
+    the value matches what :class:`keys_values.logprobs.LogProbsHeadModel` and
+    :class:`keys_values.rl.grpo.loss.GRPOLossHeadModel` compute during scoring
+    and the policy gradient. This makes the captured log-prob a drop-in
+    replacement for a separate scoring forward pass -- the reason it lives with
+    the RL rollout code rather than in the generic generation loop.
+
+    Args:
+        logits_stack: Model logits, shape ``(batch_size, 1, vocab_size)``.
+        tokens: Sampled tokens, shape ``(batch_size, 1)``.
+        sample_args_list: Per-batch sampling kwargs (for ``temperature``).
+
+    Returns:
+        Log-probs, shape ``(batch_size,)``.
+    """
+    logits = logits_stack[:, -1, :]  # (batch_size, vocab_size)
+    temps = torch.tensor(
+        [max(float(sa.get("temperature", 1.0)), 1e-5) for sa in sample_args_list],
+        device=logits.device,
+        dtype=logits.dtype,
+    ).unsqueeze(-1)  # (batch_size, 1)
+    logp_all = torch.log_softmax(logits / temps, dim=-1)
+    return logp_all.gather(-1, tokens.view(-1, 1)).squeeze(-1)
+
+
 def generate_completions(
     model: LongContextInferenceModel,
     prompt_ids: torch.Tensor,
