@@ -20,7 +20,7 @@ from keys_values.evaluation.tasks import EvaluationTasks
 
 EVAL_METRICS_ALL_FILENAME = "eval_metrics_all.csv"
 
-SWEEP_TAR_FILENAME = "eval_metrics_transfer_{dataset_size}.tgz"
+SWEEP_TAR_FILENAME = "eval_metrics_transfer_{extra}{dataset_size}.tgz"
 
 
 def main(
@@ -75,16 +75,20 @@ if __name__ == "__main__":
 
     mode = "collect"
     # mode = "sweep"
-    dataset_size = "64k"
-    # dataset_size = "128k"
+    # dataset_size = "64k"
+    dataset_size = "128k"
+    # is_rerun = False
+    is_rerun = True
     is_baseline = False
     # is_baseline = True
-    # is_base_model = False
-    is_base_model = True
-    # extra_data = False
-    extra_data = True
+    is_base_model = False
+    # is_base_model = True
+    extra_data = False
+    # extra_data = True
     multiple_tasks = not is_baseline and not is_base_model
-    if is_baseline:
+    if is_rerun:
+        base_path = base_path / "rerun"
+    elif is_baseline:
         base_path = base_path / "baseline"
     elif is_base_model:
         base_path = base_path / "basemod"
@@ -139,10 +143,11 @@ if __name__ == "__main__":
             name = "/".join((dataset, case, EVAL_METRICS_ALL_FILENAME))
             if (base_path / name).exists():
                 names.append(name)
+        extra = "extra_" if extra_data else ""
         print(
             f"\nCollected {len(names)} result files. Run at {base_path}:\n"
             + "tar cfz "
-            + SWEEP_TAR_FILENAME.format(dataset_size=dataset_size)
+            + SWEEP_TAR_FILENAME.format(dataset_size=dataset_size, extra=extra)
             + " "
             + " ".join(names)
         )
