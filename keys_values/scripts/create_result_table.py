@@ -29,24 +29,13 @@ def _sort_entries(entries):
     return non_fin + [(st, v) for st, v in entries if st == "fin"]
 
 
-# We ran evaluations for more than the task for which evaluation loss was
-# lowest. With this predicate, we filter for the winning tasks only.
+# Can be used to filter out invalid results
 def _filter_dataset_case(
     dataset: str,
     case: str,
     task: str,
 ) -> bool:
-    if dataset.endswith("_128k"):
-        return not (case.startswith("lr_4gpu_cs1024") and task == "410")
-    # Filter out error in results:
-    if task == "380" and case.startswith("lr_") and dataset.startswith("helmet_trivia"):
-        return False
-    if task == "fin":
-        # Only those for which "fin" is the only result
-        return dataset.startswith("helmet_pop") and (
-            case.startswith("slr_") or case.startswith("h2onorm_")
-        )
-    return task != "010"
+    return True
 
 
 def main(
