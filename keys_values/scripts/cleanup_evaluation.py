@@ -92,6 +92,15 @@ if __name__ == "__main__":
                 "qh2onorm_4gpu_cs2048_lr5",
             ]
         )
+        if dataset_size == "64k":
+            cases.extend(
+                [
+                    "slr_4gpu_cs128_lr5",
+                    "h2o_4gpu_cs128_lr5",
+                    "h2onorm_4gpu_cs128_lr5",
+                    "h2oorig_4gpu_cs128_lr5",
+                ]
+            )
     # Use this to clean up lock files before restarting evaluation
     # mode = "lock"
     # Use this to remove all evaluation files

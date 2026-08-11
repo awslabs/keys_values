@@ -200,6 +200,15 @@ if __name__ == "__main__":
                 ("qh2onorm_4gpu_cs2048_lr5", "qh2onorm_2048"),
             ]
         )
+        if dataset_size == "64k":
+            cases.extend(
+                [
+                    ("slr_4gpu_cs128_lr5", "slr_128"),
+                    ("h2o_4gpu_cs128_lr5", "h2o_128"),
+                    ("h2onorm_4gpu_cs128_lr5", "h2onorm_128"),
+                    ("h2oorig_4gpu_cs128_lr5", "h2oorig_128"),
+                ]
+            )
     result_path = base_path / f"results_{dataset_size}.tex"
     # final_table = False
     final_table = True
