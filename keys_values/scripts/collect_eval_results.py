@@ -110,34 +110,41 @@ if __name__ == "__main__":
             f"helmet_json_kv_{dataset_size}",
             f"helmet_ruler_mk_uuid_{dataset_size}",
         ]
-    cases = [
-        "lr_4gpu_cs2048_lr5",
-        "slr_4gpu_cs2048_lr5",
-        "h2o_4gpu_cs2048_lr5",
-        "h2onorm_4gpu_cs2048_lr5",
-        "h2oorig_4gpu_cs2048_lr5",
-        "lr_4gpu_cs1024_lr5",
-        "slr_4gpu_cs1024_lr5",
-        "h2o_4gpu_cs1024_lr5",
-        "h2onorm_4gpu_cs1024_lr5",
-        "h2oorig_4gpu_cs1024_lr5",
-    ]
-    if multiple_tasks and not extra_data:
-        cases.extend(
-            [
-                "qh2o_4gpu_cs2048_lr5",
-                "qh2onorm_4gpu_cs2048_lr5",
-            ]
-        )
-        if dataset_size == "64k":
+    if not extra_data:
+        cases = [
+            "lr_4gpu_cs2048_lr5",
+            "slr_4gpu_cs2048_lr5",
+            "h2o_4gpu_cs2048_lr5",
+            "h2onorm_4gpu_cs2048_lr5",
+            "h2oorig_4gpu_cs2048_lr5",
+            "lr_4gpu_cs1024_lr5",
+            "slr_4gpu_cs1024_lr5",
+            "h2o_4gpu_cs1024_lr5",
+            "h2onorm_4gpu_cs1024_lr5",
+            "h2oorig_4gpu_cs1024_lr5",
+        ]
+        if multiple_tasks:
             cases.extend(
                 [
-                    "slr_4gpu_cs128_lr5",
-                    "h2o_4gpu_cs128_lr5",
-                    "h2onorm_4gpu_cs128_lr5",
-                    "h2oorig_4gpu_cs128_lr5",
+                    "qh2o_4gpu_cs2048_lr5",
+                    "qh2onorm_4gpu_cs2048_lr5",
                 ]
             )
+            if dataset_size == "64k":
+                cases.extend(
+                    [
+                        "slr_4gpu_cs128_lr5",
+                        "h2o_4gpu_cs128_lr5",
+                        "h2onorm_4gpu_cs128_lr5",
+                        "h2oorig_4gpu_cs128_lr5",
+                    ]
+                )
+    else:
+        cases = [
+            "slr_4gpu_cs1024_lr5",
+            "h2onorm_4gpu_cs1024_lr5",
+            "h2oorig_4gpu_cs1024_lr5",
+        ]
     model_type = "lora"
     if mode == "collect":
         for dataset, case in product(datasets, cases):
