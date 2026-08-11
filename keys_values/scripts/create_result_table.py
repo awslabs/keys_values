@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from keys_values.evaluation.evaluator import METRICS_FOR_HELMET_TASKS
+
 EVAL_METRICS_ALL_FILENAME = "eval_metrics_all.csv"
 
 
@@ -38,13 +40,28 @@ def _filter_dataset_case(
     return True
 
 
+_PREFIX = "helmet_"
+
+_POSTFIXES = ("_64k", "_128k")
+
+def _metric_name_for_dataset(dataset: str) -> str:
+    assert dataset.startswith(_PREFIX)
+    len_post = None
+    for post in _POSTFIXES:
+        if dataset.endswith(post):
+            len_post = len(post)
+            break
+    assert len_post is not None
+    key = dataset[len(_PREFIX):-len_post]
+    return METRICS_FOR_HELMET_TASKS[key]
+
+
 def main(
     datasets,
     cases,
     result_path,
     final_table: bool,
     multiple_tasks: bool,
-    metric_name: str = "sub_exact_match",
 ):
     if not multiple_tasks and not final_table:
         raise ValueError("If multiple_tasks=False, then final_table must be True")
@@ -60,6 +77,7 @@ def main(
     for case_key, _ in cases:
         row = []
         for dataset in datasets:
+            metric_name = _metric_name_for_dataset(dataset)
             csv_path = base_path / dataset / case_key / EVAL_METRICS_ALL_FILENAME
             if not csv_path.exists():
                 row.append([])
