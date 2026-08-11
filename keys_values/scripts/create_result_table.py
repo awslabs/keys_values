@@ -212,9 +212,9 @@ if __name__ == "__main__":
                 )
     else:
         cases = [
-            "slr_4gpu_cs1024_lr5",
-            "h2onorm_4gpu_cs1024_lr5",
-            "h2oorig_4gpu_cs1024_lr5",
+            ("slr_4gpu_cs1024_lr5", "slr_1024"),
+            ("h2onorm_4gpu_cs1024_lr5","h2onorm_1024"),
+            ("h2oorig_4gpu_cs1024_lr5","h2oorig_1024"),
         ]
     result_path = base_path / f"results_{dataset_size}.tex"
     # final_table = False
