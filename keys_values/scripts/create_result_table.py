@@ -45,6 +45,7 @@ _PREFIX = "helmet_"
 
 _POSTFIXES = ("_64k", "_128k")
 
+
 def _metric_name_for_dataset(dataset: str) -> str:
     assert dataset.startswith(_PREFIX)
     len_post = None
@@ -53,7 +54,7 @@ def _metric_name_for_dataset(dataset: str) -> str:
             len_post = len(post)
             break
     assert len_post is not None
-    key = dataset[len(_PREFIX):-len_post]
+    key = dataset[len(_PREFIX) : -len_post]
     return METRICS_FOR_HELMET_TASKS[key]
 
 
@@ -183,7 +184,11 @@ if __name__ == "__main__":
         base_path = base_path / "basemod"
     multiple_tasks = not is_baseline and not is_base_model
     datasets, cases = datasets_and_cases(
-        dataset_size, extra_data, is_baseline, is_base_model, with_short=True,
+        dataset_size,
+        extra_data,
+        is_baseline,
+        is_base_model,
+        with_short=True,
     )
     result_path = base_path / f"results_{dataset_size}.tex"
     # final_table = False
