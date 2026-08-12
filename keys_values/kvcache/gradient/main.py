@@ -30,7 +30,10 @@ from keys_values.kvcache.consts import SUPPORTED_QUANTIZERS
 from keys_values.kvcache.factory import (
     deallocate_kv_cache_buffers_of_model,
 )
-from keys_values.kvcache.gradient.accumulate import GradientAccumulator
+from keys_values.kvcache.gradient.accumulate import (
+    GradientAccumulator,
+    stream_decorator,
+)
 from keys_values.kvcache.gradient.autograd_hooks import (
     CellComputationAutogradHooks,
     CleanupArraysAutogradHooks,
@@ -231,6 +234,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         cache_kwargs: Optional[Dict[str, Any]] = None,
         train_cache_kwargs: Optional[Dict[str, Any]] = None,
         backward_tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        async_cpu_transfer: bool = False,
         layercp_pin_memory: bool = False,
         cachecp_pin_memory: bool = False,
         autograd_hooks_kwargs: Optional[Dict[str, Any]] = None,
@@ -296,6 +300,12 @@ class LongContextGradientModel(LongContextInferenceModel):
             backward_tmp_array_limit_gb: Same role as `tmp_array_limit_gb`, but
                 for backward computations. Overrides "tmp_array_limit_gb"
                 entries in `cache_kwargs`, `train_cache_kwargs`.
+            async_cpu_transfer: If `True`, CPU -> GPU and GPU -> CPU transfers
+                (layer input checkpoints, KV cache checkpoints, head
+                gradients) are run on separate CUDA streams, in parallel with
+                GPU computation on the main stream. Requires
+                `layercp_pin_memory=True` and `cachecp_pin_memory=True`.
+                Defaults to `False`.
             layercp_pin_memory: If `True`, the CPU memory pages for layer input
                 checkpoints are pinned. This can run faster, but also needs more
                 real CPU memory.
@@ -385,6 +395,21 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._autograd_hooks_kwargs = autograd_hooks_kwargs
         # Device memory limit for backward computations:
         self._backward_tmp_array_limit_gb = backward_tmp_array_limit_gb
+        if async_cpu_transfer and not (layercp_pin_memory and cachecp_pin_memory):
+            raise ValueError(
+                "async_cpu_transfer=True requires layercp_pin_memory=True and cachecp_pin_memory=True"
+            )
+        if async_cpu_transfer and torch.cuda.is_available():
+            # Stream for GPU -> CPU transfers:
+            self.device_to_host_stream = torch.cuda.Stream()
+            # Stream for CPU -> GPU transfers:
+            self.host_to_device_stream = torch.cuda.Stream()
+        else:
+            self.device_to_host_stream = None
+            self.host_to_device_stream = None
+        # Event marking the end of the most recent layer input checkpoint
+        # copy on `device_to_host_stream`:
+        self._cuda_d2h_copy_event = None
         self.layercp_pin_memory = layercp_pin_memory
         self.cachecp_pin_memory = cachecp_pin_memory
         self._debug_dont_use_autograd_hooks = debug_dont_use_autograd_hooks
@@ -793,18 +818,56 @@ class LongContextGradientModel(LongContextInferenceModel):
         x: torch.Tensor,
         layer_idx: int,
     ):
+        """
+        If `self.device_to_host_stream` is given, the GPU -> CPU copy in
+        `set_checkpoint` runs on this stream, in parallel with GPU
+        computation on the main stream. Stream ordering:
+
+        - `device_to_host_stream` first waits for an event on the main
+          stream, since `x` is produced by computation there (which may have
+          only just been enqueued).
+        - :meth:`_checkpoint_layer_input_sync` is called after the layer has
+          been processed, and makes the main stream wait for the copy. This
+          must happen before the buffer underlying `x` is released.
+
+        We follow:
+        https://docs.pytorch.org/tutorials/intermediate/pinmem_nonblock.html
+
+        """
         if self.training:
             input_pos = self._layer_cp_input_pos.get(layer_idx)
-            self.layer_checkpoints.set_checkpoint(
-                layer_idx=layer_idx,
-                buffers=x,
-                input_pos=0 if input_pos is None else input_pos,
-            )
+            if self.device_to_host_stream is not None:
+                # `x` is produced on the main stream. The copy on
+                # `device_to_host_stream` must not start before that
+                # computation is done.
+                x_ready_event = torch.cuda.current_stream().record_event()
+                self.device_to_host_stream.wait_event(x_ready_event)
+            with stream_decorator(self.device_to_host_stream):
+                self.layer_checkpoints.set_checkpoint(
+                    layer_idx=layer_idx,
+                    buffers=x,
+                    input_pos=0 if input_pos is None else input_pos,
+                )
+                if self.device_to_host_stream is not None:
+                    # Event at end of copy operation
+                    self._cuda_d2h_copy_event = (
+                        self.device_to_host_stream.record_event()
+                    )
             # Need to track `input_pos` separately for each `layer_idx` for which
             # a checkpoint is stored. This works because checkpoints during the
             # forward pass are written left to right.
             if input_pos is not None:
                 self._layer_cp_input_pos[layer_idx] += x.shape[1]
+
+    def _checkpoint_layer_input_sync(
+        self,
+        layer_idx: int,
+    ):
+        if self.training and self.device_to_host_stream is not None:
+            # The main stream must not release or overwrite the source of
+            # the checkpoint copy before the copy is done
+            torch.cuda.current_stream().wait_event(self._cuda_d2h_copy_event)
+            self._cuda_d2h_copy_event = None
 
     def _do_checkpoint_layer_input(self) -> bool:
         return self.training
@@ -935,6 +998,13 @@ class LongContextGradientModel(LongContextInferenceModel):
             raise IndexError(
                 "No KV cache replay logs: Must call `forward` before `backward`"
             )
+        if self.device_to_host_stream is not None:
+            # The forward pass writes layer input checkpoints to CPU on
+            # `device_to_host_stream`. The backward computation below reads
+            # these CPU buffers, so the copies must be visible on the host
+            # before we proceed. This is one blocking synchronization per
+            # batch.
+            torch.cuda.synchronize()
         if self.verbose is not VerbosityLevels.NONE:
             print("\nAllocate storage for backward computation")
 
@@ -1208,6 +1278,8 @@ class LongContextGradientModel(LongContextInferenceModel):
                 get_inputs_slice=partial(get_inputs_slice, layer_idx=first_layer_idx),
                 get_head_gradients_slice=get_head_gradients_slice,
                 write_head_gradients_slice=write_head_gradients_slice,
+                device_to_host_stream=self.device_to_host_stream,
+                host_to_device_stream=self.host_to_device_stream,
                 record_gpu_memory_snapshots=snapshots,
             )
             if self.offload_device is not None:
