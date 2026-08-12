@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from keys_values.evaluation.tasks import EvaluationTasks
+from keys_values.scripts.cleanup_evaluation import datasets_and_cases
 
 EVAL_METRICS_ALL_FILENAME = "eval_metrics_all.csv"
 
@@ -92,59 +93,8 @@ if __name__ == "__main__":
         base_path = base_path / "baseline"
     elif is_base_model:
         base_path = base_path / "basemod"
-    if not extra_data:
-        datasets = [
-            f"helmet_nq_{dataset_size}",
-            f"helmet_trivia_qa_{dataset_size}",
-            f"helmet_hotpot_qa_{dataset_size}",
-            f"helmet_pop_qa_{dataset_size}",
-        ]
-    else:
-        datasets = [
-            f"helmet_trec_coarse_{dataset_size}",
-            f"helmet_ms_macro_{dataset_size}",
-            f"helmet_nlu_{dataset_size}",
-            f"helmet_clinc150_{dataset_size}",
-            f"helmet_infinite_bench_qa_{dataset_size}",
-            f"helmet_infinite_bench_mc_{dataset_size}",
-            f"helmet_json_kv_{dataset_size}",
-            f"helmet_ruler_mk_uuid_{dataset_size}",
-        ]
-    if not extra_data:
-        cases = [
-            "lr_4gpu_cs2048_lr5",
-            "slr_4gpu_cs2048_lr5",
-            "h2o_4gpu_cs2048_lr5",
-            "h2onorm_4gpu_cs2048_lr5",
-            "h2oorig_4gpu_cs2048_lr5",
-            "lr_4gpu_cs1024_lr5",
-            "slr_4gpu_cs1024_lr5",
-            "h2o_4gpu_cs1024_lr5",
-            "h2onorm_4gpu_cs1024_lr5",
-            "h2oorig_4gpu_cs1024_lr5",
-        ]
-        if multiple_tasks:
-            cases.extend(
-                [
-                    "qh2o_4gpu_cs2048_lr5",
-                    "qh2onorm_4gpu_cs2048_lr5",
-                ]
-            )
-            if dataset_size == "64k":
-                cases.extend(
-                    [
-                        "slr_4gpu_cs128_lr5",
-                        "h2o_4gpu_cs128_lr5",
-                        "h2onorm_4gpu_cs128_lr5",
-                        "h2oorig_4gpu_cs128_lr5",
-                    ]
-                )
-    else:
-        cases = [
-            "slr_4gpu_cs1024_lr5",
-            "h2onorm_4gpu_cs1024_lr5",
-            "h2oorig_4gpu_cs1024_lr5",
-        ]
+    datasets, cases = datasets_and_cases(extra_data, is_baseline, is_base_model)
+
     model_type = "lora"
     if mode == "collect":
         for dataset, case in product(datasets, cases):

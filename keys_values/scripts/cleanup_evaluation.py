@@ -13,9 +13,108 @@
 # limitations under the License.
 from itertools import product
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Tuple, List, Union
 
 from keys_values.evaluation.tasks import EvaluationTasks
+
+
+def datasets_and_cases(
+    extra_data: bool,
+    is_baseline: bool,
+    is_base_model: bool,
+    with_short: bool = False,
+) -> Tuple[List[str], List[Union[str, Tuple[str, str]]]]:
+    multiple_tasks = not is_baseline and not is_base_model
+    if not extra_data:
+        datasets = [
+            f"helmet_nq_{dataset_size}",
+            f"helmet_trivia_qa_{dataset_size}",
+            f"helmet_hotpot_qa_{dataset_size}",
+            f"helmet_pop_qa_{dataset_size}",
+        ]
+        if not with_short:
+            cases = [
+                "lr_4gpu_cs2048_lr5",
+                "slr_4gpu_cs2048_lr5",
+                "h2o_4gpu_cs2048_lr5",
+                "h2onorm_4gpu_cs2048_lr5",
+                "h2oorig_4gpu_cs2048_lr5",
+                "lr_4gpu_cs1024_lr5",
+                "slr_4gpu_cs1024_lr5",
+                "h2o_4gpu_cs1024_lr5",
+                "h2onorm_4gpu_cs1024_lr5",
+                "h2oorig_4gpu_cs1024_lr5",
+            ]
+        else:
+            cases = [
+                ("lr_4gpu_cs2048_lr5", "lr_2048"),
+                ("slr_4gpu_cs2048_lr5", "slr_2048"),
+                ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
+                ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
+                ("h2oorig_4gpu_cs2048_lr5", "h2oorig_2048"),
+                ("lr_4gpu_cs1024_lr5", "lr_1024"),
+                ("slr_4gpu_cs1024_lr5", "slr_1024"),
+                ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
+                ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
+                ("h2oorig_4gpu_cs1024_lr5", "h2oorig_1024"),
+            ]
+        if multiple_tasks:
+            if not with_short:
+                cases.extend(
+                    [
+                        "qh2o_4gpu_cs2048_lr5",
+                        "qh2onorm_4gpu_cs2048_lr5",
+                    ]
+                )
+                if dataset_size == "64k":
+                    cases.extend(
+                        [
+                            "slr_4gpu_cs128_lr5",
+                            "h2o_4gpu_cs128_lr5",
+                            "h2onorm_4gpu_cs128_lr5",
+                            "h2oorig_4gpu_cs128_lr5",
+                        ]
+                    )
+            else:
+                cases.extend(
+                    [
+                        ("qh2o_4gpu_cs2048_lr5", "qh2o_2048"),
+                        ("qh2onorm_4gpu_cs2048_lr5", "qh2onorm_2048"),
+                    ]
+                )
+                if dataset_size == "64k":
+                    cases.extend(
+                        [
+                            ("slr_4gpu_cs128_lr5", "slr_128"),
+                            ("h2o_4gpu_cs128_lr5", "h2o_128"),
+                            ("h2onorm_4gpu_cs128_lr5", "h2onorm_128"),
+                            ("h2oorig_4gpu_cs128_lr5", "h2oorig_128"),
+                        ]
+                    )
+    else:
+        datasets = [
+            f"helmet_trec_coarse_{dataset_size}",
+            f"helmet_ms_macro_{dataset_size}",
+            f"helmet_nlu_{dataset_size}",
+            f"helmet_clinc150_{dataset_size}",
+            f"helmet_infinite_bench_qa_{dataset_size}",
+            f"helmet_infinite_bench_mc_{dataset_size}",
+            f"helmet_json_kv_{dataset_size}",
+            f"helmet_ruler_mk_uuid_{dataset_size}",
+        ]
+        if not with_short:
+            cases = [
+                "slr_4gpu_cs1024_lr5",
+                "h2onorm_4gpu_cs1024_lr5",
+                "h2oorig_4gpu_cs1024_lr5",
+            ]
+        else:
+            cases = [
+                ("slr_4gpu_cs1024_lr5", "slr_1024"),
+                ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
+                ("h2oorig_4gpu_cs1024_lr5", "h2oorig_1024"),
+            ]
+    return datasets, cases
 
 
 def main(
@@ -55,59 +154,8 @@ if __name__ == "__main__":
         base_path = base_path / "baseline"
     elif is_base_model:
         base_path = base_path / "basemod"
-    if not extra_data:
-        datasets = [
-            f"helmet_nq_{dataset_size}",
-            f"helmet_trivia_qa_{dataset_size}",
-            f"helmet_hotpot_qa_{dataset_size}",
-            f"helmet_pop_qa_{dataset_size}",
-        ]
-    else:
-        datasets = [
-            f"helmet_trec_coarse_{dataset_size}",
-            f"helmet_ms_macro_{dataset_size}",
-            f"helmet_nlu_{dataset_size}",
-            f"helmet_clinc150_{dataset_size}",
-            f"helmet_infinite_bench_qa_{dataset_size}",
-            f"helmet_infinite_bench_mc_{dataset_size}",
-            f"helmet_json_kv_{dataset_size}",
-            f"helmet_ruler_mk_uuid_{dataset_size}",
-        ]
-    if not extra_data:
-        cases = [
-            "lr_4gpu_cs2048_lr5",
-            "slr_4gpu_cs2048_lr5",
-            "h2o_4gpu_cs2048_lr5",
-            "h2onorm_4gpu_cs2048_lr5",
-            "h2oorig_4gpu_cs2048_lr5",
-            "lr_4gpu_cs1024_lr5",
-            "slr_4gpu_cs1024_lr5",
-            "h2o_4gpu_cs1024_lr5",
-            "h2onorm_4gpu_cs1024_lr5",
-            "h2oorig_4gpu_cs1024_lr5",
-        ]
-        if multiple_tasks:
-            cases.extend(
-                [
-                    "qh2o_4gpu_cs2048_lr5",
-                    "qh2onorm_4gpu_cs2048_lr5",
-                ]
-            )
-            if dataset_size == "64k":
-                cases.extend(
-                    [
-                        "slr_4gpu_cs128_lr5",
-                        "h2o_4gpu_cs128_lr5",
-                        "h2onorm_4gpu_cs128_lr5",
-                        "h2oorig_4gpu_cs128_lr5",
-                    ]
-                )
-    else:
-        cases = [
-            "slr_4gpu_cs1024_lr5",
-            "h2onorm_4gpu_cs1024_lr5",
-            "h2oorig_4gpu_cs1024_lr5",
-        ]
+    datasets, cases = datasets_and_cases(extra_data, is_baseline, is_base_model)
+
     # Use this to clean up lock files before restarting evaluation
     # mode = "lock"
     # Use this to remove all evaluation files
