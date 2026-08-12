@@ -216,7 +216,6 @@ def generate_fn(
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
 
 
-@torch.inference_mode()
 def batched_generate_fn(
     model: LongContextInferenceModel,
     prompts: torch.Tensor,
@@ -226,6 +225,45 @@ def batched_generate_fn(
     sample_args: Union[list[dict], dict],
     stop_tokens: Tuple[List[int], ...] = (),
     deallocate_cache_buffers: bool = True,
+    return_logprobs: bool = False,
+    no_inference_mode: bool = False,
+) -> Iterator[torch.Tensor]:
+    """Generate tokens for a batch of prompts (see :func:`_batched_generate_impl`).
+
+    ``no_inference_mode``: when ``True``, run under ``torch.no_grad`` instead of
+    ``torch.inference_mode``. Required when the KV-cache buffers written during
+    generation are subsequently updated in place by a gradient pass (RL
+    rollouts). Tensors created or moved under ``inference_mode`` -- e.g. the
+    lazy device conversion of cache buffers in ``KVCache._convert_or_check_device``
+    on the first forward -- become "inference tensors" that cannot be modified
+    in place outside inference mode, which breaks the following training
+    forward/backward. Eval and generation-only callers keep the default (faster)
+    inference mode.
+    """
+    ctx = torch.no_grad() if no_inference_mode else torch.inference_mode()
+    with ctx:
+        yield from _batched_generate_impl(
+            model,
+            prompts,
+            max_returned_tokens,
+            ignore_index=ignore_index,
+            sample_args=sample_args,
+            stop_tokens=stop_tokens,
+            deallocate_cache_buffers=deallocate_cache_buffers,
+            return_logprobs=return_logprobs,
+        )
+
+
+def _batched_generate_impl(
+    model: LongContextInferenceModel,
+    prompts: torch.Tensor,
+    max_returned_tokens: int,
+    *,
+    ignore_index: int = -100,
+    sample_args: Union[list[dict], dict],
+    stop_tokens: Tuple[List[int], ...] = (),
+    deallocate_cache_buffers: bool = True,
+    return_logprobs: bool = False,
 ) -> Iterator[torch.Tensor]:
     """
     Generates tokens for a batch of prompts.
@@ -249,11 +287,23 @@ def batched_generate_fn(
             returned. They'll be followed by `ignore_index`.
         deallocate_cache_buffers: Whether to deallocate KV cache buffers at
             the end.
+        return_logprobs: If ``True``, each yielded item is a 3-tuple
+            ``(tokens, logprobs, active_mask)`` instead of just ``tokens``.
+            ``logprobs`` are the per-token log-probs of the sampled tokens
+            under the temperature-scaled policy (full softmax, no top-k/top-p),
+            shape ``(batch_size, 1)``, zeroed for already-stopped rows.
+            ``active_mask`` is a bool tensor, shape ``(batch_size, 1)``, ``True``
+            for rows that were still generating at this step (i.e. real
+            tokens, including the one that triggers a stop sequence). This lets
+            a GRPO rollout capture old-policy log-probs without a separate
+            scoring pass.
 
     Yields:
         Tensors of shape `(batch_size, num)`, where `num >= 1`. Usually,
         `num == 1` (single tokens). The entries for batch dimensions where
-        generation has stopped, are set to `ignore_index`.
+        generation has stopped, are set to `ignore_index`. If
+        ``return_logprobs`` is ``True``, yields ``(tokens, logprobs,
+        active_mask)`` tuples instead.
 
     """
     if prompts.ndim == 1:
@@ -306,15 +356,19 @@ def batched_generate_fn(
     tokens = None
     for current_idx in range(max_returned_tokens):
         if current_idx == 0:
-            tokens = batched_sample(logits_final_position, kwargs=sample_args)
+            logits_stack = logits_final_position
             logits_final_position = None
         else:
-            tokens = batched_next_token(
-                gpt_model=gpt_model,
-                x=tokens,
-                kwargs=sample_args,
-            )
+            logits_stack = gpt_model(tokens)
+        tokens = batched_sample(logits_stack, kwargs=sample_args)
         int_tokens = [token.item() for token in tokens]
+
+        if return_logprobs:
+            # RL-specific log-prob capture lives with the rollout code; import
+            # lazily to avoid a generate <-> rl import cycle.
+            from keys_values.rl.grpo.rollout import sampled_token_logprobs
+
+            step_logps = sampled_token_logprobs(logits_stack, tokens, sample_args)
 
         # Check for stop sequences
         stop_dims = []
@@ -336,7 +390,20 @@ def batched_generate_fn(
                     seq_pos = int(seq_pos > 0 and int_token == seq[0])
                 stop_progresses[batch_idx][seq_idx] = seq_pos
 
-        yield torch.where(stopped_mask, ignore_ind_vec, tokens.flatten()).view(-1, 1)
+        token_out = torch.where(
+            stopped_mask, ignore_ind_vec, tokens.flatten()
+        ).view(-1, 1)
+        if return_logprobs:
+            # `stopped_mask` reflects rows that stopped in a *previous* step,
+            # so `~stopped_mask` marks the tokens generated at this step (the
+            # stop-triggering token included; its stop flag is set below).
+            active = ~stopped_mask
+            logp_out = torch.where(
+                stopped_mask, torch.zeros_like(step_logps), step_logps
+            ).view(-1, 1)
+            yield token_out, logp_out, active.view(-1, 1)
+        else:
+            yield token_out
         for batch_idx in stop_dims:
             has_stopped[batch_idx] = True
             stopped_mask[batch_idx] = True
