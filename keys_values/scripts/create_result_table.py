@@ -183,7 +183,7 @@ if __name__ == "__main__":
         base_path = base_path / "basemod"
     multiple_tasks = not is_baseline and not is_base_model
     datasets, cases = datasets_and_cases(
-        extra_data, is_baseline, is_base_model, with_short=True,
+        dataset_size, extra_data, is_baseline, is_base_model, with_short=True,
     )
     result_path = base_path / f"results_{dataset_size}.tex"
     # final_table = False

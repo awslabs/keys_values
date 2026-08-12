@@ -19,6 +19,7 @@ from keys_values.evaluation.tasks import EvaluationTasks
 
 
 def datasets_and_cases(
+    dataset_size: str,
     extra_data: bool,
     is_baseline: bool,
     is_base_model: bool,
@@ -154,7 +155,9 @@ if __name__ == "__main__":
         base_path = base_path / "baseline"
     elif is_base_model:
         base_path = base_path / "basemod"
-    datasets, cases = datasets_and_cases(extra_data, is_baseline, is_base_model)
+    datasets, cases = datasets_and_cases(
+        dataset_size,extra_data, is_baseline, is_base_model,
+    )
 
     # Use this to clean up lock files before restarting evaluation
     # mode = "lock"
