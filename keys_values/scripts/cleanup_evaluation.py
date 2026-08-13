@@ -95,13 +95,13 @@ def datasets_and_cases(
     else:
         datasets = [
             f"helmet_trec_coarse_{dataset_size}",
-            f"helmet_ms_macro_{dataset_size}",
             f"helmet_nlu_{dataset_size}",
             f"helmet_clinc150_{dataset_size}",
             f"helmet_infinite_bench_qa_{dataset_size}",
             f"helmet_infinite_bench_mc_{dataset_size}",
             f"helmet_json_kv_{dataset_size}",
-            f"helmet_ruler_mk_uuid_{dataset_size}",
+            #    f"helmet_trec_fine_{dataset_size}",
+            #    f"helmet_banking77_{dataset_size}",
         ]
         if not with_short:
             cases = [
