@@ -29,14 +29,16 @@ def main(
     model_type: str,
     tasks: Optional[List[str]] = None,
     multiple_tasks: bool = True,
+    eval_dir: str = "eval",
 ):
     # Collect results from all files across all tasks
     print(f"\nLoading evaluation result files from {out_dir}")
     eval_tasks = EvaluationTasks(
-        out_dir,
-        model_type,
-        tasks,
+        out_dir=out_dir,
+        model_type=model_type,
+        tasks=tasks,
         collect_results=True,
+        eval_dir=eval_dir,
         multiple_tasks=multiple_tasks,
     )
     all_data = []
@@ -74,6 +76,7 @@ def main(
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
+    eval_dir = "eval"
     mode = "collect"
     # mode = "sweep"
     # dataset_size = "64k"
@@ -105,7 +108,12 @@ if __name__ == "__main__":
         for dataset, case in product(datasets, cases):
             out_dir = base_path / dataset / case
             if out_dir.exists():
-                main(out_dir, model_type, multiple_tasks=multiple_tasks)
+                main(
+                    out_dir=out_dir,
+                    model_type=model_type,
+                    multiple_tasks=multiple_tasks,
+                    eval_dir=eval_dir,
+                )
             else:
                 print(f"\nResults for {dataset}/{case} do not exist")
     elif mode == "sweep":

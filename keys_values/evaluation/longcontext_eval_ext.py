@@ -127,6 +127,7 @@ def setup(
     attention_forward_temp_size_gb: Optional[float] = None,
     lora_dropout: Optional[float] = None,
     use_sample_metric: bool = True,
+    eval_dir: str = "eval",
     sample_metric_max_generated_tokens: int = 20,
     sample_metric_temperature: Optional[float] = None,
     sample_metric_top_k: Optional[int] = None,
@@ -165,6 +166,9 @@ def setup(
         use_sample_metric: If `True` and the dataset has an associated
             sample-based metric, this is used. Otherwise, we use the same loss
             as used for training
+        eval_dir: Subdirectory to write evaluation and generated samples files
+            to. Defaults to "eval". Set this if you like to run evals under
+            different conditions for the same checkpoints.
         sample_metric_max_generated_tokens: Maximum number of tokens sampled
             for sample-based metric evaluation
         sample_metric_temperature: Parameter for token generation. Overrides
@@ -217,6 +221,7 @@ def setup(
         attention_forward_temp_size_gb,
         lora_dropout,
         use_sample_metric,
+        eval_dir,
         sample_metric_max_generated_tokens,
         sample_metric_kwargs,
         num_store_generated_samples,
@@ -234,6 +239,7 @@ def setup_internal(
     attention_forward_temp_size_gb: Optional[float],
     lora_dropout: Optional[float],
     use_sample_metric: bool,
+    eval_dir: str,
     sample_metric_max_generated_tokens: int,
     sample_metric_kwargs: Dict[str, Any],
     num_store_generated_samples: Optional[int],
@@ -258,11 +264,17 @@ def setup_internal(
     checkpoint_dir = setups[0].get("checkpoint_dir")
     if checkpoint_dir is None:
         tasks = setups[0].get("eval_tasks")
-        eval = EvaluationTasks(out_dir, model_type, tasks)
+        eval = EvaluationTasks(
+            out_dir=out_dir,
+            model_type=model_type,
+            tasks=tasks,
+            eval_dir=eval_dir,
+        )
         if not eval.tasks:
             raise ValueError(
-                f"No completed model checkpoints detected at {out_dir}. Are you "
-                f"sure that model_type = {model_type} is correct?"
+                f"No completed model checkpoints detected at {out_dir}. "
+                f"Are you sure that model_type = {model_type} and eval_dir = "
+                f"{eval_dir} are correct?"
             )
         task_path = out_dir / eval.tasks[0]
     else:
@@ -292,6 +304,7 @@ def setup_internal(
         verbose=verbose,
         attention_forward_temp_size_gb=attention_forward_temp_size_gb,
         use_sample_metric=use_sample_metric,
+        eval_dir=eval_dir,
         sample_metric_max_generated_tokens=sample_metric_max_generated_tokens,
         sample_metric_kwargs=sample_metric_kwargs,
         lora_dropout=lora_dropout,
@@ -310,6 +323,7 @@ def main(
     verbose: Optional[str],
     attention_forward_temp_size_gb: Optional[float],
     use_sample_metric: bool,
+    eval_dir: str,
     sample_metric_max_generated_tokens,
     sample_metric_kwargs: Dict[str, Any],
     lora_dropout: Optional[float],
@@ -334,11 +348,17 @@ def main(
         print(f"\n{prefix}out_dir = {out_dir}, model_type = {model_type}")
         if checkpoint_dir is None:
             tasks = _setup.get("eval_tasks")
-            eval_tasks = EvaluationTasks(out_dir, model_type, tasks)
+            eval_tasks = EvaluationTasks(
+                out_dir=out_dir,
+                model_type=model_type,
+                tasks=tasks,
+                eval_dir=eval_dir,
+            )
             if not eval_tasks.tasks:
                 raise ValueError(
-                    f"{prefix}No completed model checkpoints detected at {out_dir}. Are you "
-                    f"sure that model_type = {model_type} is correct?"
+                    f"{prefix}No completed model checkpoints detected at {out_dir}. "
+                    f"Are you sure that model_type = {model_type} and eval_dir = "
+                    f"{eval_dir} are correct?"
                 )
             print(
                 "Detected model checkpoints to evaluate from:\n" + str(eval_tasks.tasks)
@@ -566,6 +586,7 @@ def main(
             batch_size,
             eval_tasks.tasks if eval_tasks is not None else None,
             use_sample_metric,
+            eval_dir,
             sample_metric_max_generated_tokens,
             sample_metric_kwargs,
             num_store_generated_batches,
@@ -587,6 +608,7 @@ def eval_for_setup(
     batch_size: int,
     eval_tasks: Optional[List[str]],
     use_sample_metric: bool,
+    eval_dir: str,
     sample_metric_max_generated_tokens,
     sample_metric_kwargs: Dict[str, Any],
     num_store_generated_batches: Optional[int],
@@ -629,6 +651,7 @@ def eval_for_setup(
         data,
         test_dataloader,
         evaluator,
+        eval_dir,
         tokenizer,
         out_dir,
         model_type,
@@ -647,6 +670,7 @@ def eval_for_setup_internal(
     data: DataModule,
     test_dataloader: EvaluationDataLoader,
     evaluator: Optional[SampleBasedMetricsEvaluator],
+    eval_dir: str,
     tokenizer: Tokenizer,
     out_dir: Path,
     model_type: str,
@@ -675,13 +699,14 @@ def eval_for_setup_internal(
     # Note: If `skip_eval == True`, we assume that the eval metrics files are
     # already present, and we use the generated samples files for locking
     if skip_eval:
-        fname = "eval/" + GENERATED_SAMPLES_FILENAME
+        fname = eval_dir + "/" + GENERATED_SAMPLES_FILENAME
     else:
         fname = None
     tasks_helper = EvaluationWithTasksHelper(
         out_dir,
         tag=tag,
         eval_metrics_filename=fname,
+        eval_dir=eval_dir,
         multiple_tasks=multiple_tasks,
     )
     current_task = None

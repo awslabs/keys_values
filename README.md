@@ -1063,7 +1063,8 @@ python keys_values/__main__.py eval_long \
     --batch_size 2 \
     --use_sample_metric True \
     --sample_metric_max_generated_tokens 20 \
-    --tasks "step-000310,final,step-000410"
+    --tasks "step-000310,final,step-000410" \
+    --eval_dir "eval"
 ```
 
 * `/home/ubuntu/out/finetune/lora/qwen3_4b/helmet_hotpot_qa_64k/h2o_lr5` is the
@@ -1078,6 +1079,9 @@ python keys_values/__main__.py eval_long \
 * `--tasks`: Name of tasks (or checkpoints) for which evaluation is to run. If
   this is not given, the script runs evaluation for all checkpoints detected
   under the `out_dir`.
+* `--eval_dir`: Subdirectory where evaluation result files (and generated
+  samples) are written to, see below. Defaults to "eval". Use this to store
+  evaluations under different conditions for the same checkpoints.
 
 Note that dataset and configurations are taken from the hyperparameters stored
 with checkpoints (these must be the same for all checkpoints). Some of them can
@@ -1095,10 +1099,11 @@ The evaluation script works like this:
 
 * On each device, a list of all jobs (i.e., tuples `(task, batch)`) is created.
 * These jobs are worked on in parallel, on a first-come-first-served basis. The
-  outcome for a job is a file `<out_dir>/<task>/eval/eval_metrics_<no>.csv`, a
-  CSV file with one row per case in a batch. Here, `<no>` is the index of the
-  first case in the batch. For our example above, this could be
-  `.../h2o_lr5/step-000310/eval_metrics_256.csv`.
+  outcome for a job is a file `<out_dir>/<task>/<eval_dir>/eval_metrics_<no>.csv`,
+  a CSV file with one row per case in a batch. Here, `<no>` is the index of the
+  first case in the batch. `<eval_dir>` is the value of `--eval_dir`, which
+  defaults to "eval". For our example above, this could be
+  `.../h2o_lr5/step-000310/eval/eval_metrics_256.csv`.
 * Jobs are iterated over in a nested loop, tasks in outer, batches in inner loop.
 * A worker locks a job by writing the result file, but with bogus content. Once
   the job is finished, this content is overwritten by the results.
@@ -1189,7 +1194,7 @@ If you like to write out samples for all dataset cases, set this to a very
 large number.
 
 Generated samples are written to files
-`<out_dir>/<task>/eval/generated_samples_<no>.yaml`. Example:
+`<out_dir>/<task>/<eval_dir>/generated_samples_<no>.yaml`. Example:
 ```yaml
 - idx: 225
   output: Debbie Gibson
@@ -1242,7 +1247,7 @@ python keys_values/__main__.py eval_long \
   `--out_dir` path, but checkpoints are not loaded from there.
 * Instead, a single checkpoint is read from
   `/home/ubuntu/out/finetune/checkpoints/mycheckpoint`, the value of `--checkpoint_dir`.
-* Results are written to `<out_dir>/eval/eval_metrics_<no>.csv`.
+* Results are written to `<out_dir>/<eval_dir>/eval_metrics_<no>.csv`.
 
 The scripts [collect_eval_results](./keys_values/scripts/collect_eval_results.py)
 and [cleanup_evaluation](./keys_values/scripts/cleanup_evaluation.py) work in

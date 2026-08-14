@@ -34,6 +34,7 @@ def setup(
     attention_forward_temp_size_gb: Optional[float] = None,
     lora_dropout: Optional[float] = None,
     use_sample_metric: bool = True,
+    eval_dir: str = "eval",
     sample_metric_max_generated_tokens: int = 20,
     sample_metric_temperature: Optional[float] = None,
     sample_metric_top_k: Optional[int] = None,
@@ -71,7 +72,7 @@ def setup(
         shortest ones. We then iterate over dataset batches (inner) and tasks
         (outer).
     * We write result files for every batch, to
-        `<task-path>/eval/eval_metrics_<suffix>.csv`, see
+        `<task-path>/<eval_dir>/eval_metrics_<suffix>.csv`, see
         :class:`EvaluationWithTasksHelper`.
     * If `checkpoint_dir` is given, we run evaluation for a single task, loaded
         from there. Results are written as stated above, where `<task-path>
@@ -105,6 +106,9 @@ def setup(
         use_sample_metric: If `True` and the dataset has an associated
             sample-based metric, this is used. Otherwise, we use the same loss
             as used for training
+        eval_dir: Subdirectory to write evaluation and generated samples files
+            to. Defaults to "eval". Set this if you like to run evals under
+            different conditions for the same checkpoints.
         sample_metric_max_generated_tokens: Maximum number of tokens sampled
             for sample-based metric evaluation
         sample_metric_temperature: Parameter for token generation. Overrides
@@ -153,6 +157,7 @@ def setup(
         attention_forward_temp_size_gb,
         lora_dropout,
         use_sample_metric,
+        eval_dir,
         sample_metric_max_generated_tokens,
         sample_metric_kwargs,
         num_store_generated_samples,
