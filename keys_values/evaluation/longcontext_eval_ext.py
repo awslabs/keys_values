@@ -499,10 +499,14 @@ def main(
         else:
             device = torch.device("cpu")
         try:
+            print(f"Loading tokenizer from checkpoint: {checkpoint_dir}")
             tokenizer = Tokenizer(checkpoint_dir)
         except Exception as ex:
             if eval_tasks is None:
                 # Load tokenizer from base model checkpoint
+                print(
+                    f"Loading tokenizer from base model checkpoint: {base_checkpoint_dir}"
+                )
                 tokenizer = Tokenizer(base_checkpoint_dir)
             else:
                 raise ex

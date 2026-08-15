@@ -41,10 +41,12 @@ def main() -> None:
     dtype = torch.bfloat16
 
     tokenizer = None
+    tokenizer_from_cache = True
     for i, _base_model in enumerate([cache_dir, base_model]):
         try:
             print(f"Loading tokenizer from {_base_model}")
             tokenizer = AutoTokenizer.from_pretrained(_base_model)
+            tokenizer_from_cache = i == 0
             break
         except Exception as ex:
             if i == 1:
@@ -80,7 +82,11 @@ def main() -> None:
         output_dir,
         safe_serialization=True,
     )
-    tokenizer.save_pretrained(output_dir)
+    # If tokenizer was obtained from cache, we don't store it with the
+    # checkpoint, because it can be loaded from the base model checkpoint.
+    if not tokenizer_from_cache:
+        print("Saving tokenizer along with checkpoint")
+        tokenizer.save_pretrained(output_dir)
 
     print("Done")
 
