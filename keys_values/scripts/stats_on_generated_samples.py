@@ -147,10 +147,10 @@ if __name__ == "__main__":
     eval_dir = "eval_128"
     # dataset_size = "64k"
     dataset_size = "128k"
-    is_rerun = False
-    # is_rerun = True
-    # is_baseline = False
-    is_baseline = True
+    # is_rerun = False
+    is_rerun = True
+    is_baseline = False
+    # is_baseline = True
     is_base_model = False
     # is_base_model = True
     extra_data = False
