@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections import Counter
+from dataclasses import dataclass
 import math
 from pathlib import Path
 from typing import List, Optional, Any, Tuple
@@ -85,64 +86,161 @@ def _find_yaml_files(
     return []
 
 
-def main(
+def _mean_and_std(entries: List[float]) -> Tuple[float, float]:
+    num = len(entries)
+    mean = sum(entries) / num
+    std = math.sqrt(sum((x - mean) ** 2 for x in entries) / num)
+    return mean, std
+
+
+@dataclass
+class Statistics:
+    ratio: Tuple[float, float]
+    frac_at_max_length: Optional[Tuple[float, float]]
+
+    @staticmethod
+    def from_data(
+        ratios: List[float],
+        fracs_at_max_length: Optional[List[float]] = None,
+    ) -> "Statistics":
+        return Statistics(
+            ratio=_mean_and_std(ratios),
+            frac_at_max_length=(
+                None
+                if fracs_at_max_length is None
+                else _mean_and_std(fracs_at_max_length)
+            ),
+        )
+
+
+def stats_for(
     dataset: str,
-    cases: List[str],
-    base_path,
+    case_key: str,
+    base_path: Path,
     eval_dir: str,
     search_for_setups: bool,
     tokenizer: Optional[Any],
     max_tokens: int,
-):
-    all_numbers: List[float] = []
-
-    for case in cases:
-        case_key = case[0] if isinstance(case, tuple) else case
-        yaml_files = _find_yaml_files(
-            base_path, dataset, case_key, eval_dir, search_for_setups
-        )
-        # if len(yaml_files) > 0:
-        #     print(f"Found {len(yaml_files)} YAML files in {yaml_files[0].parent}")
-        number_pairs: List[Tuple[float, int]] = []
-        for path in yaml_files:
-            with open(path) as f:
-                records = yaml.safe_load(f)
-            for record in records:
-                number_pairs.append(_extract_number(record, tokenizer))
-        numbers = [x[0] for x in number_pairs]
-        num_entries = len(number_pairs)
-        if numbers:
-            mean = sum(numbers) / num_entries
-            variance = sum((x - mean) ** 2 for x in numbers) / num_entries
-            std = math.sqrt(variance)
+    verbose: bool,
+) -> Optional[Statistics]:
+    yaml_files = _find_yaml_files(
+        base_path, dataset, case_key, eval_dir, search_for_setups
+    )
+    number_pairs: List[Tuple[float, int]] = []
+    for path in yaml_files:
+        with open(path) as f:
+            records = yaml.safe_load(f)
+        for record in records:
+            number_pairs.append(_extract_number(record, tokenizer))
+    num_entries = len(number_pairs)
+    if num_entries == 0:
+        return None
+    ratios = [x[0] for x in number_pairs]
+    if tokenizer is not None:
+        num_tokens = [x[1] for x in number_pairs]
+        fracs_at_max_length = [float(x >= max_tokens) for x in num_tokens]
+        if verbose:
+            num_eq_max = sum(x == max_tokens for x in num_tokens)
+            num_gt_max = sum(x > max_tokens for x in num_tokens)
+            hist_lt_max = Counter([x for x in num_tokens if x < max_tokens])
             print(
-                f"  ({dataset}, {case_key}): n={num_entries}, mean={mean:.4f}, std={std:.4f}"
+                f"  ({dataset}, {case_key}): num_eq_max={num_eq_max}, num_gt_max={num_gt_max}, vals_lt_max={dict(hist_lt_max)}"
             )
-            if tokenizer is not None:
-                num_tokens = [x[1] for x in number_pairs]
-                num_eq_max = sum(x == max_tokens for x in num_tokens)
-                num_gt_max = sum(x > max_tokens for x in num_tokens)
-                hist_lt_max = Counter([x for x in num_tokens if x < max_tokens])
-                print(
-                    f"  ({dataset}, {case_key}): num_eq_max={num_eq_max}, num_gt_max={num_gt_max}, vals_lt_max={dict(hist_lt_max)}"
-                )
-        else:
-            print(f"  ({dataset}, {case_key}): no data")
-        all_numbers.extend(numbers)
+    else:
+        fracs_at_max_length = None
+    return Statistics.from_data(ratios, fracs_at_max_length)
 
-    if all_numbers:
-        mean = sum(all_numbers) / len(all_numbers)
-        variance = sum((x - mean) ** 2 for x in all_numbers) / len(all_numbers)
-        std = math.sqrt(variance)
-        print(
-            f"  ({dataset}, ALL): n={len(all_numbers)}, mean={mean:.4f}, std={std:.4f}"
-        )
+
+def _wrap_values(
+    vals: Tuple[float, float],
+    fstrs: Tuple[str, str],
+) -> str:
+    patterns = ["{x:" + fs + "}" for fs in fstrs]
+    parts = [p.format(x=x) for p, x in zip(patterns, vals)]
+    return r"{\small\!" + parts[0] + r"}\pm{\small\!" + parts[1] + r"}"
+
+
+def main(
+    datasets: List[str],
+    cases: List[Tuple[str, str]],
+    result_path: Path,
+    eval_dir: str,
+    search_for_setups: bool,
+    tokenizer: Optional[Any],
+    max_tokens: int,
+    verbose: bool,
+    ratio_fstrs: Tuple[str, str],
+    maxfrac_fstrs: Tuple[str, str],
+):
+    do_tokenize = tokenizer is not None
+    base_path = result_path.parent
+    col_labels = [
+        d.removeprefix("helmet_").rsplit("_", 1)[0].replace("_", r"\_")
+        for d in datasets
+    ]
+    num_datasets = len(datasets)
+
+    if do_tokenize:
+        col_spec = "|l|" + "rr|" * num_datasets
+        col_strings = [r"\multicolumn{2}{c|}{" + x + r"}" for x in col_labels]
+        tex_lines = [
+            r"\begin{tabular}{" + col_spec + "}",
+            r"\hline",
+            " & ".join([""] + col_strings) + r" \\",
+            " & R & p" * num_datasets + r" \\",
+            r"\hline\hline",
+        ]
+    else:
+        col_spec = "|l|" + "r" * num_datasets + "|"
+        tex_lines = [
+            r"\begin{tabular}{" + col_spec + "}",
+            r"\hline",
+            " & ".join([""] + col_labels) + r" \\",
+            r"\hline\hline",
+        ]
+
+    for case_key, case_label in cases:
+        case_label = case_label.replace("_", r"\_")
+        stats = [
+            stats_for(
+                dataset=dataset,
+                case_key=case_key,
+                base_path=base_path,
+                eval_dir=eval_dir,
+                search_for_setups=search_for_setups,
+                tokenizer=tokenizer,
+                max_tokens=max_tokens,
+                verbose=verbose,
+            )
+            for dataset in datasets
+        ]
+        tex_lines.append(r"\rule{0pt}{13pt} " + case_label + r" &")
+        for i, stat in enumerate(stats):
+            tail = r" \\" if i == len(stats) - 1 else r" &"
+            row = "  " + _wrap_values(stat.ratio, ratio_fstrs)
+            if do_tokenize:
+                row += " & " + _wrap_values(stat.frac_at_max_length, maxfrac_fstrs)
+            row += tail
+
+    tex_lines.extend(
+        [
+            r"\hline",
+            r"\end{tabular}",
+        ]
+    )
+    if result_path.exists():
+        result_path.unlink()
+    print(f"Writing result table to {result_path}")
+    result_path.write_text("\n".join(tex_lines) + "\n")
 
 
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
-
     do_tokenize = True
+    verbose = True
+    ratio_fstrs: Tuple[str, str] = (".1f", ".1f")
+    maxfrac_fstrs: Tuple[str, str] = (".2f", ".2f")
+
     max_tokens = 128
     eval_dir = "eval_128"
     # dataset_size = "64k"
@@ -169,17 +267,22 @@ if __name__ == "__main__":
         is_base_model,
         with_short=False,
     )
+
     if do_tokenize:
         tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH)
     else:
         tokenizer = None
-    for dataset in datasets:
-        main(
-            dataset,
-            cases,
-            base_path,
-            eval_dir,
-            search_for_setups,
-            tokenizer,
-            max_tokens,
-        )
+    result_path = base_path / f"stats_samples_{dataset_size}.tex"
+
+    main(
+        datasets=datasets,
+        cases=cases,
+        result_path=result_path,
+        eval_dir=eval_dir,
+        search_for_setups=search_for_setups,
+        tokenizer=tokenizer,
+        max_tokens=max_tokens,
+        verbose=verbose,
+        ratio_fstrs=ratio_fstrs,
+        maxfrac_fstrs=maxfrac_fstrs,
+    )
