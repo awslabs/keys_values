@@ -87,6 +87,7 @@ def main(
     eval_dir: str,
     search_for_setups: bool,
     tokenizer: Optional[Any],
+    max_tokens: int,
 ):
     all_numbers: List[float] = []
 
@@ -114,9 +115,12 @@ def main(
             )
             if tokenizer is not None:
                 num_tokens = [x[1] for x in number_pairs]
-                max_nt = max(num_tokens)
-                num_max = sum(x == max_nt for x in num_tokens)
-                print(f"  ({dataset}, {case_key}): max_nt={max_nt} ({num_max})/{num_entries})")
+                num_eq_max = sum(x == max_tokens for x in num_tokens)
+                num_gt_max = sum(x > max_tokens for x in num_tokens)
+                vals_lt_max = [x for x in num_tokens if x < max_tokens]
+                print(
+                    f"  ({dataset}, {case_key}): num_eq_max={num_eq_max}, num_gt_max={num_gt_max}, vals_lt_max={vals_lt_max}"
+                )
         else:
             print(f"  ({dataset}, {case_key}): no data")
         all_numbers.extend(numbers)
@@ -134,6 +138,7 @@ if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
     do_tokenize = True
+    max_tokens = 128
     eval_dir = "eval_128"
     # dataset_size = "64k"
     dataset_size = "128k"
@@ -165,5 +170,11 @@ if __name__ == "__main__":
         tokenizer = None
     for dataset in datasets:
         main(
-            dataset, cases, base_path, eval_dir, search_for_setups, tokenizer,
+            dataset,
+            cases,
+            base_path,
+            eval_dir,
+            search_for_setups,
+            tokenizer,
+            max_tokens,
         )
