@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections import Counter
 import math
 from pathlib import Path
 from typing import List, Optional, Any, Tuple
@@ -117,9 +118,9 @@ def main(
                 num_tokens = [x[1] for x in number_pairs]
                 num_eq_max = sum(x == max_tokens for x in num_tokens)
                 num_gt_max = sum(x > max_tokens for x in num_tokens)
-                vals_lt_max = [x for x in num_tokens if x < max_tokens]
+                hist_lt_max = Counter([x for x in num_tokens if x < max_tokens])
                 print(
-                    f"  ({dataset}, {case_key}): num_eq_max={num_eq_max}, num_gt_max={num_gt_max}, vals_lt_max={vals_lt_max}"
+                    f"  ({dataset}, {case_key}): num_eq_max={num_eq_max}, num_gt_max={num_gt_max}, vals_lt_max={hist_lt_max}"
                 )
         else:
             print(f"  ({dataset}, {case_key}): no data")
