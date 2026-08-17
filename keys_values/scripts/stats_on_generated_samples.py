@@ -120,7 +120,7 @@ def main(
                 num_gt_max = sum(x > max_tokens for x in num_tokens)
                 hist_lt_max = Counter([x for x in num_tokens if x < max_tokens])
                 print(
-                    f"  ({dataset}, {case_key}): num_eq_max={num_eq_max}, num_gt_max={num_gt_max}, vals_lt_max={hist_lt_max}"
+                    f"  ({dataset}, {case_key}): num_eq_max={num_eq_max}, num_gt_max={num_gt_max}, vals_lt_max={dict(hist_lt_max)}"
                 )
         else:
             print(f"  ({dataset}, {case_key}): no data")
