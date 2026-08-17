@@ -67,17 +67,21 @@ def _find_yaml_files(
 ) -> List[Path]:
     if not search_for_setups:
         directory = base_path / dataset / case / eval_dir
-        return sorted(directory.glob("generated_samples_*.yaml"))
+        if directory.exists():
+            return sorted(directory.glob("generated_samples_*.yaml"))
+        else:
+            return []
     # Search for setup subdirectory that contains eval_dir
     case_path = base_path / dataset / case
-    for setup_dir in case_path.iterdir():
-        if not setup_dir.is_dir():
-            continue
-        name = setup_dir.name
-        if name == "final" or (name.startswith("step-") and name[5:].isdigit()):
-            candidate = setup_dir / eval_dir
-            if candidate.is_dir():
-                return sorted(candidate.glob("generated_samples_*.yaml"))
+    if case_path.exists():
+        for setup_dir in case_path.iterdir():
+            if not setup_dir.is_dir():
+                continue
+            name = setup_dir.name
+            if name == "final" or (name.startswith("step-") and name[5:].isdigit()):
+                candidate = setup_dir / eval_dir
+                if candidate.is_dir():
+                    return sorted(candidate.glob("generated_samples_*.yaml"))
     return []
 
 
