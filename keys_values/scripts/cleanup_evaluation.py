@@ -18,6 +18,10 @@ from typing import Literal, Tuple, List, Union
 from keys_values.evaluation.tasks import EvaluationTasks
 
 
+def _append_old(case: str, multiple_tasks: bool) -> str:
+    return case + "_old" if multiple_tasks else case
+
+
 def datasets_and_cases(
     dataset_size: str,
     extra_data: bool,
@@ -35,12 +39,12 @@ def datasets_and_cases(
         ]
         if not with_short:
             cases = [
-                "lr_4gpu_cs2048_lr5",
+                _append_old("lr_4gpu_cs2048_lr5", multiple_tasks),
                 "slr_4gpu_cs2048_lr5",
                 "h2o_4gpu_cs2048_lr5",
                 "h2onorm_4gpu_cs2048_lr5",
                 "h2oorig_4gpu_cs2048_lr5",
-                "lr_4gpu_cs1024_lr5",
+                _append_old("lr_4gpu_cs1024_lr5", multiple_tasks),
                 "slr_4gpu_cs1024_lr5",
                 "h2o_4gpu_cs1024_lr5",
                 "h2onorm_4gpu_cs1024_lr5",
@@ -48,12 +52,12 @@ def datasets_and_cases(
             ]
         else:
             cases = [
-                ("lr_4gpu_cs2048_lr5", "lr_2048"),
+                (_append_old("lr_4gpu_cs2048_lr5", multiple_tasks), "lr_2048"),
                 ("slr_4gpu_cs2048_lr5", "slr_2048"),
                 ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
                 ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
                 ("h2oorig_4gpu_cs2048_lr5", "h2oorig_2048"),
-                ("lr_4gpu_cs1024_lr5", "lr_1024"),
+                (_append_old("lr_4gpu_cs1024_lr5", multiple_tasks), "lr_1024"),
                 ("slr_4gpu_cs1024_lr5", "slr_1024"),
                 ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
                 ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
