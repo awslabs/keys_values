@@ -217,9 +217,14 @@ def main(
         tex_lines.append(r"\rule{0pt}{13pt} " + case_label + r" &")
         for i, stat in enumerate(stats):
             tail = r" \\" if i == len(stats) - 1 else r" &"
-            row = "  " + _wrap_values(stat.ratio, ratio_fstrs)
-            if do_tokenize:
-                row += " & " + _wrap_values(stat.frac_at_max_length, maxfrac_fstrs)
+            if stat is not None:
+                row = "  " + _wrap_values(stat.ratio, ratio_fstrs)
+                if do_tokenize:
+                    row += " & " + _wrap_values(stat.frac_at_max_length, maxfrac_fstrs)
+            else:
+                row = "  -"
+                if do_tokenize:
+                    row += " & -"
             row += tail
 
     tex_lines.extend(
