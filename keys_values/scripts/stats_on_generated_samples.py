@@ -156,9 +156,9 @@ def _wrap_values(
     is_ratio: bool,
 ) -> str:
     if is_ratio:
-        patterns = "{x:.1f}" * len(vals)
+        patterns = ["{x:.1f}"] * 2
     else:
-        patterns = r"{x * 100:.1f}" * len(vals)
+        patterns = [r"{x * 100:.1f}"] * 2
     parts = [p.format(x=x) for p, x in zip(patterns, vals)]
     return r"{\small\!" + parts[0] + r"}\pm{\small\!" + parts[1] + r"}"
 
