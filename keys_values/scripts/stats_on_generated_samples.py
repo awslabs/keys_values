@@ -155,11 +155,12 @@ def _wrap_values(
     vals: Tuple[float, float],
     is_ratio: bool,
 ) -> str:
+    patterns = ["{x:.1f}"] * 2
     if is_ratio:
-        patterns = ["{x:.1f}"] * 2
+        multipliers = [1] * 2
     else:
-        patterns = [r"{x * 100:.1f}"] * 2
-    parts = [p.format(x=x) for p, x in zip(patterns, vals)]
+        multipliers = [100] * 2
+    parts = [p.format(x=x * m) for p, x, m in zip(patterns, vals, multipliers)]
     return r"{\small\!" + parts[0] + r"}\pm{\small\!" + parts[1] + r"}"
 
 
