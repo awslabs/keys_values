@@ -226,6 +226,7 @@ def main(
                 if do_tokenize:
                     row += " & -"
             row += tail
+            tex_lines.append(row)
 
     tex_lines.extend(
         [
