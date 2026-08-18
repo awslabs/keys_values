@@ -331,6 +331,12 @@ if __name__ == "__main__":
         base_path = base_path / "baseline"
     elif is_base_model:
         base_path = base_path / "basemod"
+    if is_baseline:
+        tag = "sp"
+    elif is_base_model:
+        tag = "no"
+    else:
+        tag = "us"
     search_for_setups = not is_baseline and not is_base_model
     datasets, cases = datasets_and_cases(
         dataset_size,
@@ -362,6 +368,7 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         max_tokens=max_tokens,
         verbose=verbose,
+        tag=tag,
     )
     if table_type_1:
         main_type1(**kwargs)
