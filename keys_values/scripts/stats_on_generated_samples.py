@@ -153,9 +153,12 @@ def stats_for(
 
 def _wrap_values(
     vals: Tuple[float, float],
-    fstrs: Tuple[str, str],
+    is_ratio: bool,
 ) -> str:
-    patterns = ["{x:" + fs + "}" for fs in fstrs]
+    if is_ratio:
+        patterns = "{x:.1f}" * len(vals)
+    else:
+        patterns = r"{x * 100:.1f}" * len(vals)
     parts = [p.format(x=x) for p, x in zip(patterns, vals)]
     return r"{\small\!" + parts[0] + r"}\pm{\small\!" + parts[1] + r"}"
 
@@ -169,8 +172,6 @@ def main(
     tokenizer: Optional[Any],
     max_tokens: int,
     verbose: bool,
-    ratio_fstrs: Tuple[str, str],
-    maxfrac_fstrs: Tuple[str, str],
 ):
     do_tokenize = tokenizer is not None
     base_path = result_path.parent
@@ -218,9 +219,9 @@ def main(
         for i, stat in enumerate(stats):
             tail = r" \\" if i == len(stats) - 1 else r" &"
             if stat is not None:
-                row = "  " + _wrap_values(stat.ratio, ratio_fstrs)
+                row = "  " + _wrap_values(stat.ratio, is_ratio=True)
                 if do_tokenize:
-                    row += " & " + _wrap_values(stat.frac_at_max_length, maxfrac_fstrs)
+                    row += " & " + _wrap_values(stat.frac_at_max_length, is_ratio=False)
             else:
                 row = "  -"
                 if do_tokenize:
@@ -244,8 +245,6 @@ if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
     do_tokenize = True
     verbose = True
-    ratio_fstrs: Tuple[str, str] = (".1f", ".1f")
-    maxfrac_fstrs: Tuple[str, str] = (".2f", ".2f")
 
     max_tokens = 128
     eval_dir = "eval_128"
@@ -289,6 +288,4 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         max_tokens=max_tokens,
         verbose=verbose,
-        ratio_fstrs=ratio_fstrs,
-        maxfrac_fstrs=maxfrac_fstrs,
     )
