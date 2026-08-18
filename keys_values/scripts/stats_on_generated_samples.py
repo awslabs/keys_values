@@ -164,7 +164,50 @@ def _wrap_values(
     return r"{\small\!" + parts[0] + r"$\pm$\!" + parts[1] + r"}"
 
 
-def main(
+def _col_header(
+    col_labels: List[str],
+    do_tokenize: bool,
+) -> List[str]:
+    num_cols = len(col_labels)
+    if do_tokenize:
+        col_spec = "|l|l|" + ("rr|" * num_cols)
+        col_strings = [r"\multicolumn{2}{c|}{" + x + r"}" for x in col_labels]
+        tex_lines = [
+            r"\begin{tabular}{" + col_spec + "}",
+            r"\hline",
+            " & ".join(["", "trn"] + col_strings) + r" \\",
+            " &" + (" & R & p" * num_cols) + r" \\",
+            r"\hline\hline",
+        ]
+    else:
+        col_spec = "|l|l|" + ("r" * num_cols) + "|"
+        tex_lines = [
+            r"\begin{tabular}{" + col_spec + "}",
+            r"\hline",
+            " & ".join(["", "trn"] + col_labels) + r" \\",
+            r"\hline\hline",
+        ]
+    return tex_lines
+
+
+def _row_for_stats(tex_lines: List[str], stats: List[Statistics]):
+    for i, stat in enumerate(stats):
+        tail = r" \\" if i == len(stats) - 1 else r" &"
+        if stat is not None:
+            row = "  " + _wrap_values(stat.ratio, is_ratio=True)
+            if do_tokenize:
+                row += " & " + _wrap_values(stat.frac_at_max_length, is_ratio=False)
+        else:
+            row = "  -"
+            if do_tokenize:
+                row += " & -"
+        row += tail
+        tex_lines.append(row)
+
+
+# Table has datasets as columns, cases as rows. This works for few datasets,
+# many cases.
+def main_type1(
     datasets: List[str],
     cases: List[Tuple[str, str]],
     result_path: Path,
@@ -173,6 +216,7 @@ def main(
     tokenizer: Optional[Any],
     max_tokens: int,
     verbose: bool,
+    tag: str,
 ):
     do_tokenize = tokenizer is not None
     base_path = result_path.parent
@@ -180,26 +224,7 @@ def main(
         d.removeprefix("helmet_").rsplit("_", 1)[0].replace("_", r"\_")
         for d in datasets
     ]
-    num_datasets = len(datasets)
-
-    if do_tokenize:
-        col_spec = "|l|" + "rr|" * num_datasets
-        col_strings = [r"\multicolumn{2}{c|}{" + x + r"}" for x in col_labels]
-        tex_lines = [
-            r"\begin{tabular}{" + col_spec + "}",
-            r"\hline",
-            " & ".join([""] + col_strings) + r" \\",
-            " & R & p" * num_datasets + r" \\",
-            r"\hline\hline",
-        ]
-    else:
-        col_spec = "|l|" + "r" * num_datasets + "|"
-        tex_lines = [
-            r"\begin{tabular}{" + col_spec + "}",
-            r"\hline",
-            " & ".join([""] + col_labels) + r" \\",
-            r"\hline\hline",
-        ]
+    tex_lines = _col_header(col_labels, do_tokenize)
 
     for case_key, case_label in cases:
         case_label = case_label.replace("_", r"\_")
@@ -217,18 +242,58 @@ def main(
             for dataset in datasets
         ]
         tex_lines.append(r"\rule{0pt}{13pt} " + case_label + r" &")
-        for i, stat in enumerate(stats):
-            tail = r" \\" if i == len(stats) - 1 else r" &"
-            if stat is not None:
-                row = "  " + _wrap_values(stat.ratio, is_ratio=True)
-                if do_tokenize:
-                    row += " & " + _wrap_values(stat.frac_at_max_length, is_ratio=False)
-            else:
-                row = "  -"
-                if do_tokenize:
-                    row += " & -"
-            row += tail
-            tex_lines.append(row)
+        _row_for_stats(tex_lines, stats)
+
+    tex_lines.extend(
+        [
+            r"\hline",
+            r"\end{tabular}",
+        ]
+    )
+    if result_path.exists():
+        result_path.unlink()
+    print(f"Writing result table to {result_path}")
+    result_path.write_text("\n".join(tex_lines) + "\n")
+
+
+# Table has datasets as rows, cases as columns. This works for many datasets,
+# few cases.
+def main_type2(
+    datasets: List[str],
+    cases: List[Tuple[str, str]],
+    result_path: Path,
+    eval_dir: str,
+    search_for_setups: bool,
+    tokenizer: Optional[Any],
+    max_tokens: int,
+    verbose: bool,
+    tag: str,
+):
+    do_tokenize = tokenizer is not None
+    base_path = result_path.parent
+    row_labels = [
+        d.removeprefix("helmet_").rsplit("_", 1)[0].replace("_", r"\_")
+        for d in datasets
+    ]
+    col_labels = [c[1].replace("_", r"\_") for c in cases]
+    tex_lines = _col_header(col_labels, do_tokenize)
+
+    for dataset, row_label in zip(datasets, row_labels):
+        stats = [
+            stats_for(
+                dataset=dataset,
+                case_key=case[0],
+                base_path=base_path,
+                eval_dir=eval_dir,
+                search_for_setups=search_for_setups,
+                tokenizer=tokenizer,
+                max_tokens=max_tokens,
+                verbose=verbose,
+            )
+            for case in cases
+        ]
+        tex_lines.append(r"\rule{0pt}{11pt} " + row_label + r" & " + tag + " &")
+        _row_for_stats(tex_lines, stats)
 
     tex_lines.extend(
         [
@@ -246,6 +311,7 @@ if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
     do_tokenize = True
     verbose = True
+    table_type_1 = False
 
     max_tokens = 128
     eval_dir = "eval_128"
@@ -273,6 +339,13 @@ if __name__ == "__main__":
         is_base_model,
         with_short=True,
     )
+    if not table_type_1 and not extra_data:
+        print("Table type 2: Reducing to 3 cases")
+        cases = [
+            ("slr_4gpu_cs1024_lr5", "slr_1024"),
+            ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
+            ("h2oorig_4gpu_cs1024_lr5", "h2oorig_1024"),
+        ]
 
     if do_tokenize:
         tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH)
@@ -280,7 +353,7 @@ if __name__ == "__main__":
         tokenizer = None
     result_path = base_path / f"stats_samples_{dataset_size}.tex"
 
-    main(
+    kwargs = dict(
         datasets=datasets,
         cases=cases,
         result_path=result_path,
@@ -290,3 +363,7 @@ if __name__ == "__main__":
         max_tokens=max_tokens,
         verbose=verbose,
     )
+    if table_type_1:
+        main_type1(**kwargs)
+    else:
+        main_type2(**kwargs)
