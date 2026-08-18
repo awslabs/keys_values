@@ -265,7 +265,7 @@ if __name__ == "__main__":
         extra_data,
         is_baseline,
         is_base_model,
-        with_short=False,
+        with_short=True,
     )
 
     if do_tokenize:
