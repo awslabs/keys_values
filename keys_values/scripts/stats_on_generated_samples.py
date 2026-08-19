@@ -24,6 +24,8 @@ from keys_values.scripts.cleanup_evaluation import datasets_and_cases
 
 BASE_MODEL_PATH = "/home/ubuntu/git/keys_values/checkpoints/Qwen/Qwen3-4B-Instruct-2507"
 
+CASE_EXACT = ("EXACT", "exact")
+
 
 def _length_ratio(
     output: str,
@@ -66,8 +68,13 @@ def _find_yaml_files(
     eval_dir: str,
     search_for_setups: bool,
 ) -> List[Path]:
-    if not search_for_setups:
+    directory = None
+    if case == CASE_EXACT[0]:
+        # Special case: Results for exact inference
+        directory = base_path / dataset.removeprefix("helmet_")
+    elif not search_for_setups:
         directory = base_path / dataset / case / eval_dir
+    if directory is not None:
         if directory.exists():
             return sorted(directory.glob("generated_samples_*.yaml"))
         else:
@@ -317,41 +324,67 @@ if __name__ == "__main__":
     eval_dir = "eval_128"
     # dataset_size = "64k"
     dataset_size = "128k"
-    # is_rerun = False
-    is_rerun = True
+    is_rerun = False
+    # is_rerun = True
     is_baseline = False
     # is_baseline = True
     is_base_model = False
     # is_base_model = True
     extra_data = False
     # extra_data = True
-    if is_rerun:
-        base_path = base_path / "rerun"
-    elif is_baseline:
-        base_path = base_path / "baseline"
-    elif is_base_model:
-        base_path = base_path / "basemod"
-    if is_baseline:
-        tag = "sp"
-    elif is_base_model:
-        tag = "no"
+    # is_exact = False
+    is_exact = True
+
+    if not is_exact:
+        if is_rerun:
+            base_path = base_path / "rerun"
+        elif is_baseline:
+            base_path = base_path / "baseline"
+        elif is_base_model:
+            base_path = base_path / "basemod"
+        if is_baseline:
+            tag = "sp"
+        elif is_base_model:
+            tag = "no"
+        else:
+            tag = "us"
+        search_for_setups = not is_baseline and not is_base_model
+        datasets, cases = datasets_and_cases(
+            dataset_size,
+            extra_data,
+            is_baseline,
+            is_base_model,
+            with_short=True,
+        )
+        if not table_type_1 and not extra_data:
+            print("Table type 2: Reducing to 3 cases")
+            cases = [
+                ("slr_4gpu_cs1024_lr5", "slr_1024"),
+                ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
+                ("h2oorig_4gpu_cs1024_lr5", "h2oorig_1024"),
+            ]
     else:
-        tag = "us"
-    search_for_setups = not is_baseline and not is_base_model
-    datasets, cases = datasets_and_cases(
-        dataset_size,
-        extra_data,
-        is_baseline,
-        is_base_model,
-        with_short=True,
-    )
-    if not table_type_1 and not extra_data:
-        print("Table type 2: Reducing to 3 cases")
-        cases = [
-            ("slr_4gpu_cs1024_lr5", "slr_1024"),
-            ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
-            ("h2oorig_4gpu_cs1024_lr5", "h2oorig_1024"),
-        ]
+        assert not table_type_1
+        base_path = Path("/mnt/efs/kbenidis/results/20260807_000000/finetuned")
+        tag = "ex"
+        cases = [CASE_EXACT]
+        datasets, _ = datasets_and_cases(
+            dataset_size=dataset_size,
+            extra_data=False,
+            is_baseline=False,
+            is_base_model=False,
+            with_short=True,
+        )
+        if dataset_size == "128k":
+            ds_extra, _ = datasets_and_cases(
+                dataset_size=dataset_size,
+                extra_data=True,
+                is_baseline=False,
+                is_base_model=False,
+                with_short=True,
+            )
+            datasets += ds_extra
+        search_for_setups = False
 
     if do_tokenize:
         tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH)
