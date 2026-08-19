@@ -324,16 +324,16 @@ if __name__ == "__main__":
     eval_dir = "eval_128"
     # dataset_size = "64k"
     dataset_size = "128k"
-    # is_rerun = False
-    is_rerun = True
+    is_rerun = False
+    # is_rerun = True
     is_baseline = False
     # is_baseline = True
     is_base_model = False
     # is_base_model = True
     extra_data = False
     # extra_data = True
-    is_exact = False
-    # is_exact = True
+    # is_exact = False
+    is_exact = True
 
     if not is_exact:
         if is_rerun:
@@ -365,7 +365,7 @@ if __name__ == "__main__":
             ]
     else:
         assert not table_type_1
-        base_path = "/mnt/efs/kbenidis/results/20260807_000000/finetuned"
+        base_path = Path("/mnt/efs/kbenidis/results/20260807_000000/finetuned")
         tag = "ex"
         cases = [CASE_EXACT]
         datasets, _ = datasets_and_cases(
