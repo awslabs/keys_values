@@ -159,3 +159,55 @@ class Solution_486:
             return True
         self.nums = nums
         return self.play_best_move(0, len(nums), True) >= 0
+
+
+class Solution_1140:
+    """
+    https://leetcode.com/problems/stone-game-ii/?envType=daily-question&envId=2026-08-20
+
+    Alice and Bob continue their games with piles of stones. There are a number
+    of piles arranged in a row, and each pile has a positive integer number of
+    stones piles[i]. The objective of the game is to end with the most stones.
+
+    Alice and Bob take turns, with Alice starting first.
+
+    On each player's turn, that player can take all the stones in the first X
+    remaining piles, where 1 <= X <= 2M. Then, we set M = max(M, X). Initially,
+    M = 1.
+
+    The game continues until all the stones have been taken.
+
+    Assuming Alice and Bob play optimally, return the maximum number of stones
+    Alice can get.
+
+    """
+    def max_score_for(
+        self,
+        start: int,
+        m: int,
+    ) -> int:
+        # Say this is called for player A (it is symmetric for B)
+        if m * 2 >= self.num_piles - start:
+            # A takes all the rest
+            return self.sum_all - self.cumsum[start]
+        max_score = 0
+        for x in range(1, m * 2 + 1):
+            # A takes `x` piles, then B scores optimally, and A takes the rest
+            score_other = self.max_score_for(start + x, max(m, x))
+            all_rest = self.sum_all - self.cumsum[start + x]
+            score_me = self.cumsum[start + x] - self.cumsum[start] + all_rest - score_other
+            max_score = max(max_score, score_me)
+        return max_score
+
+    def stoneGameII(self, piles: List[int]) -> int:
+        # General trick we use: We compute the cumulative sums for `piles`.
+        # This allows to compute sums over consecutive ranges in O(1).
+        self.piles = piles
+        self.num_piles = len(piles)
+        self.cumsum = []
+        csum = 0
+        for x in piles:
+            self.cumsum.append(csum)
+            csum += x
+        self.sum_all = csum
+        return self.max_score_for(0, 1)
