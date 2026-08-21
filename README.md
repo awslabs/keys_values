@@ -10,6 +10,7 @@ of a production system will require substantial extra efforts.
 
 ## What's New (Release 0.2.0)?
 
+* Technical report on novelties released: [arxiv](https://arxiv.org/abs/2608.19920)
 * New scaled dot product attention kernels returning attention weights (major
   speed-up of H2O cache strategies)
   - Add FlashInfer CUDA kernels and Triton score-sum for efficient attention weight computation
@@ -29,6 +30,18 @@ of a production system will require substantial extra efforts.
   - Refactor evaluation script so it can run with baseline checkpoints ([#123](https://github.com/awslabs/keys_values/pull/123))
 * Store training state and resume training from stored state. Fix bug in `SFTDataset.__getitem__` ([#103](https://github.com/awslabs/keys_values/pull/103))
 * Speed-ups by kernel fusion ([#105](https://github.com/awslabs/keys_values/pull/105))
+
+
+## Table of Contents
+
+* [Getting Started](#getting-started)
+* [Example: Long Context Fine-tuning on Helmet](#example-long-context-fine-tuning-on-helmet)
+* [Long Context Inference](#long-context-inference)
+* [Long Context Fine-tuning](#long-context-fine-tuning)
+* [Evaluation of Fine-tuned Models](#evaluation-of-fine-tuned-models)
+* [Implementing New KV Cache Policies](#implementing-new-kv-cache-policies)
+* [Profiling GPU Memory and Runtime](#profiling-gpu-memory-and-runtime)
+* [Publications](#publications)
 
 
 ## Getting Started
@@ -139,19 +152,19 @@ python build_ext.py
 ```
 
 
-## Example: Long Context Fine-tuning on LongBench V2
+## Example: Long Context Fine-tuning on Helmet
 
 This example runs on a single `Nvidia A 100` GPU with 40 GB of RAM.
 
 ```bash
 cd ${KEYS_VALUES_PATH}
 python3 keys_values/__main__.py finetune_long_lora \
-    Qwen/Qwen2.5-0.5B \
+    Qwen/Qwen3-4B-Instruct-2507 \
     --out_dir /home/ubuntu/out/finetune/longcontext_lora \
-    --data LongBenchV2 \
-        --data.max_seq_length 100000 \
+    --data Helmet \
+        --data.dataset_key trec_coarse \
+        --data.max_length 128k \
         --data.metadata_dir /home/ubuntu/out/finetune/longcontext_lora/data \
-    --head_model seq_classification_on_logits \
     --precision bf16-true \
     --verbose some \
     --kv_cache.name h2o-torch-quantized8 \
@@ -159,7 +172,9 @@ python3 keys_values/__main__.py finetune_long_lora \
         --kv_cache.chunk_size 1024 \
     --train.save_interval 10 \
         --train.micro_batch_size 4 \
-    --eval.interval 10
+    --eval.interval 10 \
+    --optimizer.name AdamW \
+        --optimizer.learning_rate 0.0005
 ```
 
 What is happening here?
@@ -168,38 +183,55 @@ What is happening here?
 * `--out_dir`: Path for results. For example, checkpoints are written to
   directories `step-000010`, `step-000020`, ... below this path (due to
   `--train.save_interval 10`, checkpoints are written every 10 iterations).
-* `--data LongBenchV2`: Using the `LongBenchV2` benchmark with its data loaders.
-  `--data.max_seq_length 100000` filters for sequences less than 100k tokens.
-  `--data.metadata_dir` stores metadata information about the dataset, so this
-  filtering runs much faster next time.
-* `--head_model seq_classification_on_logits` selects head model and loss
-  function. The benchmark task is 4-way classification, each class represented
-  by a single letter. This loss function reduces the logits to these 4 tokens.
-  This is much like asking the model to output a single letter, but only allowing
-  for valid class labels.
+* `--data Helmet`: Using the `Helmet` benchmark with its data loaders.
+  `--data.dataset_key trec_coarse` selects one Helmet dataset.
+  `--data.max_length 128k` ensures that sequences are close to 128k tokens.
+  `--data.metadata_dir` stores metadata information about the dataset, which
+  saves time the next time this dataset is chosen.
 * `--kv_cache.name h2o-default` selects the KV cache policy (`h2o`) and its
-  buffer strategy (`default` -- no quantization). `--kv_cache.cache_length` sets
-  the cache length (number of slots). Inference with batches at most this length
-  are done exactly with a single forward pass. `--kv_cache.chunk_size` sets the
-  chunk size. Sequences are processed in chunks of size
-  `cache_length, chunk_size, chunk_size, ...`, the first is called the prefill
-  chunk.
+  buffer strategy (`default` -- no quantization).
+  `--kv_cache.cache_length` sets the cache length (number of slots). Inference
+  with batches at most this length are done exactly with a single forward
+  pass.
+  `--kv_cache.chunk_size` sets the chunk size. Sequences are processed in
+  chunks of size `cache_length, chunk_size, chunk_size, ...`, the first is
+  called the *prefill* chunk.
 * `--train.micro_batch_size` sets the batch size for forward and backward
-  computations. `--train.global_batch_size` can be a multiple of the former, in
-  which case we use gradient averaging.
+  computations. The global batch size depends on how many devices are being
+  used.
+* `--train.save_interval`: The training scripts store checkpoints each K
+  training updates. These can be used for test set evaluations, or also for
+  restarting a stopped run.
+* `--eval.interval`: The scripts run evaluation on a validation set each K
+  training updates (the development set is split into training and
+  validation). Can be used to monitor training progress and to select the
+  best performing checkpoints afterwards.
 
 If you use an AWS `p4d.24xlarge` instance, you can use 8 A 100 GPUs in parallel.
-Modifying the CLI command above like runs training with an effective batch size
+Modifying the CLI command above like runs training with a global batch size
 of 32:
 
 ```bash
 cd ${KEYS_VALUES_PATH}
 python3 keys_values/__main__.py finetune_long_lora \
-    Qwen/Qwen2.5-0.5B --out_dir /home/ubuntu/out/finetune/longcontext_lora --devices 8 --data LongBenchV2 --data.max_seq_length 100000 --data.metadata_dir /home/ubuntu/out/finetune/longcontext_lora/data --head_model seq_classification_on_logits --precision bf16-true --verbose some --kv_cache.name h2o-default --kv_cache.cache_length 16384 --kv_cache.chunk_size 1024 --train.save_interval 10 --train.micro_batch_size 4 --eval.interval 10
+    Qwen/Qwen3-4B-Instruct-2507 \
+    --out_dir /home/ubuntu/out/finetune/longcontext_lora \
+    --devices 8 \
+    --data Helmet \
+        --data.dataset_key trec_coarse \
+        --data.max_length 128k \
+        --data.metadata_dir /home/ubuntu/out/finetune/longcontext_lora/data \
+    --precision bf16-true \
+    --verbose some \
+    --kv_cache.name h2o-torch-quantized8 \
+        --kv_cache.cache_length 16384 \
+        --kv_cache.chunk_size 1024 \
+    --train.save_interval 10 \
+        --train.micro_batch_size 4 \
+    --eval.interval 10 \
+    --optimizer.name AdamW \
+        --optimizer.learning_rate 0.0005
 ```
-
-Here, `--devices 8 --train.micro_batch_size 4` sets `train.global_batch_size`
-to 32, the per-device batch size to 4, and asks to use 8 devices.
 
 ### What's Next?
 
@@ -210,8 +242,10 @@ to 32, the per-device batch size to 4, and asks to use 8 devices.
   `--kv_cache.name h2o-torch-quantized8` halves the amount of GPU memory
   required for KV cache buffers and may even run faster (our code offloads
   KV cache buffers to CPU, which runs faster for less memory).
-* Play round with different datasets. `--data Helmet` gives access to datasets
-  from the Helmet benchmark.
+* Play round with different datasets. `--data LongBenchV2` gives access to the
+  `LongBench V2` dataset (for which you also want to add
+  `--head_model seq_classification_on_logits`, as this is a multi-way
+  classification problem).
 * Try using `finetune_offload_lora` instead of `finetune_long_lora`, and
   `--kv_cache.cpu_offload True`. This uses CPU offloading to free up memory
   during forward and backward pass, allowing you to explore options like
@@ -417,7 +451,7 @@ An example is given by [data.LongBenchV2](./keys_values/data/longbench_v2.py#L12
 All `DataModule` subclasses imported in the script file can be chosen by `--data`.
 Moreover, `--data.*` is used to set constructor parameters for the dataset.
 
-Relevant arguments for `LongBenchV2` (which is the default dataset):
+Relevant arguments for `LongBenchV2`:
 
 * `data.max_seq_length`: If given, we filter sequences to have token length
   less or equal this limit. The remaining data is split into training and
@@ -1464,3 +1498,21 @@ nsys profile --trace=cuda,nvtx --output <report_name> \
 
 Once the script terminates or is stopped, results are written to
 `<report_name>.nsys-rep`. You can then use `nsys-ui` to look at results.
+
+
+## Publications
+
+If you use this library, please do cite the following publication:
+
+Matthias Seeger, Zeyu Zhang, Vihang Patil, Konstantinos Benidis, Sebastian Schelter<br>
+Learning how to Forget: Fine-tuning for Long-Context Sparse Attention<br>
+[arXiv:2608.19920 \[cs.CL\]](https://arxiv.org/abs/2608.19920)
+
+```bibtex
+@techreport{Seeger:26,
+  author      = {Seeger, M. and Zhang, Z. and Patil, V. and Benidis, K. and Schelter, S.},
+  title       = {Learning how to Forget: Fine-tuning for Long-Context Sparse Attention},
+  number      = {arXiv:2608.19920 [cs.CL]},
+  year        = {2026}
+}
+```
