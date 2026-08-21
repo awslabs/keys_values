@@ -22,6 +22,7 @@ class Config:
 
 class RotaryPositionEncoding:
     def __init__(self, config: Config, context_width: int):
+        self.context_width = context_width
         n_elem = config.head_size
         theta = 1.0 / (config.rope_base ** (torch.arange(0, n_elem, 2).float() / n_elem))
         seq_idx = torch.arange(context_width).float()
@@ -72,13 +73,28 @@ class Transformer(nn.Module):
         if context_width is not None:
             self.set_context_width(context_width)
 
+    @property
+    def context_width(self) -> Optional[int]:
+        return None if self._rope is None else self._rope.context_width
+
     def set_context_width(self, context_width: int):
         self._rope = RotaryPositionEncoding(self.config, context_width)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            input_ids: Batch of input token sequences, shape
+                `(batch_size, seq_length)`
+
+        Returns:
+            Logits, shape `(batch_size, seq_length, config.vocab_size)`, if
+            `has_head == True`, final layer outputs, shape
+            `(batch_size, seq_length, config.n_embd)` otherwise.
+
+        """
         if self._rope is None:
             raise ValueError("Context width not set. Use `set_context_width`")
-        x = self.init_embd(x)
+        x = self.init_embd(input_ids)
         for layer in self.layers:
             x = layer(x, self._rope)
         return self.output_head(self.output_norm(x))
