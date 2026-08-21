@@ -432,6 +432,16 @@ class CellComputationAutogradHooks(AutogradHooks):
     "scatter-key" annotation, which can then be done earlier (and skipped
     later).
 
+    More generally, the backward traversal may request an annotation whose
+    buffer state is more than one chunk behind the current final buffer. This
+    happens if autograd's backward for the intermediate chunks is served
+    without unpacking their "scatter-*" / "cat-*" annotations, e.g., when a
+    generated region spans three or more chunks (issue #148). In this case,
+    :meth:`_unpack_from_annotation` walks the annotation chain, applying
+    intermediate annotations early. Reconstructed intermediate states are
+    parked in `_id_to_unpacked`, so their IDs can still be served if autograd
+    asks for them later.
+
     Packing broadcast-extended indexes:
 
     A broadcast-extended index is a 4D tensor of integer dtype, obtained as
@@ -826,33 +836,65 @@ class CellComputationAutogradHooks(AutogradHooks):
                 print(
                     f"_unpack_from_annotation: {str(annotation)}, buffer={buffer.shape}, final_idx={final_idx}"
                 )
-            # This is complex, because it happens that "ext-*" appears before
-            # "scatter-*" or "cat-*" for the same node. In this case, we need
-            # to first execute this "prior annotation", since otherwise the
-            # input to "ext-*" does not exist.
-            annotations_todo = [annotation]
-            if annotation.is_ext:
-                if final_idx == chunk_idx + 1:
-                    # ext-* annotation comes too early, need to do another one first
-                    prior_annotation = self._find_prior_annotation(annotation)
+            # This is complex, for two reasons:
+            # (1) It happens that "ext-*" appears before "scatter-*" or
+            #     "cat-*" for the same node. In this case, we need to first
+            #     execute this "prior annotation", since otherwise the input
+            #     to "ext-*" does not exist.
+            # (2) The final buffer can be more than one chunk ahead of
+            #     `annotation`. This happens when autograd's backward for the
+            #     intermediate chunks is served without unpacking their
+            #     "scatter-*" / "cat-*" annotations (observed with generated
+            #     regions spanning 3+ chunks, see issue #148). All "scatter" /
+            #     "cat" annotations are kept in `_packed_arg_for_id` (see
+            #     :meth:`_flush_remaining_pack_arguments`), so we can walk the
+            #     chain here, applying intermediate annotations early. Their
+            #     reconstructed states are parked in `_id_to_unpacked`, in
+            #     case autograd asks for their IDs later on.
+            # `first_needed` is the buffer state (chunk index) required
+            # before `annotation` itself can be applied:
+            first_needed = chunk_idx if annotation.is_ext else chunk_idx + 1
+            # Entries are `(annot, park_id, park_dtype)`. If `park_id` is
+            # given, the state reconstructed by `annot` is parked under this
+            # ID (see (2) above)
+            annotations_todo = [(annotation, None, None)]
+            if final_idx < chunk_idx:
+                raise ValueError(
+                    f"Annotation {str(annotation)}: final chunk_idx = {final_idx}, must be >= {chunk_idx}"
+                )
+            elif not annotation.is_ext and final_idx == chunk_idx:
+                # Has already been done to support ext-* annotation
+                if self.debug_print_annotations:
+                    print("--> Skip (already done)")
+                annotations_todo = []
+            elif final_idx > first_needed:
+                # Walk the annotation chain from `final_idx - 1` down to
+                # `first_needed`, so that `annotation` can be applied last
+                chain = []
+                for prior_chunk_idx in range(final_idx - 1, first_needed - 1, -1):
+                    found = self._find_chain_annotation(annotation, prior_chunk_idx)
+                    if found is None:
+                        raise ValueError(
+                            f"Annotation {str(annotation)}: final chunk_idx = "
+                            f"{final_idx}: Cannot reconstruct, missing "
+                            f"'scatter'/'cat' annotation for chunk {prior_chunk_idx}"
+                        )
+                    idd, prior_annotation = found
                     if self.debug_print_annotations:
                         print(f"--> Doing {str(prior_annotation)} first")
-                    annotations_todo.insert(0, prior_annotation)
-                elif final_idx != chunk_idx:
-                    raise ValueError(
-                        f"Annotation {str(annotation)}: final chunk_idx = {final_idx}, must be in [{chunk_idx}, {chunk_idx + 1}]"
-                    )
-            else:
-                if final_idx == chunk_idx:
-                    # Has already been done to support ext-* annotation
-                    if self.debug_print_annotations:
-                        print("--> Skip (already done)")
-                    annotations_todo = []
-                elif final_idx != chunk_idx + 1:
-                    raise ValueError(
-                        f"Annotation {str(annotation)}: final chunk_idx = {final_idx}, must be in [{chunk_idx}, {chunk_idx + 1}]"
-                    )
-            for annot in annotations_todo:
+                    if prior_chunk_idx > chunk_idx:
+                        # Applied early: Remove the entry here, park the
+                        # reconstructed state below
+                        value = self._packed_arg_for_id.pop(idd)
+                        chain.append((prior_annotation, idd, value.target_dtype))
+                    else:
+                        # `prior_chunk_idx == chunk_idx` ("ext-*" case): The
+                        # entry stays in `_packed_arg_for_id`. If its ID is
+                        # unpacked later, the "already done" branch above
+                        # serves it
+                        chain.append((prior_annotation, None, None))
+                annotations_todo = chain + annotations_todo
+            for annot, park_id, park_dtype in annotations_todo:
                 if annot.is_ext:
                     # `target_dim1` is either `n_head` or `n_query_groups`,
                     # depending on whether the annotation includes extension
@@ -874,9 +916,22 @@ class CellComputationAutogradHooks(AutogradHooks):
                     self._node_annotations.set_final(
                         buffer,
                         layer_idx,
-                        chunk_idx,
+                        annot.chunk_idx,
                         kind,
                     )
+                    if park_id is not None:
+                        # `annot` was applied earlier than autograd asks for
+                        # it. Park the state just reconstructed (as a copy,
+                        # since `buffer` is modified in place by subsequent
+                        # steps), so :meth:`unpack_hook` can serve the ID later
+                        parked = buffer.clone()
+                        if park_dtype is not None and parked.dtype != park_dtype:
+                            parked = parked.to(dtype=park_dtype)
+                        self._id_to_unpacked[park_id] = parked
+                        if park_id not in self._id_counts:
+                            self._id_counts[park_id] = 1
+                        if self._debug_test_args:
+                            self._debug_log_args.append((parked.clone(), annot))
                 # Sanity check
                 assert (
                     annot.shape == buffer.shape
@@ -892,15 +947,30 @@ class CellComputationAutogradHooks(AutogradHooks):
     def _get_cache_length(self, layer_idx: int) -> int:
         return self.cache_lengths[layer_idx - self.first_layer_idx]
 
-    def _find_prior_annotation(self, annotation: NodeAnnotation) -> NodeAnnotation:
-        assert annotation.is_ext
+    def _find_chain_annotation(
+        self,
+        annotation: NodeAnnotation,
+        chunk_idx: int,
+    ) -> Optional[Tuple[int, NodeAnnotation]]:
+        """
+        Searches `_packed_arg_for_id` for the "scatter-*" or "cat-*"
+        annotation on the same chain as `annotation` (i.e., same layer and
+        keys/values kind), but with chunk index `chunk_idx`.
+
+        Args:
+            annotation: Annotation determining the chain
+            chunk_idx: Chunk index to search for
+
+        Returns:
+            `(id, chain_annotation)` if found, otherwise `None`
+
+        """
         layer_idx = annotation.layer_idx
-        chunk_idx = annotation.chunk_idx
         is_keys = annotation.is_keys
-        result = next(
+        return next(
             (
-                e.annot
-                for e in self._packed_arg_for_id.values()
+                (idd, e.annot)
+                for idd, e in self._packed_arg_for_id.items()
                 if (
                     isinstance(e, PackArgumentAsAnnotation)
                     and e.annot.is_keys == is_keys
@@ -911,11 +981,6 @@ class CellComputationAutogradHooks(AutogradHooks):
             ),
             None,
         )
-        if result is None:
-            raise IndexError(
-                f"{str(annotation)}: Don't find prior annotation for this one!"
-            )
-        return result
 
     @staticmethod
     def _unpack_scatter(
