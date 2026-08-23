@@ -1,10 +1,6 @@
-from dataclasses import dataclass
-import math
-from typing import Literal, Optional, Dict, Any
+from typing import Optional, Dict, Any
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 from litgpt.utils import CycleIterator
 
@@ -21,12 +17,20 @@ from keys_values.interview_prep.transformer import (
 
 def create_state(
     config: Config,
+    max_num_steps: int,
 ) -> Dict[str, Any]:
-    state = {
+    state: Dict[str, Any] = {
         "model": Transformer(config),
-        "loss_function": torch.nn.CrossEntropyLoss(),  # TODO!
+        "loss_function": torch.nn.CrossEntropyLoss(),  # CHECK!
     }
-    # TODO!
+    # Optimizer: Adam with improved weight decay regularization
+    state["optimizer"] = torch.optim.AdamW(
+        state["model"].named_parameters(), lr=0.0005,
+    )
+    # Cosine annealing scheduler, no warm-up
+    state["scheduler"] = torch.optim.lr_scheduler.CosineAnnealingLR(
+        state["optimizer"], T_max=max_num_steps,
+    )
     return state
 
 
@@ -34,8 +38,8 @@ def fit(
     state: Dict[str, Any],
     train_dataloader: MyDataLoader,
     batch_transform: BatchTransform,
-    max_num_epochs: int,
-    max_num_steps: int,
+    max_num_steps: Optional[int],
+    max_num_epochs: Optional[int],
 ):
     # Parts of state
     model = state["model"]
@@ -48,9 +52,9 @@ def fit(
     num_steps = 0
 
     # Training loop
-    while num_steps < max_num_steps:
+    while max_num_steps is None or num_steps < max_num_steps:
         batch = batch_transform(next(train_iterator))
-        if train_iterator.epoch >= max_num_epochs:
+        if max_num_epochs is not None and train_iterator.epoch >= max_num_epochs:
             break
         # Context width of model must be long enough to process data batch.
         # Note: The context width is not fixed, but can grow. This affects
@@ -68,3 +72,38 @@ def fit(
         scheduler.step()
         print(f"Iteration {num_steps} (epoch {train_iterator.epoch}): loss = {loss.item()}")
         num_steps += 1
+
+
+# TODO:
+# - Make everything compatible with LitGPT, certain model (e.g, Qwen2-0.5B)
+#   But code from scratch
+# - Load checkpoint with tokenizer
+# - Use my own data loaders
+# - Write tests: Must give same results as my lib!
+def main(
+    config: Config,
+    max_num_steps: Optional[int] = None,
+    max_num_epochs: Optional[int] = None,
+):
+    if max_num_steps is None and max_num_epochs is None:
+        raise ValueError("One of `max_num_steps` or `max_num_epochs` must be specified.")
+    # Create training data iterator
+    train_dataloader = TODO
+    batch_transform = TODO
+    # Create state: Model, loss function, optimizer, LR scheduler
+    if max_num_epochs is None:
+        lr_max_steps = max_num_steps
+    else:
+        lr_max_steps = len(train_dataloader) * max_num_epochs
+        if max_num_steps is not None:
+            lr_max_steps = min(max_num_steps, lr_max_steps)
+    state = create_state(config, max_num_steps=lr_max_steps)
+    # TODO: Load checkpoint or initialize weights at random
+    # Run training
+    fit(
+        state=state,
+        train_dataloader=train_dataloader,
+        batch_transform=batch_transform,
+        max_num_steps=max_num_steps,
+        max_num_epochs=max_num_epochs,
+    )

@@ -1,6 +1,7 @@
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 
+# OK
 class Solution_3302:
     """
     https://leetcode.com/problems/find-the-lexicographically-smallest-valid-sequence/description/?envType=daily-question&envId=2026-08-20
@@ -89,6 +90,7 @@ class Solution_3302:
             return result
 
 
+# OK
 class Solution_3517:
     def smallestPalindrome(self, s: str) -> str:
         """
@@ -109,6 +111,7 @@ class Solution_3517:
         return "".join(half_lst + middle + list(reversed(half_lst)))
 
 
+# OK
 class Solution_486:
     """
     https://leetcode.com/problems/predict-the-winner/description/?envType=daily-question&envId=2026-08-20
@@ -161,6 +164,7 @@ class Solution_486:
         return self.play_best_move(0, len(nums), True) >= 0
 
 
+# OK
 class Solution_1140:
     """
     https://leetcode.com/problems/stone-game-ii/?envType=daily-question&envId=2026-08-20
@@ -213,15 +217,18 @@ class Solution_1140:
         return self.max_score_for(0, 1)
 
 
+# OK
+# - Fixed bug: `return end` -> `return pos`
 class Solution_2958:
     """
     https://leetcode.com/problems/length-of-longest-subarray-with-at-most-k-frequency/?envType=daily-question&envId=2026-08-20
 
-    You are given an integer array nums and an integer k.
+    You are given an integer array `nums` and an integer `k`.
 
     The frequency of an element x is the number of times it occurs in an array.
 
-    An array is called good if the frequency of each element in this array is less than or equal to k.
+    An array is called good if the frequency of each element in this array is
+    less than or equal to `k`.
 
     Return the length of the longest good subarray of nums.
 
@@ -255,21 +262,60 @@ class Solution_2958:
     1 <= k <= nums.length
 
     """
+    def extend(
+        self,
+        end: int,
+        hist: Dict[int, int],
+    ) -> int:
+        for pos in range(end, self.len_nums):
+            x = self.nums[pos]
+            curr = hist.get(x, 0)
+            if curr >= self.k:
+                return pos
+            hist[x] = curr + 1
+        return len(self.nums)
+
     def maxSubarrayLength(self, nums: List[int], k: int) -> int:
-        pass  # TODO
+        """
+        - `extend(0, {})` builds histogram for max good subarray starting at 0
+        - Iterate: Increase `start` and decrease count. Now, `extend(end, hist)`
+          extends subarray and histogram until max good again
+
+        """
+        self.nums = nums
+        self.k = k
+        self.len_nums = len(nums)
+        hist: Dict[int, int] = dict()
+        start = 0
+        end = 0
+        max_len = 0
+        for elem in self.nums:
+            end = self.extend(end, hist)
+            max_len = max(max_len, end - start)
+            if end == self.len_nums:
+                break
+            start += 1
+            hist[elem] -= 1
+        return max_len
 
 
+# OK
+# - Fixed bug: `num_of_cost[c] += 1` -> `num_of_cost[c - 1] += 1`
 class Solution_1833:
     """
     https://leetcode.com/problems/maximum-ice-cream-bars/?envType=daily-question&envId=2026-08-20
 
     It is a sweltering summer day, and a boy wants to buy some ice cream bars.
 
-    At the store, there are n ice cream bars. You are given an array costs of length n, where costs[i] is the price of the ith ice cream bar in coins. The boy initially has coins coins to spend, and he wants to buy as many ice cream bars as possible.
+    At the store, there are `n` ice cream bars. You are given an array `costs`
+    of length `n`, where `costs[i]` is the price of the ith ice cream bar in coins.
+    The boy initially has coins `coins` to spend, and he wants to buy as many ice
+    cream bars as possible.
 
     Note: The boy can buy the ice cream bars in any order.
 
-    Return the maximum number of ice cream bars the boy can buy with coins coins.
+    Return the maximum number of ice cream bars the boy can buy with `coins`
+    coins.
 
     You must solve the problem by counting sort.
 
@@ -300,21 +346,47 @@ class Solution_1833:
 
     """
     def maxIceCream(self, costs: List[int], coins: int) -> int:
-        pass  # TODO!
+        # Sort `costs` and buy from cheapest upwards
+        # Must use counting sort
+        # Count number of bars for each cost value. Note that
+        # `num_of_costs[c]` is for cost `c + 1`.
+        num_of_cost = [0] * 105
+        for c in costs:
+            num_of_cost[c - 1] += 1
+        num_bought = 0
+        for cost, num in enumerate(num_of_cost):
+            if num > 0:
+                cost += 1
+                cost_here = cost * num
+                if cost_here >= coins:
+                    num_bought += (coins // cost)
+                    break
+                num_bought += num
+                coins -= cost_here
+        return num_bought
 
 
+# OK
+# ==> DAMN!! DOES NOT WORK!!
 class Solution_2161:
     """
     https://leetcode.com/problems/partition-array-according-to-given-pivot/?envType=daily-question&envId=2026-08-20
 
-    You are given a 0-indexed integer array nums and an integer pivot. Rearrange nums such that the following conditions are satisfied:
+    You are given a 0-indexed integer array `nums` and an integer `pivot`.
+    Rearrange `nums` such that the following conditions are satisfied:
 
-    * Every element less than pivot appears before every element greater than pivot.
-    * Every element equal to pivot appears in between the elements less than and greater than pivot.
-    * The relative order of the elements less than pivot and the elements greater than pivot is maintained.
-      More formally, consider every pi, pj where pi is the new position of the ith element and pj is the new position of the jth element. If i < j and both elements are smaller (or larger) than pivot, then pi < pj.
+    * Every element less than `pivot` appears before every element greater than
+      pivot.
+    * Every element equal to `pivot` appears in between the elements less than
+      and greater than `pivot`.
+    * The relative order of the elements less than `pivot` and the elements
+      greater than `pivot` is maintained.
 
-    Return nums after the rearrangement.
+    More formally, consider every pi, pj where pi is the new position of the
+    ith element and pj is the new position of the jth element. If i < j and
+    both elements are smaller (or larger) than pivot, then pi < pj.
+
+    Return `nums` after the rearrangement.
 
     Example 1:
 
@@ -341,10 +413,70 @@ class Solution_2161:
     * pivot equals to an element of nums.
 
     """
+    def swap(self, p1: int, p2: int):
+        elem = self.nums[p1]
+        self.nums[p1] = self.nums[p2]
+        self.nums[p2] = elem
+
+    def revert(self, first: int, last: int):
+        if last < first + 1:
+            return
+        for i in range((last - first + 1) // 2):
+            self.swap(first + i, last - i)
+
     def pivotArray(self, nums: List[int], pivot: int) -> List[int]:
-        pass  # TODO!
+        self.nums = nums
+        # In-place solution
+        # - Pairwise swap solution: Ignores relative ordering
+        # - Partition left into [done | moved], right into [moved | done]
+        # - After each swap: Bubble entries left and/or right to bring them
+        #   to "done" part
+        # - "moved" parts have to be reverted at end
+        # - pivot entries kept on left, sorted out at end
+        left_pos = left_done = 0
+        right_pos = right_done = len(nums) - 1
+        while left_pos < right_pos:
+            while left_pos < right_pos and nums[left_pos] <= pivot:
+                elem = nums[left_pos]
+                if elem < pivot:
+                    # Bubble entry to the left
+                    for i in range(left_done, left_pos):
+                        nums[i + 1] = nums[i]
+                    nums[left_done] = elem
+                    left_done += 1
+                left_pos += 1
+            while left_pos < right_pos and nums[right_pos] > pivot:
+                elem = nums[right_pos]
+                # Bubble entry to right
+                for i in range(right_pos, right_done):
+                    nums[i] = nums[i + 1]
+                nums[right_done] = elem
+                right_done -= 1
+                right_pos -= 1
+            if left_pos >= right_pos:
+                break
+            self.swap(left_pos, right_pos)
+            left_pos += 1
+        # At this point:
+        # - range(0, left_done): OK
+        # - range(left_done, left_pos): Revert and move pivot right
+        # - range(right_pos + 1, right_done + 1): Revert
+        # - range(right_done + 1, N): OK
+        self.revert(right_pos + 1, right_done)
+        if left_pos > left_done:
+            # Move pivot entries to right
+            pos = left_done
+            for x in nums[left_done:left_pos]:
+                if x < pivot:
+                    nums[pos] = x
+                    pos += 1
+            if pos < left_pos:
+                nums[pos:left_pos] = [pivot] * (left_pos - pos)
+            self.revert(left_done, pos - 1)
+        return nums
 
 
+# OK
 class Solution_3635:
     """
     https://leetcode.com/problems/earliest-finish-time-for-land-and-water-rides-ii/?envType=daily-question&envId=2026-08-20
@@ -363,7 +495,8 @@ class Solution_3635:
 
     * A ride may be started at its opening time or any later moment.
     * If a ride is started at time t, it finishes at time t + duration.
-    * Immediately after finishing one ride the tourist may board the other (if it is already open) or wait until it opens.
+    * Immediately after finishing one ride the tourist may board the other (if
+      it is already open) or wait until it opens.
 
     Return the earliest possible time at which the tourist can finish both rides.
 
@@ -422,7 +555,22 @@ class Solution_3635:
         waterStartTime: List[int],
         waterDuration: List[int]
     ) -> int:
-        pass  # TODO!
+        land_earliest_time = min(
+            x + y for x, y in zip(landStartTime, landDuration)
+        )
+        water_earliest_time = min(
+            x + y for x, y in zip(waterStartTime, waterDuration)
+        )
+        return min(
+            min(
+                max(land_earliest_time, x) + y
+                for x, y in zip(waterStartTime, waterDuration)
+            ),
+            min(
+                max(water_earliest_time, x) + y
+                for x, y in zip(landStartTime, landDuration)
+            )
+        )
 
 
 class Solution_1871:
