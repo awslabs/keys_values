@@ -33,8 +33,7 @@ def _extract_train_data_index(
             if not state_path.exists():
                 continue
             train_state = torch.load(state_path)
-            print(f"{case_path}: {list(train_state.keys())}")
-            return tuple(train_state["train_data_index"].tolist())
+            return tuple(train_state["data_state"]["train_data_index"].tolist())
     return None
 
 
