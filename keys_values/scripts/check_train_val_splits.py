@@ -33,6 +33,12 @@ def _extract_train_data_index(
             if not state_path.exists():
                 continue
             train_state = torch.load(state_path)
+            if "data_state" not in train_state:
+                print(f"{setup_dir}: {TRAINSTATE_REST_FNAME} has no 'data_state'")
+                continue
+            if "train_data_index" not in train_state["data_state"]:
+                print(f"{setup_dir}: {TRAINSTATE_REST_FNAME}['data_state'] has no 'train_data_index'")
+                continue
             return tuple(train_state["data_state"]["train_data_index"].tolist())
     return None
 
