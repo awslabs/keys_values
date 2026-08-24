@@ -282,6 +282,11 @@ class SequenceLengthFilteredDataModule(DataModule):
         """
         raise NotImplementedError()
 
+    def _get_train_val_split_from_metadata(
+        self,
+    ) -> Optional[Tuple[List[int], List[int]]]:
+        return None
+
     def setup(self, stage: str = "") -> None:
         """
         Note: Datasets `train_dataset`, `val_dataset`, `test_dataset` are
@@ -296,8 +301,23 @@ class SequenceLengthFilteredDataModule(DataModule):
         """
         data, test_data = self._get_dataset()
         # Partition the dataset into train and validation. If a training
-        # state is given, this is part of it
-        if self.training_state is None:
+        # state is given, this is part of it. Otherwise, the split can also
+        # be obtained from metadata.
+        train_ind = val_ind = None
+        if self.training_state is not None:
+            train_ind = self.training_state.train_data_index
+            val_ind = self.training_state.val_data_index
+            print(
+                f"Development set split loaded from training state: training ({len(train_ind)}) and validation ({len(val_ind)})"
+            )
+        else:
+            result = self._get_train_val_split_from_metadata()
+            if result is not None:
+                train_ind, val_ind = result
+                print(
+                    f"Development set split loaded from metadata: training ({len(train_ind)}) and validation ({len(val_ind)})"
+                )
+        if train_ind is None:
             train_data, val_data = random_split(
                 data,
                 [1.0 - self.val_split_fraction, self.val_split_fraction],
@@ -306,19 +326,15 @@ class SequenceLengthFilteredDataModule(DataModule):
             # Retain split indices
             train_ind = [int(x) for x in train_data.indices]
             val_ind = [int(x) for x in val_data.indices]
-            self.training_state = SequenceLengthFilteredDataTrainState()
-            self.training_state.initialize(train_ind, val_ind)
             print(
                 f"Split development set into training ({len(train_ind)}) and validation ({len(val_ind)})"
             )
         else:
-            train_ind = self.training_state.train_data_index
-            val_ind = self.training_state.val_data_index
             train_data = Subset(data, train_ind)
             val_data = Subset(data, val_ind)
-            print(
-                f"Development set split loaded from training state: training ({len(train_ind)}) and validation ({len(val_ind)})"
-            )
+        if self.training_state is None:
+            self.training_state = SequenceLengthFilteredDataTrainState()
+            self.training_state.initialize(train_ind, val_ind)
         train_data, val_data = list(train_data), list(val_data)
         self._sequence_lengths = {
             "train": [record[NUM_TOKENS_NAME] for record in train_data],
