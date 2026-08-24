@@ -573,6 +573,7 @@ class Solution_3635:
         )
 
 
+# OK
 class Solution_1871:
     """
     https://leetcode.com/problems/jump-game-vii/description/?envType=daily-question&envId=2026-08-20
@@ -608,8 +609,28 @@ class Solution_1871:
     * 1 <= minJump <= maxJump < s.length
 
     """
+    def _canReach(self, start: int) -> bool:
+        pos = start
+        if pos + self.minJump > self.fin_pos:
+            return False
+        elif pos + self.maxJump >= self.fin_pos:
+            return True
+        for i in range(pos + self.minJump, pos + self.maxJump + 1):
+            if self.s[i] == "0" and self._canReach(i):
+                return True
+        return False
+
     def canReach(self, s: str, minJump: int, maxJump: int) -> bool:
-        pass  # TODO!
+        assert s[0] == "0"
+        self.fin_pos = len(s) - 1
+        if s[-1] != "0":
+            return False
+        elif self.fin_pos == 0:
+            return True
+        self.s = s
+        self.minJump = minJump
+        self.maxJump = maxJump
+        return self._canReach(0)
 
 
 class Solution_3629:
