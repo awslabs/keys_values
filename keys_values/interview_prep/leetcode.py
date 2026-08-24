@@ -633,20 +633,24 @@ class Solution_1871:
         return self._canReach(0)
 
 
+# OK
+# - Not happy with this solution: Could be really inefficient!
 class Solution_3629:
     """
     https://leetcode.com/problems/minimum-jumps-to-reach-end-via-prime-teleportation/?envType=daily-question&envId=2026-08-20
 
-    You are given an integer array nums of length n.
+    You are given an integer array `nums` of length `n`.
 
-    You start at index 0, and your goal is to reach index n - 1.
+    You start at index 0, and your goal is to reach index `n - 1`.
 
-    From any index i, you may perform one of the following operations:
+    From any index `i`, you may perform one of the following operations:
 
-    * Adjacent Step: Jump to index i + 1 or i - 1, if the index is within bounds.
-    * Prime Teleportation: If nums[i] is a p, you may instantly jump to any index j != i such that nums[j] % p == 0.
+    * Adjacent Step: Jump to index `i + 1` or `i - 1`, if the index is within
+      bounds.
+    * Prime Teleportation: If `nums[i]` is a prime number `p`, you may instantly
+      jump to any index `j != i` such that `nums[j] % p == 0`.
 
-    Return the minimum number of jumps required to reach index n - 1.
+    Return the minimum number of jumps required to reach index `n - 1`.
 
     Example 1:
 
@@ -694,10 +698,68 @@ class Solution_3629:
     * 1 <= nums[i] <= 106
 
     """
+    def primeSieve(self, max_num: int) -> List[bool]:
+        result = [True] * (max_num + 1)
+        curr = 2
+        limit = max_num // 2 + 1
+        while curr < limit:
+            for i in range(2 * curr, max_num + 1, curr):
+                result[i] = False
+            curr += 1
+            while curr < limit and not result[curr]:
+                curr += 1
+        return result
+
+    def _min_jumps(self, pos: int, num_done: int) -> int:
+        if num_done >= self.max_jumps:
+            return self.max_jumps
+        if pos == self.max_jumps - 1:
+            return 1
+        entry = self.nums[pos]
+        entry_is_prime = entry > 1 and self.is_prime[entry]
+        if entry_is_prime and self.fin_entry % entry == 0:
+            return 1
+        # Start with jumps to neighbors
+        min_val = self._min_jumps(pos + 1, num_done + 1) + 1
+        if min_val == 2:
+            return 2  # cannot be better than that
+        if pos > 0:
+            min_val = min(
+                min_val,
+                self._min_jumps(pos - 1, num_done + 1) + 1,
+            )
+            if min_val == 2:
+                return 2
+        if entry_is_prime:
+            # Consider teleportation jumps
+            candidates = [
+                pnext
+                for pnext in list(range(1, pos - 1)) + list(range(pos + 2, self.max_jumps))
+                if self.nums[pnext] % entry == 0
+            ]
+            for pnext in reversed(candidates):
+                min_val = min(
+                    min_val,
+                    self._min_jumps(pnext, num_done + 1) + 1,
+                )
+                if min_val == 2:
+                    return 2
+        return min(min_val, self.max_jumps)
+
+
     def minJumps(self, nums: List[int]) -> int:
-        pass  # TODO!
+        max_num = 105
+        assert all(1 <= x <= 105 for x in nums)
+        if len(nums) == 1:
+            return 0
+        self.is_prime = self.primeSieve(max_num)
+        self.nums = nums
+        self.fin_entry = self.nums[-1]
+        self.max_jumps = len(nums) - 1
+        return self._min_jumps(0, 0)
 
 
+# OK
 class Solution_2657:
     """
     https://leetcode.com/problems/find-the-prefix-common-array-of-two-arrays/?envType=daily-question&envId=2026-08-20
@@ -738,7 +800,17 @@ class Solution_2657:
 
     """
     def findThePrefixCommonArray(self, A: List[int], B: List[int]) -> List[int]:
-        pass  # TODO!
+        # Simple solution
+        n = len(A)
+        assert n == len(B)
+        counts = [0] * n
+        result = []
+        for x, y in zip(A[:-1], B[:-1]):
+            counts[x - 1] += 1
+            counts[y - 1] += 1
+            result.append(sum(c == 2 for c in counts))
+        result.append(n)
+        return result
 
 
 class Solution_3514:

@@ -63,3 +63,20 @@ right_pos:  3
 right_done: 3
 
 elem: -3
+
+
+## 3629
+
+- Need prime testing for numbers in `1, ..., 106`. Just build a boolean list
+- Sounds like recursion!
+- But why would this stop? We can jump backwards!
+  Because we have an upper bound!
+
+
+[1, 2, 4, 6]
+
+
+## 2657
+
+- Maintain `counts`
+- How many `counts[i] == 2`?

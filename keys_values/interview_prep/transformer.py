@@ -188,7 +188,6 @@ def sdpa_naive(
     assert q_len <= kv_len
     assert q_per_kv >= 1 and nh_q == nh_k * q_per_kv
     scale_factor = 1.0 / math.sqrt(head_size)
-    # Weakness of naive: Intermediate tensors are huge!
     # Compute inner products in `scores`
     if scale_factor == 1.0:
         arg1 = query
