@@ -58,11 +58,12 @@ def main(
                 if index is not None:
                     histogram[index] += 1
     num_found = sum(histogram.values())
-    tag = f"{dataset} [{num_found}]"
-    if len(histogram) == 1:
-        print(f"{tag}: Single train_data_index")
-    else:
-        print(f"{tag}: Multiple train_data_index's: {dict(histogram)}")
+    if num_found > 0:
+        tag = f"{dataset} [{num_found}]"
+        if len(histogram) == 1:
+            print(f"{tag}: Single train_data_index")
+        else:
+            print(f"{tag}: Multiple train_data_index's: {dict(histogram)}")
 
 
 if __name__ == "__main__":
