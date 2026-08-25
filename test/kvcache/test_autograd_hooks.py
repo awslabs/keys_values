@@ -295,10 +295,146 @@ def test_unpack_walks_multi_chunk_annotation_chain(device, num_states):
     torch.testing.assert_close(x1, states[1])
     assert hooks.node_annotations.get_final(layer_idx, kind)[1] == 1
 
-    # Intermediate annotations were applied early; their reconstructed
-    # states must still be served when autograd unpacks their IDs
+    # The intermediate annotations were applied early and consumed. They were
+    # inserted by the flush purely to keep the chain complete (no autograd
+    # node refers to them), so their states are not retained
     for c in range(2, num_states):
-        x_c = hooks.unpack_hook(ids[c])
-        torch.testing.assert_close(x_c, states[c])
-    # All parked states have been consumed
+        assert ids[c] not in hooks._packed_arg_for_id
     assert not hooks._id_to_unpacked
+
+
+@pytest.mark.parametrize("device", available_backends())
+def test_unpack_out_of_order_request_after_walking_past(device):
+    """
+    Second regression test for issue #148. After the chain-walk fix, long
+    32k runs hit the mirror case: the buffer had been walked *past* a chunk,
+    and autograd then asked for that chunk's state, failing with
+    `final chunk_idx = 14, must be >= 15`.
+
+    This happens when an annotation is applied early (to serve an `ext-*`
+    annotation for the same chunk, or as part of a chain walk), the buffer is
+    then walked further down by a later request, and only afterwards does
+    autograd unpack the early-applied annotation's own ID. The state must be
+    parked when it is applied early, so it can still be served.
+
+    Here we unpack chunk 2 first (walking final 3 -> 2), then chunk 1
+    (walking 2 -> 1), then ask for chunk 2 again -- which is only possible if
+    chunk 2's state was retained.
+
+    """
+    seed = 271828
+    torch.random.manual_seed(seed)
+    dtype = torch.float32
+
+    batch_size = 2
+    n_head = 4
+    n_query_groups = 2
+    head_size = 8
+    cache_length = 32
+    chunk_size = 8
+    num_states = 3
+    layer_idx = 0
+    kind = "scatter-value"
+
+    config = Config(
+        n_layer=1,
+        n_head=n_head,
+        n_query_groups=n_query_groups,
+        n_embd=n_head * head_size,
+        block_size=cache_length + num_states * chunk_size,
+        vocab_size=48,
+        rotary_percentage=1,
+    )
+    params = KVCacheParams(
+        max_batch_size=batch_size,
+        n_query_groups=n_query_groups,
+        cache_length=cache_length,
+        head_size=head_size,
+        n_head=n_head,
+        dtype=dtype,
+    )
+    hooks = CellComputationAutogradHooks(
+        config=config,
+        batch_size=batch_size,
+    )
+    token_kwargs = dict(dtype=torch.int64, device=device)
+    replay_log = DefaultKVCacheReplayLog(
+        token_chunks=[torch.zeros(batch_size, cache_length, **token_kwargs)]
+        + [
+            torch.zeros(batch_size, chunk_size, **token_kwargs)
+            for _ in range(num_states)
+        ],
+        cache_length=cache_length,
+        max_prefill_length=cache_length,
+        grace_period=0,
+    )
+    hooks.initialize_cell(
+        eff_num_layers=1,
+        num_chunks=num_states + 1,
+        first_layer_idx=layer_idx,
+        first_chunk_idx=0,
+        cache_lengths=[cache_length],
+        replay_logs=[replay_log],
+    )
+
+    buffer_kwargs = dict(dtype=dtype, device=device)
+    states = {
+        1: torch.randn(
+            batch_size, n_query_groups, cache_length, head_size, **buffer_kwargs
+        )
+    }
+    annotations = {}
+    for c in range(2, num_states + 1):
+        prev = states[c - 1]
+        index = expand_index(
+            random_index(params, 0, cache_length, num=chunk_size, device=device),
+            head_size,
+        )
+        annot = NodeAnnotation(
+            kind=kind,
+            layer_idx=layer_idx,
+            chunk_idx=c - 1,
+            shape=tuple(prev.shape),
+            index=index,
+            delta=prev.gather(2, index),
+        )
+        annotations[c - 1] = annot
+        hooks.node_annotations.append_safe(annot)
+        new_values = torch.randn(
+            batch_size, n_query_groups, chunk_size, head_size, **buffer_kwargs
+        )
+        states[c] = prev.scatter(2, index, new_values)
+    hooks.node_annotations.set_final(
+        x=states[num_states],
+        layer_idx=layer_idx,
+        chunk_idx=num_states,
+        kind=kind,
+    )
+
+    # Register the chunk-2 annotation as a *matched* pack argument (i.e., an
+    # ID the autograd graph really refers to), so it must be served even
+    # after the buffer has been walked past it. The chunk-1 annotation is
+    # flushed as usual.
+    matched_id = 4242
+    hooks._packed_arg_for_id[matched_id] = PackArgumentAsAnnotation(
+        annot=annotations[2],
+        target_dtype=None,
+    )
+    hooks.node_annotations.nodes.remove(annotations[2])
+    hooks._match_annotations(flush_pack_args=True)
+    chunk1_id = next(
+        idd
+        for idd, e in hooks._packed_arg_for_id.items()
+        if isinstance(e, PackArgumentAsAnnotation) and e.annot.chunk_idx == 1
+    )
+
+    # Walk down to chunk 1. This applies the chunk-2 annotation early (as
+    # part of the chain walk) and must park its state
+    x1 = hooks.unpack_hook(chunk1_id)
+    torch.testing.assert_close(x1, states[1])
+    assert hooks.node_annotations.get_final(layer_idx, kind)[1] == 1
+
+    # Now autograd asks for chunk 2, whose state the buffer has moved past.
+    # Before the fix this raised `final chunk_idx = 1, must be >= 2`
+    x2 = hooks.unpack_hook(matched_id)
+    torch.testing.assert_close(x2, states[2])
