@@ -52,7 +52,7 @@ def _extract_train_data_index(
                     indexes["train"] = train_ind
                     indexes["val"] = train_state["data_state"]["val_data_index"].tolist()
                 return tuple(train_ind)
-        if i == 1 and num_iter > 1:
+        if i == 0 and num_iter > 1:
             case_path = extra_path
     return None
 
@@ -89,11 +89,12 @@ def _write_back_split(
         data = json.load(fp)
     keys = _metadata_keys_prefix(dataset, model_name) + [val_split_fraction]
     if get_dict(data, keys) is not None:
-        print(f"Metadata file {meta_path} already has entries for {keys}: They are overwritten")
-    set_dict(data, keys, indexes)
-    with meta_path.open("w") as fp:
-        json.dump(data, fp)
-    print(f"Metadata stored in {meta_path} under {keys}")
+        print(f"Metadata file {meta_path} already has entries for {keys}: Skipping")
+    else:
+        set_dict(data, keys, indexes)
+        with meta_path.open("w") as fp:
+            json.dump(data, fp)
+        print(f"Metadata stored in {meta_path} under {keys}")
 
 
 def main(
