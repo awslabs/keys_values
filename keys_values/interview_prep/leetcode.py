@@ -1,6 +1,8 @@
 from typing import List, Optional, Dict
 
 
+# === Medium ===
+
 # OK
 class Solution_3302:
     """
@@ -856,3 +858,231 @@ class Solution_3514:
 
     def uniqueXorTriplets(self, nums: List[int]) -> int:
         pass  # TODO!
+
+
+class Solution_1344:
+    """
+    https://leetcode.com/problems/angle-between-hands-of-a-clock/?envType=daily-question&envId=2026-08-20
+
+    Given two numbers, hour and minutes, return the smaller angle (in
+    degrees) formed between the hour and the minute hand.
+
+    Answers within 10-5 of the actual value will be accepted as correct.
+
+    """
+    def angleClock(self, hour: int, minutes: int) -> float:
+        pass
+
+
+class Solution_2029:
+    """
+    https://leetcode.com/problems/stone-game-ix/?envType=daily-question&envId=2026-08-25
+
+    Alice and Bob continue their games with stones. There is a row of n stones, and each stone has an associated value. You are given an integer array stones, where stones[i] is the value of the ith stone.
+
+    Alice and Bob take turns, with Alice starting first. On each turn, the player may remove any stone from stones. The player who removes a stone loses if the sum of the values of all removed stones is divisible by 3. Bob will win automatically if there are no remaining stones (even if it is Alice's turn).
+
+    Assuming both players play optimally, return true if Alice wins and false if Bob wins.
+
+    Example 1:
+
+    Input: stones = [2,1]
+    Output: true
+    Explanation: The game will be played as follows:
+    - Turn 1: Alice can remove either stone.
+    - Turn 2: Bob removes the remaining stone.
+    The sum of the removed stones is 1 + 2 = 3 and is divisible by 3. Therefore, Bob loses and Alice wins the game.
+
+    Example 2:
+
+    Input: stones = [2]
+    Output: false
+    Explanation: Alice will remove the only stone, and the sum of the values on the removed stones is 2.
+    Since all the stones are removed and the sum of values is not divisible by 3, Bob wins the game.
+
+    Example 3:
+
+    Input: stones = [5,1,2,4,3]
+    Output: false
+    Explanation: Bob will always win. One possible way for Bob to win is shown below:
+    - Turn 1: Alice can remove the second stone with value 1. Sum of removed stones = 1.
+    - Turn 2: Bob removes the fifth stone with value 3. Sum of removed stones = 1 + 3 = 4.
+    - Turn 3: Alices removes the fourth stone with value 4. Sum of removed stones = 1 + 3 + 4 = 8.
+    - Turn 4: Bob removes the third stone with value 2. Sum of removed stones = 1 + 3 + 4 + 2 = 10.
+    - Turn 5: Alice removes the first stone with value 5. Sum of removed stones = 1 + 3 + 4 + 2 + 5 = 15.
+    Alice loses the game because the sum of the removed stones (15) is divisible by 3. Bob wins the game.
+
+    Constraints:
+
+        1 <= stones.length <= 105
+        1 <= stones[i] <= 104
+
+    """
+    def stoneGameIX(self, stones: List[int]) -> bool:
+        pass
+
+
+class Solution_1846:
+    """
+    https://leetcode.com/problems/maximum-element-after-decreasing-and-rearranging/?envType=daily-question&envId=2026-08-25
+
+    You are given an array of positive integers arr. Perform some operations (possibly none) on arr so that it satisfies these conditions:
+
+        The value of the first element in arr must be 1.
+        The absolute difference between any 2 adjacent elements must be less than or equal to 1. In other words, abs(arr[i] - arr[i - 1]) <= 1 for each i where 1 <= i < arr.length (0-indexed). abs(x) is the absolute value of x.
+
+    There are 2 types of operations that you can perform any number of times:
+
+        Decrease the value of any element of arr to a smaller positive integer.
+        Rearrange the elements of arr to be in any order.
+
+    Return the maximum possible value of an element in arr after performing the operations to satisfy the conditions.
+
+    Example 1:
+
+    Input: arr = [2,2,1,2,1]
+    Output: 2
+    Explanation:
+    We can satisfy the conditions by rearranging arr so it becomes [1,2,2,2,1].
+    The largest element in arr is 2.
+
+    Example 2:
+
+    Input: arr = [100,1,1000]
+    Output: 3
+    Explanation:
+    One possible way to satisfy the conditions is by doing the following:
+    1. Rearrange arr so it becomes [1,100,1000].
+    2. Decrease the value of the second element to 2.
+    3. Decrease the value of the third element to 3.
+    Now arr = [1,2,3], which satisfies the conditions.
+    The largest element in arr is 3.
+
+    Example 3:
+
+    Input: arr = [1,2,3,4,5]
+    Output: 5
+    Explanation: The array already satisfies the conditions, and the largest element is 5.
+
+    Constraints:
+
+        1 <= arr.length <= 105
+        1 <= arr[i] <= 109
+
+    """
+    def maximumElementAfterDecrementingAndRearranging(self, arr: List[int]) -> int:
+        pass
+
+
+class Solution_2812:
+    """
+    https://leetcode.com/problems/find-the-safest-path-in-a-grid/?envType=daily-question&envId=2026-08-25
+
+    You are given a 0-indexed 2D matrix grid of size n x n, where (r, c) represents:
+
+        A cell containing a thief if grid[r][c] = 1
+        An empty cell if grid[r][c] = 0
+
+    You are initially positioned at cell (0, 0). In one move, you can move to any adjacent cell in the grid, including cells containing thieves.
+
+    The safeness factor of a path on the grid is defined as the minimum manhattan distance from any cell in the path to any thief in the grid.
+
+    Return the maximum safeness factor of all paths leading to cell (n - 1, n - 1).
+
+    An adjacent cell of cell (r, c), is one of the cells (r, c + 1), (r, c - 1), (r + 1, c) and (r - 1, c) if it exists.
+
+    The Manhattan distance between two cells (a, b) and (x, y) is equal to |a - x| + |b - y|, where |val| denotes the absolute value of val.
+
+    Example 1:
+
+    Input: grid = [[1,0,0],[0,0,0],[0,0,1]]
+    Output: 0
+    Explanation: All paths from (0, 0) to (n - 1, n - 1) go through the thieves in cells (0, 0) and (n - 1, n - 1).
+
+    Example 2:
+
+    Input: grid = [[0,0,1],[0,0,0],[0,0,0]]
+    Output: 2
+    Explanation: The path depicted in the picture above has a safeness factor of 2 since:
+    - The closest cell of the path to the thief at cell (0, 2) is cell (0, 0). The distance between them is | 0 - 0 | + | 0 - 2 | = 2.
+    It can be shown that there are no other paths with a higher safeness factor.
+
+    Example 3:
+
+    Input: grid = [[0,0,0,1],[0,0,0,0],[0,0,0,0],[1,0,0,0]]
+    Output: 2
+    Explanation: The path depicted in the picture above has a safeness factor of 2 since:
+    - The closest cell of the path to the thief at cell (0, 3) is cell (1, 2). The distance between them is | 0 - 1 | + | 3 - 2 | = 2.
+    - The closest cell of the path to the thief at cell (3, 0) is cell (3, 2). The distance between them is | 3 - 3 | + | 0 - 2 | = 2.
+    It can be shown that there are no other paths with a higher safeness factor.
+
+    Constraints:
+
+        1 <= grid.length == n <= 400
+        grid[i].length == n
+        grid[i][j] is either 0 or 1.
+        There is at least one thief in the grid.
+
+    """
+    def maximumSafenessFactor(self, grid: List[List[int]]) -> int:
+
+
+# === Hard ===
+
+
+class Solution_1872:
+    """
+    https://leetcode.com/problems/stone-game-viii/?envType=daily-question&envId=2026-08-25
+
+    Alice and Bob take turns playing a game, with Alice starting first.
+
+    There are n stones arranged in a row. On each player's turn, while the number of stones is more than one, they will do the following:
+
+        Choose an integer x > 1, and remove the leftmost x stones from the row.
+        Add the sum of the removed stones' values to the player's score.
+        Place a new stone, whose value is equal to that sum, on the left side of the row.
+
+    The game stops when only one stone is left in the row.
+
+    The score difference between Alice and Bob is (Alice's score - Bob's score). Alice's goal is to maximize the score difference, and Bob's goal is the minimize the score difference.
+
+    Given an integer array stones of length n where stones[i] represents the value of the ith stone from the left, return the score difference between Alice and Bob if they both play optimally.
+
+    Example 1:
+
+    Input: stones = [-1,2,-3,4,-5]
+    Output: 5
+    Explanation:
+    - Alice removes the first 4 stones, adds (-1) + 2 + (-3) + 4 = 2 to her score, and places a stone of
+      value 2 on the left. stones = [2,-5].
+    - Bob removes the first 2 stones, adds 2 + (-5) = -3 to his score, and places a stone of value -3 on
+      the left. stones = [-3].
+    The difference between their scores is 2 - (-3) = 5.
+
+    Example 2:
+
+    Input: stones = [7,-6,5,10,5,-2,-6]
+    Output: 13
+    Explanation:
+    - Alice removes all stones, adds 7 + (-6) + 5 + 10 + 5 + (-2) + (-6) = 13 to her score, and places a
+      stone of value 13 on the left. stones = [13].
+    The difference between their scores is 13 - 0 = 13.
+
+    Example 3:
+
+    Input: stones = [-10,-12]
+    Output: -22
+    Explanation:
+    - Alice can only make one move, which is to remove both stones. She adds (-10) + (-12) = -22 to her
+      score and places a stone of value -22 on the left. stones = [-22].
+    The difference between their scores is (-22) - 0 = -22.
+
+    Constraints:
+
+        n == stones.length
+        2 <= n <= 105
+        -104 <= stones[i] <= 104
+
+    """
+    def stoneGameVIII(self, stones: List[int]) -> int:
+        pass
