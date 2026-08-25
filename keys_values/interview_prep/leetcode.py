@@ -1025,6 +1025,7 @@ class Solution_2812:
 
     """
     def maximumSafenessFactor(self, grid: List[List[int]]) -> int:
+        pass
 
 
 # === Hard ===
