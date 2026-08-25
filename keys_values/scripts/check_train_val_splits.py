@@ -29,26 +29,31 @@ def _extract_train_data_index(
     case_path: Path,
     indexes: Dict[str, Any],
 ) -> Optional[Tuple[int, ...]]:
-    for setup_dir in case_path.iterdir():
-        if not setup_dir.is_dir():
-            continue
-        name = setup_dir.name
-        if name == "final" or (name.startswith("step-") and name[5:].isdigit()):
-            state_path = setup_dir / TRAINSTATE_REST_FNAME
-            if not state_path.exists():
+    extra_path = case_path / "extra_results"
+    num_iter = 2 if extra_path.exists() and extra_path.is_dir() else 1
+    for i in range(num_iter):
+        for setup_dir in case_path.iterdir():
+            if not setup_dir.is_dir():
                 continue
-            train_state = torch.load(state_path)
-            if "data_state" not in train_state:
-                print(f"{setup_dir}: {TRAINSTATE_REST_FNAME} has no 'data_state'")
-                continue
-            if "train_data_index" not in train_state["data_state"]:
-                print(f"{setup_dir}: {TRAINSTATE_REST_FNAME}['data_state'] has no 'train_data_index'")
-                continue
-            train_ind = train_state["data_state"]["train_data_index"].tolist()
-            if indexes["train"] is None:
-                indexes["train"] = train_ind
-                indexes["val"] = train_state["data_state"]["val_data_index"].tolist()
-            return tuple(train_ind)
+            name = setup_dir.name
+            if name == "final" or (name.startswith("step-") and name[5:].isdigit()):
+                state_path = setup_dir / TRAINSTATE_REST_FNAME
+                if not state_path.exists():
+                    continue
+                train_state = torch.load(state_path)
+                if "data_state" not in train_state:
+                    print(f"{setup_dir}: {TRAINSTATE_REST_FNAME} has no 'data_state'")
+                    continue
+                if "train_data_index" not in train_state["data_state"]:
+                    print(f"{setup_dir}: {TRAINSTATE_REST_FNAME}['data_state'] has no 'train_data_index'")
+                    continue
+                train_ind = train_state["data_state"]["train_data_index"].tolist()
+                if indexes["train"] is None:
+                    indexes["train"] = train_ind
+                    indexes["val"] = train_state["data_state"]["val_data_index"].tolist()
+                return tuple(train_ind)
+        if i == 1 and num_iter > 1:
+            case_path = extra_path
     return None
 
 
