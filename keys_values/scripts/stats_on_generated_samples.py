@@ -43,19 +43,20 @@ def _length_ratio(
 def _extract_number(
     record: dict,
     tokenizer: Optional[Any],
+    metric_name: str,
 ) -> Tuple[float, int]:
     output = record["output"]
     raw_target = record["raw_target"]
     if isinstance(raw_target, str):
         target = raw_target
-    elif record.get("sub_exact_match") == 1.0:
+    elif record.get(metric_name) == 1.0:
         target = max(
             (t for t in raw_target if t in output),
             key=len,
             default=max(raw_target, key=len),
         )
     else:
-        if "sub_exact_match" not in record:
+        if metric_name not in record:
             print("UUPS!")
         target = max(raw_target, key=len)
     return _length_ratio(output, target, tokenizer)
@@ -129,6 +130,7 @@ def stats_for(
     tokenizer: Optional[Any],
     max_tokens: int,
     verbose: bool,
+    metric_name: str,
 ) -> Optional[Statistics]:
     yaml_files = _find_yaml_files(
         base_path, dataset, case_key, eval_dir, search_for_setups
@@ -138,7 +140,7 @@ def stats_for(
         with open(path) as f:
             records = yaml.safe_load(f)
         for record in records:
-            number_pairs.append(_extract_number(record, tokenizer))
+            number_pairs.append(_extract_number(record, tokenizer, metric_name))
     num_entries = len(number_pairs)
     if num_entries == 0:
         return None
@@ -224,6 +226,7 @@ def main_type1(
     max_tokens: int,
     verbose: bool,
     tag: str,
+    metric_name: str,
 ):
     do_tokenize = tokenizer is not None
     base_path = result_path.parent
@@ -245,6 +248,7 @@ def main_type1(
                 tokenizer=tokenizer,
                 max_tokens=max_tokens,
                 verbose=verbose,
+                metric_name=metric_name,
             )
             for dataset in datasets
         ]
@@ -275,6 +279,7 @@ def main_type2(
     max_tokens: int,
     verbose: bool,
     tag: str,
+    metric_name: str,
 ):
     do_tokenize = tokenizer is not None
     base_path = result_path.parent
@@ -296,6 +301,7 @@ def main_type2(
                 tokenizer=tokenizer,
                 max_tokens=max_tokens,
                 verbose=verbose,
+                metric_name=metric_name,
             )
             for case in cases
         ]
@@ -319,6 +325,8 @@ if __name__ == "__main__":
     do_tokenize = True
     verbose = True
     table_type_1 = False
+    metric_name = "match_first_word_or_phrase"  # New setup
+    # metric_name = "sub_exact_match"  # Old setup
 
     max_tokens = 128
     eval_dir = "eval_128"
@@ -402,6 +410,7 @@ if __name__ == "__main__":
         max_tokens=max_tokens,
         verbose=verbose,
         tag=tag,
+        metric_name=metric_name,
     )
     if table_type_1:
         main_type1(**kwargs)

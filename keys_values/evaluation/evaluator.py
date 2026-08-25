@@ -17,7 +17,11 @@ import torch
 
 from litgpt.tokenizer import Tokenizer
 
-from keys_values.evaluation.metrics import sub_exact_match, rouge_n_f1
+from keys_values.evaluation.metrics import (
+    sub_exact_match,
+    rouge_n_f1,
+    initial_word_or_row,
+)
 from keys_values.evaluation.evaluation import (
     _eval_rerank,
     _eval_icl,
@@ -29,6 +33,27 @@ from keys_values.generate.base import batched_generate_fn
 from keys_values.long_context import LongContextInferenceModel
 
 METRICS_FOR_HELMET_TASKS = {
+    "banking77": "exact_match",
+    "clinc150": "exact_match",
+    "hotpot_qa": "match_first_word_or_phrase",
+    "infinite_bench_mc": "infinite_mc",
+    "infinite_bench_qa": "rouge_n_f1",
+    "json_kv": "synthetic_value_token",
+    "ms_macro": "ndcg_at_10",
+    "nlu": "exact_match",
+    "nq": "match_first_word_or_phrase",
+    "pop_qa": "match_first_word_or_phrase",
+    "ruler_mk_uuid": "synthetic_value_token",
+    "trec_coarse": "exact_match",
+    "trec_fine": "exact_match",
+    "trivia_qa": "match_first_word_or_phrase",
+}
+
+# Use "sub_exact_match" instead of "match_first_word_or_phrase" for Helmet
+# QA datasets. This can be misleading, since "sub_exact_match" tolerates
+# nonsense extra outputs and is not actionable (no deterministic way to
+# extract relevant part from output)
+METRICS_FOR_HELMET_TASKS_OLD = {
     "banking77": "exact_match",
     "clinc150": "exact_match",
     "hotpot_qa": "sub_exact_match",
@@ -47,15 +72,21 @@ METRICS_FOR_HELMET_TASKS = {
 
 TargetType = Union[List[str], str]
 
+_SUPPORTS_LIST_TARGETS = (
+    "sub_exact_match",
+    "match_first_word_or_phrase",
+)
+
 
 def validate_targets(targets: TargetType, metric: str):
     is_list_str = isinstance(targets, list) and all(isinstance(x, str) for x in targets)
     is_str = isinstance(targets, str) or (is_list_str and len(targets) == 1)
-    if metric == "sub_exact_match" and not (is_list_str or is_str):
+    supp_lists = metric in _SUPPORTS_LIST_TARGETS
+    if supp_lists and not (is_list_str or is_str):
         raise ValueError(
             f"Metric {metric} needs list of string targets, got: {targets}"
         )
-    if metric != "sub_exact_match" and not is_str:
+    if not supp_lists and not is_str:
         raise ValueError(f"Metric {metric} needs string targets, got: {targets}")
 
 
@@ -69,6 +100,11 @@ def compute_metric(
             return float(any(sub_exact_match(output, target) for target in targets))
         else:
             return float(sub_exact_match(output, targets))
+    elif metric == "match_first_word_or_phrase":
+        return initial_word_or_row(
+            response=output,
+            targets=targets if isinstance(targets, list) else [targets],
+        )
     else:
         if isinstance(targets, list):
             raise ValueError(f"targets = {targets}, must be str, not list")
@@ -120,26 +156,35 @@ class SampleBasedMetricsEvaluator:
         self.sample_kwargs = sample_kwargs
 
     @staticmethod
-    def supported_metrics() -> List[str]:
+    def supported_metrics(old_setup: bool = False) -> List[str]:
         """
+        Args:
+            old_setup: If `True`, we use :const:`METRICS_FOR_HELMET_TASKS_OLD`
+                instead of :const:`METRICS_FOR_HELMET_TASKS` (this is legacy).
+
         Returns:
             List of names of supported metrics
 
         """
-        return list(METRICS_FOR_HELMET_TASKS.values())
+        return list(METRICS_FOR_HELMET_TASKS.values() if not old_setup else METRICS_FOR_HELMET_TASKS_OLD.values())
 
     @staticmethod
-    def metric_for_helmet_task(dataset_key: str) -> Optional[str]:
+    def metric_for_helmet_task(
+        dataset_key: str,
+        old_setup: bool = False,
+    ) -> Optional[str]:
         """
         Args:
             dataset_key: Name of Helmet dataset
+            old_setup: If `True`, we use :const:`METRICS_FOR_HELMET_TASKS_OLD`
+                instead of :const:`METRICS_FOR_HELMET_TASKS` (this is legacy).
 
         Returns:
             Evaluation metric to use for this task; or `None` if metric is
             not supported here for this task, or `dataset_key` is invalid.
 
         """
-        return METRICS_FOR_HELMET_TASKS.get(dataset_key)
+        return METRICS_FOR_HELMET_TASKS.get(dataset_key) if not old_setup else METRICS_FOR_HELMET_TASKS_OLD.get(dataset_key)
 
     def __call__(
         self,

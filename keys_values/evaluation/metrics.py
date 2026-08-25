@@ -223,3 +223,42 @@ def rouge_n_f1(response: str, target: str, *, n: int = 1) -> float:
         else (2 * precision * recall) / (precision + recall)
     )
     return f1
+
+
+def _normalize(row: str) -> str:
+    return " ".join(x.lower() for x in row.split())
+
+
+def initial_word_or_row(
+    response: str,
+    targets: List[str],
+) -> float:
+    """
+    This metric returns 1 if
+
+    * `targets` contains at least 1 single word, and the initial word
+      in `response` equals to an entry in `targets`; or
+    * `targets` contains at least 1 entry with whitespace, and the initial
+      row in `response` (until first "\n") equals to an entry of `targets`.
+
+    Normalization strips multiple whitespace and converts to lower case.
+
+    """
+    extracts = []
+    targets = [_normalize(t) for t in targets]
+    num_notwords = sum(" " in t for t in targets)
+    if num_notwords < len(targets):
+        # At least one single word target:
+        # Extract initial single word
+        extracts.append(response.split()[0].lower())
+    if num_notwords > 0:
+        # At least one target longer than single word:
+        # Extract initial row (until first \n)
+        extracts.append(_normalize(response.split("\n")[0]))
+    return int(
+        any(
+            x == y
+            for x in extracts
+            for y in targets
+        )
+    )

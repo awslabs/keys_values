@@ -23,10 +23,8 @@ TARGET_FILENAME = "generated_samples_0.yaml"
 
 DATA_KEYS = [("instance_id", "idx"), ("output", "output"), ("expected", "raw_target")]
 
-TARGET_METRIC_KEY = "sub_exact_match"
 
-
-def main(base_path: Path):
+def main(base_path: Path, metric_name: str) -> None:
     expected_keys = DATA_KEYS[-1]
     output_key = DATA_KEYS[1][1]
     for setup_dir in base_path.iterdir():
@@ -48,7 +46,7 @@ def main(base_path: Path):
                     for x in trg_record[expected_keys[1]].split(ENTRY_SEPARATOR)
                 ]
                 trg_record[expected_keys[1]] = trg_list
-                trg_record[TARGET_METRIC_KEY] = float(
+                trg_record[metric_name] = float(
                     any(t in trg_record[output_key] for t in trg_list)
                 )
             yaml_records.append(trg_record)
@@ -61,4 +59,7 @@ def main(base_path: Path):
 
 if __name__ == "__main__":
     base_path = Path("/mnt/efs/kbenidis/results/20260807_000000/finetuned")
-    main(base_path)
+    metric_name = "match_first_word_or_phrase"  # New setup
+    # metric_name = "sub_exact_match"  # Old setup
+
+    main(base_path, metric_name)

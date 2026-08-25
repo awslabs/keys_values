@@ -27,6 +27,7 @@ SWEEP_TAR_FILENAME = "generated_samples_transfer_{dataset_size}.tgz"
 def main(
     out_dir: Path,
     model_type: str,
+    metric_name: str,
     tasks: Optional[List[str]] = None,
     multiple_tasks: bool = True,
     eval_dir: str = "eval",
@@ -52,7 +53,7 @@ def main(
         num_total += len(records)
         records = sorted(
             records,
-            key=lambda x: (x["sub_exact_match"], x["idx"]),
+            key=lambda x: (x[metric_name], x["idx"]),
         )
         all_data[task_name] = records
 
@@ -68,6 +69,8 @@ def main(
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
+    metric_name = "match_first_word_or_phrase"  # New setup
+    # metric_name = "sub_exact_match"  # Old setup
     eval_dir = "eval"
     mode = "collect"
     # mode = "sweep"
@@ -117,6 +120,7 @@ if __name__ == "__main__":
                 main(
                     out_dir=out_dir,
                     model_type=model_type,
+                    metric_name=metric_name,
                     multiple_tasks=not is_baseline,
                     eval_dir=eval_dir,
                 )
