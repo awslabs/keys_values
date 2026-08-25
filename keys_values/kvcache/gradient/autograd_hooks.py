@@ -520,6 +520,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._packed_arg_for_id = None
         self._id_counts = None
         self._id_to_unpacked = None
+        self._orphan_annotation_ids = None
         # ID assigned to next pack hook argument
         self._next_id = None
         self._num_matched_annotations = None
@@ -590,6 +591,10 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._packed_arg_for_id: Dict[int, PackedArgumentType] = dict()
         self._id_counts: Dict[int, int] = dict()
         self._id_to_unpacked: Dict[int, torch.Tensor] = dict()
+        # IDs inserted by :meth:`_flush_remaining_pack_arguments` to keep the
+        # annotation chain complete. Nothing in the autograd graph refers to
+        # them, so states reconstructed for them need not be parked.
+        self._orphan_annotation_ids: Set[int] = set()
         self._next_id = 0
         self._num_matched_annotations = 0
         self._num_comparisons = 0
@@ -625,6 +630,8 @@ class CellComputationAutogradHooks(AutogradHooks):
             self._packed_arg_for_id = None
         self._id_counts = None
         self._id_to_unpacked = None
+        if self._orphan_annotation_ids is not None:
+            self._orphan_annotation_ids.clear()
         self._next_id = None
         self._num_matched_annotations = None
         self._num_comparisons = None
@@ -882,17 +889,18 @@ class CellComputationAutogradHooks(AutogradHooks):
                     idd, prior_annotation = found
                     if self.debug_print_annotations:
                         print(f"--> Doing {str(prior_annotation)} first")
-                    if prior_chunk_idx > chunk_idx:
-                        # Applied early: Remove the entry here, park the
-                        # reconstructed state below
-                        value = self._packed_arg_for_id.pop(idd)
-                        chain.append((prior_annotation, idd, value.target_dtype))
-                    else:
-                        # `prior_chunk_idx == chunk_idx` ("ext-*" case): The
-                        # entry stays in `_packed_arg_for_id`. If its ID is
-                        # unpacked later, the "already done" branch above
-                        # serves it
+                    # The entry is applied early, so it is removed here. We
+                    # park the state it reconstructs (below), unless nothing
+                    # in the autograd graph can ask for this ID: orphan IDs
+                    # are inserted by
+                    # :meth:`_flush_remaining_pack_arguments` purely to keep
+                    # the chain complete, and parking those would retain
+                    # full-size buffers that are never fetched.
+                    value = self._packed_arg_for_id.pop(idd)
+                    if idd in self._orphan_annotation_ids:
                         chain.append((prior_annotation, None, None))
+                    else:
+                        chain.append((prior_annotation, idd, value.target_dtype))
                 annotations_todo = chain + annotations_todo
             for annot, park_id, park_dtype in annotations_todo:
                 if annot.is_ext:
@@ -1286,6 +1294,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                                 target_dtype=None,
                             )
                         )
+                        self._orphan_annotation_ids.add(self._next_id)
                         self._next_id += 1
         self._node_annotations.nodes.clear()
         # Flush all remaining pack arguments (these will not be packed)
