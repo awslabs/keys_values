@@ -305,7 +305,7 @@ class Helmet(SequenceLengthFilteredDataModule):
             )
             val_size = max(int(devset_length * self.val_split_fraction), 1)
             self._split_from_metadata = (
-                dev_perm[:-val_size].tolist(), dev_perm[-val_size:].tolist(),
+                dev_perm[val_size:].tolist(), dev_perm[:val_size].tolist(),
             )
             needs_store = True
         return needs_store
