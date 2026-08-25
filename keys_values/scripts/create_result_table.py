@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from keys_values.evaluation.evaluator import METRICS_FOR_HELMET_TASKS
+from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
 from keys_values.scripts.cleanup_evaluation import datasets_and_cases
 
 EVAL_METRICS_ALL_FILENAME = "eval_metrics_all.csv"
@@ -55,7 +55,7 @@ def _metric_name_for_dataset(dataset: str) -> str:
             break
     assert len_post is not None
     key = dataset[len(_PREFIX) : -len_post]
-    return METRICS_FOR_HELMET_TASKS[key]
+    return SampleBasedMetricsEvaluator.metric_for_helmet_task(key)
 
 
 def main(
