@@ -102,7 +102,7 @@ def main(
         assert model_name is not None
         assert val_split_fraction is not None
     histogram = Counter()
-    indexes: Dict[str, Any] = dict()
+    indexes: Dict[str, Any] = {"train": None, "val": None}
     for base_path in base_paths:
         data_path = base_path / dataset
         if data_path.exists() and data_path.is_dir():
