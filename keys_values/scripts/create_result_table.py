@@ -166,16 +166,15 @@ def main(
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
-    dataset_size = "64k"
-    # dataset_size = "128k"
-    is_rerun = False
-    # is_rerun = True
+    # dataset_size = "64k"
+    dataset_size = "128k"
+    is_rerun = True
     is_baseline = False
-    # is_baseline = True
     is_base_model = False
-    # is_base_model = True
     extra_data = False
-    # extra_data = True
+    filter_dataset = None
+    filter_case = None
+
     if is_rerun:
         base_path = base_path / "rerun"
     elif is_baseline:
@@ -189,6 +188,8 @@ if __name__ == "__main__":
         is_baseline,
         is_base_model,
         with_short=True,
+        filter_dataset=filter_dataset,
+        filter_case=filter_case,
     )
     result_path = base_path / f"results_{dataset_size}.tex"
     # final_table = False
