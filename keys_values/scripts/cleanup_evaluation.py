@@ -13,13 +13,9 @@
 # limitations under the License.
 from itertools import product
 from pathlib import Path
-from typing import Literal, Tuple, List, Union
+from typing import Literal, Tuple, List, Union, Callable, Optional
 
 from keys_values.evaluation.tasks import EvaluationTasks
-
-
-def _append_old(case: str, multiple_tasks: bool) -> str:
-    return case + "_old" if multiple_tasks else case
 
 
 def datasets_and_cases(
@@ -28,6 +24,8 @@ def datasets_and_cases(
     is_baseline: bool,
     is_base_model: bool,
     with_short: bool = False,
+    filter_dataset: Optional[Callable[[str], bool]] = None,
+    filter_case: Optional[Callable[[str], bool]] = None,
 ) -> Tuple[List[str], List[Union[str, Tuple[str, str]]]]:
     multiple_tasks = not is_baseline and not is_base_model
     if not extra_data:
@@ -39,12 +37,12 @@ def datasets_and_cases(
         ]
         if not with_short:
             cases = [
-                _append_old("lr_4gpu_cs2048_lr5", multiple_tasks),
+                "lr_4gpu_cs2048_lr5",
                 "slr_4gpu_cs2048_lr5",
                 "h2o_4gpu_cs2048_lr5",
                 "h2onorm_4gpu_cs2048_lr5",
                 "h2oorig_4gpu_cs2048_lr5",
-                _append_old("lr_4gpu_cs1024_lr5", multiple_tasks),
+                "lr_4gpu_cs1024_lr5",
                 "slr_4gpu_cs1024_lr5",
                 "h2o_4gpu_cs1024_lr5",
                 "h2onorm_4gpu_cs1024_lr5",
@@ -52,12 +50,12 @@ def datasets_and_cases(
             ]
         else:
             cases = [
-                (_append_old("lr_4gpu_cs2048_lr5", multiple_tasks), "lr_2048"),
+                ("lr_4gpu_cs2048_lr5", "lr_2048"),
                 ("slr_4gpu_cs2048_lr5", "slr_2048"),
                 ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
                 ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
                 ("h2oorig_4gpu_cs2048_lr5", "h2oorig_2048"),
-                (_append_old("lr_4gpu_cs1024_lr5", multiple_tasks), "lr_1024"),
+                ("lr_4gpu_cs1024_lr5", "lr_1024"),
                 ("slr_4gpu_cs1024_lr5", "slr_1024"),
                 ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
                 ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
@@ -104,8 +102,8 @@ def datasets_and_cases(
             f"helmet_infinite_bench_qa_{dataset_size}",
             f"helmet_infinite_bench_mc_{dataset_size}",
             f"helmet_json_kv_{dataset_size}",
-            #    f"helmet_trec_fine_{dataset_size}",
-            #    f"helmet_banking77_{dataset_size}",
+            f"helmet_trec_fine_{dataset_size}",
+            f"helmet_banking77_{dataset_size}",
         ]
         if not with_short:
             cases = [
@@ -119,6 +117,11 @@ def datasets_and_cases(
                 ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
                 ("h2oorig_4gpu_cs1024_lr5", "h2oorig_1024"),
             ]
+
+    if filter_dataset is not None:
+        datasets = [d for d in datasets if filter_dataset(d)]
+    if filter_case is not None:
+        cases = [c for c in cases if filter_case(c[0] if with_short else c)]
     return datasets, cases
 
 
