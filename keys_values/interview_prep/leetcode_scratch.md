@@ -80,3 +80,19 @@ elem: -3
 
 - Maintain `counts`
 - How many `counts[i] == 2`?
+
+
+## 2029
+
+`1 <= stones.length <= 105`
+`1 <= stones[i] <= 104`
+
+- Recursive:
+  - Inputs: List, sum_removed, is_alice
+  - Output: Win if optimal play?
+- Sum is 0 or not div by 3
+- Restrict moves to x s.t. `(x + sum_removed) % 3 != 0`
+- End if 2 left (1 is trivial)
+
+Advanced:
+- Avoid int lists and arithmetic: Just boolean (two lists instead of 1)

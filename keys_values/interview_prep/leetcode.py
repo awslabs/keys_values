@@ -815,6 +815,142 @@ class Solution_2657:
         return result
 
 
+# OK
+class Solution_1344:
+    """
+    https://leetcode.com/problems/angle-between-hands-of-a-clock/?envType=daily-question&envId=2026-08-20
+
+    Given two numbers, hour and minutes, return the smaller angle (in
+    degrees) formed between the hour and the minute hand.
+
+    Answers within 10-5 of the actual value will be accepted as correct.
+
+    """
+    def angleClock(self, hour: int, minutes: int) -> float:
+        # - 60 minutes <-> 360 degrees
+        angle_minute = float(minutes * 6)
+        # - 12 hours <-> 360 degrees
+        # - 1 hour: 30 degrees <-> 60 minutes
+        angle_hour = (hour % 12) * 30 + minutes * 0.5
+        min_angle = abs(angle_hour - angle_minute)
+        return min(min_angle, 360 - min_angle)
+
+
+class Solution_2029:
+    """
+    https://leetcode.com/problems/stone-game-ix/?envType=daily-question&envId=2026-08-25
+
+    Alice and Bob continue their games with stones. There is a row of n stones,
+    and each stone has an associated value. You are given an integer array
+    stones, where stones[i] is the value of the ith stone.
+
+    Alice and Bob take turns, with Alice starting first. On each turn, the
+    player may remove any stone from stones. The player who removes a stone
+    loses if the sum of the values of all removed stones is divisible by 3. Bob
+    will win automatically if there are no remaining stones (even if it is
+    Alice's turn).
+
+    Assuming both players play optimally, return true if Alice wins and false
+    if Bob wins.
+
+    Example 1:
+
+    Input: stones = [2,1]
+    Output: true
+    Explanation: The game will be played as follows:
+    - Turn 1: Alice can remove either stone.
+    - Turn 2: Bob removes the remaining stone.
+    The sum of the removed stones is 1 + 2 = 3 and is divisible by 3. Therefore, Bob loses and Alice wins the game.
+
+    Example 2:
+
+    Input: stones = [2]
+    Output: false
+    Explanation: Alice will remove the only stone, and the sum of the values on the removed stones is 2.
+    Since all the stones are removed and the sum of values is not divisible by 3, Bob wins the game.
+
+    Example 3:
+
+    Input: stones = [5,1,2,4,3]
+    Output: false
+    Explanation: Bob will always win. One possible way for Bob to win is shown below:
+    - Turn 1: Alice can remove the second stone with value 1. Sum of removed stones = 1.
+    - Turn 2: Bob removes the fifth stone with value 3. Sum of removed stones = 1 + 3 = 4.
+    - Turn 3: Alices removes the fourth stone with value 4. Sum of removed stones = 1 + 3 + 4 = 8.
+    - Turn 4: Bob removes the third stone with value 2. Sum of removed stones = 1 + 3 + 4 + 2 = 10.
+    - Turn 5: Alice removes the first stone with value 5. Sum of removed stones = 1 + 3 + 4 + 2 + 5 = 15.
+    Alice loses the game because the sum of the removed stones (15) is divisible by 3. Bob wins the game.
+
+    Constraints:
+
+        1 <= stones.length <= 105
+        1 <= stones[i] <= 104
+
+    """
+    def caller_wins(
+        self,
+        stones_rem1: List[bool],
+        stones_rem2: List[bool],
+        sum_removed_rem1: bool,
+        is_alice: bool,
+    ) -> bool:
+        # `sum_removed_rem1 = (sum_removed % 3) == 1`
+        if len(stones_rem1) == 2:
+            if (
+                sum_removed_rem1 and all(stones_rem2)
+            ) or (
+                not sum_removed_rem1 and all(stones_rem1)
+            ):
+                # All stones lead to sum divisible by 3
+                return False
+            if self.sum_all_divs_3:
+                # Other play loses by picking the final stone
+                return True
+            return not is_alice
+        if sum_removed_rem1:
+            x_list = stones_rem2
+            y_list = stones_rem1
+        else:
+            x_list = stones_rem1
+            y_list = stones_rem2
+        for i, (x, y) in enumerate(zip(x_list, y_list)):
+            # Value `sum_removed_rem1` arg:
+            # - If sum_removed_rem1 == True:
+            #   [sum + el] = [1 + el{0/1}] == 1 iff el == 0 iff not y
+            # - If sum_removed_rem1 == False:
+            #   [sum + el] = [2 + el{0/2}] == 1 iff el == 2 iff y
+            if not x and not self.caller_wins(
+                stones_rem1=stones_rem1[:i] + stones_rem1[(i + 1):],
+                stones_rem2=stones_rem2[:i] + stones_rem2[(i + 1):],
+                sum_removed_rem1=not y if sum_removed_rem1 else y,
+                is_alice=not is_alice,
+            ):
+                return True
+        return False
+
+    # Fancy solution:
+    # - Avoids all integer arithmetic (just boolean)
+    # - Uses boolean lists only
+    def stoneGameIX(self, stones: List[int]) -> bool:
+        if len(stones) == 1:
+            return False
+        # Solution avoids having to do lots of int computation
+        stones_rem1 = [x % 3 == 1 for x in stones]
+        stones_rem2 = [x % 3 == 2 for x in stones]
+        self.sum_all_divs_3 = sum(stones) % 3 == 0
+        # Need initial loop: Cannot call `caller_wins` with sum 0
+        for i, (x, y) in enumerate(zip(stones_rem1, stones_rem2)):
+            if (x or y) and not self.caller_wins(
+                stones_rem1=stones_rem1[:i] + stones_rem1[(i + 1):],
+                stones_rem2=stones_rem2[:i] + stones_rem2[(i + 1):],
+                sum_removed_rem1=x,
+                is_alice=False,
+            ):
+                return True
+        return False
+
+
+# HIER: What is XOR in Python? x ^ y
 class Solution_3514:
     """
     https://leetcode.com/problems/number-of-unique-xor-triplets-ii/?envType=daily-question&envId=2026-08-20
@@ -858,68 +994,6 @@ class Solution_3514:
 
     def uniqueXorTriplets(self, nums: List[int]) -> int:
         pass  # TODO!
-
-
-class Solution_1344:
-    """
-    https://leetcode.com/problems/angle-between-hands-of-a-clock/?envType=daily-question&envId=2026-08-20
-
-    Given two numbers, hour and minutes, return the smaller angle (in
-    degrees) formed between the hour and the minute hand.
-
-    Answers within 10-5 of the actual value will be accepted as correct.
-
-    """
-    def angleClock(self, hour: int, minutes: int) -> float:
-        pass
-
-
-class Solution_2029:
-    """
-    https://leetcode.com/problems/stone-game-ix/?envType=daily-question&envId=2026-08-25
-
-    Alice and Bob continue their games with stones. There is a row of n stones, and each stone has an associated value. You are given an integer array stones, where stones[i] is the value of the ith stone.
-
-    Alice and Bob take turns, with Alice starting first. On each turn, the player may remove any stone from stones. The player who removes a stone loses if the sum of the values of all removed stones is divisible by 3. Bob will win automatically if there are no remaining stones (even if it is Alice's turn).
-
-    Assuming both players play optimally, return true if Alice wins and false if Bob wins.
-
-    Example 1:
-
-    Input: stones = [2,1]
-    Output: true
-    Explanation: The game will be played as follows:
-    - Turn 1: Alice can remove either stone.
-    - Turn 2: Bob removes the remaining stone.
-    The sum of the removed stones is 1 + 2 = 3 and is divisible by 3. Therefore, Bob loses and Alice wins the game.
-
-    Example 2:
-
-    Input: stones = [2]
-    Output: false
-    Explanation: Alice will remove the only stone, and the sum of the values on the removed stones is 2.
-    Since all the stones are removed and the sum of values is not divisible by 3, Bob wins the game.
-
-    Example 3:
-
-    Input: stones = [5,1,2,4,3]
-    Output: false
-    Explanation: Bob will always win. One possible way for Bob to win is shown below:
-    - Turn 1: Alice can remove the second stone with value 1. Sum of removed stones = 1.
-    - Turn 2: Bob removes the fifth stone with value 3. Sum of removed stones = 1 + 3 = 4.
-    - Turn 3: Alices removes the fourth stone with value 4. Sum of removed stones = 1 + 3 + 4 = 8.
-    - Turn 4: Bob removes the third stone with value 2. Sum of removed stones = 1 + 3 + 4 + 2 = 10.
-    - Turn 5: Alice removes the first stone with value 5. Sum of removed stones = 1 + 3 + 4 + 2 + 5 = 15.
-    Alice loses the game because the sum of the removed stones (15) is divisible by 3. Bob wins the game.
-
-    Constraints:
-
-        1 <= stones.length <= 105
-        1 <= stones[i] <= 104
-
-    """
-    def stoneGameIX(self, stones: List[int]) -> bool:
-        pass
 
 
 class Solution_1846:
