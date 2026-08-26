@@ -162,6 +162,9 @@ if __name__ == "__main__":
     # is_base_model = True
     extra_data = False
     # extra_data = True
+    filter_dataset = None
+    filter_case = None
+
     multiple_tasks = not is_baseline and not is_base_model
     if is_rerun:
         base_path = base_path / "rerun"
@@ -174,6 +177,8 @@ if __name__ == "__main__":
         extra_data,
         is_baseline,
         is_base_model,
+        filter_dataset=filter_dataset,
+        filter_case=filter_case,
     )
 
     # Use this to clean up lock files before restarting evaluation

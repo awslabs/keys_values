@@ -81,14 +81,13 @@ if __name__ == "__main__":
     # mode = "sweep"
     # dataset_size = "64k"
     dataset_size = "128k"
-    # is_rerun = False
     is_rerun = True
     is_baseline = False
-    # is_baseline = True
     is_base_model = False
-    # is_base_model = True
     extra_data = False
-    # extra_data = True
+    filter_dataset = None
+    filter_case = None
+
     multiple_tasks = not is_baseline and not is_base_model
     if is_rerun:
         base_path = base_path / "rerun"
@@ -101,6 +100,8 @@ if __name__ == "__main__":
         extra_data,
         is_baseline,
         is_base_model,
+        filter_dataset=filter_dataset,
+        filter_case=filter_case,
     )
 
     model_type = "lora"
