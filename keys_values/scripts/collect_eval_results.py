@@ -125,7 +125,8 @@ if __name__ == "__main__":
                 names.append(name)
         extra = "extra_" if extra_data else ""
         print(
-            f"\nCollected {len(names)} result files. Run at {base_path}:\n"
+            f"\nCollected {len(names)} result files:\n"
+            f"cd {base_path}; "
             + "tar cfz "
             + SWEEP_TAR_FILENAME.format(dataset_size=dataset_size, extra=extra)
             + " "
