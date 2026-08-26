@@ -96,3 +96,47 @@ elem: -3
 
 Advanced:
 - Avoid int lists and arithmetic: Just boolean (two lists instead of 1)
+
+
+## 3514
+
+- Simple solution: O(n^3 * log n)
+- Better:
+  - S = {x ^ y}: O(n^2 * log n) -> Can be O(n^2) long!
+
+
+## 1846
+
+Goal: Decrease largest entry as little as possible!
+Idea:
+- Sort increasing
+- Change `x[0] = 1`
+- Move along: For any `diff > 1`: Decrease 2nd
+- Return final value
+
+Better:
+- Count different values
+- Iterate over x with c > 0. Alternate between using x and
+  prev_x + 1, ..., x - 1, until n = len(arr) steps are done
+
+arr = [2,2,1,2,1]
+
+counts = [(1, 2), (2, 3)]
+
+num_left: 3
+pref_x: 2
+x: 2
+c: 3
+==> 2
+
+arr = [100,1,1000]
+
+counts = [(1, 1), (100, 1), (1000, 1)]
+
+num_left: 2
+pref_x: 1
+x: 100
+new_fill 98
+c: 1
+==> 1 + 2 = 3
+

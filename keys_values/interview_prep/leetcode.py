@@ -1,4 +1,5 @@
-from typing import List, Optional, Dict
+from collections import defaultdict
+from typing import List, Optional, Dict, Set
 
 
 # === Medium ===
@@ -950,7 +951,7 @@ class Solution_2029:
         return False
 
 
-# HIER: What is XOR in Python? x ^ y
+# OK (note that XOR is x ^ y in Python)
 class Solution_3514:
     """
     https://leetcode.com/problems/number-of-unique-xor-triplets-ii/?envType=daily-question&envId=2026-08-20
@@ -991,26 +992,48 @@ class Solution_3514:
     * 1 <= nums[i] <= 1500
 
     """
-
     def uniqueXorTriplets(self, nums: List[int]) -> int:
-        pass  # TODO!
+        triples: Set[int] = set()
+        for i, x in enumerate(nums):
+            for _j, y in enumerate(nums[i:]):
+                j = _j + i
+                x_xor_y = x ^ y
+                triples.update(x_xor_y ^ z for z in nums[j:])
+        return len(triples)
+
+    def uniqueXorTriplets_2(self, nums: List[int]) -> int:
+        assert all(0 <= x < 2048 for x in nums)
+        mask = [False] * 2048
+        for i, x in enumerate(nums):
+            for _j, y in enumerate(nums[i:]):
+                j = _j + i
+                x_xor_y = x ^ y
+                for z in nums[j:]:
+                    mask[x_xor_y ^ z] = True
+        return sum(mask)
 
 
+# OK
 class Solution_1846:
     """
     https://leetcode.com/problems/maximum-element-after-decreasing-and-rearranging/?envType=daily-question&envId=2026-08-25
 
-    You are given an array of positive integers arr. Perform some operations (possibly none) on arr so that it satisfies these conditions:
+    You are given an array of positive integers `arr`. Perform some operations
+    (possibly none) on `arr` so that it satisfies these conditions:
 
-        The value of the first element in arr must be 1.
-        The absolute difference between any 2 adjacent elements must be less than or equal to 1. In other words, abs(arr[i] - arr[i - 1]) <= 1 for each i where 1 <= i < arr.length (0-indexed). abs(x) is the absolute value of x.
+    * The value of the first element in `arr` must be 1.
+    * The absolute difference between any 2 adjacent elements must be less than
+      or equal to 1. In other words, `abs(arr[i] - arr[i - 1]) <= 1` for each i
+      where 1 <= i < arr.length (0-indexed). `abs(x)` is the absolute value of
+      x.
 
     There are 2 types of operations that you can perform any number of times:
 
-        Decrease the value of any element of arr to a smaller positive integer.
-        Rearrange the elements of arr to be in any order.
+    * Decrease the value of any element of `arr` to a smaller positive integer.
+    * Rearrange the elements of `arr` to be in any order.
 
-    Return the maximum possible value of an element in arr after performing the operations to satisfy the conditions.
+    Return the maximum possible value of an element in `arr` after performing
+    the operations to satisfy the conditions.
 
     Example 1:
 
@@ -1040,32 +1063,53 @@ class Solution_1846:
 
     Constraints:
 
-        1 <= arr.length <= 105
-        1 <= arr[i] <= 109
+    * 1 <= arr.length <= 10^5
+    * 1 <= arr[i] <= 10^9
 
     """
     def maximumElementAfterDecrementingAndRearranging(self, arr: List[int]) -> int:
-        pass
+        # Elegant solution, does not need sorting, but just a histogram
+        counts = defaultdict(int)
+        for x in arr:
+            counts[x] += 1
+        counts = sorted(counts.items(), key=lambda x: x[0])
+        num_left = len(arr)
+        prev_x = 0
+        for x, c in counts:
+            new_fill = max(0, x - prev_x - 1)
+            if new_fill >= num_left:
+                return prev_x + num_left
+            num_left -= new_fill
+            prev_x = x
+            if c >= num_left:
+                return x
+            num_left -= c
 
 
 class Solution_2812:
     """
     https://leetcode.com/problems/find-the-safest-path-in-a-grid/?envType=daily-question&envId=2026-08-25
 
-    You are given a 0-indexed 2D matrix grid of size n x n, where (r, c) represents:
+    You are given a 0-indexed 2D matrix `grid` of size n x n, where (r, c)
+    represents:
 
-        A cell containing a thief if grid[r][c] = 1
-        An empty cell if grid[r][c] = 0
+    * A cell containing a thief if `grid[r][c] = 1`
+    * An empty cell if `grid[r][c] = 0`
 
-    You are initially positioned at cell (0, 0). In one move, you can move to any adjacent cell in the grid, including cells containing thieves.
+    You are initially positioned at cell (0, 0). In one move, you can move to
+    any adjacent cell in the grid, including cells containing thieves.
 
-    The safeness factor of a path on the grid is defined as the minimum manhattan distance from any cell in the path to any thief in the grid.
+    The safeness factor of a path on the grid is defined as the minimum
+    manhattan distance from any cell in the path to any thief in the grid.
 
-    Return the maximum safeness factor of all paths leading to cell (n - 1, n - 1).
+    Return the maximum safeness factor of all paths leading to cell
+    `(n - 1, n - 1)`.
 
-    An adjacent cell of cell (r, c), is one of the cells (r, c + 1), (r, c - 1), (r + 1, c) and (r - 1, c) if it exists.
+    An adjacent cell of cell `(r, c)`, is one of the cells `(r, c + 1)`,
+    `(r, c - 1)`, `(r + 1, c)` and `(r - 1, c)` if it exists.
 
-    The Manhattan distance between two cells (a, b) and (x, y) is equal to |a - x| + |b - y|, where |val| denotes the absolute value of val.
+    The Manhattan distance between two cells `(a, b)` and `(x, y)` is equal to
+    `|a - x| + |b - y|`, where |val| denotes the absolute value of val.
 
     Example 1:
 

@@ -2,6 +2,7 @@ from typing import Optional, Dict, Any
 
 import torch
 
+from litgpt.config import Config
 from litgpt.utils import CycleIterator
 
 from keys_values.data import Helmet, MyDataLoader, INPUT_IDS_NAME
@@ -9,10 +10,7 @@ from keys_values.finetune.batch_transform import (
     BatchTransformFactory,
     BatchTransform,
 )
-from keys_values.interview_prep.transformer import (
-    Config,
-    Transformer,
-)
+from keys_values.interview_prep.transformer import Transformer
 
 
 def create_state(
@@ -68,14 +66,14 @@ def fit(
         loss.backward()
         # Update step: Both optimizer and learning rate scheduler
         optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
         scheduler.step()
+        optimizer.zero_grad(set_to_none=True)
         print(f"Iteration {num_steps} (epoch {train_iterator.epoch}): loss = {loss.item()}")
         num_steps += 1
 
 
 # TODO:
-# - Make everything compatible with LitGPT, certain model (e.g, Qwen2-0.5B)
+# - Make everything compatible with LitGPT, certain model (e.g, Qwen3-0.6B)
 #   But code from scratch
 # - Load checkpoint with tokenizer
 # - Use my own data loaders
@@ -98,7 +96,7 @@ def main(
         if max_num_steps is not None:
             lr_max_steps = min(max_num_steps, lr_max_steps)
     state = create_state(config, max_num_steps=lr_max_steps)
-    # TODO: Load checkpoint or initialize weights at random
+    # TODO: Load checkpoint
     # Run training
     fit(
         state=state,
