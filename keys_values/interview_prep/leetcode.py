@@ -1,5 +1,7 @@
 from collections import defaultdict
-from typing import List, Optional, Dict, Set
+from typing import List, Optional, Dict, Set, Tuple
+
+from accelerate.commands.config.config_args import cache_dir
 
 
 # === Medium ===
@@ -1086,6 +1088,7 @@ class Solution_1846:
             num_left -= c
 
 
+# OK: This was tough
 class Solution_2812:
     """
     https://leetcode.com/problems/find-the-safest-path-in-a-grid/?envType=daily-question&envId=2026-08-25
@@ -1142,8 +1145,72 @@ class Solution_2812:
         There is at least one thief in the grid.
 
     """
+    def min_distance_to_thiefs(
+        self,
+        grid: List[List[int]],
+    ) -> List[List[int]]:
+        n = len(grid)
+        thief_pos = [
+            (r, c)
+            for r, row in enumerate(grid)
+            for c, el in enumerate(row)
+            if el == 1
+        ]
+        min_distance = []
+        for r in range(n):
+            row = [
+                min(abs(r - x) + abs(c - y) for x, y in thief_pos)
+                for c in range(n)
+            ]
+            min_distance.append(row)
+        return min_distance
+
+    @staticmethod
+    def neighbors_not_yet_done(
+        pos: Tuple[int, int],
+        already_done: List[List[bool]],
+    ) -> List[Tuple[int, int]]:
+        max_p = len(already_done) - 1
+        r, c = pos
+        if r == 0:
+            cands = [(r + 1, c)]
+        elif r == max_p:
+            cands = [(r - 1, c)]
+        else:
+            cands = [(r + 1, c), (r - 1, c)]
+        if c == 0:
+            cands += [(r, c + 1)]
+        elif c == max_p:
+            cands += [(r, c - 1)]
+        else:
+            cands += [(r, c + 1), (r, c - 1)]
+        return [(x, y) for x, y in cands if not already_done[x][y]]
+
     def maximumSafenessFactor(self, grid: List[List[int]]) -> int:
-        pass
+        n = len(grid)
+        min_distance = self.min_distance_to_thiefs(grid)
+        if min_distance[0][0] == 0 or min_distance[n - 1][n - 1] == 0:
+            return 0
+        already_done = [[False] * n for _ in range(n)]
+        already_done[n - 1][n - 1] = True
+        best_positions = [(n - 1, n - 1)]
+        safety_val = min_distance[n - 1][n - 1]
+        # Loop over expansion rounds
+        while True:
+            cand_positions = [
+                (npos, min(min_distance[npos[0]][npos[1]], safety_val))
+                for pos in best_positions
+                for npos in self.neighbors_not_yet_done(pos, already_done)
+            ]
+            # Only expand the best
+            safety_val = max(c[1] for c in cand_positions)
+            best_positions = [
+                pos for pos, val in cand_positions if val == safety_val
+            ]
+            for pos in best_positions:
+                if pos == (0, 0):
+                    return safety_val
+                already_done[pos[0]][pos[1]] = True
 
 
 # === Hard ===

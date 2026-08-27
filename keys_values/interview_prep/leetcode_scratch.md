@@ -140,3 +140,28 @@ new_fill 98
 c: 1
 ==> 1 + 2 = 3
 
+
+## 2812
+
+- Dynamic programming
+- Create matrix `safeness[r][c]`: Max. safeness factor of any path from
+  `(r, c)` to `G = (n - 1, n - 1)`
+- Function `min_distance` (or table?)
+- Order in which `safeness` cells are computed?
+
+- First: Compute `min_distance` matrix
+- Maintain list of positions and safety value `safety_val`:
+  From these, there is a path to G with safety `safety_val`, and these are
+  the best so far
+- Always expand to neighbors of these positions:
+  - Collect positions where new `safety_val` is best
+  - Only expand these: Tick off in binary matrix
+- Stop once expanded to `(0, 0)`
+
+LEARNED ABOUT DP:
+
+If no obvious linear ordering:
+- Keep current top scorers
+- Expand: Consider all candidates (new neighbors), but only expand those which
+  obtain the new top score
+==> This IS the correct ordering then!

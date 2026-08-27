@@ -13,6 +13,7 @@ from keys_values.finetune.batch_transform import (
 from keys_values.interview_prep.transformer import Transformer
 
 
+# TODO: loss_function may not be correct for our data!
 def create_state(
     config: Config,
     max_num_steps: int,
@@ -97,6 +98,7 @@ def main(
             lr_max_steps = min(max_num_steps, lr_max_steps)
     state = create_state(config, max_num_steps=lr_max_steps)
     # TODO: Load checkpoint
+    # - May have to convert namings: Some differ from LitGPT code
     # Run training
     fit(
         state=state,

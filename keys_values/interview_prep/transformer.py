@@ -125,9 +125,9 @@ class TransformerLayer(nn.Module):
         super().__init__()
         self.attn = MultiHeadAttention(config, sdpa_type)
         self.mlp = FeedForwardNetwork(config)
-        self.norm_1 = self._create_norm(config, config.norm_1)
-        self.norm_2 = self._create_norm(config, config.norm_2)
-        self.post_attention_norm = self._create_norm(
+        self.pre_attn_norm = self._create_norm(config, config.norm_1)
+        self.pre_mlp_norm = self._create_norm(config, config.norm_2)
+        self.post_attn_norm = self._create_norm(
             config, config.post_attention_norm,
         )
         self.post_mlp_norm = self._create_norm(config, config.post_mlp_norm)
@@ -142,9 +142,8 @@ class TransformerLayer(nn.Module):
 
     def forward(self, x: torch.Tensor, rope: RotaryPositionEncoding) -> torch.Tensor:
         # Use residual link and normalization
-        attn_output = self.post_attention_norm(self.attn(self.norm_1(x), rope))
-        x = x + attn_output
-        return x + self.post_mlp_norm(self.mlp(self.norm_2(x)))
+        x = x + self.post_attn_norm(self.attn(self.pre_attn_norm(x), rope))
+        return x + self.post_mlp_norm(self.mlp(self.pre_mlp_norm(x)))
 
 
 class FeedForwardNetwork(nn.Module):
@@ -166,6 +165,7 @@ class FeedForwardNetwork(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x1 = self.fc_1(x)
         x2 = self.fc_2(x)
+        # F.silu(x1) = x1 * sigma(x1): Sigmoid linear unit
         x = F.silu(x1) * x2
         return self.proj(x)
 
@@ -189,10 +189,7 @@ def sdpa_naive(
     assert q_per_kv >= 1 and nh_q == nh_k * q_per_kv
     scale_factor = 1.0 / math.sqrt(head_size)
     # Compute inner products in `scores`
-    if scale_factor == 1.0:
-        arg1 = query
-        arg2 = key.mT
-    elif query.numel() <= key.numel():
+    if query.numel() <= key.numel():
         arg1 = query * scale_factor
         arg2 = key.mT
     else:
@@ -220,10 +217,9 @@ def sdpa_naive(
     # For training, `q_len == kv_len` and `offset == 0`, but for inference,
     # `query` is right-aligned with `key`.
     mask = torch.zeros_like(scores[0, 0, :, :])
-    offset = kv_len - q_len
     kwargs = dict(device=query.device)
     mask[
-        torch.arange(offset, kv_len, **kwargs)
+        torch.arange(kv_len - q_len, kv_len, **kwargs)
         < torch.arange(kv_len, **kwargs)
     ] = float("-inf")
     # Softmax to compute attention weights
@@ -239,9 +235,7 @@ def sdpa_naive(
         # - _scores: (bs, nh_k, q_per_kv, q_len, kv_len)
         # - _value: (bs, nh_k, 1, kv_len, head_size)
         # - result: (bs, nh_k, q_per_kv, q_len, head_size)
-        result = torch.matmul(_scores, _value)
-        r_shape = scores.shape[:-1] + (head_size,)
-        return result.view(*r_shape)
+        return torch.matmul(_scores, _value).view(*query.shape)
 
 
 def sdpa_torch(
@@ -250,6 +244,12 @@ def sdpa_torch(
     value: torch.Tensor,
 ) -> torch.Tensor:
     if query.shape[-2] != key.shape[-2]:
+        # Major flaw in `F.scaled_dot_product_attention`:
+        # - If `q_len < kv_len`, the default masking with `is_causal=True` does
+        #   not make sense (left-aligned instead of right-aligned)
+        # - Passing an explicit mask does not make sense either: Tensor is much
+        #   too large
+        # Use different SDPA in this case, for example FlexAttention
         raise NotImplementedError(
             "Only supports training case (q_len == kv_len). For inference, "
             "we'd need query to be right-aligned with key, value."
@@ -259,7 +259,8 @@ def sdpa_torch(
     enable_gqa = n_query_groups < n_head
     if enable_gqa:
         # Some efficient kernels have not implemented `enabla_gqa=True`. It is
-        # better to extend keys, values in this case.
+        # better to extend keys, values in this case, since otherwise a slow
+        # naive kernel is called
         q_per_kv = n_head // n_query_groups
         key = torch.repeat_interleave(key, q_per_kv, dim=1)
         value = torch.repeat_interleave(value, q_per_kv, dim=1)
@@ -276,7 +277,7 @@ def sdpa_torch(
 
 class MultiHeadAttention(nn.Module):
     """
-    Implements multi-head attention block.
+    Implements multi-head self-attention block.
 
     """
     def __init__(
@@ -291,18 +292,18 @@ class MultiHeadAttention(nn.Module):
         self.n_head = config.n_head
         self.n_query_groups = config.n_query_groups
         self.head_size = config.head_size
-        attn_n_embd = config.n_head * config.head_size
-        qkv_out_size = (config.n_head + 2 * config.n_query_groups) * config.head_size
+        q_n_embd = config.n_head * self.head_size
+        kv_n_embd = config.n_query_groups * self.head_size
         self.qkv = nn.Linear(
             config.n_embd,
-            qkv_out_size,
+            q_n_embd + 2 * kv_n_embd,
             bias=config.bias or config.attn_bias,
         )
         # `proj` maps SDPA outputs to outputs of the block
         self.proj = nn.Linear(
-            config.n_head * config.head_size,
+            q_n_embd,
             config.n_embd,
-            bias=False,
+            bias=config.bias,
         )
         self._sdpa = sdpa_torch if sdpa_type == "torch" else sdpa_naive
         if config.norm_qk:
@@ -313,9 +314,9 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, rope: RotaryPositionEncoding) -> torch.Tensor:
         bs = x.shape[0]
-        q_size = self.n_head * self.head_size
-        k_size = self.n_query_groups * self.head_size
-        q, k, v = self.qkv(x).split((q_size, k_size, k_size), dim=-1)
+        q_n_embd = self.n_head * self.head_size
+        kv_n_embd = self.n_query_groups * self.head_size
+        q, k, v = self.qkv(x).split((q_n_embd, kv_n_embd, kv_n_embd), dim=-1)
         # Transpose to shape used in SDPA
         q_shape = (bs, -1, self.n_head, self.head_size)
         kv_shape = (bs, -1, self.n_query_groups, self.head_size)
@@ -331,9 +332,8 @@ class MultiHeadAttention(nn.Module):
         k = rope(k).contiguous()
         v = v.contiguous()
         # Scaled dot product attention
-        # Note: Inputs should all be contiguous
         sdpa_output = self._sdpa(q, k, v)
         # Reverse transpose, final projection
         return self.proj(
-            sdpa_output.transpose(1, 2).reshape(bs, -1, q_size)
+            sdpa_output.transpose(1, 2).reshape(bs, -1, q_n_embd)
         )
