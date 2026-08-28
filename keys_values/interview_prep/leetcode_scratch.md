@@ -169,3 +169,4 @@ If no obvious linear ordering:
 
 ## 3020
 
+- Isolate numbers which appear >1 times

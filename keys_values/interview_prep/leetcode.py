@@ -1,7 +1,5 @@
-from collections import defaultdict
+from collections import defaultdict, Counter
 from typing import List, Optional, Dict, Set, Tuple
-
-from accelerate.commands.config.config_args import cache_dir
 
 
 # === Medium ===
@@ -1213,6 +1211,7 @@ class Solution_2812:
                 already_done[pos[0]][pos[1]] = True
 
 
+# OK
 class Solution_3020:
     """
     https://leetcode.com/problems/find-the-maximum-number-of-elements-in-subset/?envType=daily-question&envId=2026-08-25
@@ -1249,8 +1248,36 @@ class Solution_3020:
         1 <= nums[i] <= 10^9
 
     """
+    def _len_for(
+        self,
+        x: int,
+        at_least_once: Set[int],
+        just_once: Set[int],
+    ) -> int:
+        z = x
+        num = 1
+        while True:
+            z = z * z
+            if z not in at_least_once:
+                if z in just_once:
+                    num += 1
+                break
+            num += 1
+        return 2 * num - 1
+
     def maximumLength(self, nums: List[int]) -> int:
-        pass
+        counter = Counter(nums)
+        # Pattern could be [1, 1, ..., 1] (odd length)
+        num_1 = counter[1]
+        if num_1 % 2 == 1:
+            max_len = num_1
+        else:
+            max_len = 1  # Pattern [x] has length 1
+        at_least_twice = {x for x, c in counter.items() if c >= 2}
+        just_once = {x for x, c in counter.items() if c == 1}
+        for x in at_least_twice:
+            max_len = max(max_len, self._len_for(x, at_least_twice, just_once))
+        return max_len
 
 
 class Solution_3737:
