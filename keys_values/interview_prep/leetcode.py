@@ -1213,6 +1213,106 @@ class Solution_2812:
                 already_done[pos[0]][pos[1]] = True
 
 
+class Solution_3020:
+    """
+    https://leetcode.com/problems/find-the-maximum-number-of-elements-in-subset/?envType=daily-question&envId=2026-08-25
+
+    You are given an array of positive integers `nums`.
+
+    You need to select a subset of `nums` which satisfies the following
+    condition:
+
+    * You can place the selected elements in a 0-indexed array such that it
+      follows the pattern: `[x, x^2, x^4, ..., x^k/2, x^k, x^k/2, ..., x^4,
+      x^2, x]` (Note that `k` can be any non-negative power of 2). For
+      example, `[2, 4, 16, 4, 2]` and `[3, 9, 3]` follow the pattern while
+      `[2, 4, 8, 4, 2]` does not.
+
+    Return the maximum number of elements in a subset that satisfies these
+    conditions.
+
+    Example 1:
+
+    Input: nums = [5,4,1,2,2]
+    Output: 3
+    Explanation: We can select the subset {4,2,2}, which can be placed in the array as [2,4,2] which follows the pattern and 22 == 4. Hence the answer is 3.
+
+    Example 2:
+
+    Input: nums = [1,3,2,4]
+    Output: 1
+    Explanation: We can select the subset {1}, which can be placed in the array as [1] which follows the pattern. Hence the answer is 1. Note that we could have also selected the subsets {2}, {3}, or {4}, there may be multiple subsets which provide the same answer.
+
+    Constraints:
+
+        2 <= nums.length <= 10^5
+        1 <= nums[i] <= 10^9
+
+    """
+    def maximumLength(self, nums: List[int]) -> int:
+        pass
+
+
+class Solution_3737:
+    """
+    https://leetcode.com/problems/count-subarrays-with-majority-element-i/?envType=daily-question&envId=2026-08-25
+
+    You are given an integer array `nums` and an integer `target`.
+
+    Return the number of subarrays (contiguous ranges) of `nums` in which
+    `target` is the majority element.
+
+    The majority element of a subarray is the element that appears strictly
+    more than half of the times in that subarray.
+
+    Example 1:
+
+    Input: nums = [1,2,2,3], target = 2
+
+    Output: 5
+
+    Explanation:
+
+    Valid subarrays with target = 2 as the majority element:
+
+        nums[1..1] = [2]
+        nums[2..2] = [2]
+        nums[1..2] = [2,2]
+        nums[0..2] = [1,2,2]
+        nums[1..3] = [2,2,3]
+
+    So there are 5 such subarrays.
+
+    Example 2:
+
+    Input: nums = [1,1,1,1], target = 1
+
+    Output: 10
+
+    Explanation:
+
+    All 10 subarrays have 1 as the majority element.
+
+    Example 3:
+
+    Input: nums = [1,2,3], target = 4
+
+    Output: 0
+
+    Explanation:
+
+    target = 4 does not appear in nums at all. Therefore, there cannot be any subarray where 4 is the majority element. Hence the answer is 0.
+
+    Constraints:
+
+        1 <= nums.length <= 1000
+        1 <= nums[i] <= 10^9
+        1 <= target <= 10^9
+
+    """
+    def countMajoritySubarrays(self, nums: List[int], target: int) -> int:
+
+
 # === Hard ===
 
 
@@ -1222,17 +1322,24 @@ class Solution_1872:
 
     Alice and Bob take turns playing a game, with Alice starting first.
 
-    There are n stones arranged in a row. On each player's turn, while the number of stones is more than one, they will do the following:
+    There are `n` stones arranged in a row. On each player's turn, while the
+    number of stones is more than one, they will do the following:
 
-        Choose an integer x > 1, and remove the leftmost x stones from the row.
-        Add the sum of the removed stones' values to the player's score.
-        Place a new stone, whose value is equal to that sum, on the left side of the row.
+    * Choose an integer `x > 1`, and remove the leftmost `x` stones from the
+      row.
+    * Add the sum of the removed stones' values to the player's score.
+    * Place a new stone, whose value is equal to that sum, on the left side
+      of the row.
 
     The game stops when only one stone is left in the row.
 
-    The score difference between Alice and Bob is (Alice's score - Bob's score). Alice's goal is to maximize the score difference, and Bob's goal is the minimize the score difference.
+    The score difference between Alice and Bob is (Alice's score - Bob's score).
+    Alice's goal is to maximize the score difference, and Bob's goal is to
+    minimize the score difference.
 
-    Given an integer array stones of length n where stones[i] represents the value of the ith stone from the left, return the score difference between Alice and Bob if they both play optimally.
+    Given an integer array stones of length `n` where `stones[i]` represents
+    the value of the ith stone from the left, return the score difference
+    between Alice and Bob if they both play optimally.
 
     Example 1:
 
