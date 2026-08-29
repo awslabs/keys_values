@@ -1338,6 +1338,7 @@ class Solution_3737:
 
     """
     def countMajoritySubarrays(self, nums: List[int], target: int) -> int:
+        pass
 
 
 # === Hard ===
