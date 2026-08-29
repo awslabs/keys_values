@@ -250,11 +250,17 @@ def initial_word_or_row(
     if num_notwords < len(targets):
         # At least one single word target:
         # Extract initial single word
-        extracts.append(response.split()[0].lower())
+        words = response.split()
+        if not words:
+            return 0.0
+        extracts.append(words[0].lower())
     if num_notwords > 0:
         # At least one target longer than single word:
         # Extract initial row (until first \n)
-        extracts.append(_normalize(response.split("\n")[0]))
+        rows = response.split("\n")
+        if not rows:
+            return 0.0
+        extracts.append(_normalize(rows[0]))
     return int(
         any(
             x == y
