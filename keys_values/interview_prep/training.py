@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 
 import torch
 
@@ -17,9 +17,10 @@ from keys_values.interview_prep.transformer import Transformer
 def create_state(
     config: Config,
     max_num_steps: int,
+    sdpa_type: Literal["naive", "torch"],
 ) -> Dict[str, Any]:
     state: Dict[str, Any] = {
-        "model": Transformer(config),
+        "model": Transformer(config, sdpa_type),
         "loss_function": torch.nn.CrossEntropyLoss(),  # CHECK!
     }
     # Optimizer: Adam with improved weight decay regularization
@@ -45,7 +46,7 @@ def fit(
     loss_function = state["loss_function"]
     optimizer = state["optimizer"]
     scheduler = state["scheduler"]
-    # Cycles over epochs several times
+    # Cycles over dataset several times -> epochs
     train_iterator = CycleIterator(train_dataloader)
     model.train()  # Switch into training mode
     num_steps = 0
@@ -81,6 +82,7 @@ def fit(
 # - Write tests: Must give same results as my lib!
 def main(
     config: Config,
+    sdpa_type: Literal["naive", "torch"] = "torch",
     max_num_steps: Optional[int] = None,
     max_num_epochs: Optional[int] = None,
 ):
@@ -96,7 +98,7 @@ def main(
         lr_max_steps = len(train_dataloader) * max_num_epochs
         if max_num_steps is not None:
             lr_max_steps = min(max_num_steps, lr_max_steps)
-    state = create_state(config, max_num_steps=lr_max_steps)
+    state = create_state(config, max_num_steps=lr_max_steps, sdpa_type=sdpa_type)
     # TODO: Load checkpoint
     # - May have to convert namings: Some differ from LitGPT code
     # Run training

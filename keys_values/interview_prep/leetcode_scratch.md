@@ -170,3 +170,208 @@ If no obvious linear ordering:
 ## 3020
 
 - Isolate numbers which appear >1 times
+
+
+## 3737
+
+- Single items: Special case
+- Brute force
+- Isolate positions of `target`. Use them
+
+`nums[start:(tpos + 1)]`: `i + 1` equal to `target`
+
+(i, tpos) -> (i + 1, tpos_next)
+- Skip if 2 * i < tpos - start
+- 
+
+i + 1 > tpos + 1 - start - (i + 1) = tpos - start - i
+2 * i + 1 > tpos - start
+2 * i >= tpos - start
+
+nums = [1,2,2,3], target = 2
+
+target_pos: [1, 2]
+len_nums: 4
+
+--> [(1, 2, 2), (2,), (2, 2), (2, 2, 3), (2,)]
+num_subarrays: 5
+
+start: 2
+pos_tpos: 1
+
+(2, 4)
+
+i: 0
+tpos: 2
+tpos_next: 4
+diff: 0
+result: 1
+
+
+## 1872
+
+- Greedy: Pick x s.t. score is max/min
+  Not clear why this would be optimal!
+- Later: Denies opponent score possibility
+- A: Does not make sense to score negative!
+  ==> Recursive on all where score is positive
+
+
+scores = [-1,2,-3,4,-5]
+
+_scorediff_for(start=0, val_first=0, is_alice=True)
+
+player_sgn = 1
+scores: [1 - (-7) = 8, 2 - (-3) = 5, -3]
+i: 3
+curr_sum: 2
+
+_scorediff_for(start=4, val_first=2, is_alice=False) [2] -> -3
+
+
+_scorediff_for(start=2, val_first=1, is_alice=False) [1] -> -7
+
+player_sgn: -1
+scores: [-2 - 5 = -7, -3]
+i: 1
+x: 4
+curr_sum: 2
+
+
+_scorediff_for(start=3, val_first=-2, is_alice=True) [3] -> 5
+
+player_sgn: 1
+scores: [2 - (-3) = 5, -3]
+i: 0
+curr_sum: 2
+
+
+## 2948
+
+- sorted_nums = sorted(nums), with sortind
+- Go over gaps between neighboring. For any gap > limit: If they are in wrong
+  order: This is where it stops!
+- OK: But have to return a full array!
+- AND: Careful with equal values!
+
+nums = [1,7,6,18,2,1], limit = 3
+
+nums: [1, 6, 7, 18, 1, 2]
+
+i: 4
+
+
+## 2075
+
+encodedText: "iveo    eed   l te   olc"
+rows: 4
+cols: 6
+num_parts: 4
+
+  0    1    2    3    4    5    6    7    8    9
+['i', 'v', 'e', 'o', ' ', ' ', ' ', ' ', 'e', 'e',
+ 'd', ' ', ' ', ' ', 'l', ' ', 't', 'e', ' ', ' ',
+ ' ', 'o', 'l', 'c']
+
+j: 3
+decoded: "i love leetcode"
+
+
+dec[i + j * rows] = mat[i][j + i] = enc[i * (cols + 1) + j]
+
+
+## 2126
+
+- Collide with astroids in non-decreasing order
+
+10, [3 5 9 19 21]
+10 >= 3
+13 >= 5
+18 >= 9
+27 >= 19
+27+19 >= 21
+
+
+## 3751
+
+- Process in groups of 10
+
+num1 = 105
+num2 = 106
+
+a = 5, b = 100, num2 - b + 1 = 7
+
+--> rng2 = (5, 7)
+
+min(num2 - b + 1, 10)
+
+num1: 198
+num2: 202
+
+total_waviness: 3
+
+curr_num: 210
+digits: [2, 0, 0]
+num_peaks: 0
+rng1: (1, 10)
+a: 0
+b: 200
+rng2: (0, 3)
+num_intersect: max(0, 3 - 1) = 2
+
+
+## 3532
+
+- Can move i <--> j iff |nums[i] - nums[j]| <= maxDiff
+- Nodes 0:n can be clustered by gaps between adjacent `nums[i]` larger than `maxDiff`
+
+nums = [2,5,6,8], maxDiff = 2
+queries = [[0,1],[0,2],[1,3],[2,3]]
+
+cluster_ranges = [(0, 1), (1, 4)]
+
+result = [False, False, True, True]
+
+
+## 3534
+
+nums = [1, 8, 3, 4, 2]
+sorted_nums = [(0, 1), (4, 2), (2, 3), (3, 4), (1, 8)]
+0 -> 0
+1 -> 4
+2 -> 2
+3 -> 3
+4 -> 1
+
+
+## 2492
+
+- Path from 1 to n exists
+- For any road r reachable from 1: Go to r, come back to 1, go to n
+- Minimum score is min() over roads reachable from 1
+- Road (ai, bi) reachable from 1 iff ai or bi reachable from 1
+
+Plan:
+- Connected component of 1 -> C
+- Min over roads with ai or bi in C
+- Can do the minimum on the fly
+
+[[1,2,9],
+ [2,3,6],
+ [2,4,5],
+ [1,4,7]]
+
+edges:
+1: [(2,9), (4,7)] -> []
+2: [(1,9), (3,6), (4,5)] -> [(1,9), (4,5)]
+3: [(2,6)]
+4: [(2,5), (1,7)]
+
+min_score: 5
+nodes: {1, 2, 3, 4}
+
+min_score: 5 (!)
+extra_nodes: [3]
+node: 4
+neighbors: [(2,5), (1,7)]
+new_neighbors: [(2,5), (1,7)]

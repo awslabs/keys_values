@@ -35,6 +35,14 @@ class RotaryPositionEncoding:
         return roped.to(dtype=x.dtype)
 
 
+def create_norm(config: Config, do_norm: bool) -> nn.Module:
+    return (
+        nn.Identity()
+        if not do_norm
+        else config.norm_class(config.n_embd, eps=config.norm_eps)
+    )
+
+
 class Transformer(nn.Module):
     """
     Implements complete transformer model.
@@ -56,7 +64,7 @@ class Transformer(nn.Module):
                 h=nn.ModuleList(
                     TransformerLayer(config, sdpa_type) for _ in range(config.n_layer)
                 ),
-                ln_f=config.norm_class(config.n_embd, eps=config.norm_eps),
+                ln_f=create_norm(config, do_norm=True),
             )
         )
         if has_head:
@@ -125,20 +133,10 @@ class TransformerLayer(nn.Module):
         super().__init__()
         self.attn = MultiHeadAttention(config, sdpa_type)
         self.mlp = FeedForwardNetwork(config)
-        self.pre_attn_norm = self._create_norm(config, config.norm_1)
-        self.pre_mlp_norm = self._create_norm(config, config.norm_2)
-        self.post_attn_norm = self._create_norm(
-            config, config.post_attention_norm,
-        )
-        self.post_mlp_norm = self._create_norm(config, config.post_mlp_norm)
-
-    @staticmethod
-    def _create_norm(config: Config, do_norm: bool) -> nn.Module:
-        return (
-            nn.Identity()
-            if not do_norm
-            else config.norm_class(config.n_embd, eps=config.norm_eps)
-        )
+        self.pre_attn_norm = create_norm(config, config.norm_1)
+        self.pre_mlp_norm = create_norm(config, config.norm_2)
+        self.post_attn_norm = create_norm(config, config.post_attention_norm)
+        self.post_mlp_norm = create_norm(config, config.post_mlp_norm)
 
     def forward(self, x: torch.Tensor, rope: RotaryPositionEncoding) -> torch.Tensor:
         # Use residual link and normalization
@@ -157,10 +155,10 @@ class FeedForwardNetwork(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-        intermediate_size = config.intermediate_size
-        self.fc_1 = nn.Linear(config.n_embd, intermediate_size, bias=config.bias)
-        self.fc_2 = nn.Linear(config.n_embd, intermediate_size, bias=config.bias)
-        self.proj = nn.Linear(intermediate_size, config.n_embd, bias=config.bias)
+        i_size = config.intermediate_size
+        self.fc_1 = nn.Linear(config.n_embd, i_size, bias=config.bias)
+        self.fc_2 = nn.Linear(config.n_embd, i_size, bias=config.bias)
+        self.proj = nn.Linear(i_size, config.n_embd, bias=config.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x1 = self.fc_1(x)
@@ -174,6 +172,8 @@ def sdpa_naive(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    scale_factor: Optional[float] = None,
+    causal_mask: bool = True,
 ) -> torch.Tensor:
     """
     Scaled dot product attention: Naive implementation.
@@ -187,7 +187,8 @@ def sdpa_naive(
     q_per_kv = nh_q // nh_k
     assert q_len <= kv_len
     assert q_per_kv >= 1 and nh_q == nh_k * q_per_kv
-    scale_factor = 1.0 / math.sqrt(head_size)
+    if scale_factor is None:
+        scale_factor = 1.0 / math.sqrt(head_size)
     # Compute inner products in `scores`
     if query.numel() <= key.numel():
         arg1 = query * scale_factor
@@ -203,27 +204,29 @@ def sdpa_naive(
         arg1 = arg1.view(*q_shape)
         arg2 = arg2.unsqueeze(2)
         # At this point:
-        # - arg1: (bs, nh_k, q_per_kv, q_len, head_size)
-        # - arg2: (bs, nh_k, 1, head_size, kv_len)
+        # - arg1:   (bs, nh_k, q_per_kv, q_len, head_size)
+        # - arg2:   (bs, nh_k,        1, head_size, kv_len)
         # - scores: (bs, nh_k, q_per_kv, q_len, kv_len)
         scores = torch.matmul(arg1, arg2)
         s_shape = query.shape[:-1] + (kv_len,)
         scores = scores.view(*s_shape)  # (bs, nh_q, q_len, kv_len)
 
-    # Causal masking:
-    # Q pos `q_pos` can attend to KV pos `k_pos` only if `q_pos >= k_pos`.
-    # Adding `mask` to `score` ensures that
-    # `scores[:, :, q_pos, k_pos] == -infty` if `q_pos < k_pos`.
-    # For training, `q_len == kv_len` and `offset == 0`, but for inference,
-    # `query` is right-aligned with `key`.
-    mask = torch.zeros_like(scores[0, 0, :, :])
-    kwargs = dict(device=query.device)
-    mask[
-        torch.arange(kv_len - q_len, kv_len, **kwargs)
-        < torch.arange(kv_len, **kwargs)
-    ] = float("-inf")
+    if causal_mask:
+        # Causal masking:
+        # Q pos `q_pos` can attend to KV pos `k_pos` only if `q_pos >= k_pos`.
+        # Adding `mask` to `score` ensures that
+        # `scores[:, :, q_pos, k_pos] == -infty` if `q_pos < k_pos`.
+        # For training, `q_len == kv_len`, but for inference, `query` is
+        # right-aligned with `key`.
+        mask = torch.zeros_like(scores[0, 0, :, :])
+        kwargs = dict(device=query.device)
+        mask[
+            torch.arange(kv_len - q_len, kv_len, **kwargs)  # q_pos
+            < torch.arange(kv_len, **kwargs)  # k_pos
+        ] = float("-inf")
+        scores = scores + mask
     # Softmax to compute attention weights
-    scores = F.softmax(scores + mask, dim=-1)
+    scores = F.softmax(scores, dim=-1)
     if q_per_kv == 1:
         return torch.matmul(scores, value)
     else:
@@ -233,8 +236,8 @@ def sdpa_naive(
         _value = value.unsqueeze(2)
         # At this point:
         # - _scores: (bs, nh_k, q_per_kv, q_len, kv_len)
-        # - _value: (bs, nh_k, 1, kv_len, head_size)
-        # - result: (bs, nh_k, q_per_kv, q_len, head_size)
+        # - _value:  (bs, nh_k,        1, kv_len, head_size)
+        # - result:  (bs, nh_k, q_per_kv, q_len, head_size)
         return torch.matmul(_scores, _value).view(*query.shape)
 
 
@@ -242,8 +245,10 @@ def sdpa_torch(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    scale_factor: Optional[float] = None,
+    causal_mask: bool = True,
 ) -> torch.Tensor:
-    if query.shape[-2] != key.shape[-2]:
+    if causal_mask and query.shape[-2] != key.shape[-2]:
         # Major flaw in `F.scaled_dot_product_attention`:
         # - If `q_len < kv_len`, the default masking with `is_causal=True` does
         #   not make sense (left-aligned instead of right-aligned)
@@ -270,7 +275,8 @@ def sdpa_torch(
         query=query,
         key=key,
         value=value,
-        is_causal=True,
+        is_causal=causal_mask,
+        scale=scale_factor,
         enable_gqa=enable_gqa,
     )
 
@@ -292,11 +298,11 @@ class MultiHeadAttention(nn.Module):
         self.n_head = config.n_head
         self.n_query_groups = config.n_query_groups
         self.head_size = config.head_size
-        q_n_embd = config.n_head * self.head_size
-        kv_n_embd = config.n_query_groups * self.head_size
+        q_n_embd = config.n_head * config.head_size
+        kv_n_embd = config.n_query_groups * config.head_size
         self.qkv = nn.Linear(
             config.n_embd,
-            q_n_embd + 2 * kv_n_embd,
+            q_n_embd + 2 * kv_n_embd,  # [Q, K, V]
             bias=config.bias or config.attn_bias,
         )
         # `proj` maps SDPA outputs to outputs of the block

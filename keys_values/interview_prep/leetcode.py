@@ -1280,6 +1280,7 @@ class Solution_3020:
         return max_len
 
 
+# OK
 class Solution_3737:
     """
     https://leetcode.com/problems/count-subarrays-with-majority-element-i/?envType=daily-question&envId=2026-08-25
@@ -1337,13 +1338,472 @@ class Solution_3737:
         1 <= target <= 10^9
 
     """
+    def _num_start_from(self, start: int, pos_tpos: int) -> int:
+        result = 0
+        for i, (tpos, tpos_next) in enumerate(
+            zip(
+                self.target_pos[pos_tpos:],
+                self.target_pos[(pos_tpos + 1):] + [self.len_nums]
+            )
+        ):
+            # Array `nums[start:(tpos + 1)]`: `i + 1` equal to `target`
+            # i + 1 > tpos + 1 - start - (i + 1) = tpos - start - i
+            # <--> 2 * i >= tpos - start
+            diff = 2 * i - (tpos - start)
+            result += min(diff + 1, tpos_next - tpos)
+        return result
+
     def countMajoritySubarrays(self, nums: List[int], target: int) -> int:
-        pass
+        # Idea:
+        # - Loop over start positions `start`:
+        #   - Step over positions where `nums[tpos] == target`
+        #   - For each new `tpos`: How much ahead is count of `target` over
+        #     count of others?
+        self.target_pos = [i for i, x in enumerate(nums) if x == target]
+        if not self.target_pos:
+            return 0
+        elif len(self.target_pos) == 1:
+            return 1
+        self.len_nums = len(nums)
+        pos_tpos = 0
+        num_subarrays = 0
+        for start in range(self.len_nums):
+            num_subarrays += self._num_start_from(start, pos_tpos)
+            if start >= self.target_pos[pos_tpos]:
+                pos_tpos += 1
+                if pos_tpos == len(self.target_pos):
+                    break
+        return num_subarrays
+
+
+# OK
+class Solution_2948:
+    """
+    https://leetcode.com/problems/make-lexicographically-smallest-array-by-swapping-elements/?envType=daily-question&envId=2026-08-25
+
+    You are given a 0-indexed array of positive integers `nums` and a positive
+    integer `limit`.
+
+    In one operation, you can choose any two indices i and j and swap `nums[i]` and
+    `nums[j]` if `|nums[i] - nums[j]| <= limit`.
+
+    Return the lexicographically smallest array that can be obtained by
+    performing the operation any number of times.
+
+    An array a is lexicographically smaller than an array b if in the first
+    position where a and b differ, array a has an element that is less than
+    the corresponding element in b. For example, the array `[2,10,3]` is
+    lexicographically smaller than the array `[10,2,3]` because they differ
+    at index 0 and `2 < 10`.
+
+    Example 1:
+
+    Input: nums = [1,5,3,9,8], limit = 2
+    Output: [1,3,5,8,9]
+    Explanation: Apply the operation 2 times:
+    - Swap nums[1] with nums[2]. The array becomes [1,3,5,9,8]
+    - Swap nums[3] with nums[4]. The array becomes [1,3,5,8,9]
+    We cannot obtain a lexicographically smaller array by applying any more operations.
+    Note that it may be possible to get the same result by doing different operations.
+
+    Example 2:
+
+    Input: nums = [1,7,6,18,2,1], limit = 3
+    Output: [1,6,7,18,1,2]
+    Explanation: Apply the operation 3 times:
+    - Swap nums[1] with nums[2]. The array becomes [1,6,7,18,2,1]
+    - Swap nums[0] with nums[4]. The array becomes [2,6,7,18,1,1]
+    - Swap nums[0] with nums[5]. The array becomes [1,6,7,18,1,2]
+    We cannot obtain a lexicographically smaller array by applying any more operations.
+
+    Example 3:
+
+    Input: nums = [1,7,28,19,10], limit = 3
+    Output: [1,7,28,19,10]
+    Explanation: [1,7,28,19,10] is the lexicographically smallest array we can obtain because we cannot apply the operation on any two indices.
+
+    Constraints:
+
+        1 <= nums.length <= 10^5
+        1 <= nums[i] <= 10^9
+        1 <= limit <= 10^9
+
+    """
+
+    def lexicographicallySmallestArray(self, nums: List[int], limit: int) -> List[int]:
+        # Idea: Bubble sort with restriction on swaps
+        n = len(nums)
+        if n == 1:
+            return nums
+        for i in range(n - 1):
+            xl = nums[i]
+            for j, xr in enumerate(nums[(i + 1):]):
+                if xr < xl <= xr + limit:
+                    nums[j + i + 1] = xl
+                    nums[i] = xr
+                    xl = xr
+        return nums
+
+
+# OK
+class Solution_2075:
+    """
+    https://leetcode.com/problems/decode-the-slanted-ciphertext/?envType=daily-question&envId=2026-08-25
+
+    """
+    def decodeCiphertext(self, encodedText: str, rows: int) -> str:
+        len_text = len(encodedText)
+        cols = len_text // rows
+        assert len_text == rows * cols
+        encoded = [x for x in encodedText]
+        num_parts = cols - rows + 2
+        decoded = []
+        for j in range(num_parts):
+            decoded.extend(encoded[j:len_text:(cols + 1)])
+        return "".join(decoded).rstrip(" ")
+
+
+# OK
+class Solution_2126:
+    """
+    https://leetcode.com/problems/destroying-asteroids/?envType=daily-question&envId=2026-08-25
+
+    You are given an integer `mass`, which represents the original mass of a
+    planet. You are further given an integer array `asteroids`, where
+    `asteroids[i]` is the mass of the ith asteroid.
+
+    You can arrange for the planet to collide with the asteroids in any
+    arbitrary order. If the mass of the planet is greater than or equal to
+    the mass of the asteroid, the asteroid is destroyed and the planet gains
+    the mass of the asteroid. Otherwise, the planet is destroyed.
+
+    Return true if all asteroids can be destroyed. Otherwise, return false.
+
+    Example 1:
+
+    Input: mass = 10, asteroids = [3,9,19,5,21]
+    Output: true
+    Explanation: One way to order the asteroids is [9,19,5,3,21]:
+    - The planet collides with the asteroid with a mass of 9. New planet mass: 10 + 9 = 19
+    - The planet collides with the asteroid with a mass of 19. New planet mass: 19 + 19 = 38
+    - The planet collides with the asteroid with a mass of 5. New planet mass: 38 + 5 = 43
+    - The planet collides with the asteroid with a mass of 3. New planet mass: 43 + 3 = 46
+    - The planet collides with the asteroid with a mass of 21. New planet mass: 46 + 21 = 67
+    All asteroids are destroyed.
+
+    Example 2:
+
+    Input: mass = 5, asteroids = [4,9,23,4]
+    Output: false
+    Explanation:
+    The planet cannot ever gain enough mass to destroy the asteroid with a mass of 23.
+    After the planet destroys the other asteroids, it will have a mass of 5 + 4 + 9 + 4 = 22.
+    This is less than 23, so a collision would not destroy the last asteroid.
+
+    Constraints:
+
+        1 <= mass <= 10^5
+        1 <= asteroids.length <= 10^5
+        1 <= asteroids[i] <= 10^5
+
+    """
+    def asteroidsDestroyed(self, mass: int, asteroids: List[int]) -> bool:
+        sorted_asteroids = sorted(asteroids)
+        cumsum = [mass]
+        for x in sorted_asteroids[:-1]:
+            mass += x
+            cumsum.append(mass)
+        return all(x >= y for x, y in zip(cumsum, sorted_asteroids))
+
+
+# OK
+class Solution_3751:
+    """
+    https://leetcode.com/problems/total-waviness-of-numbers-in-range-i/?envType=daily-question&envId=2026-08-25
+
+    You are given two integers `num1` and `num2` representing an inclusive
+    range `[num1, num2]`.
+
+    The waviness of a number is defined as the total count of its peaks and
+    valleys:
+
+    * A digit is a peak if it is strictly greater than both of its immediate neighbors.
+    * A digit is a valley if it is strictly less than both of its immediate neighbors.
+    * The first and last digits of a number cannot be peaks or valleys.
+    * Any number with fewer than 3 digits has a waviness of 0.
+
+    Return the total sum of waviness for all numbers in the range `[num1, num2]`.
+
+    Example 1:
+
+    Input: num1 = 120, num2 = 130
+
+    Output: 3
+
+    Explanation:
+    In the range [120, 130]:
+
+        120: middle digit 2 is a peak, waviness = 1.
+        121: middle digit 2 is a peak, waviness = 1.
+        130: middle digit 3 is a peak, waviness = 1.
+        All other numbers in the range have a waviness of 0.
+
+    Thus, total waviness is 1 + 1 + 1 = 3.
+
+    Example 2:
+
+    Input: num1 = 198, num2 = 202
+
+    Output: 3
+
+    Explanation:
+    In the range [198, 202]:
+
+        198: middle digit 9 is a peak, waviness = 1.
+        201: middle digit 0 is a valley, waviness = 1.
+        202: middle digit 0 is a valley, waviness = 1.
+        All other numbers in the range have a waviness of 0.
+
+    Thus, total waviness is 1 + 1 + 1 = 3.
+
+    Example 3:
+
+    Input: num1 = 4848, num2 = 4848
+
+    Output: 2
+
+    Explanation:
+
+    Number 4848: the second digit 8 is a peak, and the third digit 4 is a valley, giving a waviness of 2.
+
+    Constraints:
+
+        1 <= num1 <= num2 <= 10^5
+
+    """
+    def _digits(self, x: int) -> List[int]:
+        return [int(c) for c in str(x)]
+
+    def _peaks_and_range(
+        self,
+        digits: List[int],
+    ) -> Tuple[int, Tuple[int, int]]:
+        if len(digits) >= 3:
+            num_peaks = sum(
+                y > max(x, z) or y < min(x, z)
+                for x, y, z in zip(digits[:-2], digits[1:-1], digits[2:])
+            )
+        else:
+            num_peaks = 0
+        x, y = digits[-2], digits[-1]
+        if x < y:
+            rng = (0, y)
+        elif x > y:
+            rng = (y + 1, 10)
+        else:
+            rng = (0, 0)  # empty
+        return num_peaks, rng
+
+    def totalWaviness(self, num1: int, num2: int) -> int:
+        assert 1 <= num1 <= num2
+        if num2 < 101:
+            return 0
+        curr_num = max(num1, 101)
+        total_waviness = 0
+        while curr_num <= num2:
+            digits = self._digits(curr_num)
+            num_peaks, rng1 = self._peaks_and_range(digits[:-1])
+            a = digits[-1]
+            b = curr_num - a
+            rng2 = (a, min(10, num2 - b + 1))
+            num_intersect = max(min(rng1[1], rng2[1]) - max(rng1[0], rng2[0]), 0)
+            num_rem = min(num2 - curr_num + 1, 10 - a)
+            total_waviness += (num_peaks * num_rem + num_intersect)
+            curr_num = b + 10
+        return total_waviness
+
+
+# OK
+class Solution_3532:
+    """
+    https://leetcode.com/problems/path-existence-queries-in-a-graph-i/?envType=daily-question&envId=2026-08-25
+
+    You are given an integer `n` representing the number of nodes in a graph,
+    labeled from 0 to `n - 1`.
+
+    You are also given an integer array `nums` of length n sorted in
+    non-decreasing order, and an integer `maxDiff`.
+
+    An undirected edge exists between nodes i and j if the absolute difference
+    between `nums[i]` and `nums[j]` is at most `maxDiff` (i.e.,
+    `|nums[i] - nums[j]| <= maxDiff`).
+
+    You are also given a 2D integer array queries. For each `queries[i] = [ui, vi]`,
+    determine whether there exists a path between nodes `ui` and `vi`.
+
+    Return a boolean array `answer`, where `answer[i]` is true if there
+    exists a path between ui and vi in the ith query and false otherwise.
+
+    Example 1:
+
+    Input: n = 2, nums = [1,3], maxDiff = 1, queries = [[0,0],[0,1]]
+
+    Output: [true,false]
+
+    Explanation:
+
+        Query [0,0]: Node 0 has a trivial path to itself.
+        Query [0,1]: There is no edge between Node 0 and Node 1 because |nums[0] - nums[1]| = |1 - 3| = 2, which is greater than maxDiff.
+        Thus, the final answer after processing all the queries is [true, false].
+
+    Example 2:
+
+    Input: n = 4, nums = [2,5,6,8], maxDiff = 2, queries = [[0,1],[0,2],[1,3],[2,3]]
+
+    Output: [false,false,true,true]
+
+    Explanation:
+
+    The resulting graph is:
+
+        Query [0,1]: There is no edge between Node 0 and Node 1 because |nums[0] - nums[1]| = |2 - 5| = 3, which is greater than maxDiff.
+        Query [0,2]: There is no edge between Node 0 and Node 2 because |nums[0] - nums[2]| = |2 - 6| = 4, which is greater than maxDiff.
+        Query [1,3]: There is a path between Node 1 and Node 3 through Node 2 since |nums[1] - nums[2]| = |5 - 6| = 1 and |nums[2] - nums[3]| = |6 - 8| = 2, both of which are within maxDiff.
+        Query [2,3]: There is an edge between Node 2 and Node 3 because |nums[2] - nums[3]| = |6 - 8| = 2, which is equal to maxDiff.
+        Thus, the final answer after processing all the queries is [false, false, true, true].
+
+    Constraints:
+
+        1 <= n == nums.length <= 10^5
+        0 <= nums[i] <= 10^5
+        nums is sorted in non-decreasing order.
+        0 <= maxDiff <= 10^5
+        1 <= queries.length <= 10^5
+        queries[i] == [ui, vi]
+        0 <= ui, vi < n
+
+    """
+    def _get_cluster_ranges(
+        self,
+        nums: List[int],
+        maxDiff: int,
+    ) -> List[Tuple[int, int]]:
+        result = []
+        start = 0
+        for i, (a, b) in enumerate(zip(nums[:-1], nums[1:])):
+            if b > a + maxDiff:
+                result.append((start, i + 1))
+                start = i + 1
+        result.append((start, len(nums)))
+        return result
+
+    def pathExistenceQueries(
+        self,
+        n: int,
+        nums: List[int],
+        maxDiff: int,
+        queries: List[List[int]],
+    ) -> List[bool]:
+        assert n == len(nums)
+        cluster_ranges = self._get_cluster_ranges(nums, maxDiff)
+        return [
+            any(a <= u < b and a <= v < b for a, b in cluster_ranges)
+            for u, v in queries
+        ]
+
+
+# OK
+# - First try had glitch: Extend {1} -> {1, 2, 4} with edges (1,2), (1,4),
+#   but ignored edge (2,4) which had lower distance!
+class Solution_2492:
+    """
+    https://leetcode.com/problems/minimum-score-of-a-path-between-two-cities/?envType=daily-question&envId=2026-08-25
+
+    You are given a positive integer n representing n cities numbered from 1
+    to n. You are also given a 2D array `roads` where
+    `roads[i] = [ai, bi, distancei]` indicates that there is a bidirectional
+    road between cities ai and bi with a distance equal to `distancei`. The
+    cities graph is not necessarily connected.
+
+    The score of a path between two cities is defined as the minimum
+    distance of a road in this path.
+
+    Return the minimum possible score of a path between cities 1 and n.
+
+    Note:
+
+    * A path is a sequence of roads between two cities.
+    * It is allowed for a path to contain the same road multiple times, and you can visit cities 1 and n multiple times along the path.
+    * The test cases are generated such that there is at least one path between 1 and n.
+
+    Example 1:
+
+    Input: n = 4, roads = [[1,2,9],[2,3,6],[2,4,5],[1,4,7]]
+    Output: 5
+    Explanation: The path from city 1 to 4 with the minimum score is: 1 -> 2 -> 4. The score of this path is min(9,5) = 5.
+    It can be shown that no other path has less score.
+
+    Example 2:
+
+    Input: n = 4, roads = [[1,2,2],[1,3,4],[3,4,7]]
+    Output: 2
+    Explanation: The path from city 1 to 4 with the minimum score is: 1 -> 2 -> 1 -> 3 -> 4. The score of this path is min(2,2,4,7) = 2.
+
+    Constraints:
+
+        2 <= n <= 10^5
+        1 <= roads.length <= 10^5
+        roads[i].length == 3
+        1 <= ai, bi <= n
+        ai != bi
+        1 <= distancei <= 104
+        There are no repeated edges.
+        There is at least one path between 1 and n.
+
+    """
+    def _extend_connected_component(
+        self,
+        nodes: Set[int],
+        edges: Dict[int, List[Tuple[int, int]]],
+    ) -> Optional[int]:
+        min_score = None
+        extra_nodes = []
+        for node in nodes:
+            neighbors = edges.get(node)
+            if neighbors is not None:
+                for other, score in neighbors:
+                    extra_nodes.append(other)
+                    min_score = score if min_score is None else min(min_score, score)
+                del edges[node]
+        if extra_nodes:
+            nodes.update(extra_nodes)
+        return min_score
+
+    def minScore(self, n: int, roads: List[List[int]]) -> int:
+        edges: Dict[int, List[Tuple[int, int]]] = dict()
+        for a, b, dist in roads:
+            for src, trg in ((a, b), (b, a)):
+                lst = edges.get(src)
+                entry = (trg, dist)
+                if lst is None:
+                    edges[src] = [entry]
+                else:
+                    lst.append(entry)
+        min_score = None
+        nodes: Set[int] = {1}
+        while True:
+            score = self._extend_connected_component(nodes, edges)
+            if score is None:
+                # Component could not be extended
+                break
+            min_score = score if min_score is None else min(min_score, score)
+        return min_score
 
 
 # === Hard ===
 
 
+# HIER: This is hard!
 class Solution_1872:
     """
     https://leetcode.com/problems/stone-game-viii/?envType=daily-question&envId=2026-08-25
@@ -1405,5 +1865,173 @@ class Solution_1872:
         -104 <= stones[i] <= 104
 
     """
+    def _signed_scorediff_for(
+        self,
+        start: int,
+        val_first: int,
+        player_sgn: int,
+    ) -> int:
+        curr_sum = val_first
+        scores = []
+        for i, x in enumerate(self.stones[start:-1]):
+            curr_sum += x
+            if curr_sum * player_sgn > 0:
+                scores.append(
+                    player_sgn * (
+                        curr_sum - self._signed_scorediff_for(
+                            start=start + i + 1,
+                            val_first=curr_sum,
+                            player_sgn=-player_sgn,
+                        )
+                    )
+                )
+        # Ending the game by taking the rest always needs to be considered:
+        scores.append(player_sgn * (curr_sum + self.stones[-1]))
+        return max(scores)
+
     def stoneGameVIII(self, stones: List[int]) -> int:
-        pass
+        self.stones = stones
+        self.n = len(stones)
+        return self._signed_scorediff_for(
+            start=0,
+            val_first=0,
+            player_sgn=1,
+        )
+
+
+# OK (having done 3532 first helped!)
+class Solution_3534:
+    """
+    https://leetcode.com/problems/path-existence-queries-in-a-graph-ii/description/?envType=daily-question&envId=2026-08-25
+
+    You are given an integer n representing the number of nodes in a graph,
+    labeled from 0 to n - 1.
+
+    You are also given an integer array `nums` of length n and an integer
+    `maxDiff`.
+
+    An undirected edge exists between nodes i and j if the absolute difference
+    between nums[i] and nums[j] is at most maxDiff (i.e.,
+    |nums[i] - nums[j]| <= maxDiff).
+
+    You are also given a 2D integer array queries. For each
+    queries[i] = [ui, vi], find the minimum distance between nodes ui and vi.
+    If no path exists between the two nodes, return -1 for that query.
+
+    Return an array answer, where answer[i] is the result of the ith query.
+
+    Note: The edges between the nodes are unweighted.
+
+    Example 1:
+
+    Input: n = 5, nums = [1,8,3,4,2], maxDiff = 3, queries = [[0,3],[2,4]]
+
+    Output: [1,1]
+
+    Explanation:
+
+    The resulting graph is:
+
+    Query	Shortest Path	Minimum Distance
+    [0, 3]	0 → 3	1
+    [2, 4]	2 → 4	1
+
+    Thus, the output is [1, 1].
+
+    Example 2:
+
+    Input: n = 5, nums = [5,3,1,9,10], maxDiff = 2, queries = [[0,1],[0,2],[2,3],[4,3]]
+
+    Output: [1,2,-1,1]
+
+    Explanation:
+
+    The resulting graph is:
+
+    Query	Shortest Path	Minimum Distance
+    [0, 1]	0 → 1	1
+    [0, 2]	0 → 1 → 2	2
+    [2, 3]	None	-1
+    [4, 3]	3 → 4	1
+
+    Thus, the output is [1, 2, -1, 1].
+
+    Example 3:
+
+    Input: n = 3, nums = [3,6,1], maxDiff = 1, queries = [[0,0],[0,1],[1,2]]
+
+    Output: [0,-1,-1]
+
+    Explanation:
+
+    There are no edges between any two nodes because:
+
+        Nodes 0 and 1: |nums[0] - nums[1]| = |3 - 6| = 3 > 1
+        Nodes 0 and 2: |nums[0] - nums[2]| = |3 - 1| = 2 > 1
+        Nodes 1 and 2: |nums[1] - nums[2]| = |6 - 1| = 5 > 1
+
+    Thus, no node can reach any other node, and the output is [0, -1, -1].
+
+    Constraints:
+
+        1 <= n == nums.length <= 10^5
+        0 <= nums[i] <= 10^5
+        0 <= maxDiff <= 10^5
+        1 <= queries.length <= 10^5
+        queries[i] == [ui, vi]
+        0 <= ui, vi < n
+
+    """
+    def _get_cluster_ranges(
+        self,
+        nums: List[int],
+        maxDiff: int,
+    ) -> List[Tuple[int, int]]:
+        result = []
+        start = 0
+        for i, (a, b) in enumerate(zip(nums[:-1], nums[1:])):
+            if b > a + maxDiff:
+                result.append((start, i + 1))
+                start = i + 1
+        result.append((start, len(nums)))
+        return result
+
+    def pathExistenceQueries(
+        self,
+        n: int,
+        nums: List[int],
+        maxDiff: int,
+        queries: List[List[int]],
+    ) -> List[int]:
+        assert n == len(nums)
+        ind, sorted_nums = zip(
+            *sorted(
+                enumerate(nums),
+                key=lambda x: x[1],
+            )
+        )
+        remap = dict(enumerate(ind))
+        cluster_ranges = self._get_cluster_ranges(sorted_nums, maxDiff)
+        result = []
+        for ou, ov in queries:
+            if ou == ov:
+                result.append(0)
+                continue
+            u = remap[ou]
+            v = remap[ov]
+            if u > v:
+                u = v
+                v = remap[ou]
+            if any(a <= u and v < b for a, b in cluster_ranges):
+                num_steps = 1
+                num_u = sorted_nums[u]
+                for w in range(u + 1, v + 1):
+                    num_w = sorted_nums[w]
+                    if num_w > num_u + maxDiff:
+                        num_steps += 1
+                        u = w - 1
+                        num_u = sorted_nums[u]
+                result.append(num_steps)
+            else:
+                result.append(-1)
+        return result
