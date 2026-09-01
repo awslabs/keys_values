@@ -77,8 +77,7 @@ if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
     eval_dir = "eval"
-    mode = "collect"
-    # mode = "sweep"
+    print_tar = False
     # dataset_size = "64k"
     dataset_size = "128k"
     is_rerun = True
@@ -105,24 +104,24 @@ if __name__ == "__main__":
     )
 
     model_type = "lora"
-    if mode == "collect":
-        for dataset, case in product(datasets, cases):
-            out_dir = base_path / dataset / case
-            if out_dir.exists():
-                main(
-                    out_dir=out_dir,
-                    model_type=model_type,
-                    multiple_tasks=multiple_tasks,
-                    eval_dir=eval_dir,
-                )
-            else:
-                print(f"\nResults for {dataset}/{case} do not exist")
-    elif mode == "sweep":
-        names = []
-        for dataset, case in product(datasets, cases):
-            name = "/".join((dataset, case, EVAL_METRICS_ALL_FILENAME))
-            if (base_path / name).exists():
-                names.append(name)
+    names = []
+    for dataset, case in product(datasets, cases):
+        out_dir = base_path / dataset / case
+        if out_dir.exists():
+            main(
+                out_dir=out_dir,
+                model_type=model_type,
+                multiple_tasks=multiple_tasks,
+                eval_dir=eval_dir,
+            )
+            if print_tar:
+                for case in cases:
+                    name = "/".join((dataset, case, EVAL_METRICS_ALL_FILENAME))
+                    if (base_path / name).exists():
+                        names.append(name)
+        else:
+            print(f"\nResults for {dataset}/{case} do not exist")
+    if print_tar:
         extra = "extra_" if extra_data else ""
         print(
             f"\nCollected {len(names)} result files:\n"
@@ -132,5 +131,3 @@ if __name__ == "__main__":
             + " "
             + " ".join(names)
         )
-    else:
-        raise NotImplementedError(f"Unknown mode: {mode}")
