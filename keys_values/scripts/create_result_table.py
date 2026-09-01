@@ -89,24 +89,30 @@ def main(
             if not csv_path.exists():
                 row.append([])
             else:
-                df = pd.read_csv(csv_path)
-                if multiple_tasks:
-                    avg = df.groupby("task")[_metric_name].mean()
-                    row.append(
-                        _sort_entries(
-                            [
-                                (_short_task(t), v)
-                                for t, v in avg.items()
-                                if not final_table
-                                or _filter_dataset_case(
-                                    dataset, case_key, _short_task(t)
-                                )
-                            ]
+                try:
+                    df = pd.read_csv(csv_path)
+                    if multiple_tasks:
+                        avg = df.groupby("task")[_metric_name].mean()
+                        row.append(
+                            _sort_entries(
+                                [
+                                    (_short_task(t), v)
+                                    for t, v in avg.items()
+                                    if not final_table
+                                    or _filter_dataset_case(
+                                        dataset, case_key, _short_task(t)
+                                    )
+                                ]
+                            )
                         )
+                    else:
+                        avg = df[_metric_name].mean()
+                        row.append([(None, avg.item())])
+                except KeyError as ex:
+                    print(
+                        f"dataset = {dataset}, case_key = {case_key}, metric_name = {_metric_name}"
                     )
-                else:
-                    avg = df[_metric_name].mean()
-                    row.append([(None, avg.item())])
+                    raise ex
         table.append(row)
 
     # - final_table == False:
@@ -163,6 +169,7 @@ def main(
         tex_lines.append(r"\noalign{\smallskip}\hline\noalign{\smallskip}")
     tex_lines.append(r"\end{tabular}")
 
+    print(f"Writing results to {result_path}")
     if result_path.exists():
         result_path.unlink()
     result_path.write_text("\n".join(tex_lines) + "\n")
