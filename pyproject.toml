@@ -22,14 +22,16 @@ scripts.keys_values = "keys_values.__main__:main"
 
 dependencies = [
     "filelock",
-    "black>=26.3.1",
-    "flake8",
-    "hypothesis",
 ]
 
 [project.optional-dependencies]
 cuda = ["flashinfer-python"]
 trl = ["trl>=1.0.0"]
+dev = [
+    "black>=26.3.1",
+    "flake8",
+    "hypothesis",
+]
 
 [tool.setuptools.packages.find]
 include = [
