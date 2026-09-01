@@ -34,6 +34,7 @@ DATASETS = [
     "pop_qa_64k",
     "trec_coarse_128k",
     "trivia_qa_128k",
+    "trivia_qa_64k",
 ]
 
 SAMPLE_FNAME = "generated_samples_0.yaml"
