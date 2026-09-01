@@ -59,7 +59,7 @@ def main(path: Path, metric: str) -> Tuple[float, int]:
 
 
 if __name__ == "__main__":
-    base_path = Path("/mnt/efs/kbenidis/results/20260807_000000")
+    base_path = Path("/mnt/efs/kbenidis/results/20260807_000000/finetuned")
     metric = "match_first_word_or_phrase"
 
     for dataset in DATASETS:
