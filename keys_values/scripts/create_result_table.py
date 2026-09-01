@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
@@ -64,6 +65,7 @@ def main(
     result_path,
     final_table: bool,
     multiple_tasks: bool,
+    metric_name: Optional[str] = None,
 ):
     if not multiple_tasks and not final_table:
         raise ValueError("If multiple_tasks=False, then final_table must be True")
@@ -79,14 +81,17 @@ def main(
     for case_key, _ in cases:
         row = []
         for dataset in datasets:
-            metric_name = _metric_name_for_dataset(dataset)
+            if metric_name is None:
+                _metric_name = _metric_name_for_dataset(dataset)
+            else:
+                _metric_name = metric_name
             csv_path = base_path / dataset / case_key / EVAL_METRICS_ALL_FILENAME
             if not csv_path.exists():
                 row.append([])
             else:
                 df = pd.read_csv(csv_path)
                 if multiple_tasks:
-                    avg = df.groupby("task")[metric_name].mean()
+                    avg = df.groupby("task")[_metric_name].mean()
                     row.append(
                         _sort_entries(
                             [
@@ -100,7 +105,7 @@ def main(
                         )
                     )
                 else:
-                    avg = df[metric_name].mean()
+                    avg = df[_metric_name].mean()
                     row.append([(None, avg.item())])
         table.append(row)
 
@@ -166,6 +171,8 @@ def main(
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
+    metric_name = None  # Select automatically
+    # metric_name = "sub_exact_match"  # Override
     # dataset_size = "64k"
     dataset_size = "128k"
     is_rerun = True
@@ -195,4 +202,11 @@ if __name__ == "__main__":
     # final_table = False
     final_table = True
 
-    main(datasets, cases, result_path, final_table, multiple_tasks=multiple_tasks)
+    main(
+        datasets,
+        cases,
+        result_path,
+        final_table,
+        multiple_tasks=multiple_tasks,
+        metric_name=metric_name,
+    )
