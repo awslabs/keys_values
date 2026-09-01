@@ -115,10 +115,9 @@ if __name__ == "__main__":
                 eval_dir=eval_dir,
             )
             if print_tar:
-                for case in cases:
-                    name = "/".join((dataset, case, EVAL_METRICS_ALL_FILENAME))
-                    if (base_path / name).exists():
-                        names.append(name)
+                name = "/".join((dataset, case, EVAL_METRICS_ALL_FILENAME))
+                if (base_path / name).exists():
+                    names.append(name)
         else:
             print(f"\nResults for {dataset}/{case} do not exist")
     if print_tar:
