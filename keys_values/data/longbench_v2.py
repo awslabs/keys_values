@@ -23,6 +23,7 @@ from litgpt.tokenizer import Tokenizer
 
 from keys_values.data.constants import (
     METADATA_SEQ_LENGTHS_KEY,
+    METADATA_TRAIN_VAL_SPLIT_KEY,
     METADATA_KEYS,
     RawDatasetType,
 )
@@ -57,9 +58,16 @@ SUPPORTED_HEAD_MODELS = (
 
 CLASS_LABELS = ("A", "B", "C", "D")
 
-SUPPORTED_TEST_SET_TAGS = [
+SUPPORTED_TEST_SET_TAGS = (
+    "stratified",
     "rest",
-]
+)
+
+METADATA_TRAIN_VAL_TEST_SPLIT_KEY = "train_val_test_split"
+
+LONGBENCH_NUM_CASES = 503
+
+LONGBENCH_BUCKET_SIZES = [(20, 1, 4)] * 9 + [(22, 1, 5)] + [(20, 1, 4)] * 10
 
 
 class LongBenchV2(SequenceLengthFilteredDataModule):
@@ -70,12 +78,35 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
     The dataset is filtered to contain only sequences whose prompt have
     `<= max_seq_length` tokens.
 
+    LongBench-V2 does not prescribe a dev/eval split. Instead, this is
+    determined by `test_set_tag`:
+
+    * "stratified": We use a stratified random split with fixed bucket sizes.
+      There are 20 buckets, 19 of size 25, 1 (middle) of size 28. Each bucket
+      is randomly distributed between train (80%), validation (4%), test (16%),
+      according to :const:`LONGBENCH_BUCKET_SIZES`. This train/valid/test split
+      is written into the metadata file.
+      Note: `max_seq_length`, `val_split_fraction` are ignored in this case.
+      Each split contains short and long sequences.
+    * "rest": The dev set contains sequences of length <= `max_seq_length`, the
+      test set contains all remaining sequences. The dev set is randomly split
+      to train/valid, using `val_split_fraction`. The train/valid split is
+      written into the metadata file.
+
     If `metadata_dir` is given, a metadata file is loaded and/or stored. This
     is strongly recommended to save time. A dictionary is stored as JSON, with
     this structure:
-    - `data[METADATA_SEQ_LENGTHS_KEY][model_name]`: List of sequence lengths
+
+    * `data[METADATA_SEQ_LENGTHS_KEY][model_name]`: List of sequence lengths
       (in tokens) for each record. Here, `model_name` because the tokenizer
       depends on the model.
+    * `data[METADATA_TRAIN_VAL_TEST_SPLIT_KEY][model_name]`: This is used if
+      `test_set_tag == "stratified"`. Determines the train/valid/test split.
+    * `data[METADATA_TRAIN_VAL_SPLIT_KEY][model_name][str(max_seq_length)][str(val_split_fraction)]`:
+      This is used if `test_set_tag == "rest"`. Determines the train/valid
+      split. The metadata file can store entries for different
+      `(max_seq_length, val_split_fraction)` pairs.
+
     """
 
     def __init__(
@@ -100,10 +131,12 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
                 (with ``ignore_index``)
             val_split_fraction: The fraction of the dataset to use for the
                 validation dataset. The rest is used for training.
+                Note: This is ignored if `test_set_tag == "stratified"`
             ignore_index: The index to use for elements to be ignored in the
                 label.
             max_seq_length: Sequences longer than this number of tokens are
                 filtered out. Defaults to 100000.
+                Note: This is ignored if `test_set_tag == "stratified"`
             seed: The random seed for creating the train/val splits and shuffling
                 the dataset.
             repo_id: The Hugging Face dataset repository ID from where to
@@ -120,19 +153,24 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
                 likely to happen with the longest batch.
             trainloader_shortest_first: Same as `trainloader_longest_first`,
                 but the first batch contain the shortest sequences.
-            test_set_tag: If this is given, we also maintain a test dataset
-                and serve a test dataloader. The tag determines how the test
-                set is chosen. Current choices:
-                - "rest": All cases with sequence length > `max_seq_length`,
-                    sorted by token sequence length (non-decreasing).
+            test_set_tag: Determines how the complete dataset is split into
+                train, validation, and test sets. Defaults to "stratified".
+                Current choices:
+                * "stratified": Stratified random split with fixed bucket sizes.
+                  `val_split_fraction`, `max_seq_length` are ignored.
+                * "rest": Test set is all cases with sequence length >
+                  `max_seq_length`, sorted by token sequence length
+                  (non-decreasing).
             recompute_lengths: If `True`, sequence lengths are recomputed even
                 if they are in the metadata file. The previous information is
                 overwritten.
 
         """
-        if test_set_tag is not None and test_set_tag not in SUPPORTED_TEST_SET_TAGS:
+        if test_set_tag is None:
+            test_set_tag = "stratified"
+        elif test_set_tag not in SUPPORTED_TEST_SET_TAGS:
             raise ValueError(
-                f"test_set_tag = {test_set_tag} is not supported, must be None or in {SUPPORTED_TEST_SET_TAGS}"
+                f"test_set_tag = {test_set_tag} is not supported, must be in {SUPPORTED_TEST_SET_TAGS}"
             )
         super().__init__(
             mask_prompt,
