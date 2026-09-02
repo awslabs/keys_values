@@ -150,6 +150,20 @@ class PackArgumentAsAnnotation:
 
 
 @dataclass(frozen=True)
+class ParkedBufferState:
+    """
+    Buffer state reconstructed ahead of its unpack request (chain walk, see
+    :meth:`CellComputationAutogradHooks._unpack_from_annotation`). Parked on
+    CPU: parking happens during backward, when device memory is tightest,
+    and a full-size device clone per walked chunk can push a large
+    configuration into OOM.
+    """
+
+    x_cpu: torch.Tensor
+    device: torch.device
+
+
+@dataclass(frozen=True)
 class PackArgumentAsIndex:
     index_3d: torch.Tensor
     final_dim: int
@@ -790,6 +804,8 @@ class CellComputationAutogradHooks(AutogradHooks):
             if idd in self._id_to_unpacked:
                 # Unpacked this one before: Just return it
                 x = self._id_to_unpacked[idd]
+                if isinstance(x, ParkedBufferState):
+                    x = x.x_cpu.to(device=x.device)
                 self._id_counts[idd] -= 1
                 if self._id_counts[idd] == 0:
                     # Not needed anymore:
@@ -931,15 +947,26 @@ class CellComputationAutogradHooks(AutogradHooks):
                         # `annot` was applied earlier than autograd asks for
                         # it. Park the state just reconstructed (as a copy,
                         # since `buffer` is modified in place by subsequent
-                        # steps), so :meth:`unpack_hook` can serve the ID later
-                        parked = buffer.clone()
-                        if park_dtype is not None and parked.dtype != park_dtype:
-                            parked = parked.to(dtype=park_dtype)
+                        # steps), so :meth:`unpack_hook` can serve the ID
+                        # later. Device buffers are parked on CPU to avoid
+                        # OOM during backward.
+                        target_dtype = (
+                            park_dtype if park_dtype is not None else buffer.dtype
+                        )
+                        if buffer.device.type == "cpu":
+                            parked = buffer.detach().clone().to(dtype=target_dtype)
+                        else:
+                            parked = ParkedBufferState(
+                                x_cpu=buffer.detach().to(
+                                    device="cpu", dtype=target_dtype
+                                ),
+                                device=buffer.device,
+                            )
                         self._id_to_unpacked[park_id] = parked
                         if park_id not in self._id_counts:
                             self._id_counts[park_id] = 1
                         if self._debug_test_args:
-                            self._debug_log_args.append((parked.clone(), annot))
+                            self._debug_log_args.append((buffer.clone(), annot))
                 # Sanity check
                 assert (
                     annot.shape == buffer.shape
