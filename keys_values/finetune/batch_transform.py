@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 import torch
 
@@ -54,31 +54,53 @@ class SFTBatchTransform(BatchTransform):
     Batch transform for standard supervised fine-tuning, as represented by
     :class:`SFTDataset`.
 
-    First, for every sequence, we have `input_ids` and `labels` of the same
-    length. For same `n_prompt`, we have that `input_ids[n_prompt:] ==
-    labels[n_prompt:]` and `labels[:n_prompt] == ignore_index`.
+    Input `batch`: For every sequence, we have `input_ids` and `labels` of
+    the same length. For some `n_prompt`, we have that `input_ids[n_prompt:] ==
+    labels[n_prompt:]` and `labels[:n_prompt] == ignore_index`. Second, the
+    batch collator does right padding, `input_ids` with `pad_id`, `labels`
+    with `ignore_index`.
 
-    Second, the batch collator does right padding, `input_ids` with `pad_id`,
-    `labels` with `ignore_index`.
+    Output:
+    - `result['input_ids'], result['targets']` are right-aligned
+    - `result['targets']`: No left-padding, padding on right by `ignore_index`
+      except for longest
 
+    Example:
+
+        "Who are you?I am a purple unicorn"
+        "How old are you?My age is 27"
+
+    If % is `eos_id`, $ is `pad_id`, # is `ignore_index`:
+    Input `batch`:
+    - `input_ids`: [Who are you?I am a purple unicorn%]
+                   [How old are you?My age is 27%$$$$$]
+    - `labels`:    [############I am a purple unicorn%]
+                   [################My age is 27%#####]
+
+    Result:
+    - `input_ids`: [$$$$Who are you?I am a purple unicorn]
+                   [How old are you?My age is 27$$$$$$$$$]
+    - `targets`:                  [I am a purple unicorn%]
+                                  [My age is 27%#########]
     """
 
     def __init__(
         self,
+        eos_id: int,
         ignore_index: int = -100,
         pad_id: int = 0,
-        eos_id: Optional[int] = None,
     ):
+        assert eos_id is not None
+        self._eos_id = eos_id
         self.ignore_index = ignore_index
         self.pad_id = pad_id
-        self._eos_id = eos_id
 
     def __call__(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         input_ids = batch.get(INPUT_IDS_NAME)
         labels = batch.get(LABELS_NAME)
         if input_ids is None or labels is None:
             raise ValueError(
-                f"batch.keys() = {list(batch.keys())}, must contain 'input_ids', 'labels'"
+                f"batch.keys() = {list(batch.keys())}, must contain {[INPUT_IDS_NAME, LABELS_NAME]}"
             )
         if (
             input_ids.ndim != 2
@@ -87,7 +109,7 @@ class SFTBatchTransform(BatchTransform):
             or input_ids.shape != labels.shape
         ):
             raise ValueError(
-                f"batch['input_ids'].shape = {input_ids.shape}, batch['labels'].shape = {labels.shape}: Must be 2D and the same"
+                f"batch['{INPUT_IDS_NAME}'].shape = {input_ids.shape}, batch['{LABELS_NAME}'].shape = {labels.shape}: Must be 2D and the same"
             )
         batch_size, seq_length = input_ids.shape
         left_ignore = [
@@ -98,27 +120,26 @@ class SFTBatchTransform(BatchTransform):
             next(i for i, x in enumerate(reversed(label)) if x != self.ignore_index)
             for label in labels
         ]
-        if self._eos_id is not None:
-            # Check whether <eos> tokens are in place
-            kwargs = dict(dtype=input_ids.dtype, device=input_ids.device)
-            for i, (input_id, label, ri) in enumerate(
-                zip(input_ids, labels, right_ignore)
-            ):
-                sz = ri + 1
+        # Check for right padding and <eos> token
+        eos_off = 1
+        kwargs = dict(dtype=input_ids.dtype, device=input_ids.device)
+        for i, (input_id, label, ri) in enumerate(zip(input_ids, labels, right_ignore)):
+            sz = ri + eos_off
+            if sz > 0:
                 should_be = torch.full((sz,), self.pad_id, **kwargs)
                 should_be[0] = self._eos_id
                 tail = input_id[(-sz):]
                 if not (tail == should_be).all().item():
                     print(
-                        f"Slot {i}: inputs_ids, wrong end: {tail} (should be {should_be})"
+                        f"Slot {i}: {INPUT_IDS_NAME}, wrong end: {tail} (should be {should_be})"
                     )
-                should_be = torch.full((sz,), self.ignore_index, **kwargs)
-                should_be[0] = self._eos_id
+                should_be[eos_off:] = self.ignore_index
                 tail = label[(-sz):]
                 if not (tail == should_be).all().item():
                     print(
-                        f"Slot {i}: labels, wrong end: {tail} (should be {should_be})"
+                        f"Slot {i}: {LABELS_NAME}, wrong end: {tail} (should be {should_be})"
                     )
+
         max_ignore = max(left_ignore)
         extra_left = [max_ignore - num for num in left_ignore]
         span = max(extra_left)
@@ -127,7 +148,7 @@ class SFTBatchTransform(BatchTransform):
             total_right = [ri + span - el for ri, el in zip(right_ignore, extra_left)]
             new_length = seq_length + span - min(total_right)
             new_input_ids = torch.full(
-                (batch_size, new_length - 1),
+                (batch_size, new_length - eos_off),
                 self.pad_id,
                 dtype=input_ids.dtype,
                 device=input_ids.device,
@@ -140,13 +161,13 @@ class SFTBatchTransform(BatchTransform):
             temp_row = torch.empty(
                 (new_length,), dtype=labels.dtype, device=labels.device
             )
-            for i, (input_id, label, start) in enumerate(
-                zip(input_ids, labels, extra_left)
+            for i, (input_id, label, start, ri) in enumerate(
+                zip(input_ids, labels, extra_left, right_ignore)
             ):
-                end = min(start + input_id.shape[0], new_length - 1)
+                end = min(start + seq_length - ri - eos_off, new_length - eos_off)
                 new_input_ids[i, start:end] = input_id[: (end - start)]
                 temp_row.fill_(self.ignore_index)
-                end = min(start + label.shape[0], new_length)
+                end = min(start + seq_length, new_length)
                 temp_row[start:end] = label[: (end - start)]
                 new_labels[i] = temp_row[max_ignore:]
         else:
@@ -161,22 +182,22 @@ class SFTBatchTransform(BatchTransform):
 
 class SequenceClassificationBatchTransform(BatchTransform):
     """
-    Batch transform for asequence classification, as represented by
+    Batch transform for sequence classification, as represented by
     :class:`SequenceClassificationDataset`.
 
-    All we do here is convert right padding in `input_ids` into left
-    padding. The model will learn to produce the class probabilities for the
-    <eos> input.
-
+    All we do here is convert right padding in `input_ids` into left padding.
+    We also strip off <eos>. The model learns to output the target token as
+    response to the final `input_ids` token.
     """
 
     def __init__(
         self,
+        eos_id: int,
         pad_id: int = 0,
-        eos_id: Optional[int] = None,
     ):
-        self.pad_id = pad_id
+        assert eos_id is not None
         self._eos_id = eos_id
+        self.pad_id = pad_id
 
     def __call__(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         input_ids = batch.get(INPUT_IDS_NAME)
@@ -200,27 +221,31 @@ class SequenceClassificationBatchTransform(BatchTransform):
             next(i for i, x in enumerate(reversed(input_id)) if x != self.pad_id)
             for input_id in input_ids
         ]
+        # Check for right padding and <eos> token
+        eos_off = 1
         kwargs = dict(dtype=input_ids.dtype, device=input_ids.device)
-        if self._eos_id is not None:
-            # Check whether <eos> tokens are in place
-            for i, (input_id, rp) in enumerate(zip(input_ids, right_pad)):
-                sz = rp + 1
-                should_be = torch.full((sz,), self.pad_id, **kwargs)
-                should_be[0] = self._eos_id
-                tail = input_id[(-sz):]
-                if not (tail == should_be).all().item():
-                    print(
-                        f"Slot {i}: inputs_ids, wrong end: {tail} (should be {should_be}; pad_id={self.pad_id}, eos_id={self._eos_id})"
-                    )
+        for i, (input_id, rp) in enumerate(zip(input_ids, right_pad)):
+            sz = rp + eos_off
+            should_be = torch.full((sz,), self.pad_id, **kwargs)
+            should_be[0] = self._eos_id
+            tail = input_id[(-sz):]
+            if not (tail == should_be).all().item():
+                print(
+                    f"Slot {i}: {INPUT_IDS_NAME}, wrong end: {tail} (should be {should_be}; pad_id={self.pad_id}, eos_id={self._eos_id})"
+                )
+
         if max(right_pad) > 0:
             new_input_ids = torch.full(
-                (batch_size, seq_length),
+                (batch_size, seq_length - eos_off),
                 self.pad_id,
                 **kwargs,
             )
             for i, (input_id, rp) in enumerate(zip(input_ids, right_pad)):
-                head = input_id[:(-rp)] if rp > 0 else input_id
+                rp2 = rp + eos_off
+                head = input_id[:(-rp2)] if rp2 > 0 else input_id
                 new_input_ids[i, rp:] = head
+        elif eos_off == 1:
+            new_input_ids = input_ids[:, :-1]
         else:
             new_input_ids = input_ids
         return dict(
@@ -234,8 +259,8 @@ class BatchTransformFactory:
     @staticmethod
     def from_head_model(
         head_model: str,
+        eos_id: int,
         pad_id: int = 0,
-        eos_id: Optional[int] = None,
         ignore_index: int = -100,
     ) -> BatchTransform:
         if head_model not in SUPPORTED_HEAD_MODELS:
@@ -244,12 +269,12 @@ class BatchTransformFactory:
             )
         if head_model == CrossEntropyOnLogits.NAME:
             return SFTBatchTransform(
+                eos_id=eos_id,
                 ignore_index=ignore_index,
                 pad_id=pad_id,
-                eos_id=eos_id,
             )
         else:
             return SequenceClassificationBatchTransform(
-                pad_id=pad_id,
                 eos_id=eos_id,
+                pad_id=pad_id,
             )

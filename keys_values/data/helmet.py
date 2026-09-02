@@ -23,10 +23,12 @@ from keys_values.data.constants import (
     METADATA_SEQ_LENGTHS_KEY,
     METADATA_KEYS,
     RawDatasetType,
+    INSTRUCTION_NAME,
+    OUTPUT_NAME,
     NUM_TOKENS_NAME,
     METADATA_TRAIN_VAL_SPLIT_KEY,
+    Collator,
 )
-from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.load_helmet_dev_eval import (
     load_helmet_dev_eval,
     DATASET_PARENT_DIR,
@@ -217,7 +219,7 @@ class Helmet(SequenceLengthFilteredDataModule):
         self.metadata_dir = metadata_dir
         self.store_split_in_metadata = store_split_in_metadata
         self._recompute_lengths = recompute_lengths
-        self._split_from_metadata = None
+        self._split_from_metadata: Optional[Dict[str, List[int]]] = None
 
     def _metadata_keys(
         self,
@@ -254,29 +256,28 @@ class Helmet(SequenceLengthFilteredDataModule):
         if dev_needs_store or eval_needs_store or split_needs_store:
             if metadata is None:
                 metadata = dict()
-            if dev_needs_store:
-                set_dict(
-                    metadata,
+            for need_store, metakeys, value in (
+                (
+                    dev_needs_store,
                     self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, "dev"),
                     dev_seq_lengths,
-                )
-            if eval_needs_store:
-                set_dict(
-                    metadata,
+                ),
+                (
+                    eval_needs_store,
                     self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, "eval"),
                     eval_seq_lengths,
-                )
-            if split_needs_store:
-                split_entry = {
-                    "train": self._split_from_metadata[0],
-                    "val": self._split_from_metadata[1],
-                }
-                frac_key = str(self.val_split_fraction)
-                set_dict(
-                    metadata,
-                    self._metadata_keys(METADATA_TRAIN_VAL_SPLIT_KEY, frac_key),
-                    split_entry,
-                )
+                ),
+                (
+                    split_needs_store,
+                    self._metadata_keys(
+                        METADATA_TRAIN_VAL_SPLIT_KEY, str(self.val_split_fraction)
+                    ),
+                    self._split_from_metadata,
+                ),
+            ):
+                if need_store:
+                    assert value is not None
+                    set_dict(metadata, metakeys, value)
             self._store_metadata(metadata)
         return train_data, test_data
 
@@ -285,36 +286,33 @@ class Helmet(SequenceLengthFilteredDataModule):
         metadata: Optional[Dict[str, Any]],
         devset_length: int,
     ) -> bool:
-        self._split_from_metadata = None
         needs_store = False
         if not self.store_split_in_metadata:
             # Splits are not stored to / loaded from metadata
+            self._split_from_metadata = None
             return False
         frac_key = str(self.val_split_fraction)
-        result = get_dict(
+        self._split_from_metadata = get_dict(
             metadata,
             self._metadata_keys(METADATA_TRAIN_VAL_SPLIT_KEY, frac_key),
         )
-        if result is not None:
-            # Load train/val split from metadata
-            self._split_from_metadata = (result["train"], result["val"])
         if self._split_from_metadata is None:
             # Sample train/val split -> store to metadata
             dev_perm = torch.randperm(
                 devset_length,
-                generator=torch.Generator().manual_seed(self.seed),
+                generator=self._generator,
             )
             val_size = max(int(devset_length * self.val_split_fraction), 1)
-            self._split_from_metadata = (
-                dev_perm[val_size:].tolist(),
-                dev_perm[:val_size].tolist(),
-            )
+            self._split_from_metadata = {
+                "train": dev_perm[val_size:].tolist(),
+                "val": dev_perm[:val_size].tolist(),
+            }
             needs_store = True
         return needs_store
 
     def _get_train_val_split_from_metadata(
         self,
-    ) -> Optional[Tuple[List[int], List[int]]]:
+    ) -> Optional[Dict[str, List[int]]]:
         return self._split_from_metadata
 
     def _transform(
@@ -373,8 +371,8 @@ class Helmet(SequenceLengthFilteredDataModule):
             output = instance["output"]
             results.append(
                 {
-                    "instruction": instruction,
-                    "output": output,
+                    INSTRUCTION_NAME: instruction,
+                    OUTPUT_NAME: output,
                     NUM_TOKENS_NAME: seq_length,
                 }
             )
@@ -490,7 +488,7 @@ class Helmet(SequenceLengthFilteredDataModule):
                 )
                 self.training_state.test_target_choice = self.test_dataset.target_choice
 
-    def _get_collate_fn(self) -> MyDataLoader:
+    def _get_collate_fn(self) -> Collator:
         return get_sft_collate_fn(ignore_index=self.ignore_index)
 
     def smart_lastrec_info(self, tokenizer: HFTokenizer) -> SmartInitialInformation:

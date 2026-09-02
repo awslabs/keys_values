@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from typing import Tuple, Optional, Dict
 
 import torch
@@ -165,7 +166,6 @@ class TorchBasicQuantizer(Quantizer):
 
     `tmp_array_limit_gb` provides access to the maximum size of temporary
     buffers which can be used here.
-
     """
 
     def __init__(
@@ -278,7 +278,7 @@ class TorchBasicQuantizer(Quantizer):
             self.shape = (batch_size,) + self.shape[1:]
             self._init_blocksize_quant_shape()
             shape = self._quant_shape
-            self.quant_buffer = torch.empty(
+            self.quant_buffer = torch.zeros(
                 shape,
                 dtype=self._quant_buffer_dtype,
                 device=device,
@@ -549,11 +549,18 @@ class TorchBasicQuantizer(Quantizer):
 
     def create_quantizer_state(
         self,
-        device: torch.device,
+        device: Optional[torch.device] = None,
+        storage_path: Optional[str] = None,
         cache_length: Optional[int] = None,
         **kwargs,
     ) -> "QuantizerState":
-        return TorchBasicQuantizerState(self, device, cache_length, **kwargs)
+        return TorchBasicQuantizerState(
+            quantizer=self,
+            device=device,
+            storage_path=storage_path,
+            cache_length=cache_length,
+            **kwargs,
+        )
 
     @staticmethod
     def supported_source_dtypes() -> Tuple[torch.dtype, ...]:
@@ -569,6 +576,7 @@ class TorchBasicQuantizerState(QuantizerState):
         self,
         quantizer: TorchBasicQuantizer,
         device: Optional[torch.device] = None,
+        storage_path: Optional[str] = None,
         cache_length: Optional[int] = None,
         pin_memory: bool = False,
     ):
@@ -576,74 +584,142 @@ class TorchBasicQuantizerState(QuantizerState):
             raise ValueError(
                 f"type(quantizer) = {type(quantizer)}, must be TorchBasicQuantizer"
             )
-        super().__init__(quantizer, device, cache_length)
-        # Create buffers
-        shape = (
+        super().__init__(
+            quantizer=quantizer,
+            device=device,
+            storage_path=storage_path,
+            cache_length=cache_length,
+        )
+        self._shape = (
             quantizer._quant_shape[0],
             self.cache_length,
             quantizer._quant_shape[2],
         )
-        self.quant_buffer = torch.zeros(
-            shape,
-            dtype=quantizer._quant_buffer_dtype,
-            device=self.device,
-            pin_memory=pin_memory,
-        )
-        self.quant_scales = torch.zeros(
-            shape[:-1],
-            dtype=torch.float32,
-            device=self.device,
-            pin_memory=pin_memory,
-        )
-        self.quant_zero_points = torch.zeros(
-            shape[:-1],
-            dtype=quantizer._quant_buffer_dtype,
-            device=self.device,
-            pin_memory=pin_memory,
-        )
+        if self.storage_path is None:
+            # Create buffers
+            self.quant_buffer = torch.zeros(
+                self._shape,
+                dtype=quantizer._quant_buffer_dtype,
+                device=self.device,
+                pin_memory=pin_memory,
+            )
+            self.quant_scales = torch.zeros(
+                self._shape[:-1],
+                dtype=torch.float32,
+                device=self.device,
+                pin_memory=pin_memory,
+            )
+            self.quant_zero_points = torch.zeros(
+                self._shape[:-1],
+                dtype=quantizer._quant_buffer_dtype,
+                device=self.device,
+                pin_memory=pin_memory,
+            )
+        else:
+            # File is written on first :meth:`copy_` call
+            self.quant_buffer = None
+            self.quant_scales = None
+            self.quant_zero_points = None
 
     def copy_(
         self,
         start: int = 0,
         end: Optional[int] = None,
     ):
-        if not self.quantizer.buffers_are_allocated:
-            raise IndexError("Buffers of self.quantizer are not allocated")
-        start, end = self._check_range(start, end)
         # Due to changing `batch_size`, the 0 dimension may be smaller
         dim0 = self.quantizer.quant_buffer.shape[0]
-        self.quant_buffer[:dim0, start:end, :].copy_(
-            self.quantizer.quant_buffer[:, start:end, :],
-            non_blocking=True,
-        )
-        self.quant_scales[:dim0, start:end].copy_(
-            self.quantizer.quant_scales[:, start:end],
-            non_blocking=True,
-        )
-        self.quant_zero_points[:dim0, start:end].copy_(
-            self.quantizer.quant_zero_points[:, start:end],
-            non_blocking=True,
-        )
+        start, end = self._check_range(start, end)
+        if self.storage_path is None:
+            if not self.quantizer.buffers_are_allocated:
+                raise IndexError("Buffers of self.quantizer are not allocated")
+            self.quant_buffer[:dim0, start:end, :].copy_(
+                self.quantizer.quant_buffer[:, start:end, :],
+                non_blocking=True,
+            )
+            self.quant_scales[:dim0, start:end].copy_(
+                self.quantizer.quant_scales[:, start:end],
+                non_blocking=True,
+            )
+            self.quant_zero_points[:dim0, start:end].copy_(
+                self.quantizer.quant_zero_points[:, start:end],
+                non_blocking=True,
+            )
+        else:
+            # Storage to file
+            full_size = (
+                dim0 == self._shape[0] and start == 0 and end in (None, self._shape[1])
+            )
+            objs = {
+                "buffer": self.quantizer.quant_buffer[:, start:end, :].to(
+                    self.device, non_blocking=True
+                ),
+                "scales": self.quantizer.quant_scales[:, start:end].to(
+                    self.device, non_blocking=True
+                ),
+                "zero_points": self.quantizer.quant_zero_points[:, start:end].to(
+                    self.device, non_blocking=True
+                ),
+            }
+            if full_size:
+                # Create or overwrite
+                self._write_to_file(objs)
+            else:
+                # Modify content
+                if os.path.exists(self.storage_path):
+                    curr_objs = self._read_from_file()
+                else:
+                    curr_objs = {
+                        "buffer": torch.zeros(
+                            self._shape,
+                            dtype=self.quantizer._quant_buffer_dtype,
+                            device=self.device,
+                        ),
+                        "scales": torch.zeros(
+                            self._shape[:-1],
+                            dtype=torch.float32,
+                            device=self.device,
+                        ),
+                        "zero_points": torch.zeros(
+                            self._shape[:-1],
+                            dtype=self.quantizer._quant_buffer_dtype,
+                            device=self.device,
+                        ),
+                    }
+                for name, target in curr_objs.items():
+                    source = objs[name]
+                    if name == "buffer":
+                        target[:dim0, start:end, :].copy_(source, non_blocking=True)
+                    else:
+                        target[:dim0, start:end].copy_(source, non_blocking=True)
+                self._write_to_file(curr_objs)
 
     def restore(
         self,
         start: int = 0,
         end: Optional[int] = None,
     ):
-        if not self.quantizer.buffers_are_allocated:
-            raise IndexError("Buffers of self.quantizer are not allocated")
-        start, end = self._check_range(start, end)
         # Due to changing `batch_size`, the 0 dimension may be smaller
         dim0 = self.quantizer.quant_buffer.shape[0]
+        start, end = self._check_range(start, end)
+        if self.storage_path is None:
+            if not self.quantizer.buffers_are_allocated:
+                raise IndexError("Buffers of self.quantizer are not allocated")
+            curr_objs = {
+                "buffer": self.quant_buffer,
+                "scales": self.quant_scales,
+                "zero_points": self.quant_zero_points,
+            }
+        else:
+            curr_objs = self._read_from_file()
         self.quantizer.quant_buffer[:, start:end, :].copy_(
-            self.quant_buffer[:dim0, start:end, :],
+            curr_objs["buffer"][:dim0, start:end, :],
             non_blocking=True,
         )
         self.quantizer.quant_scales[:, start:end].copy_(
-            self.quant_scales[:dim0, start:end],
+            curr_objs["scales"][:dim0, start:end],
             non_blocking=True,
         )
         self.quantizer.quant_zero_points[:, start:end].copy_(
-            self.quant_zero_points[:dim0, start:end],
+            curr_objs["zero_points"][:dim0, start:end],
             non_blocking=True,
         )

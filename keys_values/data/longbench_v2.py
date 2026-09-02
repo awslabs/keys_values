@@ -16,6 +16,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 import json
 
+import torch
 from tokenizers import Tokenizer as HFTokenizer
 from tqdm import tqdm
 
@@ -23,10 +24,14 @@ from litgpt.tokenizer import Tokenizer
 
 from keys_values.data.constants import (
     METADATA_SEQ_LENGTHS_KEY,
+    METADATA_TRAIN_VAL_SPLIT_KEY,
     METADATA_KEYS,
     RawDatasetType,
+    Collator,
+    INSTRUCTION_NAME,
+    OUTPUT_NAME,
+    NUM_TOKENS_NAME,
 )
-from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.module import SequenceLengthFilteredDataModule
 from keys_values.data.sequence_classification import (
     SequenceClassificationDataset,
@@ -57,9 +62,16 @@ SUPPORTED_HEAD_MODELS = (
 
 CLASS_LABELS = ("A", "B", "C", "D")
 
-SUPPORTED_TEST_SET_TAGS = [
+SUPPORTED_TEST_SET_TAGS = (
+    "stratified",
     "rest",
-]
+)
+
+METADATA_TRAIN_VAL_TEST_SPLIT_KEY = "train_val_test_split"
+
+LONGBENCH_NUM_CASES = 503
+
+LONGBENCH_BUCKET_SIZES = [(20, 1, 4)] * 9 + [(22, 1, 5)] + [(20, 1, 4)] * 10
 
 
 class LongBenchV2(SequenceLengthFilteredDataModule):
@@ -70,12 +82,35 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
     The dataset is filtered to contain only sequences whose prompt have
     `<= max_seq_length` tokens.
 
+    LongBench-V2 does not prescribe a dev/eval split. Instead, this is
+    determined by `test_set_tag`:
+
+    * "stratified": We use a stratified random split with fixed bucket sizes.
+      There are 20 buckets, 19 of size 25, 1 (middle) of size 28. Each bucket
+      is randomly distributed between train (80%), validation (4%), test (16%),
+      according to :const:`LONGBENCH_BUCKET_SIZES`. This train/valid/test split
+      is written into the metadata file.
+      Note: `max_seq_length`, `val_split_fraction` are ignored in this case.
+      Each split contains short and long sequences.
+    * "rest": The dev set contains sequences of length <= `max_seq_length`, the
+      test set contains all remaining sequences. The dev set is randomly split
+      to train/valid, using `val_split_fraction`. The train/valid split is
+      written into the metadata file.
+
     If `metadata_dir` is given, a metadata file is loaded and/or stored. This
     is strongly recommended to save time. A dictionary is stored as JSON, with
     this structure:
-    - `data[METADATA_SEQ_LENGTHS_KEY][model_name]`: List of sequence lengths
+
+    * `data[METADATA_SEQ_LENGTHS_KEY][model_name]`: List of sequence lengths
       (in tokens) for each record. Here, `model_name` because the tokenizer
       depends on the model.
+    * `data[METADATA_TRAIN_VAL_TEST_SPLIT_KEY][model_name]`: This is used if
+      `test_set_tag == "stratified"`. Determines the train/valid/test split.
+    * `data[METADATA_TRAIN_VAL_SPLIT_KEY][model_name][str(max_seq_length)][str(val_split_fraction)]`:
+      This is used if `test_set_tag == "rest"`. Determines the train/valid
+      split. The metadata file can store entries for different
+      `(max_seq_length, val_split_fraction)` pairs.
+
     """
 
     def __init__(
@@ -83,11 +118,12 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         mask_prompt: bool = True,
         val_split_fraction: float = 0.1,
         ignore_index: int = -100,
-        max_seq_length: Optional[int] = 100000,
+        max_seq_length: Optional[int] = None,
         seed: int = 42,
         repo_id: str = "THUDM/LongBench-v2",
         access_token: Optional[str] = None,
         metadata_dir: Optional[str] = None,
+        store_split_in_metadata: bool = False,
         debug_num_cases: Optional[int] = None,
         trainloader_longest_first: bool = False,
         trainloader_shortest_first: bool = False,
@@ -100,10 +136,13 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
                 (with ``ignore_index``)
             val_split_fraction: The fraction of the dataset to use for the
                 validation dataset. The rest is used for training.
+                Note: This is ignored if `test_set_tag == "stratified"`
             ignore_index: The index to use for elements to be ignored in the
                 label.
             max_seq_length: Sequences longer than this number of tokens are
-                filtered out. Defaults to 100000.
+                filtered out. Defaults to `None` (no limit).
+                Note: This is ignored if `test_set_tag == "stratified"`, but
+                must be given if `test_set_tag == "rest"`.
             seed: The random seed for creating the train/val splits and shuffling
                 the dataset.
             repo_id: The Hugging Face dataset repository ID from where to
@@ -112,6 +151,9 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
                 Default is using the `HF_TOKEN` environment variable.
             metadata_dir: If given, we load store/load metadata from this
                 directory. Strongly recommended to save time.
+            store_split_in_metadata: If `True`, we sample and store the
+                train/val split in the metadata and also load it from there,
+                instead of sampling it anew each time.
             debug_num_cases: If used, we only keep this number of records.
             trainloader_longest_first: If set, :meth:`train_dataloader` returns
                 a data loader whose first batch contain the longest sequences in
@@ -120,19 +162,32 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
                 likely to happen with the longest batch.
             trainloader_shortest_first: Same as `trainloader_longest_first`,
                 but the first batch contain the shortest sequences.
-            test_set_tag: If this is given, we also maintain a test dataset
-                and serve a test dataloader. The tag determines how the test
-                set is chosen. Current choices:
-                - "rest": All cases with sequence length > `max_seq_length`,
-                    sorted by token sequence length (non-decreasing).
+            test_set_tag: Determines how the complete dataset is split into
+                train, validation, and test sets. Defaults to "stratified".
+                Current choices:
+                * "stratified": Stratified random split with fixed bucket sizes.
+                  `val_split_fraction`, `max_seq_length` are ignored.
+                * "rest": Test set is all cases with sequence length >
+                  `max_seq_length`, sorted by token sequence length
+                  (non-decreasing).
             recompute_lengths: If `True`, sequence lengths are recomputed even
                 if they are in the metadata file. The previous information is
                 overwritten.
 
         """
-        if test_set_tag is not None and test_set_tag not in SUPPORTED_TEST_SET_TAGS:
+        if test_set_tag is None:
+            test_set_tag = "stratified"
+        elif test_set_tag not in SUPPORTED_TEST_SET_TAGS:
             raise ValueError(
-                f"test_set_tag = {test_set_tag} is not supported, must be None or in {SUPPORTED_TEST_SET_TAGS}"
+                f"test_set_tag = {test_set_tag} is not supported, must be in {SUPPORTED_TEST_SET_TAGS}"
+            )
+        if test_set_tag == "stratified":
+            if max_seq_length is not None:
+                print("test_set_tag = stratified means that max_seq_length is ignored")
+                max_seq_length = None
+        elif max_seq_length is None:
+            raise ValueError(
+                f"test_set_tag = {test_set_tag} means that max_seq_length must be set"
             )
         super().__init__(
             mask_prompt,
@@ -148,11 +203,14 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
             os.getenv("HF_TOKEN") if access_token is None else access_token
         )
         self.metadata_dir = metadata_dir
+        self.store_split_in_metadata = store_split_in_metadata
         self.head_model = None
         self._is_sequence_classification = None
         self.debug_num_cases = debug_num_cases
         self.test_set_tag = test_set_tag
         self._recompute_lengths = recompute_lengths
+        self._stratified_split: Optional[Dict[str, List[int]]] = None
+        self._split_from_metadata: Optional[Dict[str, List[int]]] = None
 
     def connect(
         self,
@@ -239,7 +297,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
                     class_labels=CLASS_LABELS,
                 )
 
-    def _get_collate_fn(self) -> MyDataLoader:
+    def _get_collate_fn(self) -> Collator:
         if not self._is_sequence_classification:
             return get_sft_collate_fn(ignore_index=self.ignore_index)
         else:
@@ -274,47 +332,157 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
             result["num_classes"] = len(CLASS_LABELS)
         return result
 
-    def _metadata_keys(self) -> List[str]:
-        return [METADATA_SEQ_LENGTHS_KEY, self.model_name]
-
     def _filter_and_transform(
         self,
         dataset: Any,
     ) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
         metadata = self._load_metadata(len(dataset))
         seq_lengths = self._get_seq_lengths(metadata)
-        try_to_store = seq_lengths is None and self.metadata_dir is not None
+        lens_need_store = seq_lengths is None
         # If `seq_lengths` could not be loaded, it is recomputed and stored below.
         # This takes more time.
-        if try_to_store and self.metadata_dir is not None:
+        if lens_need_store and self.metadata_dir is not None:
             print(
                 "\nFiltering the dataset takes a while. I'll store the index in "
                 f"{self.metadata_dir} under key '{self.model_name}', so next time "
                 "this won't have to be done (if you use the same dataset and model)."
             )
+        max_seq_length = (
+            None if self.test_set_tag == "stratified" else self.max_seq_length
+        )
         transformed_data, seq_lengths, test_data = filter_and_transform(
             dataset=dataset,
-            max_seq_length=self.max_seq_length,
+            max_seq_length=max_seq_length,
             tokenizer=self.tokenizer,
             seq_lengths=seq_lengths,
             head_model=self.head_model,
-            test_set_tag=self.test_set_tag,
             debug_num_cases=self.debug_num_cases,
         )
-        if try_to_store:
+        stratified_needs_store = False
+        split_needs_store = False
+        if self.test_set_tag == "stratified":
+            # Stratified random split
+            assert test_data is None  # Sanity check
+            transformed_data, test_data, stratified_needs_store = (
+                self._load_or_sample_stratified_split(
+                    metadata=metadata,
+                    seq_lengths=seq_lengths,
+                    transformed_data=transformed_data,
+                )
+            )
+        else:
+            split_needs_store = self._load_or_sample_split(
+                metadata,
+                devset_length=len(transformed_data),
+            )
+        if self.metadata_dir is not None and (
+            lens_need_store or stratified_needs_store or split_needs_store
+        ):
             if metadata is None:
                 metadata = dict()
-            set_dict(metadata, self._metadata_keys(), seq_lengths)
+            for need_store, metakeys, value in (
+                (lens_need_store, self._metakeys_seq_lengths, seq_lengths),
+                (
+                    stratified_needs_store,
+                    self._metakeys_train_val_test_split,
+                    self._stratified_split,
+                ),
+                (
+                    split_needs_store,
+                    self._metakeys_train_val_split,
+                    self._split_from_metadata,
+                ),
+            ):
+                if need_store:
+                    assert value is not None
+                    set_dict(metadata, metakeys, value)
             self._store_metadata(metadata)
         return transformed_data, test_data
+
+    @property
+    def _metakeys_seq_lengths(self) -> List[str]:
+        return [METADATA_SEQ_LENGTHS_KEY, self.model_name]
+
+    @property
+    def _metakeys_train_val_test_split(self) -> List[str]:
+        return [METADATA_TRAIN_VAL_TEST_SPLIT_KEY, self.model_name]
+
+    @property
+    def _metakeys_train_val_split(self) -> List[str]:
+        return [
+            METADATA_TRAIN_VAL_SPLIT_KEY,
+            self.model_name,
+            str(self.max_seq_length),
+            str(self.val_split_fraction),
+        ]
 
     def _get_seq_lengths(
         self, metadata: Optional[Dict[str, Any]]
     ) -> Optional[List[int]]:
         if not self._recompute_lengths:
-            return get_dict(metadata, self._metadata_keys())
+            return get_dict(metadata, self._metakeys_seq_lengths)
         else:
             return None
+
+    def _load_or_sample_stratified_split(
+        self,
+        metadata: Optional[Dict[str, Any]],
+        seq_lengths: List[int],
+        transformed_data: RawDatasetType,
+    ) -> Tuple[RawDatasetType, RawDatasetType, bool]:
+        needs_store = False
+        self._stratified_split = get_dict(metadata, self._metakeys_train_val_test_split)
+        if self._stratified_split is None:
+            # Sample stratified split
+            self._stratified_split = sample_stratified_split(
+                seq_lengths,
+                self._generator,
+            )
+            needs_store = True
+        # Split dataset
+        dev_data = [
+            transformed_data[idx]
+            for idx in self._stratified_split["train"] + self._stratified_split["val"]
+        ]
+        test_data = [transformed_data[idx] for idx in self._stratified_split["test"]]
+        # Split of dev -> (train, val) is simple now
+        len_train = len(self._stratified_split["train"])
+        len_all = len_train + len(self._stratified_split["val"])
+        self._split_from_metadata = {
+            "train": list(range(len_train)),
+            "val": list(range(len_train, len_all)),
+        }
+        return dev_data, test_data, needs_store
+
+    def _load_or_sample_split(
+        self,
+        metadata: Optional[Dict[str, Any]],
+        devset_length: int,
+    ) -> bool:
+        needs_store = False
+        if not self.store_split_in_metadata:
+            # Splits are not stored to / loaded from metadata
+            self._split_from_metadata = None
+            return False
+        self._split_from_metadata = get_dict(metadata, self._metakeys_train_val_split)
+        if self._split_from_metadata is None:
+            # Sample train/val split -> store to metadata
+            dev_perm = torch.randperm(
+                devset_length,
+                generator=self._generator,
+            )
+            val_size = max(int(devset_length * self.val_split_fraction), 1)
+            self._split_from_metadata = {
+                "train": dev_perm[val_size:].tolist(),
+                "val": dev_perm[:val_size].tolist(),
+            }
+            needs_store = True
+        return needs_store
+
+    def _get_train_val_split_from_metadata(
+        self,
+    ) -> Optional[Dict[str, List[int]]]:
+        return self._split_from_metadata
 
     def _load_metadata(self, num_records: int) -> Optional[Dict[str, Any]]:
         if self.metadata_dir is None:
@@ -403,15 +571,59 @@ PROMPTLINES_FINAL = {
 }
 
 
+def sample_stratified_split(
+    seq_lengths: List[int],
+    generator: torch.Generator,
+) -> Dict[str, List[int]]:
+    sort_ind, _ = zip(*sorted(enumerate(seq_lengths), key=lambda x: x[1]))
+    sort_ind = torch.tensor(sort_ind)
+    train_ind = None
+    val_ind = None
+    test_ind = None
+    pos = 0
+    for train_sz, val_sz, test_sz in LONGBENCH_BUCKET_SIZES:
+        sz = train_sz + val_sz + test_sz
+        tpv_sz = train_sz + val_sz
+        ind_slice = sort_ind[pos : (pos + sz)]
+        rnd_ind = torch.randperm(sz, generator=generator)
+        train_new = ind_slice[rnd_ind[:train_sz]]
+        val_new = ind_slice[rnd_ind[train_sz:tpv_sz]]
+        test_new = ind_slice[rnd_ind[tpv_sz:]]
+        if train_ind is None:
+            train_ind = train_new
+            val_ind = val_new
+            test_ind = test_new
+        else:
+            train_ind = torch.cat((train_ind, train_new))
+            val_ind = torch.cat((val_ind, val_new))
+            test_ind = torch.cat((test_ind, test_new))
+        pos += sz
+    assert pos == LONGBENCH_NUM_CASES, f"pos = {pos} != {LONGBENCH_NUM_CASES}"
+    # Shuffle `train_ind` randomly (the others don't matter)
+    rnd_ind = torch.randperm(train_ind.numel(), generator=generator)
+    train_ind = train_ind[rnd_ind]
+    return {
+        "train": train_ind.tolist(),
+        "val": val_ind.tolist(),
+        "test": test_ind.tolist(),
+    }
+
+
 def filter_and_transform(
     dataset: Any,
     max_seq_length: Optional[int],
     tokenizer: Tokenizer,
     seq_lengths: Optional[List[int]],
     head_model: str,
-    test_set_tag: Optional[str],
     debug_num_cases: Optional[int] = None,
 ) -> Tuple[RawDatasetType, List[int], Optional[RawDatasetType]]:
+    """
+    Determines sequence lengths (in tokens), if not already given as `seq_lengths`.
+    Also, if `max_seq_length` is given, `dataset` is split into a dev set (all
+    sequences of length `<= max_seq_length`) and a test set (all remaining
+    sequences, sorted in ascending order).
+
+    """
     # From https://huggingface.co/datasets/THUDM/LongBench-v2:
     # {
     #    "_id": "Unique identifier for each piece of data",
@@ -427,7 +639,7 @@ def filter_and_transform(
     #
     # Prompt is from:
     # https://github.com/THUDM/LongBench/blob/main/prompts/0shot.txt
-    train_results: RawDatasetType = []
+    dev_results: RawDatasetType = []
     test_results: RawDatasetType = []
     num_used = 0
     num_total = 0
@@ -461,49 +673,47 @@ def filter_and_transform(
         )
         instruction = "\n".join(instruction_list)
         output = entry["answer"]
+        if output not in CLASS_LABELS:
+            raise ValueError(
+                f"idx={idx}: entry['answer'] = '{output}', must be in {CLASS_LABELS}"
+            )
         if seq_lengths is None:
             encoded_prompt = tokenizer.encode(instruction)
             seq_length = encoded_prompt.numel()
             new_seq_lengths.append(seq_length)
         else:
             seq_length = seq_lengths[idx]
+        new_case = {
+            INSTRUCTION_NAME: instruction,
+            OUTPUT_NAME: output,
+            NUM_TOKENS_NAME: seq_length,
+        }
         if max_seq_length is None or seq_length <= max_seq_length:
             num_used += 1
-            train_results.append(
-                {
-                    "instruction": instruction,
-                    "output": output,
-                    "num_tokens_instruction": seq_length,
-                }
-            )
+            dev_results.append(new_case)
             if debug_num_cases is not None and num_used >= debug_num_cases:
                 print(f"DEBUG: Stop with {num_used} records.")
                 break
-        elif test_set_tag == "rest":
-            test_results.append(
-                {
-                    "instruction": instruction,
-                    "output": output,
-                    "num_tokens_instruction": seq_length,
-                }
-            )
-    print(f"\nKept {num_used} of {num_total} records")
-    if test_set_tag == "rest" and test_results:
+        elif max_seq_length is not None:
+            test_results.append(new_case)
+    if max_seq_length is not None:
+        print(f"\nKept {num_used} of {num_total} records")
         # Sort by increasing length
         test_results = sorted(
             test_results,
-            key=lambda x: x["num_tokens_instruction"],
+            key=lambda x: x[NUM_TOKENS_NAME],
         )
-        min_length = test_results[0]["num_tokens_instruction"]
-        max_length = test_results[-1]["num_tokens_instruction"]
+        min_length = test_results[0][NUM_TOKENS_NAME]
+        max_length = test_results[-1][NUM_TOKENS_NAME]
         print(
             f"Test dataset has {len(test_results)} records, token lengths between {min_length} and {max_length}"
         )
     else:
         test_results = None
+
     if seq_lengths is None:
         seq_lengths = new_seq_lengths
-    return train_results, seq_lengths, test_results
+    return dev_results, seq_lengths, test_results
 
 
 def get_instruction_template(head_model: str) -> Tuple[str, Tuple[str, ...]]:
@@ -727,7 +937,7 @@ def truncate_contexts_and_transform(
             instruction = "\n".join(instruction_list)
             output = entry["answer"]
             num_used += 1
-            results.append({"instruction": instruction, "output": output})
+            results.append({INSTRUCTION_NAME: instruction, OUTPUT_NAME: output})
             if debug_num_cases is not None and num_used >= debug_num_cases:
                 print(f"DEBUG: Stop with {num_used} records.")
                 break

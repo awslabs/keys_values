@@ -52,6 +52,7 @@ from keys_values.attention.attention_utils import (
     SDPA_KERNELS_BEST_ORDERING,
 )
 from keys_values.config import Config as ConfigFull
+from keys_values.cpu_memory import FileNameManager
 from keys_values.data import Helmet, LongBenchV2, MyDataLoader, INPUT_IDS_NAME
 from keys_values.data.constants import TARGETS_STRINGS_NAME
 from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
@@ -101,8 +102,12 @@ from keys_values.fused import (
 )
 from keys_values.generate.base import generate
 from keys_values.gpu_memory import RecordGPUMemory
-from keys_values.head_model import HeadModel, CrossEntropyOnLogits
-from keys_values.head_model_factory import HeadModelFactory
+from keys_values.head_model import (
+    HeadModel,
+    CrossEntropyOnLogits,
+    SequenceClassificationOnLogits,
+)
+from keys_values.head_model_factory import HeadModelFactory, SUPPORTED_HEAD_MODELS
 from keys_values.kvcache.consts import split_name
 from keys_values.kvcache.factory import (
     KVCacheFactory,
@@ -155,8 +160,8 @@ def setup(
     out_dir: Path = Path(DEFAULT_OUT_DIR),
     precision: Optional[str] = None,
     devices: Union[int, str] = 1,
-    resume: Optional[str] = None,
     data: Optional[DataModule] = None,
+    resume: Optional[str] = None,
     train: TrainArgs = TrainArgs(
         save_interval=50,
         log_interval=1,
@@ -202,10 +207,12 @@ def setup(
         cachecp_qname=None,
         single_tokens_for_targets=False,
         max_match_trials_pack_arg=8,
-        layercp_pin_memory=False,
-        cachecp_pin_memory=False,
+        layercp_pin_memory=True,
+        cachecp_pin_memory=True,
+        checkpoint_temp_dir=None,
+        checkpoint_frac_ram=0.1,
     ),
-    head_model: str = CrossEntropyOnLogits.NAME,
+    head_model: Optional[str] = None,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
     verbose: Optional[str] = None,
     attention_forward_temp_size_gb: Optional[float] = None,
@@ -238,12 +245,11 @@ def setup(
             /teamspace/jobs/<job-name>/share.
         precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
         devices: How many devices/GPUs to user
+        data: Data-related arguments. Mandatory
         resume: Name of checkpoint directory from which training is to be
             resumed, such as "step-000100" or "final". Training can only be
             resumed from a checkpoint for which a training state is also
             available, see `training_state_num`.
-        data: Data-related arguments. If not provided, the default is
-            ``keys_values.data.LongBenchV2``.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
             Note: We modified the defaults from `train.lr_warmup_steps=100` to
             `train.lr_warmup_fraction=0.15`, so the linear warm-up is the first
@@ -265,7 +271,7 @@ def setup(
             `grad.layers_per_cell` and `grad.chunks_per_cell_multiplier` given
             your GPU memory (defaults are smallest sensible values).
         head_model: Name of the head model to use, see
-            :class:`HeadModelFactory`. Defaults to "next_token_prediction"
+            :class:`HeadModelFactory`. Default depends on `data`.
         head_model_kwargs: Extra keyword arguments to pass to the head model
             factory.
         verbose: Verbosity level for logging outputs.
@@ -328,10 +334,10 @@ def setup(
         setup,
         checkpoint_dir,
         out_dir,
+        data,
         precision,
         devices,
         resume,
-        data,
         train,
         None,
         eval,
@@ -366,10 +372,10 @@ def setup_internal(
     original_setup: Callable,
     checkpoint_dir: Path,
     out_dir: Path,
+    data: Optional[DataModule],
     precision: Optional[str],
     devices: Union[int, str],
     resume: Optional[str],
-    data: Optional[DataModule],
     train: TrainArgs,
     lora: Optional[LoRAArgs],
     eval: EvalArgs,
@@ -379,7 +385,7 @@ def setup_internal(
     access_token: Optional[str],
     kv_cache: KVCacheArgs,
     grad: GradientArgs,
-    head_model: str,
+    head_model: Optional[str],
     head_model_kwargs: Optional[Dict[str, Any]],
     verbose: Optional[str],
     attention_forward_temp_size_gb: Optional[float],
@@ -404,16 +410,30 @@ def setup_internal(
         access_token=access_token,
     )
     pprint(locals())
-    data = LongBenchV2() if data is None else data
-    if isinstance(data, LongBenchV2) and data.metadata_dir is None:
-        data.metadata_dir = str(out_dir / "data")
-        print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
+    if data is None:
+        data = Helmet(
+            dataset_key="trec_coarse",
+            max_length="128k",
+        )
+    # TODO: Let `data` decide on default head model, not hardcoded here!
+    default_head_model = CrossEntropyOnLogits.NAME
+    if isinstance(data, LongBenchV2):
+        if data.metadata_dir is None:
+            data.metadata_dir = str(out_dir / "data")
+            print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
+        default_head_model = SequenceClassificationOnLogits.NAME
     if isinstance(data, Helmet) and data.metadata_dir is None:
         data.metadata_dir = str(out_dir / "data")
         print(f"Setting Helmet.metadata_dir to {data.metadata_dir}")
     if not isinstance(data, Helmet) and eval.use_sample_metric:
         raise ValueError(
             "use_sample_metric=True currently supported only for Helmet datasets"
+        )
+    if head_model is None:
+        head_model = default_head_model
+    elif head_model not in SUPPORTED_HEAD_MODELS:
+        raise ValueError(
+            f"head_model={head_model} is not supported (choose from {SUPPORTED_HEAD_MODELS})"
         )
     out_dir = init_out_dir(out_dir)
     if data.metadata_dir is not None:
@@ -677,8 +697,8 @@ def main(
     ignore_index = getattr(data, "ignore_index", -100)
     batch_transform = BatchTransformFactory.from_head_model(
         head_model=head_model_name,
-        pad_id=0,
         eos_id=tokenizer.eos_id,
+        pad_id=0,
         ignore_index=ignore_index,
     )
     steps_per_epoch = len(train_dataloader)
@@ -700,6 +720,19 @@ def main(
     set_fused_rope_enabled(sdpa.fused_rope)
     set_fused_rmsnorm_enabled(sdpa.fused_rmsnorm)
     set_fused_swiglu_enabled(sdpa.fused_swiglu)
+    # Create file-based manager for virtual memory to be used for checkpoints
+    if grad.checkpoint_temp_dir is not None:
+        # Create `checkpoint_name_manager`, which creates the names for storage
+        # files and also owns cleaning them up at the end.
+        print_message(
+            f"Creating manager for memory-mapped files under {grad.checkpoint_temp_dir}"
+        )
+        checkpoint_name_manager = FileNameManager(
+            grad.checkpoint_temp_dir,
+            name_pattern="state{num}.pth",
+        )
+    else:
+        checkpoint_name_manager = None
 
     if fabric.global_rank == 0:
         os.makedirs(out_dir, exist_ok=True)
@@ -765,6 +798,7 @@ def main(
             fabric=fabric,
             debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
             oom_error_recovery=oom_error_recovery,
+            checkpoint_name_manager=checkpoint_name_manager,
             **wrap_kwargs,
         )
 
@@ -1070,6 +1104,7 @@ def wrap_gpt_model(
     debug_dont_use_autograd_hooks: bool = False,
     oom_error_recovery: bool = False,
     model_kwargs: Optional[Dict[str, Any]] = None,
+    checkpoint_name_manager: Optional[FileNameManager] = None,
 ) -> Tuple[
     Union[LongContextGradientModel, LongContextInferenceModel],
     Optional[KVCacheOffloader],
@@ -1184,6 +1219,8 @@ def wrap_gpt_model(
             backward_tmp_array_limit_gb=backward_tmp_array_limit_gb,
             layercp_pin_memory=grad.layercp_pin_memory,
             cachecp_pin_memory=grad.cachecp_pin_memory,
+            checkpoint_name_manager=checkpoint_name_manager,
+            checkpoint_frac_ram=grad.checkpoint_frac_ram,
             autograd_hooks_kwargs=autograd_hooks_kwargs,
             profile_steps=profile_grad_times,
             offload_device=cpu_offload_device,
@@ -1689,7 +1726,8 @@ def fit(
                     f"\nEpoch {metrics['epoch']} | iter {metrics['iter']:3d} |"
                     f" loss train: {metrics['loss']:.3f},"
                     f" {eval_metric_name} valid: {val_loss} |"
-                    f" iter time: {metrics['iter_time']:.3f} s",
+                    f" iter time: {metrics['iter_time']:.3f} s |"
+                    f" seq_len: {batch[INPUT_IDS_NAME].shape[-1]}",
                     fabric,
                 )
                 fabric.log_dict(metrics, step=state["iter_num"])

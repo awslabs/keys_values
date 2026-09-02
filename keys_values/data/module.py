@@ -18,7 +18,7 @@ from torch.utils.data import random_split, Subset
 
 from keys_values.data.constants import (
     RawDatasetType,
-    CollateFnType,
+    Collator,
     NUM_TOKENS_NAME,
 )
 from litgpt.data import DataModule
@@ -139,7 +139,8 @@ class SequenceLengthFilteredDataModule(DataModule):
             ignore_index: The index to use for elements to be ignored in the
                 label.
             max_seq_length: Sequences longer than this number of tokens are
-                filtered out.
+                filtered out from training and validation dataset (but not from
+                the test dataset).
             seed: The random seed for creating the train/val splits and shuffling
                 the dataset.
             trainloader_longest_first: If set, :meth:`train_dataloader` returns
@@ -160,6 +161,7 @@ class SequenceLengthFilteredDataModule(DataModule):
         self.ignore_index = ignore_index
         self.max_seq_length = max_seq_length
         self.seed = seed
+        self._generator = torch.Generator().manual_seed(self.seed)
         self.head_model = None
         self._is_sequence_classification = None
         self.prompt_style = Default()
@@ -284,7 +286,7 @@ class SequenceLengthFilteredDataModule(DataModule):
 
     def _get_train_val_split_from_metadata(
         self,
-    ) -> Optional[Tuple[List[int], List[int]]]:
+    ) -> Optional[Dict[str, List[int]]]:
         return None
 
     def setup(self, stage: str = "") -> None:
@@ -313,7 +315,7 @@ class SequenceLengthFilteredDataModule(DataModule):
         else:
             result = self._get_train_val_split_from_metadata()
             if result is not None:
-                train_ind, val_ind = result
+                train_ind, val_ind = result["train"], result["val"]
                 print(
                     f"Development set split loaded from metadata: training ({len(train_ind)}) and validation ({len(val_ind)})"
                 )
@@ -321,7 +323,7 @@ class SequenceLengthFilteredDataModule(DataModule):
             train_data, val_data = random_split(
                 data,
                 [1.0 - self.val_split_fraction, self.val_split_fraction],
-                generator=torch.Generator().manual_seed(self.seed),
+                generator=self._generator,
             )
             # Retain split indices
             train_ind = [int(x) for x in train_data.indices]
@@ -372,6 +374,7 @@ class SequenceLengthFilteredDataModule(DataModule):
             max_seq_length=self.max_seq_length,
         )
         if test_data is not None:
+            # Test set sequences are not restricted by `max_seq_length`
             test_kwargs = dict(
                 data=pad_dataset(
                     test_data,
@@ -386,7 +389,7 @@ class SequenceLengthFilteredDataModule(DataModule):
             test_kwargs = None
         self._create_datasets(train_kwargs, val_kwargs, test_kwargs)
 
-    def _get_collate_fn(self) -> CollateFnType:
+    def _get_collate_fn(self) -> Collator:
         """
         Returns:
             Collator function, to create batch from list of cases. Must filter

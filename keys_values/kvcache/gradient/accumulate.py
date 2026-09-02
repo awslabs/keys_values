@@ -50,6 +50,7 @@ from keys_values.kvcache.gradient.checkpoints import (
     KVCacheBufferCheckpoints,
     KVCacheBufferQuantizedCheckpoints,
     KVCacheBufferDefaultCheckpoints,
+    QuantizerStateForCheckpoint,
 )
 from keys_values.kvcache.gradient.inference_replay import inference_replay_cache_factory
 from keys_values.kvcache.stack_layers import CellBlocks
@@ -59,7 +60,7 @@ from keys_values.long_context import (
     HEAD_OR_INITIAL_TENSORS_MAX_BYTES,
 )
 from keys_values.model import GPT
-from keys_values.utils import VerbosityLevels
+from keys_values.utils import VerbosityLevels, wrap_tqdm_conditional
 
 
 def checkpoint_hook(
@@ -157,6 +158,8 @@ class GradientAccumulator:
         train_cache_kwargs: Optional[Dict[str, Any]] = None,
         pin_memory: bool = False,
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        delay_allocation: bool = False,
+        state_allocator: Optional[QuantizerStateForCheckpoint] = None,
     ):
         if qname is None:
             qname = "torch-quantized8"
@@ -197,6 +200,8 @@ class GradientAccumulator:
         self._train_cache_kwargs = train_cache_kwargs
         self._pin_memory = pin_memory
         self._debug_tensors = debug_tensors
+        self._delay_allocation = delay_allocation
+        self._state_allocator = state_allocator
 
     def annotation_usage_logs(self) -> Dict[int, AnnotationUsageLog]:
         return self._annotation_usage_logs
@@ -325,6 +330,11 @@ class GradientAccumulator:
         # How many checkpointers per cache length?
         num_required = self._get_num_required()
         if self.qname == "default":
+            num_entries = sum(num_required.values())
+            if not self._delay_allocation:
+                print(
+                    f"GradientAccumulator: Allocate _checkpoints_per_length ({num_entries} entries)"
+                )
             self._checkpoints_per_length = {
                 cache_length: [
                     KVCacheBufferDefaultCheckpoints(
@@ -333,8 +343,11 @@ class GradientAccumulator:
                         cache_length=cache_length,
                         batch_size=self._batch_size,
                         pin_memory=pin_memory,
+                        delay_allocation=self._delay_allocation,
                     )
-                    for _ in range(num)
+                    for _ in wrap_tqdm_conditional(
+                        range(num), do_wrap=not self._delay_allocation
+                    )
                 ]
                 for cache_length, num in num_required.items()
             }
@@ -353,7 +366,13 @@ class GradientAccumulator:
                 cache_params=self._cache_params,
                 cache_kwargs=self.cache_kwargs,
                 dequant_kwargs=dequant_kwargs,
+                allocate_buffers=not self._delay_allocation,
             )[0]
+            num_entries = sum(num_required.values())
+            if not self._delay_allocation:
+                print(
+                    f"GradientAccumulator: Allocate _checkpoints_per_length ({num_entries} entries)"
+                )
             self._checkpoints_per_length = {
                 cache_length: [
                     KVCacheBufferQuantizedCheckpoints(
@@ -361,8 +380,12 @@ class GradientAccumulator:
                         quant_buffers=quant_buffers,
                         cache_length=cache_length,
                         pin_memory=pin_memory,
+                        delay_allocation=self._delay_allocation,
+                        state_allocator=self._state_allocator,
                     )
-                    for _ in range(num)
+                    for _ in wrap_tqdm_conditional(
+                        range(num), do_wrap=not self._delay_allocation
+                    )
                 ]
                 for cache_length, num in num_required.items()
             }
@@ -502,9 +525,9 @@ class GradientAccumulator:
         temporarily replaced by specific replau caches, the setup is restored
         in the end.
 
-        Note that `get_inputs_slice` and `write_head_gradients_slice` can refer
-        to the same checkpoint object. We guarantee that any slice is read
-        before it is written to.
+        Note that `get_head_gradients_slice` and `write_head_gradients_slice`
+        can refer to the same checkpoint object. We guarantee that any slice is
+        read before it is written to.
 
         Args:
             model_part: Represents layers of model for the cell
@@ -851,9 +874,9 @@ class GradientAccumulator:
         given by `input_ids`, targets by `targets`. These two are aligned on
         the right.
 
-        Note that `get_inputs_slice` and `write_outputs_slice` can refer to the
-        same underlying buffer or checkpoint object. We guarantee that any slice
-        is read before it is written to.
+        Note that `get_inputs_slice` and `write_head_gradients_slice` can refer
+        to the same underlying buffer or checkpoint object. We guarantee that
+        any slice is read before it is written to.
 
         Note: `gpt_model` passed here only needs to contain the blocks
         `gpt_model.transformer.ln_f` and `gpt_model.lm_head` related to the

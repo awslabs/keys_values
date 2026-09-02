@@ -453,15 +453,22 @@ Moreover, `--data.*` is used to set constructor parameters for the dataset.
 
 Relevant arguments for `LongBenchV2`:
 
+* `data.test_set_tag`: Determines how the complete dataset is split into train,
+  validation, and test sets. Defaults to "stratified". Current choices:
+  - "stratified": Stratified random split with fixed bucket sizes.
+    `val_split_fraction`, `max_seq_length` are ignored.
+  - "rest": Test set contains all cases with sequence length >
+    `max_seq_length`, sorted by token sequence length (non-decreasing).
 * `data.max_seq_length`: If given, we filter sequences to have token length
   less or equal this limit. The remaining data is split into training and
-  validation sets.
+  validation sets. Ignored if `test_set_tag == "stratified"`.
 * `data.metadata_dir`: If given, we store meta data into this directory. In
   particular, we tokenize all sequences and determine their token lengths, so
   that filtering runs much faster in the next call, independent of the value
-  of `data.max_seq_length`.
-* `data.val_split_fraction`: The fraction of the dataset to use for the
-  validation dataset. The rest is used for training.
+  of `data.max_seq_length`. Also, the train/validation split is stored here.
+* `data.val_split_fraction`: The fraction of the dev dataset to use for the
+  validation dataset. The rest is used for training. Ignored if
+  `test_set_tag == "stratified"`.
 * `data.trainloader_longest_first`: If `True`, the training dataloader returns
   the longest sequences in the first batch. This is useful in order to detect
   out of memory errors early.
@@ -469,11 +476,6 @@ Relevant arguments for `LongBenchV2`:
   the shortest sequences in the first batch. This can be useful for debugging.
 * `data.num_workers`, `data.pin_memory`: Arguments passed to
   `torch.utils.data.DataLoader`.
-* `data.test_set_tag`: If this is given, we also maintain a test dataset and
-  serve a test dataloader. The tag determines how the test set is chosen. Current
-  choices:
-  - "rest": All cases with sequence length > `data.max_seq_length`, sorted by
-    token sequence length (non-decreasing).
 
 > When implementing a new `DataModule` for your dataset, we strongly recommend
 > you adopting [SimilarSequenceLengthIterable](./keys_values/data/iterators.py#L172)
@@ -1050,6 +1052,51 @@ Other arguments for fine-tuning are:
   checkpoints are pinned. This can run faster, but needs more real CPU memory.
 * `--grad.cachecp_pin_memory`: If `True`, the CPU memory pages for KV cache
   checkpoints are pinned. This can run faster, but needs more real CPU memory.
+
+### Training with Very Long Sequences
+
+Recall that we checkpoint both layer inputs and key-value cache buffers to
+ensure that gradient computation works with any sequence length and number
+of layers. The catch is that the combined size of checkpoints scales linearly
+with sequence length and number of layers. By default, all checkpoints are
+stored in CPU RAM, but this can fill up for very long sequences. Since `PyTorch`
+uses the underlying OS for CPU memory management, this often leads to nasty
+crashes without sensible error messaging.
+
+Our library contains dedicated code in order to save and load checkpoints to
+disk. It is designed so that available CPU memory is used first, equalized over
+processes linked with each device, but files are used once CPU RAM is full up
+to a fraction. It is activated by using the following arguments:
+
+```bash
+    --grad.layercp_qname torch-quantized8 \
+    --grad.cachecp_qname torch-quantized8 \
+    --grad.layercp_pin_memory False \
+    --grad.cachecp_pin_memory False \
+    --grad.checkpoint_temp_dir /opt/dlami/nvme/swapspace \
+    --grad.checkpoint_frac_ram 0.1 \
+```
+
+* `--grad.layercp_qname`, `--grad.cachecp_qname`: Use quantization here, to 8
+  or even to 4 bits, in order to save CPU and disk space.
+* `--grad.layercp_pin_memory`, `--grad.cachecp_pin_memory`: Don't use memory
+  pinning for checkpoints. Once files are used, transfer is slow anyway, and
+  pinning may reduce the amount of CPU space available.
+* `--grad.checkpoint_temp_dir`: Path to write checkpoint files to. Must point
+  to a disk with sufficient free space, ideally some ephemeral storage local
+  to compute. Our implementation works with AWS EFS as well, but this can be
+  much slower than a local disk.
+* `--grad.checkpoint_frac_ram`: Roughly this fraction of available CPU RAM is
+  protected and will not be used to store checkpoints. If more than one device
+  is used (so `--devices` larger than one), the non-protected memory is split
+  between them. Defaults to 0.1. If your code crashes or freezes due to filling
+  up CPU memory, consider increasing this value.
+
+Note that training becomes quite a bit slower if most checkpoints have to be
+stored to disk. It is always better to choose a compute instance with lots of
+CPU memory. You can use `--grad.checkpoint_temp_dir` to be on the safe side,
+since file-based checkpoints are used only if the available CPU memory fills
+up.
 
 
 ## Evaluation of Fine-tuned Models

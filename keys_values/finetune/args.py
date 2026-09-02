@@ -228,6 +228,23 @@ class GradientArgs:
         cachecp_pin_memory: If `True`, the CPU memory pages for KV cache
             checkpoints are pinned. This can run faster, but also needs more
             real CPU memory.
+        checkpoint_temp_dir: If given, we use a file-based manager for virtual
+            memory for checkpoints. Different to the default swap space of the
+            system, this can be on an external file system. File-based
+            allocations are used only once the normal CPU RAM is has been used
+            for checkpoints to some extent, see `checkpoint_frac_ram`.
+        checkpoint_frac_ram: Only used if `checkpoint_temp_dir` is given.
+            Whenever a new checkpoint buffer is allocated, it is either taken
+            from normal CPU RAM or managed as file. The former is chosen if
+            `available_cpu > max(threshold, n_bytes * 1.1)`, where `n_bytes` is
+            the size of the new buffer, and
+            `threshold = checkpoint_frac_ram * available_cpu_0`. Here,
+            `available_cpu_0` is the amount of CPU RAM available just before
+            layer input checkpoints are allocated.
+            This means that `threshold` bytes of CPU RAM are protected to not
+            be used for checkpoints. The smaller `checkpoint_frac_ram`, the more
+            of CPU RAM can be used for checkpoints before files are used. Too
+            small fractions can lead to crashes or freezing.
         debug_print_annotations: If `True`, debug logging during `backward`
             computations are written which allow to track annotations for
             `autograd` saved tensors hooks.
@@ -241,6 +258,8 @@ class GradientArgs:
     max_match_trials_pack_arg: Optional[int] = None
     layercp_pin_memory: bool = True
     cachecp_pin_memory: bool = True
+    checkpoint_temp_dir: Optional[str] = None
+    checkpoint_frac_ram: float = 0.1
     debug_print_annotations: bool = False
 
     def __post_init__(self):

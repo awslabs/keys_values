@@ -765,6 +765,8 @@ class LongContextInferenceModel(GPTAndHeadModel):
             max_cell_length = int(
                 factor * max_cache_length * self.chunks_per_cell_multiplier
             )
+            # Round up or down to the closest multiple of `chunk_size`
+            max_cell_length = self.chunk_size * round(max_cell_length / self.chunk_size)
             chunks_per_cell = []
             cell_length = 0
             num_chunks = 0
