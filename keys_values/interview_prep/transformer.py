@@ -161,6 +161,8 @@ class FeedForwardNetwork(nn.Module):
         self.proj = nn.Linear(i_size, config.n_embd, bias=config.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # This setup is called GLU (gated linear unit), where silu is used for
+        # the gating
         x1 = self.fc_1(x)
         x2 = self.fc_2(x)
         # F.silu(x1) = x1 * sigma(x1): Sigmoid linear unit
@@ -185,7 +187,7 @@ def sdpa_naive(
     bs, nh_q, q_len, head_size = query.shape
     _, nh_k, kv_len, _ = key.shape
     q_per_kv = nh_q // nh_k
-    assert q_len <= kv_len
+    assert not causal_mask or q_len <= kv_len
     assert q_per_kv >= 1 and nh_q == nh_k * q_per_kv
     if scale_factor is None:
         scale_factor = 1.0 / math.sqrt(head_size)
