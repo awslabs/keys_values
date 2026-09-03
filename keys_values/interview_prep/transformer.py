@@ -170,6 +170,9 @@ class FeedForwardNetwork(nn.Module):
         return self.proj(x)
 
 
+# TODO: MoE FFN layer, derived from litgpt.model.LLaMAMoE
+
+
 def sdpa_naive(
     query: torch.Tensor,
     key: torch.Tensor,
