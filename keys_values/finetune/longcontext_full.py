@@ -1689,7 +1689,8 @@ def fit(
                     f"\nEpoch {metrics['epoch']} | iter {metrics['iter']:3d} |"
                     f" loss train: {metrics['loss']:.3f},"
                     f" {eval_metric_name} valid: {val_loss} |"
-                    f" iter time: {metrics['iter_time']:.3f} s",
+                    f" iter time: {metrics['iter_time']:.3f} s |"
+                    f" seq_len: {batch[INPUT_IDS_NAME].shape[-1]}",
                     fabric,
                 )
                 fabric.log_dict(metrics, step=state["iter_num"])
