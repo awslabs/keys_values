@@ -368,20 +368,22 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         ):
             if metadata is None:
                 metadata = dict()
-            if lens_need_store:
-                set_dict(metadata, self._metakeys_seq_lengths, seq_lengths)
-            if stratified_needs_store:
-                assert self._stratified_split is not None
-                set_dict(
-                    metadata,
+            for need_store, metakeys, value in (
+                (lens_need_store, self._metakeys_seq_lengths, seq_lengths),
+                (
+                    stratified_needs_store,
                     self._metakeys_train_val_test_split,
                     self._stratified_split,
-                )
-            if split_needs_store:
-                assert self._split_from_metadata is not None
-                set_dict(
-                    metadata, self._metakeys_train_val_split, self._split_from_metadata
-                )
+                ),
+                (
+                    split_needs_store,
+                    self._metakeys_train_val_split,
+                    self._split_from_metadata,
+                ),
+            ):
+                if need_store:
+                    assert value is not None
+                    set_dict(metadata, metakeys, value)
             self._store_metadata(metadata)
         return transformed_data, test_data
 

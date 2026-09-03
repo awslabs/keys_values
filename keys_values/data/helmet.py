@@ -254,26 +254,28 @@ class Helmet(SequenceLengthFilteredDataModule):
         if dev_needs_store or eval_needs_store or split_needs_store:
             if metadata is None:
                 metadata = dict()
-            if dev_needs_store:
-                set_dict(
-                    metadata,
+            for need_store, metakeys, value in (
+                (
+                    dev_needs_store,
                     self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, "dev"),
                     dev_seq_lengths,
-                )
-            if eval_needs_store:
-                set_dict(
-                    metadata,
+                ),
+                (
+                    eval_needs_store,
                     self._metadata_keys(METADATA_SEQ_LENGTHS_KEY, "eval"),
                     eval_seq_lengths,
-                )
-            if split_needs_store:
-                assert self._split_from_metadata is not None
-                frac_key = str(self.val_split_fraction)
-                set_dict(
-                    metadata,
-                    self._metadata_keys(METADATA_TRAIN_VAL_SPLIT_KEY, frac_key),
+                ),
+                (
+                    split_needs_store,
+                    self._metadata_keys(
+                        METADATA_TRAIN_VAL_SPLIT_KEY, str(self.val_split_fraction)
+                    ),
                     self._split_from_metadata,
-                )
+                ),
+            ):
+                if need_store:
+                    assert value is not None
+                    set_dict(metadata, metakeys, value)
             self._store_metadata(metadata)
         return train_data, test_data
 
