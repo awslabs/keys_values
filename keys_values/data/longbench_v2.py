@@ -16,6 +16,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 import json
 
+import torch
 from tokenizers import Tokenizer as HFTokenizer
 from tqdm import tqdm
 
@@ -119,6 +120,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         repo_id: str = "THUDM/LongBench-v2",
         access_token: Optional[str] = None,
         metadata_dir: Optional[str] = None,
+        store_split_in_metadata: bool = False,
         debug_num_cases: Optional[int] = None,
         trainloader_longest_first: bool = False,
         trainloader_shortest_first: bool = False,
@@ -145,6 +147,9 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
                 Default is using the `HF_TOKEN` environment variable.
             metadata_dir: If given, we load store/load metadata from this
                 directory. Strongly recommended to save time.
+            store_split_in_metadata: If `True`, we sample and store the
+                train/val split in the metadata and also load it from there,
+                instead of sampling it anew each time.
             debug_num_cases: If used, we only keep this number of records.
             trainloader_longest_first: If set, :meth:`train_dataloader` returns
                 a data loader whose first batch contain the longest sequences in
@@ -186,11 +191,14 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
             os.getenv("HF_TOKEN") if access_token is None else access_token
         )
         self.metadata_dir = metadata_dir
+        self.store_split_in_metadata = store_split_in_metadata
         self.head_model = None
         self._is_sequence_classification = None
         self.debug_num_cases = debug_num_cases
         self.test_set_tag = test_set_tag
         self._recompute_lengths = recompute_lengths
+        self._stratified_split: Optional[Dict[str, List[int]]] = None
+        self._split_from_metadata: Optional[Dict[str, List[int]]] = None
 
     def connect(
         self,
@@ -312,47 +320,155 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
             result["num_classes"] = len(CLASS_LABELS)
         return result
 
-    def _metadata_keys(self) -> List[str]:
-        return [METADATA_SEQ_LENGTHS_KEY, self.model_name]
-
     def _filter_and_transform(
         self,
         dataset: Any,
     ) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
         metadata = self._load_metadata(len(dataset))
         seq_lengths = self._get_seq_lengths(metadata)
-        try_to_store = seq_lengths is None and self.metadata_dir is not None
+        lens_need_store = seq_lengths is None
         # If `seq_lengths` could not be loaded, it is recomputed and stored below.
         # This takes more time.
-        if try_to_store and self.metadata_dir is not None:
+        if lens_need_store and self.metadata_dir is not None:
             print(
                 "\nFiltering the dataset takes a while. I'll store the index in "
                 f"{self.metadata_dir} under key '{self.model_name}', so next time "
                 "this won't have to be done (if you use the same dataset and model)."
             )
+        max_seq_length = (
+            None if self.test_set_tag == "stratified" else self.max_seq_length
+        )
         transformed_data, seq_lengths, test_data = filter_and_transform(
             dataset=dataset,
-            max_seq_length=self.max_seq_length,
+            max_seq_length=max_seq_length,
             tokenizer=self.tokenizer,
             seq_lengths=seq_lengths,
             head_model=self.head_model,
-            test_set_tag=self.test_set_tag,
             debug_num_cases=self.debug_num_cases,
         )
-        if try_to_store:
+        stratified_needs_store = False
+        split_needs_store = False
+        if self.test_set_tag == "stratified":
+            # Stratified random split
+            assert test_data is None  # Sanity check
+            transformed_data, test_data, stratified_needs_store = (
+                self._load_or_sample_stratified_split(
+                    metadata=metadata,
+                    seq_lengths=seq_lengths,
+                    transformed_data=transformed_data,
+                )
+            )
+        else:
+            split_needs_store = self._load_or_sample_split(
+                metadata,
+                devset_length=len(transformed_data),
+            )
+        if self.metadata_dir is not None and (
+            lens_need_store or stratified_needs_store or split_needs_store
+        ):
             if metadata is None:
                 metadata = dict()
-            set_dict(metadata, self._metadata_keys(), seq_lengths)
+            if lens_need_store:
+                set_dict(metadata, self._metakeys_seq_lengths, seq_lengths)
+            if stratified_needs_store:
+                assert self._stratified_split is not None
+                set_dict(
+                    metadata,
+                    self._metakeys_train_val_test_split,
+                    self._stratified_split,
+                )
+            if split_needs_store:
+                assert self._split_from_metadata is not None
+                set_dict(
+                    metadata, self._metakeys_train_val_split, self._split_from_metadata
+                )
             self._store_metadata(metadata)
         return transformed_data, test_data
+
+    @property
+    def _metakeys_seq_lengths(self) -> List[str]:
+        return [METADATA_SEQ_LENGTHS_KEY, self.model_name]
+
+    @property
+    def _metakeys_train_val_test_split(self) -> List[str]:
+        return [METADATA_TRAIN_VAL_TEST_SPLIT_KEY, self.model_name]
+
+    @property
+    def _metakeys_train_val_split(self) -> List[str]:
+        return [
+            METADATA_TRAIN_VAL_SPLIT_KEY,
+            self.model_name,
+            str(self.max_seq_length),
+            str(self.val_split_fraction),
+        ]
 
     def _get_seq_lengths(
         self, metadata: Optional[Dict[str, Any]]
     ) -> Optional[List[int]]:
         if not self._recompute_lengths:
-            return get_dict(metadata, self._metadata_keys())
+            return get_dict(metadata, self._metakeys_seq_lengths)
         else:
             return None
+
+    def _load_or_sample_stratified_split(
+        self,
+        metadata: Optional[Dict[str, Any]],
+        seq_lengths: List[int],
+        transformed_data: RawDatasetType,
+    ) -> Tuple[RawDatasetType, RawDatasetType, bool]:
+        needs_store = False
+        self._stratified_split = get_dict(metadata, self._metakeys_train_val_test_split)
+        if self._stratified_split is None:
+            # Sample stratified split
+            self._stratified_split = sample_stratified_split(
+                seq_lengths,
+                self._generator,
+            )
+            needs_store = True
+        # Split dataset
+        dev_data = [
+            transformed_data[idx]
+            for idx in self._stratified_split["train"] + self._stratified_split["val"]
+        ]
+        test_data = [transformed_data[idx] for idx in self._stratified_split["test"]]
+        # Split of dev -> (train, val) is simple now
+        len_train = len(self._stratified_split["train"])
+        len_all = len_train + len(self._stratified_split["val"])
+        self._split_from_metadata = {
+            "train": list(range(len_train)),
+            "val": list(range(len_train, len_all)),
+        }
+        return dev_data, test_data, needs_store
+
+    def _load_or_sample_split(
+        self,
+        metadata: Optional[Dict[str, Any]],
+        devset_length: int,
+    ) -> bool:
+        needs_store = False
+        if not self.store_split_in_metadata:
+            # Splits are not stored to / loaded from metadata
+            self._split_from_metadata = None
+            return False
+        self._split_from_metadata = get_dict(metadata, self._metakeys_train_val_split)
+        if self._split_from_metadata is None:
+            # Sample train/val split -> store to metadata
+            dev_perm = torch.randperm(
+                devset_length,
+                generator=self._generator,
+            )
+            val_size = max(int(devset_length * self.val_split_fraction), 1)
+            self._split_from_metadata = {
+                "train": dev_perm[val_size:].tolist(),
+                "val": dev_perm[:val_size].tolist(),
+            }
+            needs_store = True
+        return needs_store
+
+    def _get_train_val_split_from_metadata(
+        self,
+    ) -> Optional[Dict[str, List[int]]]:
+        return self._split_from_metadata
 
     def _load_metadata(self, num_records: int) -> Optional[Dict[str, Any]]:
         if self.metadata_dir is None:
@@ -441,15 +557,59 @@ PROMPTLINES_FINAL = {
 }
 
 
+def sample_stratified_split(
+    seq_lengths: List[int],
+    generator: torch.Generator,
+) -> Dict[str, List[int]]:
+    sort_ind, _ = zip(*sorted(enumerate(seq_lengths), key=lambda x: x[1]))
+    sort_ind = torch.tensor(sort_ind)
+    train_ind = None
+    val_ind = None
+    test_ind = None
+    pos = 0
+    for train_sz, val_sz, test_sz in LONGBENCH_BUCKET_SIZES:
+        sz = train_sz + val_sz + test_sz
+        tpv_sz = train_sz + val_sz
+        ind_slice = sort_ind[pos : (pos + sz)]
+        rnd_ind = torch.randperm(sz, generator=generator)
+        train_new = ind_slice[rnd_ind[:train_sz]]
+        val_new = ind_slice[rnd_ind[train_sz:tpv_sz]]
+        test_new = ind_slice[rnd_ind[tpv_sz:]]
+        if train_ind is None:
+            train_ind = train_new
+            val_ind = val_new
+            test_ind = test_new
+        else:
+            train_ind = torch.cat((train_ind, train_new))
+            val_ind = torch.cat((val_ind, val_new))
+            test_ind = torch.cat((test_ind, test_new))
+        pos += sz
+    assert pos == LONGBENCH_NUM_CASES, f"pos = {pos} != {LONGBENCH_NUM_CASES}"
+    # Shuffle `train_ind` randomly (the others don't matter)
+    rnd_ind = torch.randperm(train_ind.numel(), generator=generator)
+    train_ind = train_ind[rnd_ind]
+    return {
+        "train": train_ind.tolist(),
+        "val": val_ind.tolist(),
+        "test": test_ind.tolist(),
+    }
+
+
 def filter_and_transform(
     dataset: Any,
     max_seq_length: Optional[int],
     tokenizer: Tokenizer,
     seq_lengths: Optional[List[int]],
     head_model: str,
-    test_set_tag: Optional[str],
     debug_num_cases: Optional[int] = None,
 ) -> Tuple[RawDatasetType, List[int], Optional[RawDatasetType]]:
+    """
+    Determines sequence lengths (in tokens), if not already given as `seq_lengths`.
+    Also, if `max_seq_length` is given, `dataset` is split into a dev set (all
+    sequences of length `<= max_seq_length`) and a test set (all remaining
+    sequences, sorted in ascending order).
+
+    """
     # From https://huggingface.co/datasets/THUDM/LongBench-v2:
     # {
     #    "_id": "Unique identifier for each piece of data",
@@ -465,7 +625,7 @@ def filter_and_transform(
     #
     # Prompt is from:
     # https://github.com/THUDM/LongBench/blob/main/prompts/0shot.txt
-    train_results: RawDatasetType = []
+    dev_results: RawDatasetType = []
     test_results: RawDatasetType = []
     num_used = 0
     num_total = 0
@@ -505,28 +665,21 @@ def filter_and_transform(
             new_seq_lengths.append(seq_length)
         else:
             seq_length = seq_lengths[idx]
+        new_case = {
+            "instruction": instruction,
+            "output": output,
+            "num_tokens_instruction": seq_length,
+        }
         if max_seq_length is None or seq_length <= max_seq_length:
             num_used += 1
-            train_results.append(
-                {
-                    "instruction": instruction,
-                    "output": output,
-                    "num_tokens_instruction": seq_length,
-                }
-            )
+            dev_results.append(new_case)
             if debug_num_cases is not None and num_used >= debug_num_cases:
                 print(f"DEBUG: Stop with {num_used} records.")
                 break
-        elif test_set_tag == "rest":
-            test_results.append(
-                {
-                    "instruction": instruction,
-                    "output": output,
-                    "num_tokens_instruction": seq_length,
-                }
-            )
-    print(f"\nKept {num_used} of {num_total} records")
-    if test_set_tag == "rest" and test_results:
+        elif max_seq_length is not None:
+            test_results.append(new_case)
+    if max_seq_length is not None:
+        print(f"\nKept {num_used} of {num_total} records")
         # Sort by increasing length
         test_results = sorted(
             test_results,
@@ -539,9 +692,10 @@ def filter_and_transform(
         )
     else:
         test_results = None
+
     if seq_lengths is None:
         seq_lengths = new_seq_lengths
-    return train_results, seq_lengths, test_results
+    return dev_results, seq_lengths, test_results
 
 
 def get_instruction_template(head_model: str) -> Tuple[str, Tuple[str, ...]]:
