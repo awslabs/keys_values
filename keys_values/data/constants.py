@@ -19,8 +19,6 @@ Collator = Callable[[List[Dict[str, Any]]], Dict[str, Any]]
 
 RawDatasetType = List[Dict[str, str]]
 
-CollateFnType = Callable[[List[Dict[str, Any]]], Dict[str, Any]]
-
 METADATA_SEQ_LENGTHS_KEY = "sequence_lengths"
 
 METADATA_KEYS = {METADATA_SEQ_LENGTHS_KEY}

@@ -25,8 +25,8 @@ from keys_values.data.constants import (
     RawDatasetType,
     NUM_TOKENS_NAME,
     METADATA_TRAIN_VAL_SPLIT_KEY,
+    Collator,
 )
-from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.load_helmet_dev_eval import (
     load_helmet_dev_eval,
     DATASET_PARENT_DIR,
@@ -486,7 +486,7 @@ class Helmet(SequenceLengthFilteredDataModule):
                 )
                 self.training_state.test_target_choice = self.test_dataset.target_choice
 
-    def _get_collate_fn(self) -> MyDataLoader:
+    def _get_collate_fn(self) -> Collator:
         return get_sft_collate_fn(ignore_index=self.ignore_index)
 
     def smart_lastrec_info(self, tokenizer: HFTokenizer) -> SmartInitialInformation:

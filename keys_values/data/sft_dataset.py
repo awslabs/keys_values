@@ -26,7 +26,11 @@ from keys_values.data.base import (
     common_collate_fn,
     is_pad_datacase,
 )
-from keys_values.data.constants import TARGETS_STRINGS_NAME, POSITION_NAME
+from keys_values.data.constants import (
+    TARGETS_STRINGS_NAME,
+    POSITION_NAME,
+    Collator,
+)
 from keys_values.data import INPUT_IDS_NAME, LABELS_NAME
 
 
@@ -176,7 +180,7 @@ def sample_target_choice(
         ]
 
 
-def get_sft_collate_fn(pad_id: int = 0, ignore_index: int = -100):
+def get_sft_collate_fn(pad_id: int = 0, ignore_index: int = -100) -> Collator:
     """Returns the collate function for supervised finetuning (needed in the DataLoader).
 
     The collate function gets a list of dicts with keys `input_ids` and `labels`.
@@ -190,7 +194,7 @@ def _sft_collate_fn(
     samples: List[Dict[str, Any]],
     pad_id: int = 0,
     ignore_index: int = -100,
-) -> Dict[str, Union[torch.Tensor, Dict[str, Any]]]:
+) -> Dict[str, Any]:
     batched, samples = common_collate_fn(samples, pad_id=pad_id)
     batched[LABELS_NAME] = torch.nn.utils.rnn.pad_sequence(
         [sample[LABELS_NAME] for sample in samples],

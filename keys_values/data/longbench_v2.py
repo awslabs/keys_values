@@ -27,8 +27,8 @@ from keys_values.data.constants import (
     METADATA_TRAIN_VAL_SPLIT_KEY,
     METADATA_KEYS,
     RawDatasetType,
+    Collator,
 )
-from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.module import SequenceLengthFilteredDataModule
 from keys_values.data.sequence_classification import (
     SequenceClassificationDataset,
@@ -292,7 +292,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
                     class_labels=CLASS_LABELS,
                 )
 
-    def _get_collate_fn(self) -> MyDataLoader:
+    def _get_collate_fn(self) -> Collator:
         if not self._is_sequence_classification:
             return get_sft_collate_fn(ignore_index=self.ignore_index)
         else:

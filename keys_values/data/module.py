@@ -18,7 +18,7 @@ from torch.utils.data import random_split, Subset
 
 from keys_values.data.constants import (
     RawDatasetType,
-    CollateFnType,
+    Collator,
     NUM_TOKENS_NAME,
 )
 from litgpt.data import DataModule
@@ -179,7 +179,6 @@ class SequenceLengthFilteredDataModule(DataModule):
         self._sequence_lengths = None
         self.training_state = None
         self.model_name = None
-        self._generator = torch.Generator().manual_seed(self.seed)
 
     def connect(
         self,
@@ -285,7 +284,7 @@ class SequenceLengthFilteredDataModule(DataModule):
 
     def _get_train_val_split_from_metadata(
         self,
-    ) -> Optional[Dict[str, List[int]]]:
+    ) -> Optional[Tuple[List[int], List[int]]]:
         return None
 
     def setup(self, stage: str = "") -> None:
@@ -314,7 +313,7 @@ class SequenceLengthFilteredDataModule(DataModule):
         else:
             result = self._get_train_val_split_from_metadata()
             if result is not None:
-                train_ind, val_ind = result["train"], result["val"]
+                train_ind, val_ind = result
                 print(
                     f"Development set split loaded from metadata: training ({len(train_ind)}) and validation ({len(val_ind)})"
                 )
@@ -322,7 +321,7 @@ class SequenceLengthFilteredDataModule(DataModule):
             train_data, val_data = random_split(
                 data,
                 [1.0 - self.val_split_fraction, self.val_split_fraction],
-                generator=self._generator,
+                generator=torch.Generator().manual_seed(self.seed),
             )
             # Retain split indices
             train_ind = [int(x) for x in train_data.indices]
@@ -387,7 +386,7 @@ class SequenceLengthFilteredDataModule(DataModule):
             test_kwargs = None
         self._create_datasets(train_kwargs, val_kwargs, test_kwargs)
 
-    def _get_collate_fn(self) -> CollateFnType:
+    def _get_collate_fn(self) -> Collator:
         """
         Returns:
             Collator function, to create batch from list of cases. Must filter
