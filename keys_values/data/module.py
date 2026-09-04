@@ -160,6 +160,7 @@ class SequenceLengthFilteredDataModule(DataModule):
         self.ignore_index = ignore_index
         self.max_seq_length = max_seq_length
         self.seed = seed
+        self._generator = torch.Generator().manual_seed(self.seed)
         self.head_model = None
         self._is_sequence_classification = None
         self.prompt_style = Default()
@@ -321,7 +322,7 @@ class SequenceLengthFilteredDataModule(DataModule):
             train_data, val_data = random_split(
                 data,
                 [1.0 - self.val_split_fraction, self.val_split_fraction],
-                generator=torch.Generator().manual_seed(self.seed),
+                generator=self._generator,
             )
             # Retain split indices
             train_ind = [int(x) for x in train_data.indices]

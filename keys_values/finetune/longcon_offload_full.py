@@ -32,11 +32,11 @@ DEFAULT_OUT_DIR = "out/finetune/longcon_offload_full"
 
 def setup(
     checkpoint_dir: Path,
+    data: DataModule,
     out_dir: Path = Path(DEFAULT_OUT_DIR),
     precision: Optional[str] = None,
     devices: Union[int, str] = 1,
     resume: Optional[str] = None,
-    data: Optional[DataModule] = None,
     train: TrainArgs = TrainArgs(
         save_interval=50,
         log_interval=1,
@@ -117,6 +117,7 @@ def setup(
             load for finetuning. In general, this will be the Hugging Face
             model name. Use `resume` to restart fine-tuning from a checkpoint
             stored along the way.
+        data: Data-related arguments
         out_dir: Directory in which to save checkpoints and logs. If running in a Lightning Studio Job, look for it in
             /teamspace/jobs/<job-name>/share.
         precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
@@ -125,8 +126,6 @@ def setup(
             resumed, such as "step-000100" or "final". Training can only be
             resumed from a checkpoint for which a training state is also
             available, see `training_state_num`.
-        data: Data-related arguments. If not provided, the default is
-            ``keys_values.data.LongBenchV2``.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
             Note: We modified the defaults from `train.lr_warmup_steps=100` to
             `train.lr_warmup_fraction=0.15`, so the linear warm-up is the first
@@ -212,10 +211,10 @@ def setup(
         setup,
         checkpoint_dir,
         out_dir,
+        data,
         precision,
         devices,
         resume,
-        data,
         train,
         None,
         eval,
