@@ -101,8 +101,12 @@ from keys_values.fused import (
 )
 from keys_values.generate.base import generate
 from keys_values.gpu_memory import RecordGPUMemory
-from keys_values.head_model import HeadModel, CrossEntropyOnLogits
-from keys_values.head_model_factory import HeadModelFactory
+from keys_values.head_model import (
+    HeadModel,
+    CrossEntropyOnLogits,
+    SequenceClassificationOnLogits,
+)
+from keys_values.head_model_factory import HeadModelFactory, SUPPORTED_HEAD_MODELS
 from keys_values.kvcache.consts import split_name
 from keys_values.kvcache.factory import (
     KVCacheFactory,
@@ -205,7 +209,7 @@ def setup(
         layercp_pin_memory=False,
         cachecp_pin_memory=False,
     ),
-    head_model: str = CrossEntropyOnLogits.NAME,
+    head_model: Optional[str] = None,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
     verbose: Optional[str] = None,
     attention_forward_temp_size_gb: Optional[float] = None,
@@ -265,7 +269,7 @@ def setup(
             `grad.layers_per_cell` and `grad.chunks_per_cell_multiplier` given
             your GPU memory (defaults are smallest sensible values).
         head_model: Name of the head model to use, see
-            :class:`HeadModelFactory`. Defaults to "next_token_prediction"
+            :class:`HeadModelFactory`. Default depends on `data`.
         head_model_kwargs: Extra keyword arguments to pass to the head model
             factory.
         verbose: Verbosity level for logging outputs.
@@ -379,7 +383,7 @@ def setup_internal(
     access_token: Optional[str],
     kv_cache: KVCacheArgs,
     grad: GradientArgs,
-    head_model: str,
+    head_model: Optional[str],
     head_model_kwargs: Optional[Dict[str, Any]],
     verbose: Optional[str],
     attention_forward_temp_size_gb: Optional[float],
@@ -405,9 +409,13 @@ def setup_internal(
     )
     pprint(locals())
     data = LongBenchV2() if data is None else data
-    if isinstance(data, LongBenchV2) and data.metadata_dir is None:
-        data.metadata_dir = str(out_dir / "data")
-        print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
+    # TODO: Let `data` decide on default head model, not hardcoded here!
+    default_head_model = CrossEntropyOnLogits.NAME
+    if isinstance(data, LongBenchV2):
+        if data.metadata_dir is None:
+            data.metadata_dir = str(out_dir / "data")
+            print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
+        default_head_model = SequenceClassificationOnLogits.NAME
     if isinstance(data, Helmet) and data.metadata_dir is None:
         data.metadata_dir = str(out_dir / "data")
         print(f"Setting Helmet.metadata_dir to {data.metadata_dir}")
@@ -415,6 +423,10 @@ def setup_internal(
         raise ValueError(
             "use_sample_metric=True currently supported only for Helmet datasets"
         )
+    if head_model is None:
+        head_model = default_head_model
+    elif head_model not in SUPPORTED_HEAD_MODELS:
+        raise ValueError(f"head_model={head_model} is not supported (choose from {SUPPORTED_HEAD_MODELS})")
     out_dir = init_out_dir(out_dir)
     if data.metadata_dir is not None:
         data.metadata_dir = str(init_out_dir(Path(data.metadata_dir)))

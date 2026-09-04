@@ -27,7 +27,6 @@ from keys_values.finetune.args import (
     SDPAArgs,
 )
 from keys_values.finetune.longcontext_full import setup_internal
-from keys_values.head_model import CrossEntropyOnLogits
 
 DEFAULT_OUT_DIR = "out/finetune/longcontext_lora"
 
@@ -97,7 +96,7 @@ def setup(
         single_tokens_for_targets=False,
         max_match_trials_pack_arg=8,
     ),
-    head_model: str = CrossEntropyOnLogits.NAME,
+    head_model: Optional[str] = None,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
     verbose: Optional[str] = None,
     attention_forward_temp_size_gb: Optional[float] = None,
@@ -162,7 +161,7 @@ def setup(
             `grad.layers_per_cell` and `grad.chunks_per_cell_multiplier` given
             your GPU memory (defaults are smallest sensible values).
         head_model: Name of the head model to use, see
-            :class:`HeadModelFactory`. Defaults to "next_token_prediction"
+            :class:`HeadModelFactory`. Default depends on `data`.
         head_model_kwargs: Extra keyword arguments to pass to the head model
             factory.
         verbose: Verbosity level for logging outputs.

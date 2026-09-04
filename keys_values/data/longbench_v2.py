@@ -115,7 +115,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         mask_prompt: bool = True,
         val_split_fraction: float = 0.1,
         ignore_index: int = -100,
-        max_seq_length: Optional[int] = 100000,
+        max_seq_length: Optional[int] = None,
         seed: int = 42,
         repo_id: str = "THUDM/LongBench-v2",
         access_token: Optional[str] = None,
@@ -137,8 +137,9 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
             ignore_index: The index to use for elements to be ignored in the
                 label.
             max_seq_length: Sequences longer than this number of tokens are
-                filtered out. Defaults to 100000.
-                Note: This is ignored if `test_set_tag == "stratified"`
+                filtered out. Defaults to `None` (no limit).
+                Note: This is ignored if `test_set_tag == "stratified"`, but
+                must be given if `test_set_tag == "rest"`.
             seed: The random seed for creating the train/val splits and shuffling
                 the dataset.
             repo_id: The Hugging Face dataset repository ID from where to
@@ -177,6 +178,12 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
             raise ValueError(
                 f"test_set_tag = {test_set_tag} is not supported, must be in {SUPPORTED_TEST_SET_TAGS}"
             )
+        if test_set_tag == "stratified":
+            if max_seq_length is not None:
+                print("test_set_tag = stratified means that max_seq_length is ignored")
+                max_seq_length = None
+        elif max_seq_length is None:
+            raise ValueError(f"test_set_tag = {test_set_tag} means that max_seq_length must be set")
         super().__init__(
             mask_prompt,
             val_split_fraction,
@@ -661,6 +668,10 @@ def filter_and_transform(
         )
         instruction = "\n".join(instruction_list)
         output = entry["answer"]
+        if output not in CLASS_LABELS:
+            raise ValueError(
+                f"idx={idx}: entry['answer'] = '{output}', must be in {CLASS_LABELS}"
+            )
         if seq_lengths is None:
             encoded_prompt = tokenizer.encode(instruction)
             seq_length = encoded_prompt.numel()
