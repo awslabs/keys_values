@@ -375,3 +375,40 @@ extra_nodes: [3]
 node: 4
 neighbors: [(2,5), (1,7)]
 new_neighbors: [(2,5), (1,7)]
+
+
+## 1358
+
+- Substring: len >= 3
+- Iterate over start
+- Find smallest end -> all longer as well
+- When start increased: One letter may drop to 0: Search for that one!
+
+abc, abca, abcab, abcabc, bca, bcab, bcabc, cab, cabc, abc
+
+s = "abcabc"
+n = 6
+
+start: 3
+end: 6
+num_substrings: 4 + 3 + 2 + 1
+hist: {a: 1, b: 1, c: 1}
+elem: 'c'
+
+s = "aaacb"
+n = 5
+
+start: 3
+end: 6
+num_substrings: 1 + 1 + 1 -> 3
+hist: {b: 1, c: 1}
+elem: 'a'
+
+s = "abc"
+n = 3
+
+start: 1
+end: 3
+num_substrings: 1 -> 1
+hist: {b: 1, c: 1}
+elem: 'a'

@@ -25,11 +25,13 @@ def create_state(
     }
     # Optimizer: Adam with improved weight decay regularization
     state["optimizer"] = torch.optim.AdamW(
-        state["model"].named_parameters(), lr=0.0005,
+        state["model"].named_parameters(),
+        lr=0.0005,
     )
     # Cosine annealing scheduler, no warm-up
     state["scheduler"] = torch.optim.lr_scheduler.CosineAnnealingLR(
-        state["optimizer"], T_max=max_num_steps,
+        state["optimizer"],
+        T_max=max_num_steps,
     )
     return state
 
@@ -70,7 +72,9 @@ def fit(
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad(set_to_none=True)
-        print(f"Iteration {num_steps} (epoch {train_iterator.epoch}): loss = {loss.item()}")
+        print(
+            f"Iteration {num_steps} (epoch {train_iterator.epoch}): loss = {loss.item()}"
+        )
         num_steps += 1
 
 
@@ -87,7 +91,9 @@ def main(
     max_num_epochs: Optional[int] = None,
 ):
     if max_num_steps is None and max_num_epochs is None:
-        raise ValueError("One of `max_num_steps` or `max_num_epochs` must be specified.")
+        raise ValueError(
+            "One of `max_num_steps` or `max_num_epochs` must be specified."
+        )
     # Create training data iterator
     train_dataloader = TODO
     batch_transform = TODO

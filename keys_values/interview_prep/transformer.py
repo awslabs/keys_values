@@ -1,3 +1,4 @@
+from dataclasses import replace
 import math
 from typing import Optional, Literal
 
@@ -12,7 +13,9 @@ class RotaryPositionEncoding:
     def __init__(self, config: Config, context_width: int):
         self.context_width = context_width
         n_elem = config.head_size
-        theta = 1.0 / (config.rope_base ** (torch.arange(0, n_elem, 2).float() / n_elem))
+        theta = 1.0 / (
+            config.rope_base ** (torch.arange(0, n_elem, 2).float() / n_elem)
+        )
         seq_idx = torch.arange(context_width).float()
         idx_theta = (seq_idx[:, None] * theta[None, :]).repeat(1, 2)
         self._cos = torch.cos(idx_theta)
@@ -48,6 +51,7 @@ class Transformer(nn.Module):
     Implements complete transformer model.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -102,7 +106,7 @@ class Transformer(nn.Module):
             raise ValueError("Context width not set. Use `set_context_width`")
         x = self.transformer.wte(input_ids)
         if self.config.scale_embeddings:
-            x = x * (self.config.n_embd ** 0.5)
+            x = x * (self.config.n_embd**0.5)
         for layer in self.transformer.h:
             x = layer(x, self._rope)
         return self.lm_head(self.transformer.ln_f(x))
@@ -111,6 +115,8 @@ class Transformer(nn.Module):
     def _check_supported(config: Config):
         for name in (
             "final_logit_softcapping",
+            "n_expert_groups",
+            "n_shared_expert",
         ):
             if getattr(config, name) is not None:
                 raise ValueError(f"config.{name} is not supported")
@@ -121,7 +127,9 @@ class Transformer(nn.Module):
             ("rotary_percentage", 1.0),
         ):
             if getattr(config, name) != val:
-                raise ValueError(f"config.{name} == {getattr(config, name)} is not supported (must be {val})")
+                raise ValueError(
+                    f"config.{name} == {getattr(config, name)} is not supported (must be {val})"
+                )
 
 
 class TransformerLayer(nn.Module):
@@ -129,10 +137,15 @@ class TransformerLayer(nn.Module):
     Implements transformer layer.
 
     """
+
     def __init__(self, config: Config, sdpa_type: str):
         super().__init__()
         self.attn = MultiHeadAttention(config, sdpa_type)
-        self.mlp = FeedForwardNetwork(config)
+        self.mlp = (
+            LLaMAMoE(config)
+            if config.mlp_class_name == "LLaMAMoE"
+            else FeedForwardNetwork(config)
+        )
         self.pre_attn_norm = create_norm(config, config.norm_1)
         self.pre_mlp_norm = create_norm(config, config.norm_2)
         self.post_attn_norm = create_norm(config, config.post_attention_norm)
@@ -152,6 +165,7 @@ class FeedForwardNetwork(nn.Module):
     LLaMA, which is also used by Qwen3 models.
 
     """
+
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
@@ -170,7 +184,54 @@ class FeedForwardNetwork(nn.Module):
         return self.proj(x)
 
 
-# TODO: MoE FFN layer, derived from litgpt.model.LLaMAMoE
+class LLaMAMoE(nn.Module):
+    """
+    MoE block to represent FFN in transformer block. We only implement one
+    variant:
+    - n_shared_expert = None
+    - n_expert_groups = None (linear router)
+    - Experts are all of type :class:`FeedForwardNetwork`, with intermediate
+      size `moe_intermediate_size`
+
+    """
+
+    def __init__(self, config: Config) -> None:
+        assert config.n_expert > 0
+        super().__init__()
+        # Linear gating, mapping inputs to logits over experts
+        self.gate = nn.Linear(config.n_embd, config.n_expert, bias=False)
+        expert_config = replace(config, intermediate_size=config.moe_intermediate_size)
+        self.experts = nn.ModuleList(
+            FeedForwardNetwork(expert_config) for _ in range(config.n_expert)
+        )
+        self.n_expert_per_token = config.n_expert_per_token
+        self.routed_scaling_factor = config.routed_scaling_factor
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Derived from: https://github.com/mistralai/mistral-src/blob/b46d6/moe_one_file_ref.py#L203-L219
+        See also figure 1 in https://arxiv.org/abs/2211.15841
+
+        """
+        x_2d = x.view(-1, x.shape[-1])  # (B*T, n_embd)
+        router = self.gate(x_2d)  # (B*T, n_expert)
+        # `probs`, `indices`: `(B*T, n_expert_per_token)`
+        probs, indices = torch.topk(router, self.n_expert_per_token)
+        probs = probs.softmax(dim=1, dtype=torch.float).to(dtype=x.dtype)
+        if self.routed_scaling_factor != 1.0:
+            probs = probs * self.routed_scaling_factor
+        y = torch.zeros_like(x_2d)  # (B*T, n_embd)
+        for idx, expert in enumerate(self.experts):
+            # `mask`: `(B*T, n_expert_per_token)`
+            # `mask = indices == idx`
+            # `zip(token_idx, expert_idx) = [(t, j)]` where `mask[t, j] == True`
+            token_idx, expert_idx = torch.nonzero(indices == idx, as_tuple=True)
+            # If `N = len(token_idx)` is the number of tokens `expert` is active for:
+            # `y[token_idx]`: `(N, n_embd)`
+            # `probs[token_idx, expert_idx, None]`: `(N, 1)`
+            # `expert(x_2d[token_idx])`: `(N, n_embd)`
+            y[token_idx] += probs[token_idx, expert_idx, None] * expert(x_2d[token_idx])
+        return y.view(*x.shape)  # (B, T, n_embd)
 
 
 def sdpa_naive(
@@ -291,6 +352,7 @@ class MultiHeadAttention(nn.Module):
     Implements multi-head self-attention block.
 
     """
+
     def __init__(
         self,
         config: Config,
@@ -345,6 +407,4 @@ class MultiHeadAttention(nn.Module):
         # Scaled dot product attention
         sdpa_output = self._sdpa(q, k, v)
         # Reverse transpose, final projection
-        return self.proj(
-            sdpa_output.transpose(1, 2).reshape(bs, -1, q_n_embd)
-        )
+        return self.proj(sdpa_output.transpose(1, 2).reshape(bs, -1, q_n_embd))

@@ -1,8 +1,8 @@
 from collections import defaultdict, Counter
 from typing import List, Optional, Dict, Set, Tuple
 
-
 # === Medium ===
+
 
 # OK
 class Solution_3302:
@@ -27,6 +27,7 @@ class Solution_3302:
     not the corresponding string formed by those indices.
 
     """
+
     def find_subseq(self, word: str, seq: str) -> Optional[List[int]]:
         len_seq = len(seq)
         result = []
@@ -72,7 +73,7 @@ class Solution_3302:
                 break
             # Skip position `skip_pos`, then match the rest
             off = curr_pos + 1
-            postfix = self.find_subseq(word1[off:], word2[(skip_pos + 1):])
+            postfix = self.find_subseq(word1[off:], word2[(skip_pos + 1) :])
             if postfix is not None:
                 candidate = prefix + [curr_pos] + [x + off for x in postfix]
                 result = self.lexico_min(result, candidate)
@@ -133,6 +134,7 @@ class Solution_486:
     You may assume that both players are playing optimally.
 
     """
+
     def play_best_move(
         self,
         start: int,
@@ -156,8 +158,12 @@ class Solution_486:
         if sz == 2:
             return pl_sgn * abs(elem1 - elem2)
         else:
-            sdiff1 = self.play_best_move(start + 1, end, not is_player1) + pl_sgn * elem1
-            sdiff2 = self.play_best_move(start, end - 1, not is_player1) + pl_sgn * elem2
+            sdiff1 = (
+                self.play_best_move(start + 1, end, not is_player1) + pl_sgn * elem1
+            )
+            sdiff2 = (
+                self.play_best_move(start, end - 1, not is_player1) + pl_sgn * elem2
+            )
             return max(sdiff1, sdiff2) if is_player1 else min(sdiff1, sdiff2)
 
     def predictTheWinner(self, nums: List[int]) -> bool:
@@ -188,6 +194,7 @@ class Solution_1140:
     Alice can get.
 
     """
+
     def max_score_for(
         self,
         start: int,
@@ -202,7 +209,9 @@ class Solution_1140:
             # A takes `x` piles, then B scores optimally, and A takes the rest
             score_other = self.max_score_for(start + x, max(m, x))
             all_rest = self.sum_all - self.cumsum[start + x]
-            score_me = self.cumsum[start + x] - self.cumsum[start] + all_rest - score_other
+            score_me = (
+                self.cumsum[start + x] - self.cumsum[start] + all_rest - score_other
+            )
             max_score = max(max_score, score_me)
         return max_score
 
@@ -265,6 +274,7 @@ class Solution_2958:
     1 <= k <= nums.length
 
     """
+
     def extend(
         self,
         end: int,
@@ -348,6 +358,7 @@ class Solution_1833:
     1 <= coins <= 108
 
     """
+
     def maxIceCream(self, costs: List[int], coins: int) -> int:
         # Sort `costs` and buy from cheapest upwards
         # Must use counting sort
@@ -362,7 +373,7 @@ class Solution_1833:
                 cost += 1
                 cost_here = cost * num
                 if cost_here >= coins:
-                    num_bought += (coins // cost)
+                    num_bought += coins // cost
                     break
                 num_bought += num
                 coins -= cost_here
@@ -416,6 +427,7 @@ class Solution_2161:
     * pivot equals to an element of nums.
 
     """
+
     def swap(self, p1: int, p2: int):
         elem = self.nums[p1]
         self.nums[p1] = self.nums[p2]
@@ -551,19 +563,16 @@ class Solution_3635:
     * 1 <= landStartTime[i], landDuration[i], waterStartTime[j], waterDuration[j] <= 105
 
     """
+
     def earliestFinishTime(
         self,
         landStartTime: List[int],
         landDuration: List[int],
         waterStartTime: List[int],
-        waterDuration: List[int]
+        waterDuration: List[int],
     ) -> int:
-        land_earliest_time = min(
-            x + y for x, y in zip(landStartTime, landDuration)
-        )
-        water_earliest_time = min(
-            x + y for x, y in zip(waterStartTime, waterDuration)
-        )
+        land_earliest_time = min(x + y for x, y in zip(landStartTime, landDuration))
+        water_earliest_time = min(x + y for x, y in zip(waterStartTime, waterDuration))
         return min(
             min(
                 max(land_earliest_time, x) + y
@@ -572,7 +581,7 @@ class Solution_3635:
             min(
                 max(water_earliest_time, x) + y
                 for x, y in zip(landStartTime, landDuration)
-            )
+            ),
         )
 
 
@@ -612,6 +621,7 @@ class Solution_1871:
     * 1 <= minJump <= maxJump < s.length
 
     """
+
     def _canReach(self, start: int) -> bool:
         pos = start
         if pos + self.minJump > self.fin_pos:
@@ -701,6 +711,7 @@ class Solution_3629:
     * 1 <= nums[i] <= 106
 
     """
+
     def primeSieve(self, max_num: int) -> List[bool]:
         result = [True] * (max_num + 1)
         curr = 2
@@ -737,7 +748,8 @@ class Solution_3629:
             # Consider teleportation jumps
             candidates = [
                 pnext
-                for pnext in list(range(1, pos - 1)) + list(range(pos + 2, self.max_jumps))
+                for pnext in list(range(1, pos - 1))
+                + list(range(pos + 2, self.max_jumps))
                 if self.nums[pnext] % entry == 0
             ]
             for pnext in reversed(candidates):
@@ -748,7 +760,6 @@ class Solution_3629:
                 if min_val == 2:
                     return 2
         return min(min_val, self.max_jumps)
-
 
     def minJumps(self, nums: List[int]) -> int:
         max_num = 105
@@ -802,6 +813,7 @@ class Solution_2657:
     * It is guaranteed that A and B are both a permutation of n integers.
 
     """
+
     def findThePrefixCommonArray(self, A: List[int], B: List[int]) -> List[int]:
         # Simple solution
         n = len(A)
@@ -827,6 +839,7 @@ class Solution_1344:
     Answers within 10-5 of the actual value will be accepted as correct.
 
     """
+
     def angleClock(self, hour: int, minutes: int) -> float:
         # - 60 minutes <-> 360 degrees
         angle_minute = float(minutes * 6)
@@ -888,6 +901,7 @@ class Solution_2029:
         1 <= stones[i] <= 104
 
     """
+
     def caller_wins(
         self,
         stones_rem1: List[bool],
@@ -897,9 +911,7 @@ class Solution_2029:
     ) -> bool:
         # `sum_removed_rem1 = (sum_removed % 3) == 1`
         if len(stones_rem1) == 2:
-            if (
-                sum_removed_rem1 and all(stones_rem2)
-            ) or (
+            if (sum_removed_rem1 and all(stones_rem2)) or (
                 not sum_removed_rem1 and all(stones_rem1)
             ):
                 # All stones lead to sum divisible by 3
@@ -921,8 +933,8 @@ class Solution_2029:
             # - If sum_removed_rem1 == False:
             #   [sum + el] = [2 + el{0/2}] == 1 iff el == 2 iff y
             if not x and not self.caller_wins(
-                stones_rem1=stones_rem1[:i] + stones_rem1[(i + 1):],
-                stones_rem2=stones_rem2[:i] + stones_rem2[(i + 1):],
+                stones_rem1=stones_rem1[:i] + stones_rem1[(i + 1) :],
+                stones_rem2=stones_rem2[:i] + stones_rem2[(i + 1) :],
                 sum_removed_rem1=not y if sum_removed_rem1 else y,
                 is_alice=not is_alice,
             ):
@@ -942,8 +954,8 @@ class Solution_2029:
         # Need initial loop: Cannot call `caller_wins` with sum 0
         for i, (x, y) in enumerate(zip(stones_rem1, stones_rem2)):
             if (x or y) and not self.caller_wins(
-                stones_rem1=stones_rem1[:i] + stones_rem1[(i + 1):],
-                stones_rem2=stones_rem2[:i] + stones_rem2[(i + 1):],
+                stones_rem1=stones_rem1[:i] + stones_rem1[(i + 1) :],
+                stones_rem2=stones_rem2[:i] + stones_rem2[(i + 1) :],
                 sum_removed_rem1=x,
                 is_alice=False,
             ):
@@ -992,6 +1004,7 @@ class Solution_3514:
     * 1 <= nums[i] <= 1500
 
     """
+
     def uniqueXorTriplets(self, nums: List[int]) -> int:
         triples: Set[int] = set()
         for i, x in enumerate(nums):
@@ -1067,6 +1080,7 @@ class Solution_1846:
     * 1 <= arr[i] <= 10^9
 
     """
+
     def maximumElementAfterDecrementingAndRearranging(self, arr: List[int]) -> int:
         # Elegant solution, does not need sorting, but just a histogram
         counts = defaultdict(int)
@@ -1143,23 +1157,18 @@ class Solution_2812:
         There is at least one thief in the grid.
 
     """
+
     def min_distance_to_thiefs(
         self,
         grid: List[List[int]],
     ) -> List[List[int]]:
         n = len(grid)
         thief_pos = [
-            (r, c)
-            for r, row in enumerate(grid)
-            for c, el in enumerate(row)
-            if el == 1
+            (r, c) for r, row in enumerate(grid) for c, el in enumerate(row) if el == 1
         ]
         min_distance = []
         for r in range(n):
-            row = [
-                min(abs(r - x) + abs(c - y) for x, y in thief_pos)
-                for c in range(n)
-            ]
+            row = [min(abs(r - x) + abs(c - y) for x, y in thief_pos) for c in range(n)]
             min_distance.append(row)
         return min_distance
 
@@ -1202,9 +1211,7 @@ class Solution_2812:
             ]
             # Only expand the best
             safety_val = max(c[1] for c in cand_positions)
-            best_positions = [
-                pos for pos, val in cand_positions if val == safety_val
-            ]
+            best_positions = [pos for pos, val in cand_positions if val == safety_val]
             for pos in best_positions:
                 if pos == (0, 0):
                     return safety_val
@@ -1248,6 +1255,7 @@ class Solution_3020:
         1 <= nums[i] <= 10^9
 
     """
+
     def _len_for(
         self,
         x: int,
@@ -1338,12 +1346,13 @@ class Solution_3737:
         1 <= target <= 10^9
 
     """
+
     def _num_start_from(self, start: int, pos_tpos: int) -> int:
         result = 0
         for i, (tpos, tpos_next) in enumerate(
             zip(
                 self.target_pos[pos_tpos:],
-                self.target_pos[(pos_tpos + 1):] + [self.len_nums]
+                self.target_pos[(pos_tpos + 1) :] + [self.len_nums],
             )
         ):
             # Array `nums[start:(tpos + 1)]`: `i + 1` equal to `target`
@@ -1437,7 +1446,7 @@ class Solution_2948:
             return nums
         for i in range(n - 1):
             xl = nums[i]
-            for j, xr in enumerate(nums[(i + 1):]):
+            for j, xr in enumerate(nums[(i + 1) :]):
                 if xr < xl <= xr + limit:
                     nums[j + i + 1] = xl
                     nums[i] = xr
@@ -1451,6 +1460,7 @@ class Solution_2075:
     https://leetcode.com/problems/decode-the-slanted-ciphertext/?envType=daily-question&envId=2026-08-25
 
     """
+
     def decodeCiphertext(self, encodedText: str, rows: int) -> str:
         len_text = len(encodedText)
         cols = len_text // rows
@@ -1459,7 +1469,7 @@ class Solution_2075:
         num_parts = cols - rows + 2
         decoded = []
         for j in range(num_parts):
-            decoded.extend(encoded[j:len_text:(cols + 1)])
+            decoded.extend(encoded[j : len_text : (cols + 1)])
         return "".join(decoded).rstrip(" ")
 
 
@@ -1507,6 +1517,7 @@ class Solution_2126:
         1 <= asteroids[i] <= 10^5
 
     """
+
     def asteroidsDestroyed(self, mass: int, asteroids: List[int]) -> bool:
         sorted_asteroids = sorted(asteroids)
         cumsum = [mass]
@@ -1581,6 +1592,7 @@ class Solution_3751:
         1 <= num1 <= num2 <= 10^5
 
     """
+
     def _digits(self, x: int) -> List[int]:
         return [int(c) for c in str(x)]
 
@@ -1618,7 +1630,7 @@ class Solution_3751:
             rng2 = (a, min(10, num2 - b + 1))
             num_intersect = max(min(rng1[1], rng2[1]) - max(rng1[0], rng2[0]), 0)
             num_rem = min(num2 - curr_num + 1, 10 - a)
-            total_waviness += (num_peaks * num_rem + num_intersect)
+            total_waviness += num_peaks * num_rem + num_intersect
             curr_num = b + 10
         return total_waviness
 
@@ -1683,6 +1695,7 @@ class Solution_3532:
         0 <= ui, vi < n
 
     """
+
     def _get_cluster_ranges(
         self,
         nums: List[int],
@@ -1761,6 +1774,7 @@ class Solution_2492:
         There is at least one path between 1 and n.
 
     """
+
     def _extend_connected_component(
         self,
         nodes: Set[int],
@@ -1800,25 +1814,31 @@ class Solution_2492:
         return min_score
 
 
+# CHECK
 class Solution_1358:
     """
     https://leetcode.com/problems/number-of-substrings-containing-all-three-characters/?envType=daily-question&envId=2026-08-25
 
     Given a string s consisting only of characters a, b and c.
 
-    Return the number of substrings containing at least one occurrence of all these characters a, b and c.
+    Return the number of substrings containing at least one occurrence of all
+    these characters a, b and c.
 
     Example 1:
 
     Input: s = "abcabc"
     Output: 10
-    Explanation: The substrings containing at least one occurrence of the characters a, b and c are "abc", "abca", "abcab", "abcabc", "bca", "bcab", "bcabc", "cab", "cabc" and "abc" (again).
+    Explanation: The substrings containing at least one occurrence of the
+    characters a, b and c are:
+    "abc", "abca", "abcab", "abcabc", "bca", "bcab", "bcabc", "cab", "cabc" and
+    "abc" (again).
 
     Example 2:
 
     Input: s = "aaacb"
     Output: 3
-    Explanation: The substrings containing at least one occurrence of the characters a, b and c are "aaacb", "aacb" and "acb".
+    Explanation: The substrings containing at least one occurrence of the
+    characters a, b and c are "aaacb", "aacb" and "acb".
 
     Example 3:
 
@@ -1831,26 +1851,70 @@ class Solution_1358:
         s only consists of 'a', 'b' or 'c' characters.
 
     """
+
     def numberOfSubstrings(self, s: str) -> int:
-        pass
+        n = len(s)
+        start, end = 0, 3
+        num_substrings = 0
+        hist = Counter(s[:end])
+        while len(hist) < 3:
+            hist[s[end]] += 1
+            end += 1
+            if end == n:
+                if len(hist) < 3:
+                    return 0
+        while True:
+            # At this point:
+            # s[start:end] has all 3
+            # Note that end == n is allowed
+            num_substrings += n - end + 1
+            while hist[s[start]] > 1:
+                hist[s[start]] -= 1
+                start += 1
+                num_substrings += n - end + 1
+            elem = s[start]
+            del hist[elem]
+            start += 1
+            if end == n:
+                break
+            while s[end] != elem:
+                hist[s[end]] += 1
+                end += 1
+                if end == n:
+                    break
+            hist[elem] = 1
+            end += 1
+            if end == n:
+                num_substrings += 1
+                break
+        return num_substrings
+
 
 class Solution_3568:
     """
     https://leetcode.com/problems/minimum-moves-to-clean-the-classroom/?envType=daily-question&envId=2026-08-25
 
-    You are given an m x n grid classroom where a student volunteer is tasked with cleaning up litter scattered around the room. Each cell in the grid is one of the following:
+    You are given an m x n grid classroom where a student volunteer is tasked
+    with cleaning up litter scattered around the room. Each cell in the grid is
+    one of the following:
 
-        'S': Starting position of the student
-        'L': Litter that must be collected (once collected, the cell becomes empty)
-        'R': Reset area that restores the student's energy to full capacity, regardless of their current energy level (can be used multiple times)
-        'X': Obstacle the student cannot pass through
-        '.': Empty space
+    * 'S': Starting position of the student
+    * 'L': Litter that must be collected (once collected, the cell becomes empty)
+    * 'R': Reset area that restores the student's energy to full capacity,
+           regardless of their current energy level (can be used multiple times)
+    * 'X': Obstacle the student cannot pass through
+    * '.': Empty space
 
-    You are also given an integer energy, representing the student's maximum energy capacity. The student starts with this energy from the starting position 'S'.
+    You are also given an integer `energy`, representing the student's maximum
+    energy capacity. The student starts with this energy from the starting
+    position 'S'.
 
-    Each move to an adjacent cell (up, down, left, or right) costs 1 unit of energy. If the energy reaches 0, the student can only continue if they are on a reset area 'R', which resets the energy to its maximum capacity energy.
+    Each move to an adjacent cell (up, down, left, or right) costs 1 unit of
+    energy. If the energy reaches 0, the student can only continue if they are on
+    a reset area 'R', which resets the energy to its maximum capacity energy.
 
-    Return the minimum number of moves required to collect all litter items, or -1 if it's impossible.
+    Return the minimum number of moves required to collect all litter items, or
+    -1 if it's impossible.
 
     Example 1:
 
@@ -1902,6 +1966,7 @@ class Solution_3568:
         There are at most 10 'L' cells in the grid.
 
     """
+
     def minMoves(self, classroom: List[str], energy: int) -> int:
         pass
 
@@ -1971,6 +2036,7 @@ class Solution_1872:
         -104 <= stones[i] <= 104
 
     """
+
     def _signed_scorediff_for(
         self,
         start: int,
@@ -1983,8 +2049,10 @@ class Solution_1872:
             curr_sum += x
             if curr_sum * player_sgn > 0:
                 scores.append(
-                    player_sgn * (
-                        curr_sum - self._signed_scorediff_for(
+                    player_sgn
+                    * (
+                        curr_sum
+                        - self._signed_scorediff_for(
                             start=start + i + 1,
                             val_first=curr_sum,
                             player_sgn=-player_sgn,
@@ -2088,6 +2156,7 @@ class Solution_3534:
         0 <= ui, vi < n
 
     """
+
     def _get_cluster_ranges(
         self,
         nums: List[int],
@@ -2188,5 +2257,6 @@ class Solution_3116:
         coins contains pairwise distinct integers.
 
     """
+
     def findKthSmallest(self, coins: List[int], k: int) -> int:
         pass
