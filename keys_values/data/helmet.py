@@ -23,6 +23,8 @@ from keys_values.data.constants import (
     METADATA_SEQ_LENGTHS_KEY,
     METADATA_KEYS,
     RawDatasetType,
+    INSTRUCTION_NAME,
+    OUTPUT_NAME,
     NUM_TOKENS_NAME,
     METADATA_TRAIN_VAL_SPLIT_KEY,
     Collator,
@@ -369,8 +371,8 @@ class Helmet(SequenceLengthFilteredDataModule):
             output = instance["output"]
             results.append(
                 {
-                    "instruction": instruction,
-                    "output": output,
+                    INSTRUCTION_NAME: instruction,
+                    OUTPUT_NAME: output,
                     NUM_TOKENS_NAME: seq_length,
                 }
             )

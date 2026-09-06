@@ -29,6 +29,9 @@ from keys_values.data.base import (
 from keys_values.data.constants import (
     TARGETS_STRINGS_NAME,
     POSITION_NAME,
+    INSTRUCTION_NAME,
+    OUTPUT_NAME,
+    NUM_TOKENS_NAME,
     Collator,
 )
 from keys_values.data import INPUT_IDS_NAME, LABELS_NAME
@@ -42,13 +45,13 @@ class SFTDataset(LongContextDataset):
     included only if it is given or available from what is done anyway.
     Avoids extra costs due to tokenization.
 
-    It is admissible for `data[idx]["output"]` to be a list of strings.
+    It is admissible for `data[idx][OUTPUT_NAME]` to be a list of strings.
     In this case, we choose one of them at random in each
     :meth:`__getitem__` call. The semantics is that any of the entries
     is a valid target sequence.
 
     If `retain_targets_strings == True`, we also append the original
-    targets `data[idx]["output"]`, either string or list of strings,
+    targets `data[idx][OUTPUT_NAME]`, either string or list of strings,
     as :const:`TARGETS_STRINGS_NAME` field. This is needed by a number of
     evaluation metrics.
     """
@@ -98,14 +101,15 @@ class SFTDataset(LongContextDataset):
             return example
         if self.transform is not None:
             example = self.transform(example)
-        prompt = self.prompt_style.apply(prompt=example["instruction"], **example)
+        prompt = self.prompt_style.apply(prompt=example[INSTRUCTION_NAME], **example)
         max_length = -1 if self.max_seq_length is None else self.max_seq_length
         encoded_prompt = self.tokenizer.encode(
             prompt,
+            eos=False,
             max_length=max_length,
         )
         num_tokens_prompt = encoded_prompt.numel()
-        targets = example["output"]
+        targets = example[OUTPUT_NAME]
         if isinstance(targets, list):
             _targets = targets[self.target_choice[idx]]
         else:
@@ -132,7 +136,7 @@ class SFTDataset(LongContextDataset):
         token_counts = {
             "raw_plus_prompt_template": num_tokens_prompt + num_tokens_response
         }
-        raw_count = example.get("num_tokens_instruction")
+        raw_count = example.get(NUM_TOKENS_NAME)
         if (
             raw_count is None
             and self.transform is None
@@ -161,8 +165,8 @@ def sample_target_choice(
     # For padding cases, we return 0 as target choice
     num_choices = [
         (
-            len(example["output"])
-            if not is_pad_datacase(example) and isinstance(example["output"], list)
+            len(example[OUTPUT_NAME])
+            if not is_pad_datacase(example) and isinstance(example[OUTPUT_NAME], list)
             else 1
         )
         for example in data
@@ -184,8 +188,10 @@ def get_sft_collate_fn(pad_id: int = 0, ignore_index: int = -100) -> Collator:
     """Returns the collate function for supervised finetuning (needed in the DataLoader).
 
     The collate function gets a list of dicts with keys `input_ids` and `labels`.
-    It returns a dict with batched `input_ids` and `labels`. Also pads short sequences to the longest element in
-    the batch. Optionally truncates all sequences to the specified maximum length.
+    It returns a dict with batched `input_ids` and `labels`. Also pads short
+    sequences to the longest element in the batch. Optionally truncates all
+    sequences to the specified maximum length.
+
     """
     return partial(_sft_collate_fn, pad_id=pad_id, ignore_index=ignore_index)
 
@@ -195,6 +201,17 @@ def _sft_collate_fn(
     pad_id: int = 0,
     ignore_index: int = -100,
 ) -> Dict[str, Any]:
+    """
+    Padding is done on the right, using `pad_id` for the :const:`INPUT_IDS_NAME`
+    field, `ignore_index` for the :const:`LABELS_NAME` field. Note that in
+    general, the :const:`LABELS_NAME` field is padded on the left with
+    `ignore_index` already, whereas the :const:`INPUT_IDS_NAME` field is not
+    padded at all.
+
+    This means that the positions of the first `x != ignore_index` in the
+    :const:`LABELS_NAME` field in the result are different across the batch.
+
+    """
     batched, samples = common_collate_fn(samples, pad_id=pad_id)
     batched[LABELS_NAME] = torch.nn.utils.rnn.pad_sequence(
         [sample[LABELS_NAME] for sample in samples],

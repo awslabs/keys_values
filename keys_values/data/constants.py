@@ -25,6 +25,10 @@ METADATA_KEYS = {METADATA_SEQ_LENGTHS_KEY}
 
 METADATA_TRAIN_VAL_SPLIT_KEY = "train_val_split"
 
+INSTRUCTION_NAME = "instruction"
+
+OUTPUT_NAME = "output"
+
 NUM_TOKENS_NAME = "num_tokens_instruction"
 
 INPUT_IDS_NAME = "input_ids"

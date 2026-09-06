@@ -28,6 +28,9 @@ from keys_values.data.constants import (
     METADATA_KEYS,
     RawDatasetType,
     Collator,
+    INSTRUCTION_NAME,
+    OUTPUT_NAME,
+    NUM_TOKENS_NAME,
 )
 from keys_values.data.module import SequenceLengthFilteredDataModule
 from keys_values.data.sequence_classification import (
@@ -679,9 +682,9 @@ def filter_and_transform(
         else:
             seq_length = seq_lengths[idx]
         new_case = {
-            "instruction": instruction,
-            "output": output,
-            "num_tokens_instruction": seq_length,
+            INSTRUCTION_NAME: instruction,
+            OUTPUT_NAME: output,
+            NUM_TOKENS_NAME: seq_length,
         }
         if max_seq_length is None or seq_length <= max_seq_length:
             num_used += 1
@@ -696,10 +699,10 @@ def filter_and_transform(
         # Sort by increasing length
         test_results = sorted(
             test_results,
-            key=lambda x: x["num_tokens_instruction"],
+            key=lambda x: x[NUM_TOKENS_NAME],
         )
-        min_length = test_results[0]["num_tokens_instruction"]
-        max_length = test_results[-1]["num_tokens_instruction"]
+        min_length = test_results[0][NUM_TOKENS_NAME]
+        max_length = test_results[-1][NUM_TOKENS_NAME]
         print(
             f"Test dataset has {len(test_results)} records, token lengths between {min_length} and {max_length}"
         )
@@ -932,7 +935,7 @@ def truncate_contexts_and_transform(
             instruction = "\n".join(instruction_list)
             output = entry["answer"]
             num_used += 1
-            results.append({"instruction": instruction, "output": output})
+            results.append({INSTRUCTION_NAME: instruction, OUTPUT_NAME: output})
             if debug_num_cases is not None and num_used >= debug_num_cases:
                 print(f"DEBUG: Stop with {num_used} records.")
                 break

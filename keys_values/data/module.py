@@ -139,7 +139,8 @@ class SequenceLengthFilteredDataModule(DataModule):
             ignore_index: The index to use for elements to be ignored in the
                 label.
             max_seq_length: Sequences longer than this number of tokens are
-                filtered out.
+                filtered out from training and validation dataset (but not from
+                the test dataset).
             seed: The random seed for creating the train/val splits and shuffling
                 the dataset.
             trainloader_longest_first: If set, :meth:`train_dataloader` returns
@@ -373,6 +374,7 @@ class SequenceLengthFilteredDataModule(DataModule):
             max_seq_length=self.max_seq_length,
         )
         if test_data is not None:
+            # Test set sequences are not restricted by `max_seq_length`
             test_kwargs = dict(
                 data=pad_dataset(
                     test_data,

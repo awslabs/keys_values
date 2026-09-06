@@ -25,8 +25,14 @@ from keys_values.data.base import (
     common_collate_fn,
     is_pad_datacase,
 )
-from keys_values.data.constants import POSITION_NAME
-from keys_values.data import INPUT_IDS_NAME, LABELS_NAME
+from keys_values.data.constants import (
+    POSITION_NAME,
+    INPUT_IDS_NAME,
+    LABELS_NAME,
+    INSTRUCTION_NAME,
+    OUTPUT_NAME,
+    NUM_TOKENS_NAME,
+)
 
 
 class SequenceClassificationDataset(LongContextDataset):
@@ -36,14 +42,15 @@ class SequenceClassificationDataset(LongContextDataset):
 
     Args:
         data: A list of samples (dicts). The target/label must be stored under
-            the key 'output', the instruction under the key 'instruction'. The
-            latter is mapped to the prompt via `prompt_style`.
+            the key :const:`OUTPUT_NAME`, the instruction under the key
+            :const:`INSTRUCTION_NAME`. The latter is mapped to the prompt via
+            `prompt_style`.
         tokenizer: The tokenizer to use. Should match the one that was used to
             pretrain the model.
         prompt_style: The style to apply to prompts. See `litgpt.prompts` for a
             list of available styles.
         class_labels: List of class labels. For each entry `x` of `data`,
-            `x['output']` must be equal to an entry in this list.
+            `x[OUTPUT_NAME]` must be equal to an entry in this list.
         max_seq_length: Truncate sequences that are longer than this value. By
             default, no truncation is applied.
 
@@ -85,13 +92,13 @@ class SequenceClassificationDataset(LongContextDataset):
                     raise ValueError(
                         f"data can only contain pad entries at the end, but entry {idx} is not padding, while pad entries before"
                     )
-                label = example["output"]
+                label = example[OUTPUT_NAME]
                 pos = next(
                     (i for i, cl in enumerate(self.class_labels) if cl == label), None
                 )
                 if pos is None:
                     raise ValueError(
-                        f"data[{idx}]['output'] = '{label}' invalid, must lie in {self.class_labels}"
+                        f"data[{idx}]['{OUTPUT_NAME}'] = '{label}' invalid, must lie in {self.class_labels}"
                     )
             self._label_indexes.append(pos)
 
@@ -106,7 +113,7 @@ class SequenceClassificationDataset(LongContextDataset):
             return example  # Padding case
         if self.transform is not None:
             example = self.transform(example)
-        prompt = self.prompt_style.apply(prompt=example["instruction"], **example)
+        prompt = self.prompt_style.apply(prompt=example[INSTRUCTION_NAME], **example)
         max_length = -1 if self.max_seq_length is None else self.max_seq_length
         encoded_prompt = self.tokenizer.encode(
             prompt,
@@ -115,7 +122,8 @@ class SequenceClassificationDataset(LongContextDataset):
             max_length=max_length,
         )
         token_counts = {"raw_plus_prompt_template": len(encoded_prompt)}
-        raw_count = example.get("num_tokens_instruction")
+        raw_count = example.get(NUM_TOKENS_NAME)
+
         if (
             raw_count is None
             and self.transform is None
@@ -142,6 +150,12 @@ def _seq_class_collate_fn(
     samples: List[Dict[str, Any]],
     pad_id: int = 0,
 ) -> Dict[str, Union[Tensor, Dict[str, Any]]]:
+    """
+    Padding is done on the right, using `pad_id` for the :const:`INPUT_IDS_NAME`
+    field. The :const:`LABELS_NAME` field in the result is a vector containing
+    the values `[sample[LABELS_NAME] for sample in samples]`.
+
+    """
     batched, samples = common_collate_fn(samples, pad_id=pad_id)
     batched[LABELS_NAME] = torch.tensor(
         [sample[LABELS_NAME] for sample in samples],
