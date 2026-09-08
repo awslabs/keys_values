@@ -2076,6 +2076,62 @@ class Solution_3568:
             num_steps += 1
 
 
+class Solution_1861:
+    """
+    https://leetcode.com/problems/rotating-the-box/?envType=daily-question&envId=2026-08-25
+
+    You are given an m x n matrix of characters boxGrid representing a side-view of a box. Each cell of the box is one of the following:
+
+        A stone '#'
+        A stationary obstacle '*'
+        Empty '.'
+
+    The box is rotated 90 degrees clockwise, causing some of the stones to fall due to gravity. Each stone falls down until it lands on an obstacle, another stone, or the bottom of the box. Gravity does not affect the obstacles' positions, and the inertia from the box's rotation does not affect the stones' horizontal positions.
+
+    It is guaranteed that each stone in boxGrid rests on an obstacle, another stone, or the bottom of the box.
+
+    Return an n x m matrix representing the box after the rotation described above.
+
+    Example 1:
+
+    Input: boxGrid = [["#",".","#"]]
+    Output: [["."],
+             ["#"],
+             ["#"]]
+
+    Example 2:
+
+    Input: boxGrid = [["#",".","*","."],
+                      ["#","#","*","."]]
+    Output: [["#","."],
+             ["#","#"],
+             ["*","*"],
+             [".","."]]
+
+    Example 3:
+
+    Input: boxGrid = [["#","#","*",".","*","."],
+                      ["#","#","#","*",".","."],
+                      ["#","#","#",".","#","."]]
+    Output: [[".","#","#"],
+             [".","#","#"],
+             ["#","#","*"],
+             ["#","*","."],
+             ["#",".","*"],
+             ["#",".","."]]
+
+    Constraints:
+
+        m == boxGrid.length
+        n == boxGrid[i].length
+        1 <= m, n <= 500
+        boxGrid[i][j] is either '#', '*', or '.'.
+
+    """
+    def rotateTheBox(self, boxGrid: List[List[str]]) -> List[List[str]]:
+        pass
+
+
 # === Hard ===
 
 
@@ -2380,3 +2436,44 @@ class Solution_3116:
             for p in mpos:
                 next[p] += coins[p]
         return curr
+
+
+class Solution_115:
+    """
+    https://leetcode.com/problems/distinct-subsequences/description/?envType=daily-question&envId=2026-08-25
+
+    Given two strings s and t, return the number of distinct subsequences of s which equals t.
+
+    The test cases are generated so that the answer fits on a 32-bit signed integer.
+
+    Example 1:
+
+    Input: s = "rabbbit", t = "rabbit"
+    Output: 3
+    Explanation:
+    As shown below, there are 3 ways you can generate "rabbit" from s.
+    rabbbit
+    rabbbit
+    rabbbit
+
+    Example 2:
+
+    Input: s = "babgbag", t = "bag"
+    Output: 5
+    Explanation:
+    As shown below, there are 5 ways you can generate "bag" from s.
+    babgbag
+    babgbag
+    babgbag
+    babgbag
+    babgbag
+
+    Constraints:
+
+        1 <= s.length, t.length <= 1000
+        s and t consist of English letters.
+
+    """
+
+    def numDistinct(self, s: str, t: str) -> int:
+        pass
