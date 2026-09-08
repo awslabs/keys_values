@@ -438,3 +438,166 @@ def test_unpack_out_of_order_request_after_walking_past(device):
     # Before the fix this raised `final chunk_idx = 1, must be >= 2`
     x2 = hooks.unpack_hook(matched_id)
     torch.testing.assert_close(x2, states[2])
+
+
+@pytest.mark.parametrize("device", available_backends())
+def test_parked_memory_is_bounded_and_released(device):
+    """
+    Memory guarantee for the chain walk (issue #148 review question).
+
+    States rebuilt ahead of their unpack request are parked so the late
+    request can be served. This test pins the two properties that bound the
+    cost:
+
+    1. Only states whose ID the autograd graph can actually request are
+       parked. IDs inserted by the flush purely to keep the chain complete
+       are never parked, so walking a long chain of them costs nothing.
+    2. A parked state is released as soon as its request arrives, so the
+       peak is set by how many requests are outstanding at once, not by the
+       chain length.
+
+    """
+    torch.random.manual_seed(31415927)
+    dtype = torch.float32
+    batch_size = 2
+    n_head = 4
+    n_query_groups = 2
+    head_size = 8
+    cache_length = 32
+    chunk_size = 8
+    num_states = 6  # long chain: gap of 5 from the final buffer
+    layer_idx = 0
+    kind = "scatter-value"
+
+    config = Config(
+        n_layer=1,
+        n_head=n_head,
+        n_query_groups=n_query_groups,
+        n_embd=n_head * head_size,
+        block_size=cache_length + num_states * chunk_size,
+        vocab_size=48,
+        rotary_percentage=1,
+    )
+    params = KVCacheParams(
+        max_batch_size=batch_size,
+        n_query_groups=n_query_groups,
+        cache_length=cache_length,
+        head_size=head_size,
+        n_head=n_head,
+        dtype=dtype,
+    )
+    hooks = CellComputationAutogradHooks(config=config, batch_size=batch_size)
+    token_kwargs = dict(dtype=torch.int64, device=device)
+    replay_log = DefaultKVCacheReplayLog(
+        token_chunks=[torch.zeros(batch_size, cache_length, **token_kwargs)]
+        + [
+            torch.zeros(batch_size, chunk_size, **token_kwargs)
+            for _ in range(num_states)
+        ],
+        cache_length=cache_length,
+        max_prefill_length=cache_length,
+        grace_period=0,
+    )
+    hooks.initialize_cell(
+        eff_num_layers=1,
+        num_chunks=num_states + 1,
+        first_layer_idx=layer_idx,
+        first_chunk_idx=0,
+        cache_lengths=[cache_length],
+        replay_logs=[replay_log],
+    )
+
+    buffer_kwargs = dict(dtype=dtype, device=device)
+    states = {
+        1: torch.randn(
+            batch_size, n_query_groups, cache_length, head_size, **buffer_kwargs
+        )
+    }
+    annotations = {}
+    for c in range(2, num_states + 1):
+        prev = states[c - 1]
+        index = expand_index(
+            random_index(params, 0, cache_length, num=chunk_size, device=device),
+            head_size,
+        )
+        annot = NodeAnnotation(
+            kind=kind,
+            layer_idx=layer_idx,
+            chunk_idx=c - 1,
+            shape=tuple(prev.shape),
+            index=index,
+            delta=prev.gather(2, index),
+        )
+        annotations[c - 1] = annot
+        hooks.node_annotations.append_safe(annot)
+        states[c] = prev.scatter(
+            2,
+            index,
+            torch.randn(
+                batch_size, n_query_groups, chunk_size, head_size, **buffer_kwargs
+            ),
+        )
+    hooks.node_annotations.set_final(
+        x=states[num_states],
+        layer_idx=layer_idx,
+        chunk_idx=num_states,
+        kind=kind,
+    )
+
+    # Case 1: the whole chain is flush-inserted (orphan) except the one being
+    # requested. Walking 5 links must park nothing at all.
+    matched_id = 9001
+    hooks._packed_arg_for_id[matched_id] = PackArgumentAsAnnotation(
+        annot=annotations[1], target_dtype=None
+    )
+    hooks.node_annotations.nodes.remove(annotations[1])
+    hooks._match_annotations(flush_pack_args=True)
+
+    x1 = hooks.unpack_hook(matched_id)
+    torch.testing.assert_close(x1, states[1])
+    log = hooks.annotation_usage_log()
+    assert log.parked_peak_count == 0, "orphan chain links must not be parked"
+    assert log.parked_peak_bytes == 0
+    assert not hooks._id_to_unpacked
+
+    # Case 2: every chain link is a real (matched) ID, so each is parked when
+    # applied early -- and released when its request arrives. The peak equals
+    # the number of outstanding requests, and memory returns to zero.
+    hooks.initialize_cell(
+        eff_num_layers=1,
+        num_chunks=num_states + 1,
+        first_layer_idx=layer_idx,
+        first_chunk_idx=0,
+        cache_lengths=[cache_length],
+        replay_logs=[replay_log],
+    )
+    ids = {}
+    for chunk_idx, annot in annotations.items():
+        ids[chunk_idx] = 9100 + chunk_idx
+        hooks._packed_arg_for_id[ids[chunk_idx]] = PackArgumentAsAnnotation(
+            annot=annot, target_dtype=None
+        )
+    hooks.node_annotations.set_final(
+        x=states[num_states],
+        layer_idx=layer_idx,
+        chunk_idx=num_states,
+        kind=kind,
+    )
+    hooks._match_annotations(flush_pack_args=True)
+
+    # Worst case: request the oldest state first, forcing the full walk
+    torch.testing.assert_close(hooks.unpack_hook(ids[1]), states[1])
+    log = hooks.annotation_usage_log()
+    one_buffer_bytes = states[1].numel() * states[1].element_size()
+    # num_states - 2 intermediate links get applied early and parked
+    assert log.parked_peak_count == num_states - 2
+    assert log.parked_peak_bytes == (num_states - 2) * one_buffer_bytes
+    # Bound claimed in review: at most (chunks_per_cell - 1) buffers per
+    # (layer, kind). Never a function of model size or step count.
+    assert log.parked_peak_count <= (num_states - 1)
+
+    # Serving the outstanding requests releases everything
+    for chunk_idx in range(2, num_states):
+        torch.testing.assert_close(hooks.unpack_hook(ids[chunk_idx]), states[chunk_idx])
+    assert not hooks._id_to_unpacked
+    assert hooks._parked_bytes == 0

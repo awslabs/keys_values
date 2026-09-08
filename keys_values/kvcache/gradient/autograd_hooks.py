@@ -203,6 +203,12 @@ class AnnotationUsageLog:
     unmatched_pack_args: List[UnmatchedPackHookArgument] = field(default_factory=list)
     unmatched_annotations: List[NodeAnnotationForLog] = field(default_factory=list)
     track_unmatched_annotations_for_pack_args: bool = False
+    # Peak memory retained (CPU) by parked buffer states within this cell,
+    # and the peak number of simultaneously parked states. Bounded by
+    # (num_chunks_per_cell - 1) * 2 * eff_num_layers buffers; typically far
+    # smaller, since states are freed as soon as their ID is fetched
+    parked_peak_bytes: int = 0
+    parked_peak_count: int = 0
 
     def report(self) -> str:
         lines: List[str] = [
@@ -211,6 +217,8 @@ class AnnotationUsageLog:
             f"Number of delta comparisons:             {self.num_comparisons}",
             f"Number of 4D indexes packed:             {self.num_4d_indexes}",
             f"Number of unmatched scatter annotations: {self.num_unmatched_scatter_cat}",
+            f"Parked states, peak (CPU):               {self.parked_peak_count} "
+            f"({self.parked_peak_bytes / (1 << 20):.1f} MiB)",
         ]
         if self.unmatched_annotations:
             lines.append("Remaining unmatched annotations:")
@@ -535,6 +543,10 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._id_counts = None
         self._id_to_unpacked = None
         self._orphan_annotation_ids = None
+        self._parked_bytes_for_id = None
+        self._parked_bytes = 0
+        self._parked_peak_bytes = 0
+        self._parked_peak_count = 0
         # ID assigned to next pack hook argument
         self._next_id = None
         self._num_matched_annotations = None
@@ -605,6 +617,12 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._packed_arg_for_id: Dict[int, PackedArgumentType] = dict()
         self._id_counts: Dict[int, int] = dict()
         self._id_to_unpacked: Dict[int, torch.Tensor] = dict()
+        # Memory accounting for parked buffer states: ID -> bytes retained.
+        # Peaks are reported in :meth:`annotation_usage_log`
+        self._parked_bytes_for_id: Dict[int, int] = dict()
+        self._parked_bytes = 0
+        self._parked_peak_bytes = 0
+        self._parked_peak_count = 0
         # IDs inserted by :meth:`_flush_remaining_pack_arguments` to keep the
         # annotation chain complete. Nothing in the autograd graph refers to
         # them, so states reconstructed for them need not be parked.
@@ -646,6 +664,9 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._id_to_unpacked = None
         if self._orphan_annotation_ids is not None:
             self._orphan_annotation_ids.clear()
+        if self._parked_bytes_for_id is not None:
+            self._parked_bytes_for_id.clear()
+        self._parked_bytes = 0
         self._next_id = None
         self._num_matched_annotations = None
         self._num_comparisons = None
@@ -748,6 +769,8 @@ class CellComputationAutogradHooks(AutogradHooks):
             unmatched_pack_args=self._unmatched_pack_args.copy(),
             unmatched_annotations=remaining_annotations,
             track_unmatched_annotations_for_pack_args=self._track_unmatched_annotations,
+            parked_peak_bytes=self._parked_peak_bytes,
+            parked_peak_count=self._parked_peak_count,
         )
 
     def debug_log_args(self) -> Optional[List[Tuple[torch.Tensor, NodeAnnotation]]]:
@@ -810,6 +833,8 @@ class CellComputationAutogradHooks(AutogradHooks):
                 if self._id_counts[idd] == 0:
                     # Not needed anymore:
                     del self._id_to_unpacked[idd]
+                    parked_bytes = self._parked_bytes_for_id.pop(idd, 0)
+                    self._parked_bytes -= parked_bytes
             else:
                 value = self._packed_arg_for_id.pop(idd)
                 if isinstance(value, PackArgumentAsAnnotation):
@@ -965,6 +990,23 @@ class CellComputationAutogradHooks(AutogradHooks):
                         self._id_to_unpacked[park_id] = parked
                         if park_id not in self._id_counts:
                             self._id_counts[park_id] = 1
+                        # Memory accounting (reported in the usage log)
+                        parked_tensor = (
+                            parked.x_cpu
+                            if isinstance(parked, ParkedBufferState)
+                            else parked
+                        )
+                        num_bytes = (
+                            parked_tensor.numel() * parked_tensor.element_size()
+                        )
+                        self._parked_bytes_for_id[park_id] = num_bytes
+                        self._parked_bytes += num_bytes
+                        self._parked_peak_bytes = max(
+                            self._parked_peak_bytes, self._parked_bytes
+                        )
+                        self._parked_peak_count = max(
+                            self._parked_peak_count, len(self._parked_bytes_for_id)
+                        )
                         if self._debug_test_args:
                             self._debug_log_args.append((buffer.clone(), annot))
                 # Sanity check
