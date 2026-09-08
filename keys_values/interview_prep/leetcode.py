@@ -1815,7 +1815,7 @@ class Solution_2492:
         return min_score
 
 
-# CHECK
+# OK
 class Solution_1358:
     """
     https://leetcode.com/problems/number-of-substrings-containing-all-three-characters/?envType=daily-question&envId=2026-08-25
@@ -1891,8 +1891,17 @@ class Solution_1358:
         return num_substrings
 
 
-# CHECK:
+# OK:
 # This was not easy!
+# - Overlooked infinite recharge issue initially
+# - Initial bug: Removed paths with 0 energy before checking if they visit the
+#   final L
+# General idea here:
+# - Breadth-first traversal
+# - Condense paths to final cell: Always represent best one there
+# - Criterion for best: Heuristic, first num_l_collected, second num_energy
+# - Ensure Ls are picked up once only
+# - Avoid infinite recharging
 class Solution_3568:
     """
     https://leetcode.com/problems/minimum-moves-to-clean-the-classroom/?envType=daily-question&envId=2026-08-25
@@ -1969,7 +1978,6 @@ class Solution_3568:
         There are at most 10 'L' cells in the grid.
 
     """
-
     def neighbors(self, pos: Tuple[int, int]) -> List[Tuple[int, int]]:
         y, x = pos
         result = []
@@ -1991,31 +1999,29 @@ class Solution_3568:
         new_paths = dict()
         for pos, vals in paths.items():
             coll_patt, num_energy = vals
-            assert num_energy > 0  # Sanity check
             if all(coll_patt):
                 return "success"  # We are done
-            num_done = sum(coll_patt)
-            for npos in self.neighbors(pos):
-                cell = self.classroom[npos[0]][npos[1]]
-                _coll_patt = coll_patt
-                _num_energy = num_energy - 1
-                _num_done = num_done
-                if cell == "L":
-                    lpos = self.litter_pos[npos]
-                    if not coll_patt[lpos]:
-                        # L not yet collected before
-                        _coll_patt = [True if i == lpos else x for i, x in enumerate(coll_patt)]
-                        _num_done += 1
-                elif cell == "R":
-                    # Prevent infinite "recharging": Must make progress between
-                    # recharging on the same rest place, i.e. pick at least one
-                    # more litter
-                    if num_done <= self.rest_pos[npos]:
-                        continue
-                    _num_energy = full_energy
-                    self.rest_pos[npos] = num_done
-                # Do not keep path with 0 energy
-                if _num_energy > 0:
+            if num_energy > 0:
+                num_done = sum(coll_patt)
+                for npos in self.neighbors(pos):
+                    cell = self.classroom[npos[0]][npos[1]]
+                    _coll_patt = coll_patt
+                    _num_energy = num_energy - 1
+                    _num_done = num_done
+                    if cell == "L":
+                        lpos = self.litter_pos[npos]
+                        if not coll_patt[lpos]:
+                            # L not yet collected before
+                            _coll_patt = [True if i == lpos else x for i, x in enumerate(coll_patt)]
+                            _num_done += 1
+                    elif cell == "R":
+                        # Prevent infinite "recharging": Must make progress between
+                        # recharging on the same rest place, i.e. pick at least one
+                        # more litter
+                        if num_done <= self.rest_pos[npos]:
+                            continue
+                        _num_energy = full_energy
+                        self.rest_pos[npos] = num_done
                     _vals = (_coll_patt, _num_energy)
                     _vals2 = new_paths.get(npos)
                     if _vals2 is None:
@@ -2311,17 +2317,19 @@ class Solution_3534:
         return result
 
 
+# OK
+# This was not hard at all...
 class Solution_3116:
     """
     https://leetcode.com/problems/kth-smallest-amount-with-single-denomination-combination/?envType=daily-question&envId=2026-08-25
 
-    You are given an integer array coins representing coins of different denominations and an integer k.
+    You are given an integer array `coins` representing coins of different
+    denominations and an integer `k`.
 
-    You have an infinite number of coins of each denomination. However, you are not allowed to combine coins of different denominations.
+    You have an infinite number of coins of each denomination. However, you are
+    not allowed to combine coins of different denominations.
 
     Return the kth smallest amount that can be made using these coins.
-
-
 
     Example 1:
 
@@ -2346,8 +2354,6 @@ class Solution_3116:
     Coin 2 produces multiples of 2: 2, 4, 6, 8, 10, 12, etc.
     All of the coins combined produce: 2, 4, 5, 6, 8, 10, 12, 14, 15, etc.
 
-
-
     Constraints:
 
         1 <= coins.length <= 15
@@ -2358,4 +2364,19 @@ class Solution_3116:
     """
 
     def findKthSmallest(self, coins: List[int], k: int) -> int:
-        pass
+        next = [c for c in coins]
+        rank = 0
+        curr = None
+        while rank < k:
+            curr = next[0]
+            mpos = []
+            for pos, val in enumerate(next):
+                if val < curr:
+                    curr = val
+                    mpos = [pos]
+                elif val == curr:
+                    mpos.append(pos)
+            rank += 1
+            for p in mpos:
+                next[p] += coins[p]
+        return curr

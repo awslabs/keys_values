@@ -454,3 +454,22 @@ For each R state:
 - Retain best coll_patt so far
 - If come back and it's not better: Do not allow for this path
 ==> Prevents cycles due to infinite "recharging"
+
+Test:
+
+S.
+XL
+
+m = n = 2, energy = 2
+start_pos: (0, 0)
+litter_pos: {(1, 1): 0}
+rest_pos: {}
+
+num_steps: 1
+paths: {(0, 1): ([0], 1)}
+
+new_paths: {(0, 1): ([0], 1)}
+
+
+## 3116
+
