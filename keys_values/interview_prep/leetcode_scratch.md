@@ -412,3 +412,45 @@ end: 3
 num_substrings: 1 -> 1
 hist: {b: 1, c: 1}
 elem: 'a'
+
+
+## 3568
+
+- First find S and number of L
+- Is this DP? If so, w.r.t. which score?
+  ==> Looks tough!
+- Otherwise: just recursive?
+- Just a BFS w.r.t. number of steps? Blows up!
+  Can't we fuse paths to the same cell? By just keeping the best so far?
+  What does "best" mean?
+  - Most L collected
+  - Most energy left to move
+  How to combine these?
+  Heuristic: First, number of L collected. Second, energy left to move
+- One issue: Once L is collected, it becomes ".". But not for all paths, only
+  the ones who collected it!
+  ==> Have to store L positions, and for each path: Which have been collected?
+- Another issue: How to detect that this is not possible??
+
+Testing:
+
+L.S
+RXL
+
+m = 2, n = 3, energy = 3
+start_pos: (0, 2)
+litter_pos: {(0, 0): 0, (1, 2): 1}
+num_litter: 2
+
+num_steps: 5
+paths: {(1, 0): ([10], 3), (0, 1): ([10], 1)}
+
+new_paths: {(0, 0): ([10], 2)}
+
+AHH! Cycle!
+
+Need one more rule:
+For each R state:
+- Retain best coll_patt so far
+- If come back and it's not better: Do not allow for this path
+==> Prevents cycles due to infinite "recharging"

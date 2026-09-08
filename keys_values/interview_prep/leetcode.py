@@ -1,5 +1,6 @@
 from collections import defaultdict, Counter
-from typing import List, Optional, Dict, Set, Tuple
+from typing import List, Optional, Dict, Set, Tuple, Union
+
 
 # === Medium ===
 
@@ -1890,6 +1891,8 @@ class Solution_1358:
         return num_substrings
 
 
+# CHECK:
+# This was not easy!
 class Solution_3568:
     """
     https://leetcode.com/problems/minimum-moves-to-clean-the-classroom/?envType=daily-question&envId=2026-08-25
@@ -1967,8 +1970,104 @@ class Solution_3568:
 
     """
 
+    def neighbors(self, pos: Tuple[int, int]) -> List[Tuple[int, int]]:
+        y, x = pos
+        result = []
+        if x > 0 and self.classroom[y][x - 1] != "X":
+            result.append((y, x - 1))
+        if x < self.n - 1 and self.classroom[y][x + 1] != "X":
+            result.append((y, x + 1))
+        if y > 0 and self.classroom[y - 1][x] != "X":
+            result.append((y - 1, x))
+        if y < self.m - 1 and self.classroom[y + 1][x] != "X":
+            result.append((y + 1, x))
+        return result
+
+    def do_step(
+        self,
+        paths: Dict[Tuple[int, int], Tuple[List[bool], int]],
+        full_energy: int,
+    ) -> Union[Dict[Tuple[int, int], Tuple[List[bool], int]], str]:
+        new_paths = dict()
+        for pos, vals in paths.items():
+            coll_patt, num_energy = vals
+            assert num_energy > 0  # Sanity check
+            if all(coll_patt):
+                return "success"  # We are done
+            num_done = sum(coll_patt)
+            for npos in self.neighbors(pos):
+                cell = self.classroom[npos[0]][npos[1]]
+                _coll_patt = coll_patt
+                _num_energy = num_energy - 1
+                _num_done = num_done
+                if cell == "L":
+                    lpos = self.litter_pos[npos]
+                    if not coll_patt[lpos]:
+                        # L not yet collected before
+                        _coll_patt = [True if i == lpos else x for i, x in enumerate(coll_patt)]
+                        _num_done += 1
+                elif cell == "R":
+                    # Prevent infinite "recharging": Must make progress between
+                    # recharging on the same rest place, i.e. pick at least one
+                    # more litter
+                    if num_done <= self.rest_pos[npos]:
+                        continue
+                    _num_energy = full_energy
+                    self.rest_pos[npos] = num_done
+                # Do not keep path with 0 energy
+                if _num_energy > 0:
+                    _vals = (_coll_patt, _num_energy)
+                    _vals2 = new_paths.get(npos)
+                    if _vals2 is None:
+                        new_paths[npos] = _vals
+                    else:
+                        # Keep better of the two
+                        # Ordering is heuristic: num_done counts more than
+                        # num_energy (except must have num_energy > 0)
+                        _num_done2 = sum(_vals2[0])
+                        if (_num_done, _num_energy) > (_num_done2, _vals2[1]):
+                            new_paths[npos] = _vals
+
+        if new_paths:
+            return new_paths
+        else:
+            return "failure"
+
     def minMoves(self, classroom: List[str], energy: int) -> int:
-        pass
+        self.m = len(classroom)
+        self.n = len(classroom[0])
+        assert all(len(row) == self.n for row in classroom)
+        assert energy > 0
+        self.litter_pos = dict()
+        num_litter = 0
+        start_pos = None
+        self.rest_pos = dict()
+        for y, row in enumerate(classroom):
+            for x, cell in enumerate(row):
+                if cell == "S":
+                    start_pos = (y, x)
+                elif cell == "L":
+                    self.litter_pos[(y, x)] = num_litter
+                    num_litter += 1
+                elif cell == "R":
+                    self.rest_pos[(y, x)] = -1
+        if num_litter == 0:
+            return 0
+        self.classroom = classroom
+        # Data structure:
+        # `paths[pos]` for positions `(y, x)`, contains tuple
+        # `(coll_patt, num_energy)`. We proceed in steps. After `num_steps`
+        # rounds, all paths represented by `paths` are this many steps long.
+        # `coll_patt` is a boolean list of length `num_litter`, where we mark
+        # which litter cells have been visited. This is needed, since otherwise
+        # L cells could be counted several times.
+        paths = {start_pos: ([False] * num_litter, energy)}
+        num_steps = 0
+        while True:
+            paths = self.do_step(paths, energy)
+            if isinstance(paths, str):
+                return num_steps if paths == "success" else -1
+            num_steps += 1
 
 
 # === Hard ===
