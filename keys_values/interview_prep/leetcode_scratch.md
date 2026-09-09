@@ -471,5 +471,150 @@ paths: {(0, 1): ([0], 1)}
 new_paths: {(0, 1): ([0], 1)}
 
 
-## 3116
+## 1861
 
+- Each row is an i.i.d. problem
+- Row i becomes column m - i - 1 in the result
+
+Each row:
+- "*" remain where they are
+- Anything in between
+
+
+## 115
+
+- Recursive?
+
+s = "babgbag", t = "bag"
+
+full_len_s: 7
+full_len_t: 3
+
+num(0, 0):
+  first_t: b
+  len_s: 7
+  len_t: 3
+  off = 1, 2, 3, 4
+  result = num(1, 1) + num(3, 1) + num(5, 1) = 3 + 1 + 1 = 5
+
+num(1, 1):
+  first_t: a
+  len_s: 6
+  len_t: 2
+  off = 1, 2, 3, 4
+  result = num(2, 2) + num(6, 2) = 2 + 1 = 3
+
+num(3, 1):
+  first_t: a
+  start_t: 3 -> 5
+  len_s: 2
+  ==> 1
+
+num(5, 1):
+  ==> 1
+
+num(2, 2):
+  first_t: g
+  start_t: 2 -> 3
+  len_s: 4
+  len_t: 1
+  ==> 2
+
+num(6, 2):
+  first_t: g
+  len_s: 1
+  len_t: 1
+  ==> 1
+
+num(s = "rabbbit", t = "rabbit")
+= num(s="abbbit", t="abbit")
+= num(s="bbbit", t="bbit")
+= num(s="bbit", t="bit") + num(s="bit", t="bit") = num(s="bbit", t="bit") + 1
+
+num(s="bbit", t="bit")
+= num(s="bit", t="it") + num(s="it", t="it")
+= num(s="it", t="it") + num(s="it", t="it") = 2
+
+
+## 39
+
+Properties/constraints:
+- candidates: distinct entries
+- number of unique combinations is < 150
+
+Ideas:
+- Work with count vectors
+- Sort increasing, then from the right
+- Use recursion
+
+candidates = [2,3,6,7], target = 7
+
+cs(end=4, target=7):
+  cand_last: 7
+  result: []
+  num_last: 0, 1
+  -> cs(end=3, target=7); then l + [0]
+  -> append [0, 0, 0, 1]
+
+cs(end=3, target=7)
+  cand_last: 6
+  result: []
+  num_last: 0, 1
+
+Would memoization work here?
+
+
+## 134
+
+Properties/constraints:
+- Both n and gas, cost values can be large (but also 0)
+- Need to find starting station which works to go around the whole ring
+
+Observations:
+- Need to start at i where `gas[i] >= cost[i]`
+- Use `delta[i] = gas[i] - cost[i]`
+- Only start where `delta[i] > 0`. Note that `delta[i] == 0` steps are "free"
+- Consider using `cumsum` as precomputation!
+
+
+gas = [1,2,3,4,5], cost = [3,4,5,1,2]
+delta = [-2, -2, -2, 3, 3]
+delta_cumsum = [0, -2, -4, -6, -3, 0]
+
+pos in [3, 4]:
+  pos: 3
+  # first
+  off: -6
+  # second
+  off: 6
+  ==> Return 3
+
+
+## 1927
+
+Properties/constraints:
+- num has even length, can be very long
+- "?" can be replaced by digits
+- Positions do not matter, but only: How many ? are left/right, and
+  what are the current sums
+
+State: `(sum_left, sum_right, free_left, free_right)`
+
+Greedy idea:
+- A tries to maximize `abs(sum_left - sum_right)` with every move
+- B tries to minimize `abs(sum_left - sum_right)` with every move
+
+num = "?329 5???"
+==> (14, 5, 1, 3)
+A: 9L -> (23, 5, 0, 3)
+B: 9R -> (23, 14, 0, 2)
+A: 0R -> (23, 14, 0, 1)
+B: 9R -> (23, 23, 0, 0)
+
+Greedy solution can be done in O(1), from start state:
+(sum_left, sum_right, free_left, free_right)
+
+delta = sum_left - sum_right
+- If delta == 0:
+  A wins if free_left + free_right is odd; B otherwise.
+  Namely: 

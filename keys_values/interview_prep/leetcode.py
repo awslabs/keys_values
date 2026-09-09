@@ -1,4 +1,6 @@
 from collections import defaultdict, Counter
+import math
+from itertools import accumulate
 from typing import List, Optional, Dict, Set, Tuple, Union
 
 
@@ -1902,6 +1904,21 @@ class Solution_1358:
 # - Criterion for best: Heuristic, first num_l_collected, second num_energy
 # - Ensure Ls are picked up once only
 # - Avoid infinite recharging
+#
+# AI comments on solution (CoderPad):
+# - BFS right idea, but state for table cannot just be position
+# - State should be (pos, coll_path, num_energy)
+# - With that state: Can just keep one entry, no need to order them
+# - Infinite recharging: Don't allow to return to same recharge state. May have
+#   to block several recharge states this way
+#
+# Lesson learned:
+# - BFS is the right idea, but how to represent paths?
+# - My "solution" is not bad: Smaller state table, but heuristic ordering may
+#   fail
+# - Study the constraints:
+#   Limited number of L cells -> Can include coll_path in the state definition
+#   Energy only up to 50 -> Can include num_energy in state definition
 class Solution_3568:
     """
     https://leetcode.com/problems/minimum-moves-to-clean-the-classroom/?envType=daily-question&envId=2026-08-25
@@ -2076,21 +2093,29 @@ class Solution_3568:
             num_steps += 1
 
 
+# OK
 class Solution_1861:
     """
     https://leetcode.com/problems/rotating-the-box/?envType=daily-question&envId=2026-08-25
 
-    You are given an m x n matrix of characters boxGrid representing a side-view of a box. Each cell of the box is one of the following:
+    You are given an m x n matrix of characters boxGrid representing a side-view
+    of a box. Each cell of the box is one of the following:
 
-        A stone '#'
-        A stationary obstacle '*'
-        Empty '.'
+    * A stone '#'
+    * A stationary obstacle '*'
+    * Empty '.'
 
-    The box is rotated 90 degrees clockwise, causing some of the stones to fall due to gravity. Each stone falls down until it lands on an obstacle, another stone, or the bottom of the box. Gravity does not affect the obstacles' positions, and the inertia from the box's rotation does not affect the stones' horizontal positions.
+    The box is rotated 90 degrees clockwise, causing some of the stones to fall
+    due to gravity. Each stone falls down until it lands on an obstacle, another
+    stone, or the bottom of the box. Gravity does not affect the obstacles'
+    positions, and the inertia from the box's rotation does not affect the
+    stones' horizontal positions.
 
-    It is guaranteed that each stone in boxGrid rests on an obstacle, another stone, or the bottom of the box.
+    It is guaranteed that each stone in boxGrid rests on an obstacle, another
+    stone, or the bottom of the box.
 
-    Return an n x m matrix representing the box after the rotation described above.
+    Return an n x m matrix representing the box after the rotation described
+    above.
 
     Example 1:
 
@@ -2128,8 +2153,414 @@ class Solution_1861:
         boxGrid[i][j] is either '#', '*', or '.'.
 
     """
+    def rotateRow(self, row_str: str) -> str:
+        # Idea:
+        # - "*" stay where they are
+        # - Parts between "*" are ordered first "." then "#"
+        # Also, we work on strings rather than lists of characters, because
+        # Python is better with strings
+        parts = row_str.split("*")
+        new_parts = []
+        for part in parts:
+            len_part = len(part)
+            num_stones = sum(x == "#" for x in part)
+            new_parts.append("." * (len_part - num_stones) + "#" * num_stones)
+        return "*".join(new_parts)
+
     def rotateTheBox(self, boxGrid: List[List[str]]) -> List[List[str]]:
-        pass
+        # Rotating by 90 degrees clockwise: Row i becomes column m - i - 1. That
+        # is why we need to reverse.
+        result_cols = reversed([self.rotateRow("".join(row)) for row in boxGrid])
+        # Transpose of list of lists is done with zip, but need to convert tuples
+        # into lists (as requested)
+        return [list(l) for l in zip(*result_cols)]
+
+
+# CHECK
+# - Passes the tests
+# - Can think of better solution?
+class Solution_39:
+    """
+    https://leetcode.com/problems/combination-sum/
+
+    Given an array of distinct integers `candidates` and a target integer `target`,
+    return a list of all unique combinations of candidates where the chosen numbers
+    sum to `target`. You may return the combinations in any order.
+
+    The same number may be chosen from candidates an unlimited number of times. Two
+    combinations are unique if the frequency of at least one of the chosen numbers
+    is different.
+
+    The test cases are generated such that the number of unique combinations that
+    sum up to target is less than 150 combinations for the given input.
+
+    Example 1:
+
+    Input: candidates = [2,3,6,7], target = 7
+    Output: [[2,2,3],[7]]
+    Explanation:
+    2 and 3 are candidates, and 2 + 2 + 3 = 7. Note that 2 can be used multiple times.
+    7 is a candidate, and 7 = 7.
+    These are the only two combinations.
+
+    Example 2:
+
+    Input: candidates = [2,3,5], target = 8
+    Output: [[2,2,2,2],[2,3,3],[3,5]]
+
+    Example 3:
+
+    Input: candidates = [2], target = 1
+    Output: []
+
+    Constraints:
+
+        1 <= candidates.length <= 30
+        2 <= candidates[i] <= 40
+        All elements of candidates are distinct.
+        1 <= target <= 40
+
+    """
+    def _combination_sum(self, end: int, target: int) -> List[List[int]]:
+        while self.candidates[end - 1] > target:
+            end -= 1
+            if end == 0:
+                return []
+        cand_last = self.candidates[end - 1]
+        if end == 1:
+            return [] if target % cand_last != 0 else [[target // cand_last]]
+        result = []
+        for num_last in range(0, target // cand_last + 1):
+            el_last = num_last * cand_last
+            if el_last < target:
+                result.extend(
+                    l + [num_last]
+                    for l in self._combination_sum(end - 1, target - el_last)
+                )
+            elif el_last == target:
+                result.append([0] * (end - 1) + [num_last])
+        return result
+
+    def combinationSum(self, candidates: List[int], target: int) -> List[List[int]]:
+        assert len(candidates) > 0
+        self.candidates = candidates
+        result_as_counts = self._combination_sum(len(candidates), target)
+        return [
+            [
+                x
+                for cand, num in zip(self.candidates, cvec)
+                for x in [cand] * num
+            ]
+            for cvec in result_as_counts
+        ]
+
+
+# OK
+# - My solution works
+# - AI solution is just much simpler, but not obvious at all why it works,
+#   so WTF!
+#
+# From AI:
+# - If sum(delta) < 0: Solution cannot exist. For any start, we'd fail with the
+#   final step
+# - If sum(delta) >= 0: Solution must exist. Why? Say you start from 0. For some
+#   position pos, sum(delta[:(pos+1)]) is smallest. Assume this is negative. If we
+#   start from pos, cumulative sums from there on cannot be negative at least
+#   until the end, because that would imply a smaller cum-sum value. In fact, the
+#   sum from pos until the end must be >= -sum(delta[:(pos+1)]), since the total
+#   sum(delta) >= 0. Also, sum(delta[:(i+1)]) >= sum(delta[:(pos+1)]) for any
+#   i <= pos by definition of pos, and so this is a solution.
+# - The rest of the AI solution is just trying to be clever. We could just as
+#   well track the minimum cumulative sum.
+class Solution_134:
+    """
+    https://leetcode.com/problems/gas-station/
+
+    There are n gas stations along a circular route, where the amount of gas at
+    the ith station is `gas[i]`.
+
+    You have a car with an unlimited gas tank and it costs `cost[i]` of gas to
+    travel from the ith station to its next (i + 1)th station. You begin the
+    journey with an empty tank at one of the gas stations.
+
+    Given two integer arrays `gas` and `cost`, return the starting gas station's
+    index if you can travel around the circuit once in the clockwise direction,
+    otherwise return -1. If there exists a solution, it is guaranteed to be unique.
+
+    Example 1:
+
+    Input: gas = [1,2,3,4,5], cost = [3,4,5,1,2]
+    Output: 3
+    Explanation:
+    Start at station 3 (index 3) and fill up with 4 unit of gas. Your tank = 0 + 4 = 4
+    Travel to station 4. Your tank = 4 - 1 + 5 = 8
+    Travel to station 0. Your tank = 8 - 2 + 1 = 7
+    Travel to station 1. Your tank = 7 - 3 + 2 = 6
+    Travel to station 2. Your tank = 6 - 4 + 3 = 5
+    Travel to station 3. The cost is 5. Your gas is just enough to travel back to station 3.
+    Therefore, return 3 as the starting index.
+
+    Example 2:
+
+    Input: gas = [2,3,4], cost = [3,4,3]
+    Output: -1
+    Explanation:
+    You can't start at station 0 or 1, as there is not enough gas to travel to the next station.
+    Let's start at station 2 and fill up with 4 unit of gas. Your tank = 0 + 4 = 4
+    Travel to station 0. Your tank = 4 - 3 + 2 = 3
+    Travel to station 1. Your tank = 3 - 3 + 3 = 3
+    You cannot travel back to station 2, as it requires 4 unit of gas but you only have 3.
+    Therefore, you can't travel around the circuit once no matter where you start.
+
+    Constraints:
+
+        n == gas.length == cost.length
+        1 <= n <= 10^5
+        0 <= gas[i], cost[i] <= 10^4
+        The input is generated such that the answer is unique.
+
+    """
+    def canCompleteCircuit(self, gas: List[int], cost: List[int]) -> int:
+        delta = [g - c for g, c in zip(gas, cost)]
+        # delta_cumsum[i] = sum(delta[:(i + 1)])
+        delta_cumsum = [0] + list(accumulate(delta))
+        # Starting from largest `delta` seems sensible
+        for pos, _ in sorted(enumerate(delta), key=lambda x: x[1], reverse=True):
+            if delta[pos] >= 0:
+                # Need to ensure:
+                # - sum(delta[pos:j]) >= 0 for all j in range(pos + 1, n + 1)
+                # - sum(delta[pos:]) + sum(delta[:j]) >= 0 for all j in range(1, pos + 1)
+                off = delta_cumsum[pos]
+                if any(x < off for x in delta_cumsum[(pos + 1):]):
+                    continue
+                off = delta_cumsum[-1] - delta_cumsum[pos]
+                if any(x < -off for x in delta_cumsum[:(pos + 1)]):
+                    continue
+                return pos
+        return -1
+
+    # AI solution: Why does this work?
+    # ==> Sucks. Just being very clever here!
+    def canCompleteCircuit_optimal(self, gas: List[int], cost: List[int]) -> int:
+        total_tank = 0
+        tank = 0
+        start = 0
+        for i in range(len(gas)):
+            diff = gas[i] - cost[i]
+            total_tank += diff
+            tank += diff
+            if tank < 0:
+                start = i + 1
+                tank = 0
+        return start if total_tank >= 0 else -1
+
+    def canCompleteCircuit_also_optimal(self, gas: List[int], cost: List[int]) -> int:
+        len_gas = len(gas)
+        total_tank = 0
+        start = 0
+        tank_after_start = 0
+        for i in range(len_gas):
+            diff = gas[i] - cost[i]
+            total_tank += diff
+            if total_tank < tank_after_start:
+                start = i + 1
+                tank_after_start = total_tank
+        return start % len_gas if total_tank >= 0 else -1
+
+
+# OK: This is a optimal solution
+class Solution_1927:
+    """
+    https://leetcode.com/problems/sum-game/?envType=daily-question&envId=2026-08-25
+
+    Alice and Bob take turns playing a game, with Alice starting first.
+
+    You are given a string `num` of even length consisting of digits and '?'
+    characters. On each turn, a player will do the following if there is still at
+    least one '?' in `num`:
+
+    * Choose an index i where `num[i] == '?'`.
+    * Replace `num[i]` with any digit between '0' and '9'.
+
+    The game ends when there are no more '?' characters in `num`.
+
+    For Bob to win, the sum of the digits in the first half of `num` must be equal
+    to the sum of the digits in the second half. For Alice to win, the sums must
+    not be equal.
+
+    For example, if the game ended with num = "243801", then Bob wins because
+    2+4+3 = 8+0+1. If the game ended with num = "243803", then Alice wins because
+    2+4+3 != 8+0+3.
+
+    Assuming Alice and Bob play optimally, return true if Alice will win and
+    false if Bob will win.
+
+    Example 1:
+
+    Input: num = "5023"
+    Output: false
+    Explanation: There are no moves to be made.
+    The sum of the first half is equal to the sum of the second half: 5 + 0 = 2 + 3.
+
+    Example 2:
+
+    Input: num = "25??"
+    Output: true
+    Explanation: Alice can replace one of the '?'s with '9' and it will be
+    impossible for Bob to make the sums equal.
+
+    Example 3:
+
+    Input: num = "?3295???"
+    Output: false
+    Explanation: It can be proven that Bob will always win. One possible outcome is:
+    - Alice replaces the first '?' with '9'. num = "93295???".
+    - Bob replaces one of the '?' in the right half with '9'. num = "932959??".
+    - Alice replaces one of the '?' in the right half with '2'. num = "9329592?".
+    - Bob replaces the last '?' in the right half with '7'. num = "93295927".
+    Bob wins because 9 + 3 + 2 + 9 = 5 + 9 + 2 + 7.
+
+    Constraints:
+
+    * 2 <= num.length <= 10^5
+    * num.length is even.
+    * num consists of only digits and '?'.
+
+    """
+    def sumGame(self, num: str) -> bool:
+        # Positions do not matter. Just state:
+        #   (delta, free_left, free_right), where delta = sum_left - sum_right
+        # Optimal approach is to play greedy:
+        # - A maximizes `abs(delta)` with every move
+        # - B minimizes `abs(delta)` with every move
+        # - A plays 9 or 0 only, until the end
+        #
+        # Don't have to really play, but can predict outcome from start
+        # state (delta, free_left, free_right)
+        assert len(num) % 2 == 0
+        half = len(num) // 2
+        delta = free_left = free_right = 0
+        for x in num[:half]:
+            if x == "?":
+                free_left += 1
+            else:
+                delta += int(x)
+        for x in num[half:]:
+            if x == "?":
+                free_right += 1
+            else:
+                delta -= int(x)
+        if delta == 0:
+            # B wins if free_left == free_right: B always plays the same as A,
+            # but on the other side.
+            # A wins if free_left != free_right: A plays 9 on larger side, B
+            # counters with 9 on other side, but last move is for A
+            return free_left != free_right
+        if delta < 0:
+            # Flip everything around: Works by symmetry
+            temp = free_left
+            free_left, free_right = free_right, temp
+            delta = -delta
+        # At this point: delta > 0
+        # If free_left > free_right: A wins (always 9 on left)
+        # If free_left == free_right: A wins (always 9 on left)
+        # If free_left < free_right: First, A and B play 9 left and right
+        #   for free_left steps. Then, delta is the same and there are
+        #   free_right - free_left right slots left.
+        if free_left >= free_right:
+            return True  # A wins (always 9 on the left)
+        free_right -= free_left  # Free slots on the right only
+        if free_right % 2 == 0:
+            # B plays last
+            # If delta > rhs: A wins by A:0, B:9 always
+            # If delta < rhs: A wins by A:9, B:0 always
+            # If delta == rhs: B wins by always playing 9 - A
+            rhs = (free_right // 2) * 9
+            return delta != rhs
+        else:
+            # A plays last
+            # Same argument with delta vs rhs, but A can always move away
+            # from 0 then
+            return True
+
+
+class Solution_3756:
+    """
+    https://leetcode.com/problems/concatenate-non-zero-digits-and-multiply-by-sum-ii/?envType=daily-question&envId=2026-08-25
+
+    You are given a string s of length m consisting of digits. You are also given a 2D integer array queries, where queries[i] = [li, ri].
+
+    For each queries[i], extract the s[li..ri]. Then, perform the following:
+
+        Form a new integer x by concatenating all the non-zero digits from the substring in their original order. If there are no non-zero digits, x = 0.
+        Let sum be the sum of digits in x. The answer is x * sum.
+
+    Return an array of integers answer where answer[i] is the answer to the ith query.
+
+    Since the answers may be very large, return them modulo 109 + 7.
+
+    Example 1:
+
+    Input: s = "10203004", queries = [[0,7],[1,3],[4,6]]
+
+    Output: [12340, 4, 9]
+
+    Explanation:
+
+        s[0..7] = "10203004"
+            x = 1234
+            sum = 1 + 2 + 3 + 4 = 10
+            Therefore, answer is 1234 * 10 = 12340.
+        s[1..3] = "020"
+            x = 2
+            sum = 2
+            Therefore, the answer is 2 * 2 = 4.
+        s[4..6] = "300"
+            x = 3
+            sum = 3
+            Therefore, the answer is 3 * 3 = 9.
+
+    Example 2:
+
+    Input: s = "1000", queries = [[0,3],[1,1]]
+
+    Output: [1, 0]
+
+    Explanation:
+
+        s[0..3] = "1000"
+            x = 1
+            sum = 1
+            Therefore, the answer is 1 * 1 = 1.
+        s[1..1] = "0"
+            x = 0
+            sum = 0
+            Therefore, the answer is 0 * 0 = 0.
+
+    Example 3:
+
+    Input: s = "9876543210", queries = [[0,9]]
+
+    Output: [444444137]
+
+    Explanation:
+
+        s[0..9] = "9876543210"
+            x = 987654321
+            sum = 9 + 8 + 7 + 6 + 5 + 4 + 3 + 2 + 1 = 45
+            Therefore, the answer is 987654321 * 45 = 44444444445.
+            We return 44444444445 modulo (109 + 7) = 444444137.
+
+    Constraints:
+
+        1 <= m == s.length <= 10^5
+        s consists of digits only.
+        1 <= queries.length <= 10^5
+        queries[i] = [li, ri]
+        0 <= li <= ri < m
+
+     """
+    pass
 
 
 # === Hard ===
@@ -2374,7 +2805,9 @@ class Solution_3534:
 
 
 # OK
-# This was not hard at all...
+# - My solution is VERY inefficient, scales linear in k
+# - Mistake: Did not look at constraints! k can be very large, but coins cannot
+#   (neither number of them, nor their values)
 class Solution_3116:
     """
     https://leetcode.com/problems/kth-smallest-amount-with-single-denomination-combination/?envType=daily-question&envId=2026-08-25
@@ -2437,7 +2870,46 @@ class Solution_3116:
                 next[p] += coins[p]
         return curr
 
+    # Solution from AI:
+    # - countMultiplesUpTo(amount): Number of 1 <= x <= amount covered by any of the
+    #   coins. Uses inclusion-exclusion principle, iterating over all binary masks
+    #   of length number of coins
+    # - Then use binary search to find amount s.t. countMultiplesUpTo(amount) == k.
+    #   Here, amount <= min(coins) * k up front, which would mean that only the
+    #   minimum coin is used.
+    def findKthSmallest_muchbetter(self, coins: List[int], k: int) -> int:
+        numCoins = len(coins)
 
+        def countMultiplesUpTo(amount: int) -> int:
+            # Inclusion-exclusion over all non-empty subsets of coins:
+            # count of numbers <= amount divisible by lcm(subset), with sign
+            # +1 for odd-sized subsets and -1 for even-sized subsets.
+            totalCount = 0
+            for mask in range(1, 1 << numCoins):
+                subsetLcm = 1
+                subsetSize = 0
+                for i in range(numCoins):
+                    if mask & (1 << i):
+                        subsetLcm = subsetLcm * coins[i] // math.gcd(subsetLcm, coins[i])
+                        subsetSize += 1
+                sign = 1 if subsetSize % 2 == 1 else -1
+                totalCount += sign * (amount // subsetLcm)
+            return totalCount
+
+        lowerBound, upperBound = 1, min(coins) * k
+        while lowerBound < upperBound:
+            midAmount = (lowerBound + upperBound) // 2
+            if countMultiplesUpTo(midAmount) >= k:
+                upperBound = midAmount
+            else:
+                lowerBound = midAmount + 1
+        return lowerBound
+
+
+# OK
+# - My solution is standard-recursive, but can be very slow
+# - First fix: Cache results in dict (memoization)
+# - Even better: Standard bottom-up DP
 class Solution_115:
     """
     https://leetcode.com/problems/distinct-subsequences/description/?envType=daily-question&envId=2026-08-25
@@ -2474,6 +2946,40 @@ class Solution_115:
         s and t consist of English letters.
 
     """
+    def _num_distinct(self, start_s: int, start_t: int) -> int:
+        cache_key = (start_s, start_t)
+        cached = self.memory.get(cache_key)
+        if cached is not None:
+            return cached
+        first_t = self.t[start_t]
+        while self.s[start_s] != first_t:
+            start_s += 1
+            if start_s >= self.full_len_s:
+                self.memory[cache_key] = 0
+                return 0
+        len_s = self.full_len_s - start_s
+        len_t = self.full_len_t - start_t
+        result = None
+        if len_s < len_t:
+            result = 0
+        elif len_s == len_t:
+            result = int(self.s[start_s:] == self.t[start_t:])
+        elif len_t == 1:
+            result = sum(x == first_t for x in self.s[(start_s + 1):]) + 1
+        if result is None:
+            result = self._num_distinct(start_s + 1, start_t + 1)
+            for off in range(1, len_s - len_t + 1):
+                if self.s[start_s + off] == first_t:
+                    result += self._num_distinct(start_s + 1 + off, start_t + 1)
+        self.memory[cache_key] = result
+        return result
 
     def numDistinct(self, s: str, t: str) -> int:
-        pass
+        self.s = s
+        self.t = t
+        self.full_len_s = len(s)
+        self.full_len_t = len(t)
+        self.memory: Dict[Tuple[int, int], int] = dict()
+        return self._num_distinct(0, 0)
+
+

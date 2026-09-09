@@ -222,15 +222,15 @@ class LLaMAMoE(nn.Module):
             probs = probs * self.routed_scaling_factor
         y = torch.zeros_like(x_2d)  # (B*T, n_embd)
         for idx, expert in enumerate(self.experts):
-            # `mask`: `(B*T, n_expert_per_token)`
-            # `mask = indices == idx`
+            # `mask = indices == idx`: `(B*T, n_expert_per_token)`
             # `zip(token_idx, expert_idx) = [(t, j)]` where `mask[t, j] == True`
             token_idx, expert_idx = torch.nonzero(indices == idx, as_tuple=True)
-            # If `N = len(token_idx)` is the number of tokens `expert` is active for:
+            # If `N = len(token_idx)` is the number of tokens `expert` is active for
+            # (we can have N == 0):
             # `y[token_idx]`: `(N, n_embd)`
-            # `probs[token_idx, expert_idx, None]`: `(N, 1)`
+            # `probs[token_idx, expert_idx].unsqueeze(-1)`: `(N, 1)`
             # `expert(x_2d[token_idx])`: `(N, n_embd)`
-            y[token_idx] += probs[token_idx, expert_idx, None] * expert(x_2d[token_idx])
+            y[token_idx] += probs[token_idx, expert_idx].unsqueeze(-1) * expert(x_2d[token_idx])
         return y.view(*x.shape)  # (B, T, n_embd)
 
 
