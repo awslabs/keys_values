@@ -27,6 +27,7 @@ from keys_values.kvcache.quantize.quantization import (
     QuantizerState,
 )
 from keys_values.utils import bits_for_torch_dtype, bitsize_of
+from keys_values.utils import bytes_for_shape  # DEBUG
 
 ALLOWED_SOURCE_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 
@@ -601,6 +602,13 @@ class TorchBasicQuantizerState(QuantizerState):
             device=self.device,
             pin_memory=pin_memory,
         )
+        # DEBUG
+        mem_sz1 = bytes_for_shape(shape, quantizer._quant_buffer_dtype) // (2 ** 30)
+        mem_sz2 = (
+            bytes_for_shape(shape[:-1], torch.float32) + bytes_for_shape(shape[:-1], quantizer._quant_buffer_dtype)
+        ) // (2 ** 30)
+        print(f"DEBUG: TorchBasicQuantizerState: quant_buffer ({mem_sz1:.2f}G), quant_scales+quant_zero_points ({mem_sz2:.2f}G)")
+        # END DEBUG
 
     def copy_(
         self,

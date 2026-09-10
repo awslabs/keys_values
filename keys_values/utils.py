@@ -15,6 +15,7 @@ import csv
 from enum import unique, Enum
 from filelock import FileLock, Timeout
 from pathlib import Path
+import math
 import sys
 import time
 from typing import List, Dict, Any, Optional, Iterable, Union, Iterator, Tuple, Set
@@ -322,6 +323,10 @@ def bits_for_torch_dtype(dtype: torch.dtype) -> int:
 
 def bitsize_of(x: torch.Tensor) -> int:
     return x.numel() * x.element_size() * 8
+
+
+def bytes_for_shape(shape: Tuple[int, ...], dtype: torch.dtype) -> int:
+    return math.prod(shape) * bytes_for_torch_dtype(dtype)
 
 
 def shape_to_tuple(x: torch.Tensor) -> Tuple[int, ...]:

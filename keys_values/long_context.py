@@ -724,6 +724,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
             num_output_tokens = 0
         # Select chunk sizes and chunks per cell
         self._select_chunks_and_cells(num_output_tokens, seq_length)
+        print("DEBUG: End of _init_members_from_tokens")  # DEBUG
 
     def _select_chunks_and_cells(
         self,

@@ -827,6 +827,7 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             dequant_kwargs = dict(max_num_ranges=cache_kwargs.get("max_num_ranges"))
         else:
             dequant_kwargs = None
+        print("DEBUG: LayerInputQuantizedCheckpoints: create_quantized_kv_buffers")  # DEBUG
         quant_buffers = create_quantized_kv_buffers(
             qname=qname,
             cache_lengths=[max_cell_length],
@@ -837,6 +838,7 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             device=device,
         )[0]
         # Internally, we use :class:`KVCacheBufferQuantizedCheckpoints` objects
+        print("DEBUG: LayerInputQuantizedCheckpoints: Create _checkpoints_int")  # DEBUG
         self._checkpoints_int = [
             KVCacheBufferQuantizedCheckpoints(
                 chunk_numbers=layer_numbers,
@@ -847,6 +849,7 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             for start, end in cell_ranges
         ]
         self.n_embd = model.config.n_embd
+        print("DEBUG: LayerInputQuantizedCheckpoints done")  # DEBUG
 
     def clear(self):
         """
