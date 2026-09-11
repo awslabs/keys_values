@@ -689,13 +689,10 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         else:
             # Checkpoints are quantized
-            if self.offload_device is not None:
-                kwargs = dict(
-                    allocate_buffers=True,
-                    device=self.offload_device,
-                )
-            else:
-                kwargs = dict(allocate_buffers=False)
+            # Note: We need `allocate_buffers=True` here in general, since
+            # checkpoint buffers are on CPU. `self.cache_kwargs` may have
+            # `allocate_buffers=False` (default), as this is the better option
+            # for KV cache buffers.
             self.layer_checkpoints = LayerInputQuantizedCheckpoints(
                 model=self.gpt_model,
                 layer_numbers=layer_numbers,
@@ -704,11 +701,11 @@ class LongContextGradientModel(LongContextInferenceModel):
                 qname=self.layercp_qname,
                 cache_kwargs=dict(
                     self.cache_kwargs,
-                    allocate_buffers=True,
                     tmp_array_limit_gb=self._tmp_array_limit_gb,
                 ),
+                allocate_buffers=True,
                 pin_memory=pin_memory,
-                **kwargs,
+                device=self.offload_device,
             )
         # Need to track `input_pos` across calls of :meth:`_checkpoint_layer_input`
         self._layer_cp_input_pos = {layer_idx: 0 for layer_idx in layer_numbers}

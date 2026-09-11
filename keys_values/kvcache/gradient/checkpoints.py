@@ -838,8 +838,8 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             qname: Determines quantization buffers
             cache_kwargs: Additional keyword arguments for
                 :class:`QuantizedKVCacheBuffers`.
-            allocate_buffers: If `True`, we allocate buffer buffers here.
-                Otherwise, they are allocated at first use
+            allocate_buffers: If `True`, we allocate buffers here. Otherwise,
+                they are allocated at first use
             device: Device for buffer allocations, needed if
                 `allocate_buffers=True`
             pin_memory: If given, must have the same length as `layer_numbers`.

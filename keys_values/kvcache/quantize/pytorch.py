@@ -165,7 +165,6 @@ class TorchBasicQuantizer(Quantizer):
 
     `tmp_array_limit_gb` provides access to the maximum size of temporary
     buffers which can be used here.
-
     """
 
     def __init__(
