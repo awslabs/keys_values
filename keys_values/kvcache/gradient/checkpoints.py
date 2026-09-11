@@ -17,6 +17,7 @@ from typing import List, Optional, Tuple, Dict, Any
 import torch
 
 from keys_values.attention import DefaultKeysAndValues
+from keys_values.cpu_memory import get_memory_manager, has_memory_manager
 from keys_values.kvcache.buffers import KVCacheBuffersParams, DefaultKVCacheBuffers
 from keys_values.kvcache.quant_buffers import (
     QuantizedKVCacheBuffers,
@@ -451,6 +452,12 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
     The checkpoints are stored as they are, without quantization. This is
     recommended mostly for testing, or if CPU memory is not scarce.
 
+    If `use_memory_manager == True`, we use `get_memory_manager` for all
+    tensor allocations here. This is done only if `has_memory_manager() == True`,
+    so the file-based memory manager exists. In this case, tensors are allocated
+    normally until the virtual memory including default system swap space is
+    nearly full. At that point, the manager creates extra files on some
+    external file system.
     """
 
     def __init__(
@@ -460,6 +467,7 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         cache_length: int,
         batch_size: Optional[int] = None,
         pin_memory: Optional[List[bool]] = None,
+        use_memory_manager: bool = True,
     ):
         """
         Args:
@@ -476,6 +484,7 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         self._kwargs = dict(dtype=params.dtype, device=torch.device("cpu"))
         if batch_size is None:
             batch_size = params.max_batch_size
+        self._use_memory_manager = use_memory_manager and has_memory_manager()
         self._shape = (
             batch_size,
             params.n_query_groups,
@@ -494,6 +503,18 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
     @property
     def cache_length(self) -> int:
         return self._shape[2]
+
+    def _allocate_tensor(
+        self,
+        shape: Tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        pin_memory: bool,
+    ) -> torch.Tensor:
+        if self._use_memory_manager and not pin_memory and (device is None or device == torch.device("cpu")):
+            return get_memory_manager().allocate(shape, dtype).fill_(0)
+        else:
+            return torch.zeros(shape, dtype=dtype, device=device, pin_memory=pin_memory)
 
     def set_chunk_numbers(
         self,
@@ -524,11 +545,11 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
             num_to_create = max(len(self.chunk_numbers) - len(self.k), 0)
         if num_to_create > 0:
             new_k = [
-                torch.zeros(self._shape, **self._kwargs, pin_memory=pm)
+                self._allocate_tensor(self._shape, **self._kwargs, pin_memory=pm)
                 for pm in pin_memory[(-num_to_create):]
             ]
             new_v = [
-                torch.zeros(self._shape, **self._kwargs, pin_memory=pm)
+                self._allocate_tensor(self._shape, **self._kwargs, pin_memory=pm)
                 for pm in pin_memory[(-num_to_create):]
             ]
         else:

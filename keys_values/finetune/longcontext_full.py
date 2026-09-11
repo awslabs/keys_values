@@ -52,6 +52,7 @@ from keys_values.attention.attention_utils import (
     SDPA_KERNELS_BEST_ORDERING,
 )
 from keys_values.config import Config as ConfigFull
+from keys_values.cpu_memory import get_memory_manager
 from keys_values.data import Helmet, LongBenchV2, MyDataLoader, INPUT_IDS_NAME
 from keys_values.data.constants import TARGETS_STRINGS_NAME
 from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
@@ -208,6 +209,7 @@ def setup(
         max_match_trials_pack_arg=8,
         layercp_pin_memory=False,
         cachecp_pin_memory=False,
+        checkpoint_temp_dir=None,
     ),
     head_model: Optional[str] = None,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
@@ -715,6 +717,14 @@ def main(
     set_fused_rope_enabled(sdpa.fused_rope)
     set_fused_rmsnorm_enabled(sdpa.fused_rmsnorm)
     set_fused_swiglu_enabled(sdpa.fused_swiglu)
+    # Create file-based manager for virtual memory to be used for checkpoints
+    if grad.checkpoint_temp_dir is not None:
+        # Creates singleton, which includes choosing and creating a unique
+        # subdirectory of `grad.checkpoint_temp_dir`
+        print_message(
+            f"Creating manager for memory-mapped files under {grad.checkpoint_temp_dir}"
+        )
+        mem_manager = get_memory_manager(grad.checkpoint_temp_dir)
 
     if fabric.global_rank == 0:
         os.makedirs(out_dir, exist_ok=True)

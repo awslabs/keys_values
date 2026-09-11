@@ -95,3 +95,7 @@ def get_memory_manager(tmp_dir: Optional[str] = None) -> FileBasedExtraMemoryMan
             raise ValueError("tmp_dir must be provided with first call")
         _manager = FileBasedExtraMemoryManager(tmp_dir)
     return _manager
+
+
+def has_memory_manager() -> bool:
+    return _manager is not None

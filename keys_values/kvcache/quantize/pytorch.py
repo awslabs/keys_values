@@ -165,6 +165,13 @@ class TorchBasicQuantizer(Quantizer):
 
     `tmp_array_limit_gb` provides access to the maximum size of temporary
     buffers which can be used here.
+
+    If `use_memory_manager == True`, we use `get_memory_manager` for all
+    tensor allocations here. This is done only if `has_memory_manager() == True`,
+    so the file-based memory manager exists. In this case, tensors are allocated
+    normally until the virtual memory including default system swap space is
+    nearly full. At that point, the manager creates extra files on some
+    external file system.
     """
 
     def __init__(
@@ -176,6 +183,7 @@ class TorchBasicQuantizer(Quantizer):
         allocate_buffers: bool = False,
         device: Optional[torch.device] = None,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        use_memory_manager: bool = True,
     ):
         super().__init__(
             shape,
@@ -277,21 +285,21 @@ class TorchBasicQuantizer(Quantizer):
             self.shape = (batch_size,) + self.shape[1:]
             self._init_blocksize_quant_shape()
             shape = self._quant_shape
-            self.quant_buffer = torch.empty(
+            self.quant_buffer = self._allocate_tensor(
                 shape,
                 dtype=self._quant_buffer_dtype,
                 device=device,
             )
-            self.quant_scales = torch.zeros(
+            self.quant_scales = self._allocate_tensor(
                 shape[:-1],
                 dtype=torch.float32,
                 device=device,
-            )
-            self.quant_zero_points = torch.zeros(
+            ).fill_(0)
+            self.quant_zero_points = self._allocate_tensor(
                 shape[:-1],
                 dtype=torch.int32,
                 device=device,
-            )
+            ).fill_(0)
         self._batch_size = batch_size  # Effective batch size
 
     def deallocate(self):
@@ -582,24 +590,24 @@ class TorchBasicQuantizerState(QuantizerState):
             self.cache_length,
             quantizer._quant_shape[2],
         )
-        self.quant_buffer = torch.zeros(
+        self.quant_buffer = quantizer._allocate_tensor(
             shape,
             dtype=quantizer._quant_buffer_dtype,
             device=self.device,
             pin_memory=pin_memory,
-        )
-        self.quant_scales = torch.zeros(
+        ).fill_(0)
+        self.quant_scales = quantizer._allocate_tensor(
             shape[:-1],
             dtype=torch.float32,
             device=self.device,
             pin_memory=pin_memory,
-        )
-        self.quant_zero_points = torch.zeros(
+        ).fill_(0)
+        self.quant_zero_points = quantizer._allocate_tensor(
             shape[:-1],
             dtype=quantizer._quant_buffer_dtype,
             device=self.device,
             pin_memory=pin_memory,
-        )
+        ).fill_(0)
 
     def copy_(
         self,

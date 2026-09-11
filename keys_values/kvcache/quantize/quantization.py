@@ -17,6 +17,7 @@ import torch
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
+from keys_values.cpu_memory import get_memory_manager, has_memory_manager
 from keys_values.kvcache.buffers import KVCacheBuffersParams
 
 QuantizerCallback = Callable[[int, int], None]
@@ -60,6 +61,12 @@ class Quantizer(torch.nn.Module):
     required if the callback is used. The callback is called at the start of
     each method, passing `new_block_idx=block_idx`.
 
+    If `use_memory_manager == True`, we use `get_memory_manager` for all
+    tensor allocations here. This is done only if `has_memory_manager() == True`,
+    so the file-based memory manager exists. In this case, tensors are allocated
+    normally until the virtual memory including default system swap space is
+    nearly full. At that point, the manager creates extra files on some
+    external file system.
     """
 
     def __init__(
@@ -68,6 +75,7 @@ class Quantizer(torch.nn.Module):
         source_dtype: torch.dtype,
         blocks_over_heads: bool = False,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
+        use_memory_manager: bool = True,
     ):
         super().__init__()
         if len(shape) != 4 or any(x < 1 for x in shape):
@@ -78,6 +86,7 @@ class Quantizer(torch.nn.Module):
         self._tmp_array_limit_gb = tmp_array_limit_gb
         self._callback = None
         self.current_block_idx = None
+        self._use_memory_manager = use_memory_manager and has_memory_manager()
 
     @property
     def device(self) -> Optional[torch.device]:
@@ -288,6 +297,18 @@ class Quantizer(torch.nn.Module):
     @property
     def batch_size(self) -> Optional[int]:
         raise NotImplementedError
+
+    def _allocate_tensor(
+        self,
+        shape: Tuple[int, ...],
+        dtype: torch.dtype,
+        device: Optional[torch.device] = None,
+        pin_memory: bool = False,
+    ) -> torch.Tensor:
+        if self._use_memory_manager and not pin_memory and (device is None or device == torch.device("cpu")):
+            return get_memory_manager().allocate(shape, dtype)
+        else:
+            return torch.empty(shape, dtype=dtype, device=device, pin_memory=pin_memory)
 
 
 class QuantizerState:

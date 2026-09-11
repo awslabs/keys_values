@@ -178,16 +178,16 @@ class BitsAndBytesQuantizer(Quantizer):
             self.shape = (batch_size,) + self.shape[1:]
             self._init_blocksize_quant_shape()
             shape = self._quant_shape
-            self.quant_buffer = torch.zeros(
+            self.quant_buffer = self._allocate_tensor(
                 shape,
                 dtype=self.target_dtype,
                 device=device,
             )
-            self.quant_absmax = torch.zeros(
+            self.quant_absmax = self._allocate_tensor(
                 shape[:-1],
                 dtype=torch.float32,
                 device=device,
-            )
+            ).fill_(0)
         self._batch_size = batch_size  # Effective batch size
 
     def _initialize(self):
@@ -476,18 +476,18 @@ class BitsAndBytesQuantizerState(QuantizerState):
         shape = list(quantizer._quant_shape)
         pos = 0 if self.quantizer.blocks_over_heads else 1
         shape[pos] = self.cache_length
-        self.quant_buffer = torch.zeros(
+        self.quant_buffer = quantizer._allocate_tensor(
             shape,
             dtype=quantizer.target_dtype,
             device=self.device,
             pin_memory=pin_memory,
-        )
-        self.quant_absmax = torch.zeros(
+        ).fill_(0)
+        self.quant_absmax = quantizer._allocate_tensor(
             shape[:-1],
             dtype=torch.float32,
             device=self.device,
             pin_memory=pin_memory,
-        )
+        ).fill_(0)
 
     def copy_(
         self,
