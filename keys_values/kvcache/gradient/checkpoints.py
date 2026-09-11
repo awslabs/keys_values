@@ -423,7 +423,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
     # For debugging
     def size_estimate(self) -> int:
         return sum(
-            cp[0].size_estimate()[0] + cp[1].size_estimate()[0]
+            cp[0].quantizer.size_estimate()[0] + cp[1].quantizer.size_estimate()[0]
             for cp in self.checkpoints
         )
 
