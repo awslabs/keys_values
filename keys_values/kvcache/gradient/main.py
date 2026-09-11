@@ -704,6 +704,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 qname=self.layercp_qname,
                 cache_kwargs=dict(
                     self.cache_kwargs,
+                    allocate_buffers=True,
                     tmp_array_limit_gb=self._tmp_array_limit_gb,
                 ),
                 pin_memory=pin_memory,

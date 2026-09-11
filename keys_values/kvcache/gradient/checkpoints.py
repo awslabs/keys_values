@@ -267,7 +267,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
             )[0] / (2 ** 23)
             print(
                 "DEBUG: KVCacheBufferQuantizedCheckpoints.set_chunk_numbers:\n"
-                f"==> {num_to_create} CPs a {mem_per_cp:.3f}M: {(mem_per_cp * num_to_create):.3f}M\n"
+                f"==> {num_to_create} CPs a {mem_per_cp:.2f}M: {(mem_per_cp * num_to_create):.1f}M\n"
             )
             # END DEBUG
             new_checkpoints = [
@@ -294,7 +294,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
             self._checkpoint_lengths.extend(new_lengths)
         # DEBUG
         mem_all = self.size_estimate() // (2 ** 23)
-        print(f"DEBUG: KVCacheBufferQuantizedCheckpoints.set_chunk_numbers: {mem_all:.3f}M a posteriori")
+        print(f"DEBUG: KVCacheBufferQuantizedCheckpoints.set_chunk_numbers: {mem_all:.1f}M a posteriori")
         # END DEBUG
 
     def _set_checkpoint(
@@ -891,7 +891,7 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
         self.n_embd = model.config.n_embd
         # DEBUG
         mem_all = sum(cp.size_estimate() for cp in self._checkpoints_int) // (2 ** 23)
-        print(f"DEBUG: LayerInputQuantizedCheckpoints: _checkpoints_int of len {len(cell_ranges)} need {mem_all:.3f}M in total")
+        print(f"DEBUG: LayerInputQuantizedCheckpoints: _checkpoints_int of len {len(cell_ranges)} need {mem_all:.1f}M in total")
         # END DEBUG
 
     def clear(self):
