@@ -263,6 +263,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
                 num_bits=8,
                 quantizer_type=type(self.quant_buffers.quantizer_k),
                 cache_length=self.cache_length,
+                blocks_over_heads=False,
             )[0] / (2 ** 23)
             print(
                 "DEBUG: KVCacheBufferQuantizedCheckpoints.set_chunk_numbers:\n"
@@ -419,11 +420,28 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
             values = values.to(device)
         return DefaultKeysAndValues(keys, values)
 
+    # For debugging
     def size_estimate(self) -> int:
         return sum(
             cp[0].size_estimate()[0] + cp[1].size_estimate()[0]
             for cp in self.checkpoints
         )
+
+    # For debugging
+    def size_estimate_apriori(
+        self,
+        num_chunk_numbers: int,
+        num_bits: int = 8,
+        blocks_over_heads: bool = False,
+    ) -> int:
+        mem_per_cp = QuantizedKVCacheBuffers.size_estimate_apriori(
+            self.quant_buffers.dequant_buffers.get_params(),
+            num_bits=num_bits,
+            quantizer_type=type(self.quant_buffers.quantizer_k),
+            cache_length=self.cache_length,
+            blocks_over_heads=blocks_over_heads,
+        )[0]
+        return mem_per_cp * num_chunk_numbers
 
 
 class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
