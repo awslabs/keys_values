@@ -28,7 +28,6 @@ from keys_values.kvcache.consts import SUPPORTED_QUANTIZERS
 from keys_values.kvcache.quantize.quantization import Quantizer
 from keys_values.kvcache.utils import smallest_covering_ranges
 from keys_values.utils import expand_index, bits_for_torch_dtype, bitsize_of
-from keys_values.utils import bytes_for_shape  # DEBUG
 
 
 class QuantizedKVCacheBuffers(KVCacheBuffers):
@@ -445,13 +444,6 @@ class DequantizedKVCacheBuffers:
                 self.cache_length,
                 self.head_size,
             )
-            # DEBUG
-            mem_sz = bytes_for_shape(shape, self.dtype) // (2 ** 30)
-            print(
-                "DEBUG: DequantizedKVCacheBuffers._allocate_buffers: "
-                f"k_buff ({mem_sz:.2f}G), v_buff ({mem_sz:.2f}G)"
-            )
-            # END DEBUG
             self.k_buff = torch.zeros(shape, device=device, dtype=self.dtype)
             self.v_buff = torch.zeros(shape, device=device, dtype=self.dtype)
 
