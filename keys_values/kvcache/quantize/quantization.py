@@ -305,7 +305,11 @@ class Quantizer(torch.nn.Module):
         device: Optional[torch.device] = None,
         pin_memory: bool = False,
     ) -> torch.Tensor:
-        if self._use_memory_manager and not pin_memory and (device is None or device == torch.device("cpu")):
+        if (
+            self._use_memory_manager
+            and not pin_memory
+            and (device is None or device == torch.device("cpu"))
+        ):
             return get_memory_manager().allocate(shape, dtype)
         else:
             return torch.empty(shape, dtype=dtype, device=device, pin_memory=pin_memory)

@@ -42,7 +42,9 @@ class FileBasedExtraMemoryManager:
         atexit.register(self.cleanup)
         self._install_sigterm_handler()
 
-    def allocate(self, shape: Tuple[int, ...], dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    def allocate(
+        self, shape: Tuple[int, ...], dtype: torch.dtype = torch.float32
+    ) -> torch.Tensor:
         n_bytes = math.prod(shape) * bytes_for_torch_dtype(dtype)
         vm = psutil.virtual_memory()
         sw = psutil.swap_memory()
@@ -59,11 +61,15 @@ class FileBasedExtraMemoryManager:
             except FileNotFoundError:
                 pass
 
-    def _alloc_from_file(self, shape: Tuple[int, ...], dtype: torch.dtype, n_bytes: int) -> torch.Tensor:
+    def _alloc_from_file(
+        self, shape: Tuple[int, ...], dtype: torch.dtype, n_bytes: int
+    ) -> torch.Tensor:
         with self._lock:
             path = os.path.join(self.tmp_dir, f"buf_{len(self._files)}.bin")
             self._files.append(path)
         storage = torch.UntypedStorage.from_file(path, shared=True, nbytes=n_bytes)
+        if len(self._files) == 1:
+            print(f"Starting to write virtual memory to {self.tmp_dir}")
         return torch.empty(0, dtype=dtype).set_(storage).reshape(shape)
 
     def _install_sigterm_handler(self) -> None:
@@ -87,7 +93,9 @@ def get_memory_manager(tmp_dir: Optional[str] = None) -> FileBasedExtraMemoryMan
     """Return the process-wide singleton, creating it on first call."""
     global _manager
     if _manager is not None and tmp_dir is not None and tmp_dir != _manager.tmp_dir:
-        print(f"tmp_dir = {tmp_dir} != {_manager.tmp_dir} = _manager.tmp_dir. Creating new manager")
+        print(
+            f"tmp_dir = {tmp_dir} != {_manager.tmp_dir} = _manager.tmp_dir. Creating new manager"
+        )
         _manager.cleanup()
         _manager = None
     if _manager is None:

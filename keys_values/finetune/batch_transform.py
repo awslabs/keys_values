@@ -122,9 +122,7 @@ class SFTBatchTransform(BatchTransform):
         # Check for right padding and <eos> token
         eos_off = int(self._eos_id is not None)
         kwargs = dict(dtype=input_ids.dtype, device=input_ids.device)
-        for i, (input_id, label, ri) in enumerate(
-            zip(input_ids, labels, right_ignore)
-        ):
+        for i, (input_id, label, ri) in enumerate(zip(input_ids, labels, right_ignore)):
             sz = ri + eos_off
             should_be = torch.full((sz,), self.pad_id, **kwargs)
             if self._eos_id is not None:

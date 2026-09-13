@@ -431,7 +431,9 @@ def setup_internal(
     if head_model is None:
         head_model = default_head_model
     elif head_model not in SUPPORTED_HEAD_MODELS:
-        raise ValueError(f"head_model={head_model} is not supported (choose from {SUPPORTED_HEAD_MODELS})")
+        raise ValueError(
+            f"head_model={head_model} is not supported (choose from {SUPPORTED_HEAD_MODELS})"
+        )
     out_dir = init_out_dir(out_dir)
     if data.metadata_dir is not None:
         data.metadata_dir = str(init_out_dir(Path(data.metadata_dir)))

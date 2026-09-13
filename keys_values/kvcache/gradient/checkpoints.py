@@ -265,7 +265,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
                 quantizer_type=type(self.quant_buffers.quantizer_k),
                 cache_length=self.cache_length,
                 blocks_over_heads=False,
-            )[0] / (2 ** 23)
+            )[0] / (2**23)
             print(
                 "DEBUG: KVCacheBufferQuantizedCheckpoints.set_chunk_numbers:\n"
                 f"==> {num_to_create} CPs a {mem_per_cp:.2f}M: {(mem_per_cp * num_to_create):.1f}M\n"
@@ -294,8 +294,10 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
             self.checkpoints.extend(new_checkpoints)
             self._checkpoint_lengths.extend(new_lengths)
         # DEBUG
-        mem_all = self.size_estimate() // (2 ** 23)
-        print(f"DEBUG: KVCacheBufferQuantizedCheckpoints.set_chunk_numbers: {mem_all:.1f}M a posteriori")
+        mem_all = self.size_estimate() // (2**23)
+        print(
+            f"DEBUG: KVCacheBufferQuantizedCheckpoints.set_chunk_numbers: {mem_all:.1f}M a posteriori"
+        )
         # END DEBUG
 
     def _set_checkpoint(
@@ -511,7 +513,11 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         device: torch.device,
         pin_memory: bool,
     ) -> torch.Tensor:
-        if self._use_memory_manager and not pin_memory and (device is None or device == torch.device("cpu")):
+        if (
+            self._use_memory_manager
+            and not pin_memory
+            and (device is None or device == torch.device("cpu"))
+        ):
             return get_memory_manager().allocate(shape, dtype).fill_(0)
         else:
             return torch.zeros(shape, dtype=dtype, device=device, pin_memory=pin_memory)
@@ -888,7 +894,9 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             dequant_kwargs = dict(max_num_ranges=cache_kwargs.get("max_num_ranges"))
         else:
             dequant_kwargs = None
-        print("DEBUG: LayerInputQuantizedCheckpoints: create_quantized_kv_buffers")  # DEBUG
+        print(
+            "DEBUG: LayerInputQuantizedCheckpoints: create_quantized_kv_buffers"
+        )  # DEBUG
         quant_buffers = create_quantized_kv_buffers(
             qname=qname,
             cache_lengths=[max_cell_length],
@@ -899,7 +907,9 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             device=device,
         )[0]
         # Internally, we use :class:`KVCacheBufferQuantizedCheckpoints` objects
-        print(f"DEBUG: LayerInputQuantizedCheckpoints: Create _checkpoints_int ({len(cell_ranges)} entries)")  # DEBUG
+        print(
+            f"DEBUG: LayerInputQuantizedCheckpoints: Create _checkpoints_int ({len(cell_ranges)} entries)"
+        )  # DEBUG
         self._checkpoints_int = [
             KVCacheBufferQuantizedCheckpoints(
                 chunk_numbers=layer_numbers,
@@ -911,8 +921,10 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
         ]
         self.n_embd = model.config.n_embd
         # DEBUG
-        mem_all = sum(cp.size_estimate() for cp in self._checkpoints_int) // (2 ** 23)
-        print(f"DEBUG: LayerInputQuantizedCheckpoints: _checkpoints_int of len {len(cell_ranges)} need {mem_all:.1f}M in total")
+        mem_all = sum(cp.size_estimate() for cp in self._checkpoints_int) // (2**23)
+        print(
+            f"DEBUG: LayerInputQuantizedCheckpoints: _checkpoints_int of len {len(cell_ranges)} need {mem_all:.1f}M in total"
+        )
         # END DEBUG
 
     def clear(self):

@@ -711,7 +711,6 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._layer_cp_input_pos = {layer_idx: 0 for layer_idx in layer_numbers}
         print("DEBUG: End _create_layer_checkpointers")  # DEBUG
 
-
     def _create_layer_numbers(self) -> List[int]:
         """
         These are layer numbers so that cells run over layers

@@ -186,7 +186,9 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
                 print("test_set_tag = stratified means that max_seq_length is ignored")
                 max_seq_length = None
         elif max_seq_length is None:
-            raise ValueError(f"test_set_tag = {test_set_tag} means that max_seq_length must be set")
+            raise ValueError(
+                f"test_set_tag = {test_set_tag} means that max_seq_length must be set"
+            )
         super().__init__(
             mask_prompt,
             val_split_fraction,
