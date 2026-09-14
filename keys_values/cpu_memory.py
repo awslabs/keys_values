@@ -29,7 +29,7 @@ from keys_values.utils import bytes_for_torch_dtype
 
 class FileBasedExtraMemoryManager:
     """
-    Allocates CPU tensors from RAM/swap, falling back to memory-mapped files on
+    Allocates CPU tensors from RAM, falling back to memory-mapped files on
     a large disk. This disk can be an external file system (such as AWS EFS).
     """
 
@@ -74,8 +74,8 @@ class FileBasedExtraMemoryManager:
     ) -> torch.Tensor:
         n_bytes = math.prod(shape) * bytes_for_torch_dtype(dtype)
         vm = psutil.virtual_memory()
-        sw = psutil.swap_memory()
-        if vm.available + sw.free > n_bytes * self._HEADROOM:
+        # sw = psutil.swap_memory()
+        if vm.available > n_bytes * self._HEADROOM:
             return torch.empty(shape, dtype=dtype)
         return self._alloc_from_file(shape, dtype, n_bytes)
 
