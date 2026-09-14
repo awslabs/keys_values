@@ -54,19 +54,15 @@ class FileBasedExtraMemoryManager:
         while res_dir is None:
             runn_no += 1
             cand_path = tmp_path / (time_stamp + f"_{runn_no}")
-            if not cand_path.exists():
-                lock_path = cand_path.with_suffix(".lock")
-                lock = FileLock(lock_path, timeout=1)
-                try:
-                    with lock.acquire(timeout=1):
-                        cand_path.mkdir(parents=True, exist_ok=False)
+            lock_path = cand_path.with_suffix(".lock")
+            lock = FileLock(lock_path, timeout=1)
+            try:
+                with lock.acquire(timeout=1):
+                    if not cand_path.exists():
+                        cand_path.mkdir(parents=True)
                         res_dir = str(cand_path)
-                except Timeout:
-                    pass
-                finally:
-                    lock.release()
-                    if lock_path.exists():
-                        lock_path.unlink()
+            except Timeout:
+                pass
         return res_dir
 
     def _filename(self, num: int) -> str:
