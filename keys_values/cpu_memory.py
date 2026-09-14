@@ -38,6 +38,7 @@ class FileBasedExtraMemoryManager:
     def __init__(self, tmp_dir: str):
         # Create unique subdirectory
         self.tmp_dir = self._unique_dir(tmp_dir)
+        print(f"FileBasedExtraMemoryManager: Memory-mapped files will be written to {self.tmp_dir}")
         self.num_files = 0
         self._lock = threading.Lock()
         # Ensure that when program ends, or when it is terminated,
