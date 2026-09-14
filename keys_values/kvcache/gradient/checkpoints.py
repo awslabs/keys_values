@@ -259,17 +259,17 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         kwargs = dict(device=torch.device("cpu"), cache_length=self.cache_length)
         if num_to_create > 0:
             # DEBUG
-            #mem_per_cp = QuantizedKVCacheBuffers.size_estimate_apriori(
+            # mem_per_cp = QuantizedKVCacheBuffers.size_estimate_apriori(
             #    self.quant_buffers.dequant_buffers.get_params(),
             #    num_bits=8,
             #    quantizer_type=type(self.quant_buffers.quantizer_k),
             #    cache_length=self.cache_length,
             #    blocks_over_heads=False,
-            #)[0] / (2**23)
-            #print(
+            # )[0] / (2**23)
+            # print(
             #    "DEBUG: KVCacheBufferQuantizedCheckpoints.set_chunk_numbers:\n"
             #    f"==> {num_to_create} CPs a {mem_per_cp:.2f}M: {(mem_per_cp * num_to_create):.1f}M\n"
-            #)
+            # )
             # END DEBUG
             new_checkpoints = [
                 (
@@ -294,10 +294,10 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
             self.checkpoints.extend(new_checkpoints)
             self._checkpoint_lengths.extend(new_lengths)
         # DEBUG
-        #mem_all = self.size_estimate() // (2**23)
-        #print(
+        # mem_all = self.size_estimate() // (2**23)
+        # print(
         #    f"DEBUG: KVCacheBufferQuantizedCheckpoints.set_chunk_numbers: {mem_all:.1f}M a posteriori"
-        #)
+        # )
         # END DEBUG
 
     def _set_checkpoint(

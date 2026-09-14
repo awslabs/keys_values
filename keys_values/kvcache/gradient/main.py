@@ -24,7 +24,12 @@ import torch
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import MultiHeadSelfAttention
-from keys_values.tools.intermediates import DebugIntermediates
+from keys_values.cpu_memory import (
+    get_memory_manager,
+    has_memory_manager,
+    available_cpu_memory_in_bytes,
+)
+from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.consts import SUPPORTED_QUANTIZERS
 from keys_values.kvcache.factory import (
@@ -45,7 +50,6 @@ from keys_values.kvcache.gradient.cleanup import (
     protect_named_params_buffers_of_model,
 )
 from keys_values.kvcache.offloading import KVCacheOffloader
-from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
 from keys_values.long_context import (
     LongContextInferenceModel,
@@ -56,6 +60,7 @@ from keys_values.model import GPT
 from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
 from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.optimize.model_factory import GPTShardCellBlock
+from keys_values.tools.intermediates import DebugIntermediates
 from keys_values.utils import (
     check_for_nan_module_weights,
     VerbosityLevels,
@@ -233,6 +238,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         backward_tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
         layercp_pin_memory: bool = False,
         cachecp_pin_memory: bool = False,
+        checkpoint_frac_ram: Optional[float] = None,
         autograd_hooks_kwargs: Optional[Dict[str, Any]] = None,
         debug_dont_use_autograd_hooks: bool = False,
         use_arrays_cleanup: bool = True,
@@ -302,6 +308,14 @@ class LongContextGradientModel(LongContextInferenceModel):
             cachecp_pin_memory: If `True`, the CPU memory pages for KV cache
                 checkpoints are pinned. This can run faster, but also needs more
                 real CPU memory.
+            checkpoint_frac_ram: See
+                `keys_values.finetune.args.GradientArgs.checkpoint_frac_ram`. If
+                an external volume memory manager has been created by
+                `keys_values.cpu_memory.get_memory_manager`, we set its `threshold`
+                value here, to
+                `checkpoint_frac_ram * available_cpu_memory_in_bytes()`. This
+                protects `threshold` bytes of CPU memory from being used for
+                checkpointing (both layer input and KV cache).
             debug_dont_use_autograd_hooks: Internal option, used for unit
                 testing. If this is set, autograd saved tensors hooks are not
                 used, and we also do not use memory efficient attention.
@@ -387,6 +401,15 @@ class LongContextGradientModel(LongContextInferenceModel):
         self._backward_tmp_array_limit_gb = backward_tmp_array_limit_gb
         self.layercp_pin_memory = layercp_pin_memory
         self.cachecp_pin_memory = cachecp_pin_memory
+        if has_memory_manager() and checkpoint_frac_ram is None:
+            raise ValueError(
+                "checkpoint_frac_ram must be given if external volume memory manager is active"
+            )
+        if checkpoint_frac_ram is not None and not (0 <= checkpoint_frac_ram <= 1):
+            raise ValueError(
+                f"checkpoint_frac_ram={checkpoint_frac_ram} invalid, must be in [0, 1]"
+            )
+        self.checkpoint_frac_ram = checkpoint_frac_ram
         self._debug_dont_use_autograd_hooks = debug_dont_use_autograd_hooks
         self._use_arrays_cleanup = use_arrays_cleanup
         # Attention logit softcapping is not supported by the special operators
@@ -668,6 +691,26 @@ class LongContextGradientModel(LongContextInferenceModel):
         return ranges
 
     def _create_layer_checkpointers(self):
+        """
+        If an external volume memory manager has been created (by calling
+        `keys_values.cpu_memory.get_memory_manager` with `tmp_dir` pointing to
+        a mounted external volume), we set its `threshold` parameter here. The
+        idea is to protect a fraction `checkpoint_frac_ram` of CPU RAM currently
+        available from being used for checkpoints. If this is not done, the
+        program may crash or freeze. This can also happen if `checkpoint_frac_ram`
+        is too small.
+
+        """
+        if has_memory_manager() and self.checkpoint_frac_ram is not None:
+            threshold = int(self.checkpoint_frac_ram * available_cpu_memory_in_bytes())
+            # The singleton exists, so this call changes `threshold` (usually, we
+            # have `threshold=None` before this call)
+            print(
+                "Manager for memory-mapped files: Set threshold = "
+                f"{(threshold / 2 ** 20):.1f} MB "
+                f"({int(self.checkpoint_frac_ram * 100)}% of available RAM)"
+            )
+            manager = get_memory_manager(tmp_dir=None, threshold=threshold)
         # Layer input checkpoints
         print("DEBUG: Start _create_layer_checkpointers")  # DEBUG
         layer_numbers = self._create_layer_numbers()

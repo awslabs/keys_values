@@ -27,18 +27,32 @@ import torch
 from keys_values.utils import bytes_for_torch_dtype
 
 
+def available_cpu_memory_in_bytes() -> int:
+    vm = psutil.virtual_memory()
+    return vm.available
+
+
 class FileBasedExtraMemoryManager:
     """
     Allocates CPU tensors from RAM, falling back to memory-mapped files on
     a large disk. This disk can be an external file system (such as AWS EFS).
+
+    We allocate a tensor from RAM if free RAM space lies above
+    `max(threshold, n_bytes * self._HEADROOM)`, otherwise we use a new
+    memory-mapped file. It is recommended to set `threshold` as a fraction of
+    free RAM space determined just before allocations start.
+
     """
 
     _HEADROOM = 1.1  # require 10% more available memory than requested
 
-    def __init__(self, tmp_dir: str):
+    def __init__(self, tmp_dir: str, threshold: Optional[int]) -> None:
         # Create unique subdirectory
         self.tmp_dir = self._unique_dir(tmp_dir)
-        print(f"FileBasedExtraMemoryManager: Memory-mapped files will be written to {self.tmp_dir}")
+        print(
+            f"FileBasedExtraMemoryManager: Memory-mapped files will be written to {self.tmp_dir}"
+        )
+        self.threshold = threshold
         self.num_files = 0
         self._lock = threading.Lock()
         # Ensure that when program ends, or when it is terminated,
@@ -69,13 +83,18 @@ class FileBasedExtraMemoryManager:
     def _filename(self, num: int) -> str:
         return os.path.join(self.tmp_dir, f"buf_{num}.bin")
 
+    def _use_virtual_memory(self, n_bytes: int) -> bool:
+        available = available_cpu_memory_in_bytes()
+        limit = n_bytes * self._HEADROOM
+        if self.threshold is not None:
+            limit = max(limit, self.threshold)
+        return available > limit
+
     def allocate(
         self, shape: Tuple[int, ...], dtype: torch.dtype = torch.float32
     ) -> torch.Tensor:
         n_bytes = math.prod(shape) * bytes_for_torch_dtype(dtype)
-        vm = psutil.virtual_memory()
-        # sw = psutil.swap_memory()
-        if vm.available > n_bytes * self._HEADROOM:
+        if self._use_virtual_memory(n_bytes):
             return torch.empty(shape, dtype=dtype)
         return self._alloc_from_file(shape, dtype, n_bytes)
 
@@ -120,19 +139,37 @@ class FileBasedExtraMemoryManager:
 _manager: Optional[FileBasedExtraMemoryManager] = None
 
 
-def get_memory_manager(tmp_dir: Optional[str] = None) -> FileBasedExtraMemoryManager:
-    """Return the process-wide singleton, creating it on first call."""
+def get_memory_manager(
+    tmp_dir: Optional[str] = None,
+    threshold: Optional[int] = None,
+) -> FileBasedExtraMemoryManager:
+    """
+    Return the process-wide singleton, creating it on first call.
+    If this is called again, we try to return the singleton object, but sometimes
+    have to recreate it:
+
+    * If `tmp_dir` is given and different from `_manager.tmp_dir`: Recreate, copy
+      `_manager.threshold`
+    * If `threshold` is given: Set `_manager.threshold = threshold` and return
+      `_manager`. This allows to delay setting `threshold`
+
+    """
     global _manager
-    if _manager is not None and tmp_dir is not None and tmp_dir != _manager.tmp_dir:
-        print(
-            f"tmp_dir = {tmp_dir} != {_manager.tmp_dir} = _manager.tmp_dir. Creating new manager"
-        )
-        _manager.cleanup()
-        _manager = None
+    if _manager is not None:
+        if tmp_dir is not None and tmp_dir != _manager.tmp_dir:
+            print(
+                f"tmp_dir = {tmp_dir} != {_manager.tmp_dir} = _manager.tmp_dir. Creating new manager"
+            )
+            _manager.cleanup()
+            if threshold is None:
+                threshold = _manager.threshold
+            _manager = None
+        elif threshold is not None:
+            _manager.threshold = threshold
     if _manager is None:
         if tmp_dir is None:
             raise ValueError("tmp_dir must be provided with first call")
-        _manager = FileBasedExtraMemoryManager(tmp_dir)
+        _manager = FileBasedExtraMemoryManager(tmp_dir, threshold)
     return _manager
 
 

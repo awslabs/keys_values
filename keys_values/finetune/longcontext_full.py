@@ -722,7 +722,9 @@ def main(
     # Create file-based manager for virtual memory to be used for checkpoints
     if grad.checkpoint_temp_dir is not None:
         # Creates singleton, which includes choosing and creating a unique
-        # subdirectory of `grad.checkpoint_temp_dir`
+        # subdirectory of `grad.checkpoint_temp_dir`.
+        # Note: `threshold` is not set here. This is done just before layer
+        # input checkpoints are allocated.
         print_message(
             f"Creating manager for memory-mapped files under {grad.checkpoint_temp_dir}"
         )
