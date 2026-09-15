@@ -18,6 +18,7 @@ def create_state(
     config: Config,
     max_num_steps: int,
     sdpa_type: Literal["naive", "torch"],
+    learning_rate: float = 0.0005,
 ) -> Dict[str, Any]:
     state: Dict[str, Any] = {
         "model": Transformer(config, sdpa_type),
@@ -26,7 +27,7 @@ def create_state(
     # Optimizer: Adam with improved weight decay regularization
     state["optimizer"] = torch.optim.AdamW(
         state["model"].named_parameters(),
-        lr=0.0005,
+        lr=learning_rate,
     )
     # Cosine annealing scheduler, no warm-up
     state["scheduler"] = torch.optim.lr_scheduler.CosineAnnealingLR(

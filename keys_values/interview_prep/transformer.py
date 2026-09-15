@@ -78,7 +78,7 @@ class Transformer(nn.Module):
                 bias=config.lm_head_bias,
             )
         else:
-            self.output_head = nn.Identity()
+            self.lm_head = nn.Identity()
         self._rope = None
         if context_width is not None:
             self.set_context_width(context_width)
@@ -120,15 +120,21 @@ class Transformer(nn.Module):
         ):
             if getattr(config, name) is not None:
                 raise ValueError(f"config.{name} is not supported")
-        for name, val in (
+        for name, should_be in (
             ("parallel_residual", False),
             ("shared_attention_norm", False),
             ("mlp_class_name", "LLaMAMLP"),
             ("rotary_percentage", 1.0),
+            ("mlp_class_name", {"LLaMAMoE", "LLaMAMLP"}),
         ):
-            if getattr(config, name) != val:
+            val = getattr(config, name)
+            if isinstance(should_be, set) and val not in should_be:
                 raise ValueError(
-                    f"config.{name} == {getattr(config, name)} is not supported (must be {val})"
+                    f"config.{name} == {val} is not supported (must be in {should_be})"
+                )
+            elif val != should_be:
+                raise ValueError(
+                    f"config.{name} == {val} is not supported (must be {should_be})"
                 )
 
 
@@ -190,7 +196,7 @@ class LLaMAMoE(nn.Module):
     variant:
     - n_shared_expert = None
     - n_expert_groups = None (linear router)
-    - Experts are all of type :class:`FeedForwardNetwork`, with intermediate
+    - All experts have type :class:`FeedForwardNetwork`, with intermediate
       size `moe_intermediate_size`
 
     """
