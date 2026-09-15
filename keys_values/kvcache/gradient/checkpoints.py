@@ -377,6 +377,11 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
             raise ValueError(
                 f"input_pos = {input_pos}, num = {num}, does not fit into [0, {self.quant_buffers.cache_length}]"
             )
+        device = self.quant_buffers.device
+        if device != key.device:
+            # TODO: Is `non_blocking=True` correct here?
+            key = key.to(device, non_blocking=True)
+            value = value.to(device, non_blocking=True)
         if input_pos == 0:
             self.quant_buffers.prefill(key, value)
         else:
