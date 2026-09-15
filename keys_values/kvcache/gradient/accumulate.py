@@ -352,15 +352,12 @@ class GradientAccumulator:
             max_cache_length = max(
                 clen for clens in self.cache_lengths for clen in clens
             )
-            # Buffers for KV cache checkpointing should be allocated directly,
-            # so `allocate_buffers=True`
             quant_buffers = create_quantized_kv_buffers(
                 qname=self.qname,
                 cache_lengths=[max_cache_length],
                 cache_params=self._cache_params,
                 cache_kwargs=self.cache_kwargs,
                 dequant_kwargs=dequant_kwargs,
-                allocate_buffers=True,
             )[0]
             num_entries = sum(num_required.values())
             print(

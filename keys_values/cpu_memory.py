@@ -119,7 +119,7 @@ class FileBasedExtraMemoryManager:
             self.num_files += 1
         storage = torch.UntypedStorage.from_file(path, shared=True, nbytes=n_bytes)
         if self.num_files == 1:
-            print(f"Starting to write virtual memory to {self.tmp_dir}")
+            print(f"\nStarting to write virtual memory to {self.tmp_dir}")
         return torch.empty(0, dtype=dtype).set_(storage).reshape(shape)
 
     def _install_sigterm_handler(self) -> None:

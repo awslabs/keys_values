@@ -761,10 +761,6 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         else:
             # Checkpoints are quantized
-            # Note: We need `allocate_buffers=True` here in general, since
-            # checkpoint buffers are on CPU. `self.cache_kwargs` may have
-            # `allocate_buffers=False` (default), as this is the better option
-            # for KV cache buffers.
             self.layer_checkpoints = LayerInputQuantizedCheckpoints(
                 model=self.gpt_model,
                 layer_numbers=layer_numbers,
@@ -775,7 +771,6 @@ class LongContextGradientModel(LongContextInferenceModel):
                     self.cache_kwargs,
                     tmp_array_limit_gb=self._tmp_array_limit_gb,
                 ),
-                allocate_buffers=True,
                 pin_memory=pin_memory,
                 device=self.offload_device,
             )
