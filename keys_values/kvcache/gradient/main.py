@@ -22,6 +22,7 @@ from typing import Optional, Dict, Any, Tuple, Union, List, Callable
 
 import torch
 import torch.distributed as dist
+from torch.ao.nn.quantized.functional import threshold
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import MultiHeadSelfAttention
@@ -724,12 +725,12 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
             dist.all_reduce(sum_seq_lengths, op=dist.ReduceOp.SUM)
             all_free = available_cpu_memory_in_bytes()
-            factor = seq_length / sum_seq_lengths.item()
-            can_use = int((1 - self.checkpoint_frac_ram) * all_free * factor)
+            factor = (1 - self.checkpoint_frac_ram) * seq_length / sum_seq_lengths.item()
+            can_use = int(all_free * factor)
             threshold = max(all_free - can_use, 1)
             # The singleton exists, so this call changes `threshold` (usually, we
             # have `threshold=None` before this call)
-            my_frac = all_free / threshold
+            my_frac = threshold / all_free
             print(
                 "Manager for memory-mapped files: Set threshold = "
                 f"{(threshold / 2 ** 20):.1f} MB "
