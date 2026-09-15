@@ -379,3 +379,22 @@ def encode(
     if hasattr(result, "ids"):
         result = result.ids
     return result
+
+
+def print_list_int(lst: List[int], min_collapse: int = 5) -> str:
+    if not lst:
+        return ""
+    parts = []
+    val = lst[0]
+    start = 0
+    for end, x in enumerate(lst[1:] + [lst[-1] + 1], start=1):
+        if x != val:
+            sz = end - start
+            if sz >= min_collapse:
+                parts.append(f"{val} * {sz}")
+            else:
+                parts.append(",".join([str(val)] * sz))
+            val = x
+            start = end
+    assert start == len(lst)  # Sanity check
+    return ",".join(parts)

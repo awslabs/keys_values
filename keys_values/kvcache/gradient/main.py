@@ -21,6 +21,7 @@ import time
 from typing import Optional, Dict, Any, Tuple, Union, List, Callable
 
 import torch
+import torch.distributed as dist
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention import MultiHeadSelfAttention
@@ -66,6 +67,7 @@ from keys_values.utils import (
     VerbosityLevels,
     wrap_tqdm_if_verbose,
     message_with_device_memory,
+    print_list_int,
 )
 
 
@@ -700,15 +702,28 @@ class LongContextGradientModel(LongContextInferenceModel):
         program may crash or freeze. This can also happen if `checkpoint_frac_ram`
         is too small.
 
+        In fact, the processes attached to each device share the same pool of
+        CPU RAM. In order to avoid one of the processes using much more RAM
+        than the others, we synchronize the processes here, and make sure the
+        amount of CPU RAM which can be used by each process is only a fraction
+        of the number of devices.
+
         """
         if has_memory_manager() and self.checkpoint_frac_ram is not None:
-            threshold = int(self.checkpoint_frac_ram * available_cpu_memory_in_bytes())
+            # Ensure all processes are synchronized here
+            print("Synchronize processes in order to configure manager for memory-mapped files")
+            dist.barrier()
+            num_devices = dist.get_world_size()
+            all_free = available_cpu_memory_in_bytes()
+            can_use = int((1 - self.checkpoint_frac_ram) * all_free / num_devices)
+            threshold = all_free - can_use
             # The singleton exists, so this call changes `threshold` (usually, we
             # have `threshold=None` before this call)
+            my_frac = all_free / threshold
             print(
                 "Manager for memory-mapped files: Set threshold = "
                 f"{(threshold / 2 ** 20):.1f} MB "
-                f"({int(self.checkpoint_frac_ram * 100)}% of available RAM)"
+                f"({int(my_frac * 100)}% of available RAM)"
             )
             manager = get_memory_manager(tmp_dir=None, threshold=threshold)
             print(
@@ -882,9 +897,9 @@ class LongContextGradientModel(LongContextInferenceModel):
                 lines.append("cache_lengths   = " + cl_str)
             lines.extend(
                 [
-                    f"chunk_sizes     = {self.chunk_sizes}",
+                    f"chunk_sizes     = {print_list_int(self.chunk_sizes)}",
                     f"layers_per_cell = {self.layers_per_cell}",
-                    f"chunks_per_cell = {self.chunks_per_cell}\n",
+                    f"chunks_per_cell = {print_list_int(self.chunks_per_cell)}\n",
                     f"Forward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (training mode)",
                 ]
             )
