@@ -393,8 +393,8 @@ def print_list_int(lst: List[int], min_collapse: int = 5) -> str:
             if sz >= min_collapse:
                 parts.append(f"{val} * {sz}")
             else:
-                parts.append(",".join([str(val)] * sz))
+                parts.append(", ".join([str(val)] * sz))
             val = x
             start = end
     assert start == len(lst)  # Sanity check
-    return ",".join(parts)
+    return ", ".join(parts)

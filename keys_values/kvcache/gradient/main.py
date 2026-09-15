@@ -903,9 +903,9 @@ class LongContextGradientModel(LongContextInferenceModel):
                 lines.append("cache_lengths   = " + cl_str)
             lines.extend(
                 [
-                    f"chunk_sizes     = {print_list_int(self.chunk_sizes)}",
+                    f"chunk_sizes     = [{print_list_int(self.chunk_sizes)}]",
                     f"layers_per_cell = {self.layers_per_cell}",
-                    f"chunks_per_cell = {print_list_int(self.chunks_per_cell)}\n",
+                    f"chunks_per_cell = [{print_list_int(self.chunks_per_cell)}]\n",
                     f"Forward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (training mode)",
                 ]
             )
