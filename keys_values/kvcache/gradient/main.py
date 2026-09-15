@@ -676,7 +676,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         super()._init_members_from_tokens(input_ids, targets)
         if self.training:
             # Create checkpointing members
-            self._create_layer_checkpointers()
+            self._create_layer_checkpointers(seq_length=input_ids.shape[-1])
         # These are needed in :meth:`backward`
         self._input_ids = input_ids
         self._targets = targets
@@ -692,7 +692,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             ch_pos += num_chunks
         return ranges
 
-    def _create_layer_checkpointers(self):
+    def _create_layer_checkpointers(self, seq_length: int):
         """
         If an external volume memory manager has been created (by calling
         `keys_values.cpu_memory.get_memory_manager` with `tmp_dir` pointing to
@@ -706,17 +706,27 @@ class LongContextGradientModel(LongContextInferenceModel):
         CPU RAM. In order to avoid one of the processes using much more RAM
         than the others, we synchronize the processes here, and make sure the
         amount of CPU RAM which can be used by each process is only a fraction
-        of the number of devices.
+        of the number of devices. More specifically, process `k` can use a
+        fraction of `seq_length[k] / sum(seq_length)`, so devices working on
+        longer sequences can use more CPU RAM (as they also need more space
+        for checkpoints).
 
         """
         if has_memory_manager() and self.checkpoint_frac_ram is not None:
             # Ensure all processes are synchronized here
-            print("Synchronize processes in order to configure manager for memory-mapped files")
-            dist.barrier()
-            num_devices = dist.get_world_size()
+            print(
+                "Synchronize processes in order to configure manager for memory-mapped files"
+            )
+            sum_seq_lengths = torch.tensor(
+                [seq_length],
+                dtype=torch.int64,
+                device=self._work_device,
+            )
+            dist.all_reduce(sum_seq_lengths, op=dist.ReduceOp.SUM)
             all_free = available_cpu_memory_in_bytes()
-            can_use = int((1 - self.checkpoint_frac_ram) * all_free / num_devices)
-            threshold = all_free - can_use
+            factor = seq_length / sum_seq_lengths.item()
+            can_use = int((1 - self.checkpoint_frac_ram) * all_free * factor)
+            threshold = max(all_free - can_use, 1)
             # The singleton exists, so this call changes `threshold` (usually, we
             # have `threshold=None` before this call)
             my_frac = all_free / threshold
