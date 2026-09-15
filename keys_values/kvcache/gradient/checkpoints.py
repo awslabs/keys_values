@@ -15,6 +15,7 @@ from dataclasses import replace
 from typing import List, Optional, Tuple, Dict, Any
 
 import torch
+from tqdm import tqdm
 
 from keys_values.attention import DefaultKeysAndValues
 from keys_values.cpu_memory import get_memory_manager, has_memory_manager
@@ -894,9 +895,6 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             dequant_kwargs = dict(max_num_ranges=cache_kwargs.get("max_num_ranges"))
         else:
             dequant_kwargs = None
-        print(
-            "DEBUG: LayerInputQuantizedCheckpoints: create_quantized_kv_buffers"
-        )  # DEBUG
         quant_buffers = create_quantized_kv_buffers(
             qname=qname,
             cache_lengths=[max_cell_length],
@@ -908,8 +906,8 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
         )[0]
         # Internally, we use :class:`KVCacheBufferQuantizedCheckpoints` objects
         print(
-            f"DEBUG: LayerInputQuantizedCheckpoints: Create _checkpoints_int ({len(cell_ranges)} entries)"
-        )  # DEBUG
+            f"LayerInputQuantizedCheckpoints: Create _checkpoints_int ({len(cell_ranges)} entries)"
+        )
         self._checkpoints_int = [
             KVCacheBufferQuantizedCheckpoints(
                 chunk_numbers=layer_numbers,
@@ -917,7 +915,7 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
                 cache_length=end - start,
                 pin_memory=pin_memory,
             )
-            for start, end in cell_ranges
+            for start, end in tqdm(cell_ranges)
         ]
         self.n_embd = model.config.n_embd
         # DEBUG
@@ -1028,6 +1026,9 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
             dtype=dtype,
             device=torch.device("cpu"),
         )
+        print(
+            f"LayerInputDefaultCheckpoints: Create _checkpoints_int ({len(cell_ranges)} entries)"
+        )
         self._checkpoints_int = [
             KVCacheBufferDefaultCheckpoints(
                 chunk_numbers=layer_numbers,
@@ -1035,7 +1036,7 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
                 cache_length=end - start,
                 pin_memory=pin_memory,
             )
-            for start, end in cell_ranges
+            for start, end in tqdm(cell_ranges)
         ]
         self.n_embd = n_embd
 

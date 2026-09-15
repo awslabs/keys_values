@@ -711,6 +711,9 @@ class LongContextGradientModel(LongContextInferenceModel):
                 f"({int(self.checkpoint_frac_ram * 100)}% of available RAM)"
             )
             manager = get_memory_manager(tmp_dir=None, threshold=threshold)
+            print(
+                "Allocating memory for layer input checkpoints: This may take a while!"
+            )
         # Layer input checkpoints
         print("DEBUG: Start _create_layer_checkpointers")  # DEBUG
         layer_numbers = self._create_layer_numbers()

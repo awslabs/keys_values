@@ -18,6 +18,7 @@ from itertools import accumulate
 from typing import List, Optional, Dict, Any, Tuple
 
 import torch
+from tqdm import tqdm
 
 from keys_values.config import Config
 
@@ -325,6 +326,10 @@ class GradientAccumulator:
         # How many checkpointers per cache length?
         num_required = self._get_num_required()
         if self.qname == "default":
+            num_entries = sum(num_required.values())
+            print(
+                f"GradientAccumulator: Allocate _checkpoints_per_length ({num_entries} entries)"
+            )
             self._checkpoints_per_length = {
                 cache_length: [
                     KVCacheBufferDefaultCheckpoints(
@@ -334,7 +339,7 @@ class GradientAccumulator:
                         batch_size=self._batch_size,
                         pin_memory=pin_memory,
                     )
-                    for _ in range(num)
+                    for _ in tqdm(range(num))
                 ]
                 for cache_length, num in num_required.items()
             }
@@ -357,6 +362,10 @@ class GradientAccumulator:
                 dequant_kwargs=dequant_kwargs,
                 allocate_buffers=True,
             )[0]
+            num_entries = sum(num_required.values())
+            print(
+                f"GradientAccumulator: Allocate _checkpoints_per_length ({num_entries} entries)"
+            )
             self._checkpoints_per_length = {
                 cache_length: [
                     KVCacheBufferQuantizedCheckpoints(
@@ -365,7 +374,7 @@ class GradientAccumulator:
                         cache_length=cache_length,
                         pin_memory=pin_memory,
                     )
-                    for _ in range(num)
+                    for _ in tqdm(range(num))
                 ]
                 for cache_length, num in num_required.items()
             }
