@@ -32,6 +32,9 @@ def available_cpu_memory_in_bytes() -> int:
     return vm.available
 
 
+NUM_FILES_PER_DIRECTORY = 3072
+
+
 class FileBasedExtraMemoryManager:
     """
     Allocates CPU tensors from RAM, falling back to memory-mapped files on
@@ -80,8 +83,14 @@ class FileBasedExtraMemoryManager:
                 pass
         return res_dir
 
+    def _subdir_path(self, num: int) -> Path:
+        return Path(self.tmp_dir) / str(num // NUM_FILES_PER_DIRECTORY)
+
     def _filename(self, num: int) -> str:
-        return os.path.join(self.tmp_dir, f"buf_{num}.bin")
+        path = self._subdir_path(num)
+        if not path.exists():
+            path.mkdir(parents=True)
+        return str(path / f"buf_{num % NUM_FILES_PER_DIRECTORY}.bin")
 
     def _use_virtual_memory(self, n_bytes: int) -> bool:
         available = available_cpu_memory_in_bytes()
@@ -110,6 +119,13 @@ class FileBasedExtraMemoryManager:
                 os.remove(self._filename(num))
             except FileNotFoundError:
                 pass
+        for num in range(0, num_files, NUM_FILES_PER_DIRECTORY):
+            dir_path = self._subdir_path(num)
+            if dir_path.exists():
+                try:
+                    dir_path.rmdir()
+                except Exception:
+                    pass
 
     def _alloc_from_file(
         self, shape: Tuple[int, ...], dtype: torch.dtype, n_bytes: int
