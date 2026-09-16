@@ -51,25 +51,26 @@ class FileBasedExtraMemoryManager:
 
     def __init__(self, tmp_dir: str, threshold: Optional[int]) -> None:
         # Create unique subdirectory
-        self.tmp_dir = self._unique_dir(tmp_dir)
+        self.tmp_path = self._unique_path(tmp_dir)
         print(
-            f"FileBasedExtraMemoryManager: Memory-mapped files will be written to {self.tmp_dir}"
+            f"FileBasedExtraMemoryManager: Memory-mapped files will be written to {self.tmp_path}"
         )
         self.threshold = threshold
         self.num_files = 0
         self._lock = threading.Lock()
         # Ensure that when program ends, or when it is terminated,
         # :meth:`cleanup` is called, which removes the files.
-        atexit.register(self.cleanup)
-        self._install_sigterm_handler()
+        # atexit.register(self.cleanup)
+        # self._install_sigterm_handler()
 
-    def _unique_dir(self, tmp_dir: str) -> str:
+    @staticmethod
+    def _unique_path(tmp_dir: str) -> Path:
         time_format = "%Y%m%d_%H%M%S"
         time_stamp = datetime.now().strftime(time_format)
         tmp_path = Path(tmp_dir)
-        res_dir = None
+        res_path = None
         runn_no = -1
-        while res_dir is None:
+        while res_path is None:
             runn_no += 1
             cand_path = tmp_path / (time_stamp + f"_{runn_no}")
             lock_path = cand_path.with_suffix(".lock")
@@ -78,19 +79,17 @@ class FileBasedExtraMemoryManager:
                 with lock.acquire(timeout=1):
                     if not cand_path.exists():
                         cand_path.mkdir(parents=True)
-                        res_dir = str(cand_path)
+                        res_path = cand_path
             except Timeout:
                 pass
-        return res_dir
+        return res_path
 
-    def _subdir_path(self, num: int) -> Path:
-        return Path(self.tmp_dir) / str(num // NUM_FILES_PER_DIRECTORY)
-
-    def _filename(self, num: int) -> str:
-        path = self._subdir_path(num)
-        if not path.exists():
-            path.mkdir(parents=True)
-        return str(path / f"buf_{num % NUM_FILES_PER_DIRECTORY}.bin")
+    def _path_for(self, num: int) -> Path:
+        return (
+            self.tmp_path
+            / str(num // NUM_FILES_PER_DIRECTORY)
+            / f"buf_{num % NUM_FILES_PER_DIRECTORY}.bin"
+        )
 
     def _use_virtual_memory(self, n_bytes: int) -> bool:
         available = available_cpu_memory_in_bytes()
@@ -109,33 +108,56 @@ class FileBasedExtraMemoryManager:
 
     def cleanup(self) -> None:
         """
-        Removes all files. The directory itself is not removed.
+        Removes all files and the directory. Afterwards, the object cannot be used
+        anymore.
 
         """
         with self._lock:
             num_files, self.num_files = self.num_files, 0
+            tmp_path, self.tmp_path = self.tmp_path, None
+        if tmp_path is None:
+            return
         for num in range(num_files):
             try:
-                os.remove(self._filename(num))
+                self._path_for(num).unlink()
             except FileNotFoundError:
                 pass
-        for num in range(0, num_files, NUM_FILES_PER_DIRECTORY):
-            dir_path = self._subdir_path(num)
-            if dir_path.exists():
+            if num % NUM_FILES_PER_DIRECTORY == 0 and num > 0:
                 try:
-                    dir_path.rmdir()
+                    self._path_for(num - 1).parent.rmdir()
                 except Exception:
                     pass
+        if num_files > 0:
+            final_dir = self._path_for(num_files - 1).parent
+            if final_dir.exists():
+                try:
+                    final_dir.rmdir()
+                except Exception:
+                    pass
+        try:
+            tmp_path.rmdir()
+        except Exception:
+            pass
+        lock_path = tmp_path.with_suffix(".lock")
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
     def _alloc_from_file(
         self, shape: Tuple[int, ...], dtype: torch.dtype, n_bytes: int
     ) -> torch.Tensor:
         with self._lock:
-            path = self._filename(self.num_files)
+            if self.tmp_path is None:
+                raise RuntimeError(
+                    "FileBasedExtraMemoryManager has already been cleaned up"
+                )
+            path = self._path_for(self.num_files)
+            num = self.num_files
             self.num_files += 1
-        storage = torch.UntypedStorage.from_file(path, shared=True, nbytes=n_bytes)
-        if self.num_files == 1:
-            print(f"\nStarting to write virtual memory to {self.tmp_dir}")
+        storage = torch.UntypedStorage.from_file(str(path), shared=True, nbytes=n_bytes)
+        if num == 0:
+            print(f"\nStarting to write virtual memory to {self.tmp_path}")
         return torch.empty(0, dtype=dtype).set_(storage).reshape(shape)
 
     def _install_sigterm_handler(self) -> None:
@@ -172,19 +194,15 @@ def get_memory_manager(
     """
     global _manager
     if _manager is not None:
-        if tmp_dir is not None and tmp_dir != _manager.tmp_dir:
-            print(
-                f"tmp_dir = {tmp_dir} != {_manager.tmp_dir} = _manager.tmp_dir. Creating new manager"
+        if tmp_dir is not None:
+            raise ValueError(
+                "Singleton exists. Don't pass `tmp_dir` to `get_memory_manager`"
             )
-            _manager.cleanup()
-            if threshold is None:
-                threshold = _manager.threshold
-            _manager = None
         elif threshold is not None:
             _manager.threshold = threshold
     if _manager is None:
         if tmp_dir is None:
-            raise ValueError("tmp_dir must be provided with first call")
+            raise ValueError("`tmp_dir` must be provided with first call")
         _manager = FileBasedExtraMemoryManager(tmp_dir, threshold)
     return _manager
 
