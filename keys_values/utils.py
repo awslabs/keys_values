@@ -217,17 +217,29 @@ class VerbosityLevels(str, Enum):
     ALL = "all"
 
 
-def wrap_tqdm_if_verbose(
+def wrap_tqdm_conditional(
     iterator: Iterable,
-    verbose: VerbosityLevels,
+    do_wrap: bool,
     total: Optional[int] = None,
 ) -> Union[Iterable, Iterator]:
-    if verbose is VerbosityLevels.NONE:
+    if not do_wrap:
         return iterator
     if isinstance(iterator, Iterator):
         return tqdm(iterator, total=total)
     else:
         return tqdm(iterator)
+
+
+def wrap_tqdm_if_verbose(
+    iterator: Iterable,
+    verbose: VerbosityLevels,
+    total: Optional[int] = None,
+) -> Union[Iterable, Iterator]:
+    return wrap_tqdm_conditional(
+        iterator=iterator,
+        do_wrap=verbose is not VerbosityLevels.NONE,
+        total=total,
+    )
 
 
 _PRECISION_TO_DTYPE = {

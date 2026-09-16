@@ -12,19 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import replace
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Union
 
 import torch
-from tqdm import tqdm
 
 from keys_values.attention import DefaultKeysAndValues
 from keys_values.cpu_memory import get_memory_manager, has_memory_manager
 from keys_values.kvcache.buffers import KVCacheBuffersParams, DefaultKVCacheBuffers
+from keys_values.kvcache.quantize.quantization import QuantizerState
 from keys_values.kvcache.quant_buffers import (
     QuantizedKVCacheBuffers,
     create_quantized_kv_buffers,
 )
 from keys_values.model import GPT
+from keys_values.utils import wrap_tqdm_conditional
 
 
 class KVCacheBufferCheckpoints:
@@ -194,6 +195,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         quant_buffers: QuantizedKVCacheBuffers,
         cache_length: Optional[int] = None,
         pin_memory: Optional[List[bool]] = None,
+        delay_allocation: bool = False,
     ):
         """
         Args:
@@ -211,6 +213,9 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
             pin_memory: If given, must have the same length as `chunk_numbers`.
                 Checkpoints for chunks with `True` entries are pinned in CPU
                 memory. Default: No checkpoints are pinned.
+            delay_allocation: If `True`, checkpoint buffers are allocated only
+                when first used. This is useful if checkpoints are stored on
+                disk, but should be avoided if they can be held in CPU RAM.
 
         """
         if cache_length is None:
@@ -221,7 +226,11 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
             )
         self.cache_length = cache_length
         self.quant_buffers = quant_buffers
-        self.checkpoints = None
+        self._delay_allocation = delay_allocation
+        # If `delay_allocation == True`, we store the `pin_memory` entry in the
+        # list. The :class:`QuantizerState` entry is allocated and written there
+        # on first use.
+        self.checkpoints: List[Union[bool, Tuple[QuantizerState, QuantizerState]]] = []
         self._checkpoint_lengths = None
         super().__init__(chunk_numbers)
         self.set_chunk_numbers(chunk_numbers, pin_memory)
@@ -229,6 +238,38 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
     @property
     def batch_size(self) -> Optional[int]:
         return self.quant_buffers.batch_size
+
+    def _allocate_buffer(self, pos: int):
+        if not (0 <= pos < len(self.checkpoints)):
+            raise ValueError(f"pos={pos}, must be in [0, {len(self.checkpoints)})")
+        entry = self.checkpoints[pos]
+        if (
+            isinstance(entry, tuple)
+            and len(entry) == 2
+            and all(isinstance(x, QuantizerState) for x in entry)
+        ):
+            return
+        if not isinstance(entry, bool):
+            raise ValueError(
+                f"pos={pos}, type(entry)={type(entry)}: Must be bool or Tuple[QuantizerState, QuantizerState]"
+            )
+        kwargs = dict(
+            device=torch.device("cpu"),
+            cache_length=self.cache_length,
+            pin_memory=entry,
+        )
+        self.checkpoints[pos] = (
+            self.quant_buffers.quantizer_k.create_quantizer_state(**kwargs),
+            self.quant_buffers.quantizer_v.create_quantizer_state(**kwargs),
+        )
+
+    def _check_allocated(self, pos: int):
+        if not (0 <= pos < len(self.checkpoints)):
+            raise ValueError(f"pos={pos}, must be in [0, {len(self.checkpoints)})")
+        if isinstance(self.checkpoints[pos], bool):
+            raise ValueError(
+                f"self.checkpoints[{pos}] does not exist. Call `set_checkpoint` before reading!"
+            )
 
     def set_chunk_numbers(
         self,
@@ -253,38 +294,9 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
                 )
         else:
             pin_memory = [False] * len(self.chunk_numbers)
-        if self.checkpoints is None:
-            num_to_create = len(self.chunk_numbers)
-        else:
-            num_to_create = max(len(self.chunk_numbers) - len(self.checkpoints), 0)
-        kwargs = dict(device=torch.device("cpu"), cache_length=self.cache_length)
+        num_to_create = max(len(self.chunk_numbers) - len(self.checkpoints), 0)
         if num_to_create > 0:
-            # DEBUG
-            # mem_per_cp = QuantizedKVCacheBuffers.size_estimate_apriori(
-            #    self.quant_buffers.dequant_buffers.get_params(),
-            #    num_bits=8,
-            #    quantizer_type=type(self.quant_buffers.quantizer_k),
-            #    cache_length=self.cache_length,
-            #    blocks_over_heads=False,
-            # )[0] / (2**23)
-            # print(
-            #    "DEBUG: KVCacheBufferQuantizedCheckpoints.set_chunk_numbers:\n"
-            #    f"==> {num_to_create} CPs a {mem_per_cp:.2f}M: {(mem_per_cp * num_to_create):.1f}M\n"
-            # )
-            # END DEBUG
-            new_checkpoints = [
-                (
-                    self.quant_buffers.quantizer_k.create_quantizer_state(
-                        **kwargs,
-                        pin_memory=pm,
-                    ),
-                    self.quant_buffers.quantizer_v.create_quantizer_state(
-                        **kwargs,
-                        pin_memory=pm,
-                    ),
-                )
-                for pm in pin_memory[(-num_to_create):]
-            ]
+            new_checkpoints = pin_memory[(-num_to_create):].copy()
         else:
             new_checkpoints = []
         new_lengths = [self.cache_length] * num_to_create
@@ -294,18 +306,17 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         else:
             self.checkpoints.extend(new_checkpoints)
             self._checkpoint_lengths.extend(new_lengths)
-        # DEBUG
-        # mem_all = self.size_estimate() // (2**23)
-        # print(
-        #    f"DEBUG: KVCacheBufferQuantizedCheckpoints.set_chunk_numbers: {mem_all:.1f}M a posteriori"
-        # )
-        # END DEBUG
+        if not self._delay_allocation:
+            # Ensure all new buffers are allocated here
+            for pos in range(len(self.checkpoints)):
+                self._allocate_buffer(pos)
 
     def _set_checkpoint(
         self,
         pos: int,
         buffers: DefaultKVCacheBuffers,
     ) -> int:
+        self._allocate_buffer(pos)
         k_and_v = buffers.get_keys_values()
         keys, values = k_and_v.keys(), k_and_v.values()
         current_length = buffers.current_length
@@ -326,6 +337,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         out: DefaultKVCacheBuffers,
     ):
         assert out.cache_length == self.cache_length
+        self._check_allocated(pos)
         current_length = self._checkpoint_lengths[pos]
         self.checkpoints[pos][0].restore(end=current_length)
         self.checkpoints[pos][1].restore(end=current_length)
@@ -351,6 +363,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         pos = self._chunk_pos.get(chunk_idx)
         if pos is None:
             return None
+        self._allocate_buffer(pos)
         assert key.ndim == 4
         num = key.shape[2]
         batch_size = self.batch_size
@@ -410,6 +423,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         pos = self._chunk_pos.get(chunk_idx)
         if pos is None:
             raise IndexError(f"chunk_idx = {chunk_idx} must be in {self.chunk_numbers}")
+        self._check_allocated(pos)
         if not (
             0 <= input_pos
             and num > 0
@@ -432,7 +446,12 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
     # For debugging
     def size_estimate(self) -> int:
         return sum(
-            cp[0].quantizer.size_estimate()[0] + cp[1].quantizer.size_estimate()[0]
+            (
+                0
+                if isinstance(cp, bool)
+                else cp[0].quantizer.size_estimate()[0]
+                + cp[1].quantizer.size_estimate()[0]
+            )
             for cp in self.checkpoints
         )
 
@@ -881,6 +900,9 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
         """
 
         super().__init__(layer_numbers, cell_ranges)
+        print(
+            f"LayerInputQuantizedCheckpoints: allocate_buffers={allocate_buffers}"
+        )  # DEBUG
         if pin_memory is not None and len(pin_memory) != len(layer_numbers):
             raise ValueError(
                 f"pin_memory = {pin_memory}, layer_numbers = {layer_numbers}: Must have same length"
@@ -919,15 +941,19 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
                 quant_buffers=quant_buffers,
                 cache_length=end - start,
                 pin_memory=pin_memory,
+                delay_allocation=not allocate_buffers,
             )
-            for start, end in tqdm(cell_ranges)
+            for start, end in wrap_tqdm_conditional(
+                cell_ranges, do_wrap=allocate_buffers
+            )
         ]
         self.n_embd = model.config.n_embd
         # DEBUG
-        mem_all = sum(cp.size_estimate() for cp in self._checkpoints_int) // (2**23)
-        print(
-            f"DEBUG: LayerInputQuantizedCheckpoints: _checkpoints_int of len {len(cell_ranges)} need {mem_all:.1f}M in total"
-        )
+        if allocate_buffers:
+            mem_all = sum(cp.size_estimate() for cp in self._checkpoints_int) // (2**23)
+            print(
+                f"DEBUG: LayerInputQuantizedCheckpoints: _checkpoints_int of len {len(cell_ranges)} need {mem_all:.1f}M in total"
+            )
         # END DEBUG
 
     def clear(self):
@@ -1041,7 +1067,7 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
                 cache_length=end - start,
                 pin_memory=pin_memory,
             )
-            for start, end in tqdm(cell_ranges)
+            for start, end in wrap_tqdm_conditional(cell_ranges, do_wrap=True)
         ]
         self.n_embd = n_embd
 

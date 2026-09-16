@@ -712,7 +712,10 @@ class LongContextGradientModel(LongContextInferenceModel):
         for checkpoints).
 
         """
-        if has_memory_manager() and self.checkpoint_frac_ram is not None:
+        use_filebased_memory = (
+            has_memory_manager() and self.checkpoint_frac_ram is not None
+        )
+        if use_filebased_memory:
             # Ensure all processes are synchronized here
             print(
                 "Synchronize processes in order to configure manager for memory-mapped files"
@@ -724,7 +727,9 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
             dist.all_reduce(sum_seq_lengths, op=dist.ReduceOp.SUM)
             all_free = available_cpu_memory_in_bytes()
-            factor = (1 - self.checkpoint_frac_ram) * seq_length / sum_seq_lengths.item()
+            factor = (
+                (1 - self.checkpoint_frac_ram) * seq_length / sum_seq_lengths.item()
+            )
             can_use = int(all_free * factor)
             threshold = max(all_free - can_use, 1)
             # The singleton exists, so this call changes `threshold` (usually, we
@@ -736,9 +741,10 @@ class LongContextGradientModel(LongContextInferenceModel):
                 f"({int(my_frac * 100)}% of available RAM)"
             )
             manager = get_memory_manager(tmp_dir=None, threshold=threshold)
-            # print(
-            #     "Allocating memory for layer input checkpoints: This may take a while!"
-            # )
+            if self.layercp_pin_memory:
+                print(
+                    "WARNING: grad.layercp_pin_memory = True (memory pinning) does not work together with memory-mapped files. Your run may fail down the line!"
+                )
         # Layer input checkpoints
         layer_numbers = self._create_layer_numbers()
         if self.layercp_pin_memory:
@@ -759,6 +765,11 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         else:
             # Checkpoints are quantized
+            # Note: If `use_filebased_memory == True`, we pass
+            # `allocate_buffers=False`, so that checkpoint buffers (including
+            # quantizer states) are allocated only when first used. This works
+            # better for file-based allocation, but does not go together with
+            # memory pinning.
             self.layer_checkpoints = LayerInputQuantizedCheckpoints(
                 model=self.gpt_model,
                 layer_numbers=layer_numbers,
@@ -769,6 +780,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                     self.cache_kwargs,
                     tmp_array_limit_gb=self._tmp_array_limit_gb,
                 ),
+                allocate_buffers=not use_filebased_memory,
                 pin_memory=pin_memory,
                 device=self.offload_device,
             )
@@ -835,6 +847,9 @@ class LongContextGradientModel(LongContextInferenceModel):
         # Accumulator object
         # Key and value buffers should not be annotated for the first chunk if
         # there is only a single chunk in the first cell
+        use_filebased_memory = (
+            has_memory_manager() and self.checkpoint_frac_ram is not None
+        )
         self.accumulator = GradientAccumulator(
             config=self.config,
             cache_lengths=cache_lengths,
@@ -851,6 +866,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 tmp_array_limit_gb=self._backward_tmp_array_limit_gb,
             ),
             pin_memory=self.cachecp_pin_memory,
+            delay_allocation=use_filebased_memory,
         )
 
     def _checkpoint_layer_input(

@@ -18,7 +18,6 @@ from itertools import accumulate
 from typing import List, Optional, Dict, Any, Tuple
 
 import torch
-from tqdm import tqdm
 
 from keys_values.config import Config
 
@@ -60,7 +59,7 @@ from keys_values.long_context import (
     HEAD_OR_INITIAL_TENSORS_MAX_BYTES,
 )
 from keys_values.model import GPT
-from keys_values.utils import VerbosityLevels
+from keys_values.utils import VerbosityLevels, wrap_tqdm_conditional
 
 
 def checkpoint_hook(
@@ -158,6 +157,7 @@ class GradientAccumulator:
         train_cache_kwargs: Optional[Dict[str, Any]] = None,
         pin_memory: bool = False,
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        delay_allocation: bool = False,
     ):
         if qname is None:
             qname = "torch-quantized8"
@@ -198,6 +198,7 @@ class GradientAccumulator:
         self._train_cache_kwargs = train_cache_kwargs
         self._pin_memory = pin_memory
         self._debug_tensors = debug_tensors
+        self._delay_allocation = delay_allocation
 
     def annotation_usage_logs(self) -> Dict[int, AnnotationUsageLog]:
         return self._annotation_usage_logs
@@ -339,7 +340,7 @@ class GradientAccumulator:
                         batch_size=self._batch_size,
                         pin_memory=pin_memory,
                     )
-                    for _ in tqdm(range(num))
+                    for _ in wrap_tqdm_conditional(range(num), do_wrap=True)
                 ]
                 for cache_length, num in num_required.items()
             }
@@ -358,6 +359,7 @@ class GradientAccumulator:
                 cache_params=self._cache_params,
                 cache_kwargs=self.cache_kwargs,
                 dequant_kwargs=dequant_kwargs,
+                allocate_buffers=not self._delay_allocation,
             )[0]
             num_entries = sum(num_required.values())
             print(
@@ -370,8 +372,11 @@ class GradientAccumulator:
                         quant_buffers=quant_buffers,
                         cache_length=cache_length,
                         pin_memory=pin_memory,
+                        delay_allocation=self._delay_allocation,
                     )
-                    for _ in tqdm(range(num))
+                    for _ in wrap_tqdm_conditional(
+                        range(num), do_wrap=not self._delay_allocation
+                    )
                 ]
                 for cache_length, num in num_required.items()
             }
