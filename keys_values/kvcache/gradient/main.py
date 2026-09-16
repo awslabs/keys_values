@@ -799,6 +799,10 @@ class LongContextGradientModel(LongContextInferenceModel):
         self.config.n_layer + 1` is used to store head gradients during the
         backward computation.
 
+        Note: We could save one slot, since head gradients could overwrite the
+        top layer outputs. But this would not allow to rerun the backward pass
+        after an OOM error.
+
         """
         n_layer = self.config.n_layer
         layer_numbers = list(range(0, n_layer, self.layers_per_cell))
@@ -1125,9 +1129,8 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
 
         def get_head_gradients_slice(start: int, end: int) -> torch.Tensor:
-            n_layer = self.gpt_model.config.n_layer
             return self.layer_checkpoints.get_checkpoint(
-                layer_idx=n_layer + 1,
+                layer_idx=self.gpt_model.config.n_layer + 1,
                 input_pos=start,
                 num=end - start,
                 device=self._work_device,
@@ -1137,9 +1140,8 @@ class LongContextGradientModel(LongContextInferenceModel):
             input_pos: int,
             value: torch.Tensor,
         ) -> Optional[int]:
-            n_layer = self.gpt_model.config.n_layer
             return self.layer_checkpoints.set_checkpoint(
-                layer_idx=n_layer + 1,
+                layer_idx=self.gpt_model.config.n_layer + 1,
                 buffers=value,
                 input_pos=input_pos,
             )

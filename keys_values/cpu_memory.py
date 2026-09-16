@@ -60,8 +60,8 @@ class FileBasedExtraMemoryManager:
         self._lock = threading.Lock()
         # Ensure that when program ends, or when it is terminated,
         # :meth:`cleanup` is called, which removes the files.
-        # atexit.register(self.cleanup)
-        # self._install_sigterm_handler()
+        atexit.register(self.cleanup)
+        self._install_sigterm_handler()
 
     @staticmethod
     def _unique_path(tmp_dir: str) -> Path:
