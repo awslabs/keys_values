@@ -294,11 +294,13 @@ class TorchBasicQuantizer(Quantizer):
                 shape[:-1],
                 dtype=torch.float32,
                 device=device,
+                use_ram=True,
             ).fill_(0)
             self.quant_zero_points = self._allocate_tensor(
                 shape[:-1],
                 dtype=torch.int32,
                 device=device,
+                use_ram=True,
             ).fill_(0)
         self._batch_size = batch_size  # Effective batch size
 
@@ -601,12 +603,14 @@ class TorchBasicQuantizerState(QuantizerState):
             dtype=torch.float32,
             device=self.device,
             pin_memory=pin_memory,
+            use_ram=True,
         ).fill_(0)
         self.quant_zero_points = quantizer._allocate_tensor(
             shape[:-1],
             dtype=quantizer._quant_buffer_dtype,
             device=self.device,
             pin_memory=pin_memory,
+            use_ram=True,
         ).fill_(0)
 
     def copy_(
