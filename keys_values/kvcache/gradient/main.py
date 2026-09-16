@@ -520,7 +520,6 @@ class LongContextGradientModel(LongContextInferenceModel):
             targets = targets.to(self._work_device)
         self._init_members_from_tokens(input_ids, targets)
         # Reset KV caches
-        print("DEBUG: gpt_model.reset()")  # DEBUG
         self.gpt_model.reset()
         if not isinstance(self.gpt_model.mha, MultiHeadSelfAttention):
             raise ValueError(
@@ -737,11 +736,10 @@ class LongContextGradientModel(LongContextInferenceModel):
                 f"({int(my_frac * 100)}% of available RAM)"
             )
             manager = get_memory_manager(tmp_dir=None, threshold=threshold)
-            print(
-                "Allocating memory for layer input checkpoints: This may take a while!"
-            )
+            # print(
+            #     "Allocating memory for layer input checkpoints: This may take a while!"
+            # )
         # Layer input checkpoints
-        print("DEBUG: Start _create_layer_checkpointers")  # DEBUG
         layer_numbers = self._create_layer_numbers()
         if self.layercp_pin_memory:
             pin_memory = [True] * len(layer_numbers)
@@ -776,7 +774,6 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         # Need to track `input_pos` across calls of :meth:`_checkpoint_layer_input`
         self._layer_cp_input_pos = {layer_idx: 0 for layer_idx in layer_numbers}
-        print("DEBUG: End _create_layer_checkpointers")  # DEBUG
 
     def _create_layer_numbers(self) -> List[int]:
         """
@@ -884,7 +881,6 @@ class LongContextGradientModel(LongContextInferenceModel):
         scale_factor: float,
         average_loss_per_batch: bool,
     ) -> LossValue:
-        print("DEBUG: Start _inference_forward_pass")  # DEBUG
         if self.verbose is not VerbosityLevels.NONE:
             lines = [
                 f"\nbatch_size      = {self.batch_size}",
