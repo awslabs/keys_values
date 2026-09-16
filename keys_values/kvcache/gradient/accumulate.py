@@ -521,9 +521,9 @@ class GradientAccumulator:
         temporarily replaced by specific replau caches, the setup is restored
         in the end.
 
-        Note that `get_inputs_slice` and `write_head_gradients_slice` can refer
-        to the same checkpoint object. We guarantee that any slice is read
-        before it is written to.
+        Note that `get_head_gradients_slice` and `write_head_gradients_slice`
+        can refer to the same checkpoint object. We guarantee that any slice is
+        read before it is written to.
 
         Args:
             model_part: Represents layers of model for the cell
@@ -870,9 +870,9 @@ class GradientAccumulator:
         given by `input_ids`, targets by `targets`. These two are aligned on
         the right.
 
-        Note that `get_inputs_slice` and `write_outputs_slice` can refer to the
-        same underlying buffer or checkpoint object. We guarantee that any slice
-        is read before it is written to.
+        Note that `get_inputs_slice` and `write_head_gradients_slice` can refer
+        to the same underlying buffer or checkpoint object. We guarantee that
+        any slice is read before it is written to.
 
         Note: `gpt_model` passed here only needs to contain the blocks
         `gpt_model.transformer.ln_f` and `gpt_model.lm_head` related to the
