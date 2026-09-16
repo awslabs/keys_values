@@ -231,7 +231,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         # list. The :class:`QuantizerState` entry is allocated and written there
         # on first use.
         self.checkpoints: List[Union[bool, Tuple[QuantizerState, QuantizerState]]] = []
-        self._checkpoint_lengths = None
+        self._checkpoint_lengths: List[int] = []
         super().__init__(chunk_numbers)
         self.set_chunk_numbers(chunk_numbers, pin_memory)
 
@@ -296,20 +296,12 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
             pin_memory = [False] * len(self.chunk_numbers)
         num_to_create = max(len(self.chunk_numbers) - len(self.checkpoints), 0)
         if num_to_create > 0:
-            new_checkpoints = pin_memory[(-num_to_create):].copy()
-        else:
-            new_checkpoints = []
-        new_lengths = [self.cache_length] * num_to_create
-        if self.checkpoints is None:
-            self.checkpoints = new_checkpoints
-            self._checkpoint_lengths = new_lengths
-        else:
-            self.checkpoints.extend(new_checkpoints)
-            self._checkpoint_lengths.extend(new_lengths)
-        if not self._delay_allocation:
-            # Ensure all new buffers are allocated here
-            for pos in range(len(self.checkpoints)):
-                self._allocate_buffer(pos)
+            self.checkpoints.extend(pin_memory[(-num_to_create):])
+            self._checkpoint_lengths.extend([self.cache_length] * num_to_create)
+            if not self._delay_allocation:
+                # Ensure all new buffers are allocated here
+                for pos in range(len(self.checkpoints)):
+                    self._allocate_buffer(pos)
 
     def _set_checkpoint(
         self,
