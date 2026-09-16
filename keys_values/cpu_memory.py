@@ -152,8 +152,10 @@ class FileBasedExtraMemoryManager:
                 raise RuntimeError(
                     "FileBasedExtraMemoryManager has already been cleaned up"
                 )
-            path = self._path_for(self.num_files)
             num = self.num_files
+            path = self._path_for(num)
+            if num % NUM_FILES_PER_DIRECTORY == 0:
+                path.parent.mkdir(parents=True, exist_ok=True)
             self.num_files += 1
         storage = torch.UntypedStorage.from_file(str(path), shared=True, nbytes=n_bytes)
         if num == 0:
