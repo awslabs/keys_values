@@ -487,6 +487,7 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         batch_size: Optional[int] = None,
         pin_memory: Optional[List[bool]] = None,
         use_memory_manager: bool = True,
+        delay_allocation: bool = False,
     ):
         """
         Args:
@@ -497,6 +498,9 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
             pin_memory: If given, must have the same length as `chunk_numbers`.
                 Checkpoints for chunks with `True` entries are pinned in CPU
                 memory. Default: No checkpoints are pinned.
+            delay_allocation: If `True`, checkpoint buffers are allocated only
+                when first used. This is useful if checkpoints are stored on
+                disk, but should be avoided if they can be held in CPU RAM.
 
         """
         super().__init__(chunk_numbers)
@@ -510,9 +514,10 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
             cache_length,
             params.head_size,
         )
-        self.k = None
-        self.v = None
-        self._checkpoint_lengths = None
+        self.k: List[Union[bool, torch.Tensor]] = []
+        self.v: List[Union[bool, torch.Tensor]] = []
+        self._checkpoint_lengths: List[int] = []
+        self._delay_allocation = delay_allocation
         self.set_chunk_numbers(chunk_numbers, pin_memory)
 
     @property
@@ -539,6 +544,31 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         else:
             return torch.zeros(shape, dtype=dtype, device=device, pin_memory=pin_memory)
 
+    def _allocate_buffer(self, pos: int):
+        if not (0 <= pos < len(self.k)):
+            raise ValueError(f"pos={pos}, must be in [0, {len(self.k)})")
+        entry = self.k[pos]
+        if isinstance(entry, torch.Tensor):
+            return
+        if not isinstance(entry, bool):
+            raise ValueError(
+                f"pos={pos}, type(entry)={type(entry)}: Must be bool or torch.Tensor"
+            )
+        self.k[pos] = self._allocate_tensor(
+            self._shape, **self._kwargs, pin_memory=entry
+        )
+        self.v[pos] = self._allocate_tensor(
+            self._shape, **self._kwargs, pin_memory=entry
+        )
+
+    def _check_allocated(self, pos: int):
+        if not (0 <= pos < len(self.k)):
+            raise ValueError(f"pos={pos}, must be in [0, {len(self.k)})")
+        if isinstance(self.k[pos], bool):
+            raise ValueError(
+                f"self.k[{pos}] does not exist. Call `set_checkpoint` before reading!"
+            )
+
     def set_chunk_numbers(
         self,
         chunk_numbers: List[int],
@@ -562,37 +592,21 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
                 )
         else:
             pin_memory = [False] * len(chunk_numbers)
-        if self.k is None:
-            num_to_create = len(self.chunk_numbers)
-        else:
-            num_to_create = max(len(self.chunk_numbers) - len(self.k), 0)
+        num_to_create = max(len(self.chunk_numbers) - len(self.k), 0)
         if num_to_create > 0:
-            new_k = [
-                self._allocate_tensor(self._shape, **self._kwargs, pin_memory=pm)
-                for pm in pin_memory[(-num_to_create):]
-            ]
-            new_v = [
-                self._allocate_tensor(self._shape, **self._kwargs, pin_memory=pm)
-                for pm in pin_memory[(-num_to_create):]
-            ]
-        else:
-            new_k = []
-            new_v = []
-        new_lengths = [self.cache_length] * num_to_create
-        if self.k is None:
-            self.k = new_k
-            self.v = new_v
-            self._checkpoint_lengths = new_lengths
-        else:
-            self.k.extend(new_k)
-            self.v.extend(new_v)
-            self._checkpoint_lengths.extend(new_lengths)
+            self.k.extend(pin_memory[(-num_to_create):])
+            self.v.extend(pin_memory[(-num_to_create):])
+            self._checkpoint_lengths.extend([self.cache_length] * num_to_create)
+            if not self._delay_allocation:
+                for pos in range(len(self.k)):
+                    self._allocate_buffer(pos)
 
     def _set_checkpoint(
         self,
         pos: int,
         buffers: DefaultKVCacheBuffers,
     ) -> int:
+        self._allocate_buffer(pos)
         k_and_v = buffers.get_keys_values()
         current_length = buffers.current_length
         self.k[pos][:, :, :current_length, :].copy_(
@@ -611,6 +625,7 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         pos: int,
         out: DefaultKVCacheBuffers,
     ):
+        self._check_allocated(pos)
         key = self.k[pos][:, ...]
         value = self.v[pos][:, ...]
         device = out.device
@@ -630,6 +645,7 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         pos = self._chunk_pos.get(chunk_idx)
         if pos is None:
             return None
+        self._allocate_buffer(pos)
         assert key.ndim == 4
         num = key.shape[2]
         _shape = self.k[0].shape
@@ -666,6 +682,7 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         pos = self._chunk_pos.get(chunk_idx)
         if pos is None:
             raise IndexError(f"chunk_idx = {chunk_idx} must be in {self.chunk_numbers}")
+        self._check_allocated(pos)
         current_length = self._checkpoint_lengths[pos]
         if not (0 <= input_pos and num > 0 and input_pos + num <= current_length):
             raise ValueError(
@@ -892,9 +909,6 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
         """
 
         super().__init__(layer_numbers, cell_ranges)
-        print(
-            f"LayerInputQuantizedCheckpoints: allocate_buffers={allocate_buffers}"
-        )  # DEBUG
         if pin_memory is not None and len(pin_memory) != len(layer_numbers):
             raise ValueError(
                 f"pin_memory = {pin_memory}, layer_numbers = {layer_numbers}: Must have same length"
@@ -924,9 +938,10 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             device=device,
         )[0]
         # Internally, we use :class:`KVCacheBufferQuantizedCheckpoints` objects
-        print(
-            f"LayerInputQuantizedCheckpoints: Create _checkpoints_int ({len(cell_ranges)} entries)"
-        )
+        if allocate_buffers:
+            print(
+                f"LayerInputQuantizedCheckpoints: Create _checkpoints_int ({len(cell_ranges)} entries)"
+            )
         self._checkpoints_int = [
             KVCacheBufferQuantizedCheckpoints(
                 chunk_numbers=layer_numbers,
@@ -940,13 +955,6 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             )
         ]
         self.n_embd = model.config.n_embd
-        # DEBUG
-        if allocate_buffers:
-            mem_all = sum(cp.size_estimate() for cp in self._checkpoints_int) // (2**23)
-            print(
-                f"DEBUG: LayerInputQuantizedCheckpoints: _checkpoints_int of len {len(cell_ranges)} need {mem_all:.1f}M in total"
-            )
-        # END DEBUG
 
     def clear(self):
         """
@@ -1023,6 +1031,7 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
         n_embd: int,
         dtype: Optional[torch.dtype],
         pin_memory: Optional[List[bool]] = None,
+        allocate_buffers: bool = False,
     ):
         """
         Args:
@@ -1035,6 +1044,8 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
             pin_memory: If given, must have the same length as `layer_numbers`.
                 Checkpoints for layers with `True` entries are pinned in CPU
                 memory. Default: No checkpoints are pinned.
+            allocate_buffers: If `True`, we allocate buffers here. Otherwise,
+                they are allocated at first use
         """
 
         super().__init__(layer_numbers, cell_ranges)
@@ -1049,17 +1060,21 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
             dtype=dtype,
             device=torch.device("cpu"),
         )
-        print(
-            f"LayerInputDefaultCheckpoints: Create _checkpoints_int ({len(cell_ranges)} entries)"
-        )
+        if allocate_buffers:
+            print(
+                f"LayerInputDefaultCheckpoints: Create _checkpoints_int ({len(cell_ranges)} entries)"
+            )
         self._checkpoints_int = [
             KVCacheBufferDefaultCheckpoints(
                 chunk_numbers=layer_numbers,
                 params=self._buffer_params,
                 cache_length=end - start,
                 pin_memory=pin_memory,
+                delay_allocation=not allocate_buffers,
             )
-            for start, end in wrap_tqdm_conditional(cell_ranges, do_wrap=True)
+            for start, end in wrap_tqdm_conditional(
+                cell_ranges, do_wrap=allocate_buffers
+            )
         ]
         self.n_embd = n_embd
 

@@ -762,6 +762,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 n_embd=self.config.n_embd,
                 dtype=dtype,
                 pin_memory=pin_memory,
+                allocate_buffers=not use_filebased_memory,
             )
         else:
             # Checkpoints are quantized
