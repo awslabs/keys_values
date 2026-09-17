@@ -32,7 +32,7 @@ def available_cpu_memory_in_bytes() -> int:
     return vm.available
 
 
-NUM_FILES_PER_DIRECTORY = 3072
+NUM_FILES_PER_DIRECTORY = 1024
 
 
 class FileNameManager:
@@ -82,9 +82,11 @@ class FileNameManager:
                 pass
         return res_path
 
-    def _path_for(self, num: int) -> Path:
+    def _path_for(self, num: int, tmp_path: Optional[Path] = None) -> Path:
+        if tmp_path is None:
+            tmp_path = self.tmp_path
         return (
-            self.tmp_path
+            tmp_path
             / str(num // NUM_FILES_PER_DIRECTORY)
             / self._name_pattern.format(num=num % NUM_FILES_PER_DIRECTORY)
         )
@@ -112,19 +114,19 @@ class FileNameManager:
             num_files, self.num_files = self.num_files, 0
             tmp_path, self.tmp_path = self.tmp_path, None
         if tmp_path is None:
-            return
+            returne
         for num in range(num_files):
             try:
-                self._path_for(num).unlink()
+                self._path_for(num, tmp_path).unlink()
             except FileNotFoundError:
                 pass
             if num % NUM_FILES_PER_DIRECTORY == 0 and num > 0:
                 try:
-                    self._path_for(num - 1).parent.rmdir()
+                    self._path_for(num - 1, tmp_path).parent.rmdir()
                 except Exception:
                     pass
         if num_files > 0:
-            final_dir = self._path_for(num_files - 1).parent
+            final_dir = self._path_for(num_files - 1, tmp_path).parent
             if final_dir.exists():
                 try:
                     final_dir.rmdir()
