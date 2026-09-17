@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Tuple, Optional, Dict
 from functools import partial
+import os
+from typing import Tuple, Optional, Dict
 
 import torch
 from torch.linalg import vector_norm
@@ -440,11 +441,12 @@ class BitsAndBytesQuantizer(Quantizer):
 
     def create_quantizer_state(
         self,
-        device: torch.device,
+        device: Optional[torch.device] = None,
+        storage_path: Optional[str] = None,
         cache_length: Optional[int] = None,
         **kwargs,
     ) -> "QuantizerState":
-        return BitsAndBytesQuantizerState(self, device, cache_length, **kwargs)
+        return BitsAndBytesQuantizerState(self, device, storage_path, cache_length, **kwargs)
 
     @staticmethod
     def supported_source_dtypes() -> Tuple[torch.dtype, ...]:
@@ -464,6 +466,7 @@ class BitsAndBytesQuantizerState(QuantizerState):
         self,
         quantizer: BitsAndBytesQuantizer,
         device: Optional[torch.device] = None,
+        storage_path: Optional[str] = None,
         cache_length: Optional[int] = None,
         pin_memory: bool = False,
     ):
@@ -471,80 +474,142 @@ class BitsAndBytesQuantizerState(QuantizerState):
             raise ValueError(
                 f"type(quantizer) = {type(quantizer)}, must be BitsAndBytesQuantizer"
             )
-        super().__init__(quantizer, device, cache_length)
-        # Create buffers
-        shape = list(quantizer._quant_shape)
+        super().__init__(quantizer, storage_path, device, cache_length)
+        self._shape = list(quantizer._quant_shape)
         pos = 0 if self.quantizer.blocks_over_heads else 1
-        shape[pos] = self.cache_length
-        self.quant_buffer = quantizer._allocate_tensor(
-            shape,
-            dtype=quantizer.target_dtype,
-            device=self.device,
-            pin_memory=pin_memory,
-        ).fill_(0)
-        self.quant_absmax = quantizer._allocate_tensor(
-            shape[:-1],
-            dtype=torch.float32,
-            device=self.device,
-            pin_memory=pin_memory,
-        ).fill_(0)
+        self._shape[pos] = self.cache_length
+        if self.storage_path is None:
+            # Create buffers
+            self.quant_buffer = torch.zeros(
+                self._shape,
+                dtype=quantizer.target_dtype,
+                device=self.device,
+                pin_memory=pin_memory,
+            )
+            self.quant_absmax = torch.zeros(
+                self._shape[:-1],
+                dtype=torch.float32,
+                device=self.device,
+                pin_memory=pin_memory,
+            )
+        else:
+            # File is written on first :meth:`copy_` call
+            self.quant_buffer = None
+            self.quant_absmax = None
 
     def copy_(
         self,
         start: int = 0,
         end: Optional[int] = None,
     ):
-        if not self.quantizer.buffers_are_allocated:
-            raise IndexError("Buffers of self.quantizer are not allocated")
         start, end = self._check_range(start, end)
         # Due to changing `batch_size`, the dimension may be smaller
-        if self.quantizer.blocks_over_heads:
-            dim1 = self.quantizer.quant_buffer.shape[1]
-            self.quant_buffer[start:end, :dim1, :].copy_(
-                self.quantizer.quant_buffer[start:end, :, :],
-                non_blocking=True,
-            )
-            self.quant_absmax[start:end, :dim1].copy_(
-                self.quantizer.quant_absmax[start:end, :],
-                non_blocking=True,
-            )
+        bo_heads = self.quantizer.blocks_over_heads
+        dim_pos = int(bo_heads)
+        dim0 = self.quantizer.quant_buffer.shape[dim_pos]
+        if self.storage_path is None:
+            if not self.quantizer.buffers_are_allocated:
+                raise IndexError("Buffers of self.quantizer are not allocated")
+            if bo_heads:
+                self.quant_buffer[start:end, :dim0, :].copy_(
+                    self.quantizer.quant_buffer[start:end, :, :],
+                    non_blocking=True,
+                )
+                self.quant_absmax[start:end, :dim0].copy_(
+                    self.quantizer.quant_absmax[start:end, :],
+                    non_blocking=True,
+                )
+            else:
+                self.quant_buffer[:dim0, start:end, :].copy_(
+                    self.quantizer.quant_buffer[:, start:end, :],
+                    non_blocking=True,
+                )
+                self.quant_absmax[:dim0, start:end].copy_(
+                    self.quantizer.quant_absmax[:, start:end],
+                    non_blocking=True,
+                )
         else:
-            dim0 = self.quantizer.quant_buffer.shape[0]
-            self.quant_buffer[:dim0, start:end, :].copy_(
-                self.quantizer.quant_buffer[:, start:end, :],
-                non_blocking=True,
-            )
-            self.quant_absmax[:dim0, start:end].copy_(
-                self.quantizer.quant_absmax[:, start:end],
-                non_blocking=True,
-            )
+            # Storage to file
+            full_size = dim0 == self._shape[dim_pos] and start == 0 and end in (None, self._shape[1 - dim_pos])
+            if bo_heads:
+                objs = {
+                    "buffer": self.quantizer.quant_buffer[start:end, :, :].to(self.device, non_blocking=True),
+                    "absmax": self.quantizer.quant_absmax[start:end, :].to(self.device, non_blocking=True),
+                }
+            else:
+                objs = {
+                    "buffer": self.quantizer.quant_buffer[:, start:end, :].to(self.device, non_blocking=True),
+                    "absmax": self.quantizer.quant_absmax[:, start:end].to(self.device, non_blocking=True),
+                }
+            if full_size:
+                # Create or overwrite
+                self._write_to_file(objs)
+            else:
+                # Modify content
+                if os.path.exists(self.storage_path):
+                    curr_objs = self._read_from_file()
+                else:
+                    curr_objs = {
+                        "buffer": torch.zeros(
+                            self._shape,
+                            dtype=self.quantizer.target_dtype,
+                            device=self.device,
+                        ),
+                        "absmax": torch.zeros(
+                            self._shape[:-1],
+                            dtype=torch.float32,
+                            device=self.device,
+                        ),
+                    }
+                for name, target in curr_objs.items():
+                    source = objs[name]
+                    if bo_heads:
+                        if name == "buffer":
+                            target[start:end, :dim0, :].copy_(source, non_blocking=True)
+                        else:
+                            target[start:end, :dim0].copy_(source, non_blocking=True)
+                    else:
+                        if name == "buffer":
+                            target[:dim0, start:end, :].copy_(source, non_blocking=True)
+                        else:
+                            target[:dim0, start:end].copy_(source, non_blocking=True)
+                self._write_to_file(curr_objs)
+
 
     def restore(
         self,
         start: int = 0,
         end: Optional[int] = None,
     ):
-        if not self.quantizer.buffers_are_allocated:
-            raise IndexError("Buffers of self.quantizer are not allocated")
         start, end = self._check_range(start, end)
-        # Due to changing `batch_size`, the 0 dimension may be smaller
-        if self.quantizer.blocks_over_heads:
-            dim1 = self.quantizer.quant_buffer.shape[1]
+        # Due to changing `batch_size`, the dimension may be smaller
+        bo_heads = self.quantizer.blocks_over_heads
+        dim_pos = int(bo_heads)
+        dim0 = self.quantizer.quant_buffer.shape[dim_pos]
+        if self.storage_path is None:
+            if not self.quantizer.buffers_are_allocated:
+                raise IndexError("Buffers of self.quantizer are not allocated")
+            curr_objs = {
+                "buffer": self.quant_buffer,
+                "absmax": self.quant_absmax,
+            }
+        else:
+            curr_objs = self._read_from_file()
+        if bo_heads:
             self.quantizer.quant_buffer[start:end, :, :].copy_(
-                self.quant_buffer[start:end, :dim1, :],
+                curr_objs["buffer"][start:end, :dim0, :],
                 non_blocking=True,
             )
             self.quantizer.quant_absmax[start:end, :].copy_(
-                self.quant_absmax[start:end, :dim1],
+                curr_objs["absmax"][start:end, :dim0],
                 non_blocking=True,
             )
         else:
-            dim0 = self.quantizer.quant_buffer.shape[0]
             self.quantizer.quant_buffer[:, start:end, :].copy_(
-                self.quant_buffer[:dim0, start:end, :],
+                curr_objs["buffer"][:dim0, start:end, :],
                 non_blocking=True,
             )
             self.quantizer.quant_absmax[:, start:end].copy_(
-                self.quant_absmax[:dim0, start:end],
+                curr_objs["absmax"][:dim0, start:end],
                 non_blocking=True,
             )

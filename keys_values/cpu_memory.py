@@ -35,27 +35,24 @@ def available_cpu_memory_in_bytes() -> int:
 NUM_FILES_PER_DIRECTORY = 3072
 
 
-class FileBasedExtraMemoryManager:
+class FileNameManager:
     """
-    Allocates CPU tensors from RAM, falling back to memory-mapped files on
-    a large disk. This disk can be an external file system (such as AWS EFS).
-
-    We allocate a tensor from RAM if free RAM space lies above
-    `max(threshold, n_bytes * self._HEADROOM)`, otherwise we use a new
-    memory-mapped file. It is recommended to set `threshold` as a fraction of
-    free RAM space determined just before allocations start.
+    Creates unique names for file-based storage, also deals with cleanup.
 
     """
-
-    _HEADROOM = 1.1  # require 10% more available memory than requested
-
-    def __init__(self, tmp_dir: str, threshold: Optional[int]) -> None:
+    def __init__(
+        self,
+        tmp_dir: str,
+        name_pattern: Optional[str] = None,
+    ) -> None:
         # Create unique subdirectory
         self.tmp_path = self._unique_path(tmp_dir)
         print(
-            f"FileBasedExtraMemoryManager: Memory-mapped files will be written to {self.tmp_path}"
+            f"FileNameManager: Memory-mapped files will be written to {self.tmp_path}"
         )
-        self.threshold = threshold
+        if name_pattern is None:
+            name_pattern = "buf_{num}.bin"
+        self._name_pattern = name_pattern
         self.num_files = 0
         self._lock = threading.Lock()
         # Ensure that when program ends, or when it is terminated,
@@ -88,23 +85,23 @@ class FileBasedExtraMemoryManager:
         return (
             self.tmp_path
             / str(num // NUM_FILES_PER_DIRECTORY)
-            / f"buf_{num % NUM_FILES_PER_DIRECTORY}.bin"
+            / self._name_pattern.format(num=num % NUM_FILES_PER_DIRECTORY)
         )
 
-    def _use_virtual_memory(self, n_bytes: int) -> bool:
-        available = available_cpu_memory_in_bytes()
-        limit = n_bytes * self._HEADROOM
-        if self.threshold is not None:
-            limit = max(limit, self.threshold)
-        return available > limit
-
-    def allocate(
-        self, shape: Tuple[int, ...], dtype: torch.dtype = torch.float32
-    ) -> torch.Tensor:
-        n_bytes = math.prod(shape) * bytes_for_torch_dtype(dtype)
-        if self._use_virtual_memory(n_bytes):
-            return torch.empty(shape, dtype=dtype)
-        return self._alloc_from_file(shape, dtype, n_bytes)
+    def next_path(self) -> Path:
+        with self._lock:
+            if self.tmp_path is None:
+                raise RuntimeError(
+                    "FileNameManager has already been cleaned up"
+                )
+            num = self.num_files
+            path = self._path_for(num)
+            if num % NUM_FILES_PER_DIRECTORY == 0:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            self.num_files += 1
+        if num == 0:
+            print(f"\nStarting to write virtual memory to {self.tmp_path}")
+        return path
 
     def cleanup(self) -> None:
         """
@@ -144,24 +141,6 @@ class FileBasedExtraMemoryManager:
         except FileNotFoundError:
             pass
 
-    def _alloc_from_file(
-        self, shape: Tuple[int, ...], dtype: torch.dtype, n_bytes: int
-    ) -> torch.Tensor:
-        with self._lock:
-            if self.tmp_path is None:
-                raise RuntimeError(
-                    "FileBasedExtraMemoryManager has already been cleaned up"
-                )
-            num = self.num_files
-            path = self._path_for(num)
-            if num % NUM_FILES_PER_DIRECTORY == 0:
-                path.parent.mkdir(parents=True, exist_ok=True)
-            self.num_files += 1
-        storage = torch.UntypedStorage.from_file(str(path), shared=True, nbytes=n_bytes)
-        if num == 0:
-            print(f"\nStarting to write virtual memory to {self.tmp_path}")
-        return torch.empty(0, dtype=dtype).set_(storage).reshape(shape)
-
     def _install_sigterm_handler(self) -> None:
         prev = signal.getsignal(signal.SIGTERM)
 
@@ -174,6 +153,47 @@ class FileBasedExtraMemoryManager:
                 os.kill(os.getpid(), signal.SIGTERM)
 
         signal.signal(signal.SIGTERM, handler)
+
+
+class FileBasedExtraMemoryManager:
+    """
+    Allocates CPU tensors from RAM, falling back to memory-mapped files on
+    a large disk. This disk can be an external file system (such as AWS EFS).
+
+    We allocate a tensor from RAM if free RAM space lies above
+    `max(threshold, n_bytes * self._HEADROOM)`, otherwise we use a new
+    memory-mapped file. It is recommended to set `threshold` as a fraction of
+    free RAM space determined just before allocations start.
+
+    """
+
+    _HEADROOM = 1.1  # require 10% more available memory than requested
+
+    def __init__(self, tmp_dir: str, threshold: Optional[int]) -> None:
+        self.name_manager = FileNameManager(tmp_dir)
+        self.threshold = threshold
+
+    def _use_virtual_memory(self, n_bytes: int) -> bool:
+        available = available_cpu_memory_in_bytes()
+        limit = n_bytes * self._HEADROOM
+        if self.threshold is not None:
+            limit = max(limit, self.threshold)
+        return available > limit
+
+    def allocate(
+        self, shape: Tuple[int, ...], dtype: torch.dtype = torch.float32
+    ) -> torch.Tensor:
+        n_bytes = math.prod(shape) * bytes_for_torch_dtype(dtype)
+        if self._use_virtual_memory(n_bytes):
+            return torch.empty(shape, dtype=dtype)
+        return self._alloc_from_file(shape, dtype, n_bytes)
+
+    def _alloc_from_file(
+        self, shape: Tuple[int, ...], dtype: torch.dtype, n_bytes: int
+    ) -> torch.Tensor:
+        path = self.name_manager.next_path()
+        storage = torch.UntypedStorage.from_file(str(path), shared=True, nbytes=n_bytes)
+        return torch.empty(0, dtype=dtype).set_(storage).reshape(shape)
 
 
 _manager: Optional[FileBasedExtraMemoryManager] = None

@@ -11,13 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from typing import Optional, Tuple, Dict, Callable
 
 import torch
 
 from keys_values.array_limit import TemporaryArrayLimit
 from keys_values.attention.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
-from keys_values.cpu_memory import get_memory_manager, has_memory_manager
 from keys_values.kvcache.buffers import KVCacheBuffersParams
 
 QuantizerCallback = Callable[[int, int], None]
@@ -60,13 +60,6 @@ class Quantizer(torch.nn.Module):
     methods called by buffers have an additional `block_idx` argument, which is
     required if the callback is used. The callback is called at the start of
     each method, passing `new_block_idx=block_idx`.
-
-    If `use_memory_manager == True`, we use `get_memory_manager` for all
-    tensor allocations here. This is done only if `has_memory_manager() == True`,
-    so the file-based memory manager exists. In this case, tensors are allocated
-    normally until the virtual memory including default system swap space is
-    nearly full. At that point, the manager creates extra files on some
-    external file system.
     """
 
     def __init__(
@@ -75,7 +68,6 @@ class Quantizer(torch.nn.Module):
         source_dtype: torch.dtype,
         blocks_over_heads: bool = False,
         tmp_array_limit_gb: Optional[TemporaryArrayLimit] = None,
-        use_memory_manager: bool = True,
     ):
         super().__init__()
         if len(shape) != 4 or any(x < 1 for x in shape):
@@ -86,7 +78,6 @@ class Quantizer(torch.nn.Module):
         self._tmp_array_limit_gb = tmp_array_limit_gb
         self._callback = None
         self.current_block_idx = None
-        self._use_memory_manager = use_memory_manager and has_memory_manager()
 
     @property
     def device(self) -> Optional[torch.device]:
@@ -277,7 +268,8 @@ class Quantizer(torch.nn.Module):
 
     def create_quantizer_state(
         self,
-        device: torch.device,
+        device: Optional[torch.device] = None,
+        storage_path: Optional[str] = None,
         cache_length: Optional[int] = None,
         **kwargs,
     ) -> "QuantizerState":
@@ -298,29 +290,11 @@ class Quantizer(torch.nn.Module):
     def batch_size(self) -> Optional[int]:
         raise NotImplementedError
 
-    def _allocate_tensor(
-        self,
-        shape: Tuple[int, ...],
-        dtype: torch.dtype,
-        device: Optional[torch.device] = None,
-        pin_memory: bool = False,
-        use_ram: bool = False,
-    ) -> torch.Tensor:
-        if (
-            not use_ram
-            and self._use_memory_manager
-            and not pin_memory
-            and (device is None or device == torch.device("cpu"))
-        ):
-            return get_memory_manager().allocate(shape, dtype)
-        else:
-            return torch.empty(shape, dtype=dtype, device=device, pin_memory=pin_memory)
-
 
 class QuantizerState:
     """
     Allows to copy the content of a :class:`Quantizer` to a different
-    device.
+    device, or to disk.
 
     """
 
@@ -328,6 +302,7 @@ class QuantizerState:
         self,
         quantizer: Quantizer,
         device: Optional[torch.device] = None,
+        storage_path: Optional[str] = None,
         cache_length: Optional[int] = None,
     ):
         """
@@ -337,12 +312,18 @@ class QuantizerState:
         Args:
             quantizer: Associated quantizer to copy from and to restore
             device: Device for buffers here. Defaults to CPU
+            storage_path: If this is given, the :class:`Quantizer` is stored
+                to a file of this path, and loaded from there. `device` is
+                ignored then.
 
         """
         if device is None:
             device = torch.device("cpu")
+        if storage_path is not None and os.path.exists(storage_path):
+            raise ValueError(f"Storage path {storage_path} for QuantizerState already exists")
         self.quantizer = quantizer
         self.device = device
+        self.storage_path = storage_path
         if cache_length is None:
             cache_length = self.quantizer.shape[2]
         self.cache_length = cache_length
@@ -370,6 +351,16 @@ class QuantizerState:
 
         """
         raise NotImplementedError
+
+    def _write_to_file(self, objs: Dict[str, torch.Tensor]):
+        if self.storage_path is None:
+            raise ValueError("Storage path is not set")
+        torch.save(objs, self.storage_path)
+
+    def _read_from_file(self) -> Dict[str, torch.Tensor]:
+        if self.storage_path is None:
+            raise ValueError("Storage path is not set")
+        return torch.load(self.storage_path)
 
     def _check_range(
         self,

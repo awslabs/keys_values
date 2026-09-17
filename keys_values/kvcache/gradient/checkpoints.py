@@ -17,9 +17,9 @@ from typing import List, Optional, Tuple, Dict, Any, Union
 import torch
 
 from keys_values.attention import DefaultKeysAndValues
-from keys_values.cpu_memory import get_memory_manager, has_memory_manager
+from keys_values.cpu_memory import available_cpu_memory_in_bytes, FileNameManager
 from keys_values.kvcache.buffers import KVCacheBuffersParams, DefaultKVCacheBuffers
-from keys_values.kvcache.quantize.quantization import QuantizerState
+from keys_values.kvcache.quantize.quantization import QuantizerState, Quantizer
 from keys_values.kvcache.quant_buffers import (
     QuantizedKVCacheBuffers,
     create_quantized_kv_buffers,
@@ -150,6 +150,58 @@ class KVCacheBufferCheckpoints:
         raise NotImplementedError
 
 
+class QuantizerStateForCheckpoint:
+    """
+    Can be used to overwrite the quantizer state creation in
+    :class:`KVCacheBufferQuantizedCheckpoints`, say by file-based states.
+
+    """
+    def __call__(
+        self,
+        quantizer: Quantizer,
+        **kwargs,
+    ) -> QuantizerState:
+        raise NotImplementedError
+
+
+class DefaultQuantizerStateForCheckpoint(QuantizerStateForCheckpoint):
+    def __call__(
+        self,
+        quantizer: Quantizer,
+        **kwargs,
+    ) -> QuantizerState:
+        return quantizer.create_quantizer_state(**kwargs)
+
+
+class FileBasedQuantizerStateForCheckpoint(QuantizerStateForCheckpoint):
+    """
+    The quantizer state returned is file-based iff the available CPU memory
+    falls below `threshold`.
+    """
+
+    def __init__(
+        self,
+        storage_path_manager: FileNameManager,
+        threshold: int,
+    ):
+        self.storage_path_manager = storage_path_manager
+        self.threshold = threshold
+
+    def __call__(
+        self,
+        quantizer: Quantizer,
+        **kwargs,
+    ) -> QuantizerState:
+        if available_cpu_memory_in_bytes() > self.threshold:
+            # Memory-based state (as in default)
+            return quantizer.create_quantizer_state(**kwargs)
+        else:
+            # File-based state
+            return quantizer.create_quantizer_state(
+                **kwargs, storage_path=str(self.storage_path_manager.next_path()),
+            )
+
+
 class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
     """
     Collects checkpoints of KV cache buffers for a subset of token chunks.
@@ -187,6 +239,12 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
     Here, the KV caches must use :class:`DefaultKVCacheBuffers` buffers, not
     :class:`QuantizedKVCacheBuffers`.
 
+    Quantizer state allocation:
+
+    The bulk of checkpoints are stored using quantizer states. By passing
+    `state_allocator`, the storage of these states can be controlled. The default
+    is storage in CPU RAM. Use :class:`FileBasedQuantizerStateForCheckpoint` for
+    file-based storage.
     """
 
     def __init__(
@@ -196,6 +254,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         cache_length: Optional[int] = None,
         pin_memory: Optional[List[bool]] = None,
         delay_allocation: bool = False,
+        state_allocator: Optional[QuantizerStateForCheckpoint] = None,
     ):
         """
         Args:
@@ -216,6 +275,7 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
             delay_allocation: If `True`, checkpoint buffers are allocated only
                 when first used. This is useful if checkpoints are stored on
                 disk, but should be avoided if they can be held in CPU RAM.
+            state_allocator: See above. Default is storage in CPU RAM.
 
         """
         if cache_length is None:
@@ -233,6 +293,9 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
         self.checkpoints: List[Union[bool, Tuple[QuantizerState, QuantizerState]]] = []
         self._checkpoint_lengths: List[int] = []
         super().__init__(chunk_numbers)
+        if state_allocator is None:
+            state_allocator = DefaultQuantizerStateForCheckpoint()
+        self._state_allocator = state_allocator
         self.set_chunk_numbers(chunk_numbers, pin_memory)
 
     @property
@@ -259,8 +322,8 @@ class KVCacheBufferQuantizedCheckpoints(KVCacheBufferCheckpoints):
             pin_memory=entry,
         )
         self.checkpoints[pos] = (
-            self.quant_buffers.quantizer_k.create_quantizer_state(**kwargs),
-            self.quant_buffers.quantizer_v.create_quantizer_state(**kwargs),
+            self._state_allocator(self.quant_buffers.quantizer_k, **kwargs),
+            self._state_allocator(self.quant_buffers.quantizer_v, **kwargs),
         )
 
     def _check_allocated(self, pos: int):
@@ -470,13 +533,6 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
 
     The checkpoints are stored as they are, without quantization. This is
     recommended mostly for testing, or if CPU memory is not scarce.
-
-    If `use_memory_manager == True`, we use `get_memory_manager` for all
-    tensor allocations here. This is done only if `has_memory_manager() == True`,
-    so the file-based memory manager exists. In this case, tensors are allocated
-    normally until the virtual memory including default system swap space is
-    nearly full. At that point, the manager creates extra files on some
-    external file system.
     """
 
     def __init__(
@@ -486,7 +542,6 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         cache_length: int,
         batch_size: Optional[int] = None,
         pin_memory: Optional[List[bool]] = None,
-        use_memory_manager: bool = True,
         delay_allocation: bool = False,
     ):
         """
@@ -507,7 +562,6 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
         self._kwargs = dict(dtype=params.dtype, device=torch.device("cpu"))
         if batch_size is None:
             batch_size = params.max_batch_size
-        self._use_memory_manager = use_memory_manager and has_memory_manager()
         self._shape = (
             batch_size,
             params.n_query_groups,
@@ -528,22 +582,6 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
     def cache_length(self) -> int:
         return self._shape[2]
 
-    def _allocate_tensor(
-        self,
-        shape: Tuple[int, ...],
-        dtype: torch.dtype,
-        device: torch.device,
-        pin_memory: bool,
-    ) -> torch.Tensor:
-        if (
-            self._use_memory_manager
-            and not pin_memory
-            and (device is None or device == torch.device("cpu"))
-        ):
-            return get_memory_manager().allocate(shape, dtype).fill_(0)
-        else:
-            return torch.zeros(shape, dtype=dtype, device=device, pin_memory=pin_memory)
-
     def _allocate_buffer(self, pos: int):
         if not (0 <= pos < len(self.k)):
             raise ValueError(f"pos={pos}, must be in [0, {len(self.k)})")
@@ -554,10 +592,10 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
             raise ValueError(
                 f"pos={pos}, type(entry)={type(entry)}: Must be bool or torch.Tensor"
             )
-        self.k[pos] = self._allocate_tensor(
+        self.k[pos] = torch.zeros(
             self._shape, **self._kwargs, pin_memory=entry
         )
-        self.v[pos] = self._allocate_tensor(
+        self.v[pos] = torch.zeros(
             self._shape, **self._kwargs, pin_memory=entry
         )
 
@@ -885,6 +923,7 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
         allocate_buffers: bool = False,
         device: Optional[torch.device] = None,
         pin_memory: Optional[List[bool]] = None,
+        state_allocator: Optional[QuantizerStateForCheckpoint] = None,
     ):
         """
         We create a list of :class:`KVCacheBufferQuantizedCheckpoints` objects,
@@ -906,6 +945,7 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             pin_memory: If given, must have the same length as `layer_numbers`.
                 Checkpoints for layers with `True` entries are pinned in CPU
                 memory. Default: No checkpoints are pinned.
+            state_allocator: See :class:`KVCacheBufferQuantizedCheckpoints`.
         """
 
         super().__init__(layer_numbers, cell_ranges)
@@ -949,6 +989,7 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
                 cache_length=end - start,
                 pin_memory=pin_memory,
                 delay_allocation=not allocate_buffers,
+                state_allocator=state_allocator,
             )
             for start, end in wrap_tqdm_conditional(
                 cell_ranges, do_wrap=allocate_buffers
