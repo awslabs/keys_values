@@ -40,6 +40,7 @@ class FileNameManager:
     Creates unique names for file-based storage, also deals with cleanup.
 
     """
+
     def __init__(
         self,
         tmp_dir: str,
@@ -91,9 +92,7 @@ class FileNameManager:
     def next_path(self) -> Path:
         with self._lock:
             if self.tmp_path is None:
-                raise RuntimeError(
-                    "FileNameManager has already been cleaned up"
-                )
+                raise RuntimeError("FileNameManager has already been cleaned up")
             num = self.num_files
             path = self._path_for(num)
             if num % NUM_FILES_PER_DIRECTORY == 0:

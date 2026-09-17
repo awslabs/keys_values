@@ -320,7 +320,9 @@ class QuantizerState:
         if device is None:
             device = torch.device("cpu")
         if storage_path is not None and os.path.exists(storage_path):
-            raise ValueError(f"Storage path {storage_path} for QuantizerState already exists")
+            raise ValueError(
+                f"Storage path {storage_path} for QuantizerState already exists"
+            )
         self.quantizer = quantizer
         self.device = device
         self.storage_path = storage_path

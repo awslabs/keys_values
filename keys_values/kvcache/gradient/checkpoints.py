@@ -156,6 +156,7 @@ class QuantizerStateForCheckpoint:
     :class:`KVCacheBufferQuantizedCheckpoints`, say by file-based states.
 
     """
+
     def __call__(
         self,
         quantizer: Quantizer,
@@ -202,7 +203,8 @@ class FileBasedQuantizerStateForCheckpoint(QuantizerStateForCheckpoint):
         else:
             # File-based state
             return quantizer.create_quantizer_state(
-                **kwargs, storage_path=str(self.storage_path_manager.next_path()),
+                **kwargs,
+                storage_path=str(self.storage_path_manager.next_path()),
             )
 
 
@@ -596,12 +598,8 @@ class KVCacheBufferDefaultCheckpoints(KVCacheBufferCheckpoints):
             raise ValueError(
                 f"pos={pos}, type(entry)={type(entry)}: Must be bool or torch.Tensor"
             )
-        self.k[pos] = torch.zeros(
-            self._shape, **self._kwargs, pin_memory=entry
-        )
-        self.v[pos] = torch.zeros(
-            self._shape, **self._kwargs, pin_memory=entry
-        )
+        self.k[pos] = torch.zeros(self._shape, **self._kwargs, pin_memory=entry)
+        self.v[pos] = torch.zeros(self._shape, **self._kwargs, pin_memory=entry)
 
     def _check_allocated(self, pos: int):
         if not (0 <= pos < len(self.k)):

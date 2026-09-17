@@ -446,7 +446,13 @@ class BitsAndBytesQuantizer(Quantizer):
         cache_length: Optional[int] = None,
         **kwargs,
     ) -> "QuantizerState":
-        return BitsAndBytesQuantizerState(self, device, storage_path, cache_length, **kwargs)
+        return BitsAndBytesQuantizerState(
+            quantizer=self,
+            device=device,
+            storage_path=storage_path,
+            cache_length=cache_length,
+            **kwargs,
+        )
 
     @staticmethod
     def supported_source_dtypes() -> Tuple[torch.dtype, ...]:
@@ -474,7 +480,12 @@ class BitsAndBytesQuantizerState(QuantizerState):
             raise ValueError(
                 f"type(quantizer) = {type(quantizer)}, must be BitsAndBytesQuantizer"
             )
-        super().__init__(quantizer, storage_path, device, cache_length)
+        super().__init__(
+            quantizer=quantizer,
+            device=device,
+            storage_path=storage_path,
+            cache_length=cache_length,
+        )
         self._shape = list(quantizer._quant_shape)
         pos = 0 if self.quantizer.blocks_over_heads else 1
         self._shape[pos] = self.cache_length
@@ -530,16 +541,28 @@ class BitsAndBytesQuantizerState(QuantizerState):
                 )
         else:
             # Storage to file
-            full_size = dim0 == self._shape[dim_pos] and start == 0 and end in (None, self._shape[1 - dim_pos])
+            full_size = (
+                dim0 == self._shape[dim_pos]
+                and start == 0
+                and end in (None, self._shape[1 - dim_pos])
+            )
             if bo_heads:
                 objs = {
-                    "buffer": self.quantizer.quant_buffer[start:end, :, :].to(self.device, non_blocking=True),
-                    "absmax": self.quantizer.quant_absmax[start:end, :].to(self.device, non_blocking=True),
+                    "buffer": self.quantizer.quant_buffer[start:end, :, :].to(
+                        self.device, non_blocking=True
+                    ),
+                    "absmax": self.quantizer.quant_absmax[start:end, :].to(
+                        self.device, non_blocking=True
+                    ),
                 }
             else:
                 objs = {
-                    "buffer": self.quantizer.quant_buffer[:, start:end, :].to(self.device, non_blocking=True),
-                    "absmax": self.quantizer.quant_absmax[:, start:end].to(self.device, non_blocking=True),
+                    "buffer": self.quantizer.quant_buffer[:, start:end, :].to(
+                        self.device, non_blocking=True
+                    ),
+                    "absmax": self.quantizer.quant_absmax[:, start:end].to(
+                        self.device, non_blocking=True
+                    ),
                 }
             if full_size:
                 # Create or overwrite
@@ -574,7 +597,6 @@ class BitsAndBytesQuantizerState(QuantizerState):
                         else:
                             target[:dim0, start:end].copy_(source, non_blocking=True)
                 self._write_to_file(curr_objs)
-
 
     def restore(
         self,

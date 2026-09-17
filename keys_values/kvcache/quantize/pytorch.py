@@ -554,7 +554,13 @@ class TorchBasicQuantizer(Quantizer):
         cache_length: Optional[int] = None,
         **kwargs,
     ) -> "QuantizerState":
-        return TorchBasicQuantizerState(self, device, storage_path, cache_length, **kwargs)
+        return TorchBasicQuantizerState(
+            quantizer=self,
+            device=device,
+            storage_path=storage_path,
+            cache_length=cache_length,
+            **kwargs,
+        )
 
     @staticmethod
     def supported_source_dtypes() -> Tuple[torch.dtype, ...]:
@@ -578,7 +584,12 @@ class TorchBasicQuantizerState(QuantizerState):
             raise ValueError(
                 f"type(quantizer) = {type(quantizer)}, must be TorchBasicQuantizer"
             )
-        super().__init__(quantizer, storage_path, device, cache_length)
+        super().__init__(
+            quantizer=quantizer,
+            device=device,
+            storage_path=storage_path,
+            cache_length=cache_length,
+        )
         self._shape = (
             quantizer._quant_shape[0],
             self.cache_length,
@@ -635,11 +646,19 @@ class TorchBasicQuantizerState(QuantizerState):
             )
         else:
             # Storage to file
-            full_size = dim0 == self._shape[0] and start == 0 and end in (None, self._shape[1])
+            full_size = (
+                dim0 == self._shape[0] and start == 0 and end in (None, self._shape[1])
+            )
             objs = {
-                "buffer": self.quantizer.quant_buffer[:, start:end, :].to(self.device, non_blocking=True),
-                "scales": self.quantizer.quant_scales[:, start:end].to(self.device, non_blocking=True),
-                "zero_points": self.quantizer.quant_zero_points[:, start:end].to(self.device, non_blocking=True),
+                "buffer": self.quantizer.quant_buffer[:, start:end, :].to(
+                    self.device, non_blocking=True
+                ),
+                "scales": self.quantizer.quant_scales[:, start:end].to(
+                    self.device, non_blocking=True
+                ),
+                "zero_points": self.quantizer.quant_zero_points[:, start:end].to(
+                    self.device, non_blocking=True
+                ),
             }
             if full_size:
                 # Create or overwrite
