@@ -52,7 +52,7 @@ from keys_values.attention.attention_utils import (
     SDPA_KERNELS_BEST_ORDERING,
 )
 from keys_values.config import Config as ConfigFull
-from keys_values.cpu_memory import get_memory_manager
+from keys_values.cpu_memory import FileNameManager
 from keys_values.data import Helmet, LongBenchV2, MyDataLoader, INPUT_IDS_NAME
 from keys_values.data.constants import TARGETS_STRINGS_NAME
 from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
@@ -722,14 +722,17 @@ def main(
     set_fused_swiglu_enabled(sdpa.fused_swiglu)
     # Create file-based manager for virtual memory to be used for checkpoints
     if grad.checkpoint_temp_dir is not None:
-        # Creates singleton, which includes choosing and creating a unique
-        # subdirectory of `grad.checkpoint_temp_dir`.
-        # Note: `threshold` is not set here. This is done just before layer
-        # input checkpoints are allocated.
+        # Create `checkpoint_name_manager`, which creates the names for storage
+        # files and also owns cleaning them up at the end.
         print_message(
             f"Creating manager for memory-mapped files under {grad.checkpoint_temp_dir}"
         )
-        mem_manager = get_memory_manager(grad.checkpoint_temp_dir)
+        checkpoint_name_manager = FileNameManager(
+            grad.checkpoint_temp_dir,
+            name_pattern="state{num}.pth",
+        )
+    else:
+        checkpoint_name_manager = None
 
     if fabric.global_rank == 0:
         os.makedirs(out_dir, exist_ok=True)
@@ -795,6 +798,7 @@ def main(
             fabric=fabric,
             debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
             oom_error_recovery=oom_error_recovery,
+            checkpoint_name_manager=checkpoint_name_manager,
             **wrap_kwargs,
         )
 
@@ -1100,6 +1104,7 @@ def wrap_gpt_model(
     debug_dont_use_autograd_hooks: bool = False,
     oom_error_recovery: bool = False,
     model_kwargs: Optional[Dict[str, Any]] = None,
+    checkpoint_name_manager: Optional[FileNameManager] = None,
 ) -> Tuple[
     Union[LongContextGradientModel, LongContextInferenceModel],
     Optional[KVCacheOffloader],
@@ -1214,6 +1219,7 @@ def wrap_gpt_model(
             backward_tmp_array_limit_gb=backward_tmp_array_limit_gb,
             layercp_pin_memory=grad.layercp_pin_memory,
             cachecp_pin_memory=grad.cachecp_pin_memory,
+            checkpoint_name_manager=checkpoint_name_manager,
             checkpoint_frac_ram=grad.checkpoint_frac_ram,
             autograd_hooks_kwargs=autograd_hooks_kwargs,
             profile_steps=profile_grad_times,

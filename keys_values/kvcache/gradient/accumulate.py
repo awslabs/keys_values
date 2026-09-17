@@ -50,6 +50,7 @@ from keys_values.kvcache.gradient.checkpoints import (
     KVCacheBufferCheckpoints,
     KVCacheBufferQuantizedCheckpoints,
     KVCacheBufferDefaultCheckpoints,
+    QuantizerStateForCheckpoint,
 )
 from keys_values.kvcache.gradient.inference_replay import inference_replay_cache_factory
 from keys_values.kvcache.stack_layers import CellBlocks
@@ -158,6 +159,7 @@ class GradientAccumulator:
         pin_memory: bool = False,
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
         delay_allocation: bool = False,
+        state_allocator: Optional[QuantizerStateForCheckpoint] = None,
     ):
         if qname is None:
             qname = "torch-quantized8"
@@ -199,6 +201,7 @@ class GradientAccumulator:
         self._pin_memory = pin_memory
         self._debug_tensors = debug_tensors
         self._delay_allocation = delay_allocation
+        self._state_allocator = state_allocator
 
     def annotation_usage_logs(self) -> Dict[int, AnnotationUsageLog]:
         return self._annotation_usage_logs
@@ -378,6 +381,7 @@ class GradientAccumulator:
                         cache_length=cache_length,
                         pin_memory=pin_memory,
                         delay_allocation=self._delay_allocation,
+                        state_allocator=self._state_allocator,
                     )
                     for _ in wrap_tqdm_conditional(
                         range(num), do_wrap=not self._delay_allocation

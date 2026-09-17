@@ -177,6 +177,10 @@ class FileBasedQuantizerStateForCheckpoint(QuantizerStateForCheckpoint):
     """
     The quantizer state returned is file-based iff the available CPU memory
     falls below `threshold`.
+
+    Note: If the returned quantizer state is memory-based, it is directly
+    allocated. However, the file behind a file-based state is written only when
+    the state is first set.
     """
 
     def __init__(

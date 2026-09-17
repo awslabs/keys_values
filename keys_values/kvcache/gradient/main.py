@@ -414,6 +414,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         self.checkpoint_name_manager = checkpoint_name_manager
         self.checkpoint_frac_ram = checkpoint_frac_ram
+        self._state_allocator = None
         self._debug_dont_use_autograd_hooks = debug_dont_use_autograd_hooks
         self._use_arrays_cleanup = use_arrays_cleanup
         # Attention logit softcapping is not supported by the special operators
@@ -738,12 +739,12 @@ class LongContextGradientModel(LongContextInferenceModel):
                 f"{(threshold / 2 ** 20):.1f} MB "
                 f"({int(my_frac * 100)}% of available RAM)"
             )
-            state_allocator = FileBasedQuantizerStateForCheckpoint(
+            self._state_allocator = FileBasedQuantizerStateForCheckpoint(
                 storage_path_manager=self.checkpoint_name_manager,
                 threshold=threshold,
             )
         else:
-            state_allocator = None
+            self._state_allocator = None
         # Layer input checkpoints
         layer_numbers = self._create_layer_numbers()
         if self.layercp_pin_memory:
@@ -783,7 +784,7 @@ class LongContextGradientModel(LongContextInferenceModel):
                 allocate_buffers=not use_filebased_memory,
                 device=self.offload_device,
                 pin_memory=pin_memory,
-                state_allocator=state_allocator,
+                state_allocator=self._state_allocator,
             )
         # Need to track `input_pos` across calls of :meth:`_checkpoint_layer_input`
         self._layer_cp_input_pos = {layer_idx: 0 for layer_idx in layer_numbers}
@@ -852,9 +853,7 @@ class LongContextGradientModel(LongContextInferenceModel):
         # Accumulator object
         # Key and value buffers should not be annotated for the first chunk if
         # there is only a single chunk in the first cell
-        use_filebased_memory = (
-            has_memory_manager() and self.checkpoint_frac_ram is not None
-        )
+        use_filebased_memory = self.checkpoint_name_manager is not None
         self.accumulator = GradientAccumulator(
             config=self.config,
             cache_lengths=cache_lengths,
@@ -872,6 +871,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             ),
             pin_memory=self.cachecp_pin_memory,
             delay_allocation=use_filebased_memory,
+            state_allocator=self._state_allocator,
         )
 
     def _checkpoint_layer_input(
