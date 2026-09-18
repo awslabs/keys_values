@@ -762,15 +762,10 @@ class LongContextGradientModel(LongContextInferenceModel):
                 n_embd=self.config.n_embd,
                 dtype=dtype,
                 pin_memory=pin_memory,
-                allocate_buffers=not use_filebased_memory,
+                delay_allocation=use_filebased_memory,
             )
         else:
             # Checkpoints are quantized
-            # Note: If `use_filebased_memory == True`, we pass
-            # `allocate_buffers=False`, so that checkpoint buffers (including
-            # quantizer states) are allocated only when first used. This works
-            # better for file-based allocation, but does not go together with
-            # memory pinning.
             self.layer_checkpoints = LayerInputQuantizedCheckpoints(
                 model=self.gpt_model,
                 layer_numbers=layer_numbers,
@@ -781,9 +776,9 @@ class LongContextGradientModel(LongContextInferenceModel):
                     self.cache_kwargs,
                     tmp_array_limit_gb=self._tmp_array_limit_gb,
                 ),
-                allocate_buffers=not use_filebased_memory,
                 device=self.offload_device,
                 pin_memory=pin_memory,
+                delay_allocation=use_filebased_memory,
                 state_allocator=self._state_allocator,
             )
         # Need to track `input_pos` across calls of :meth:`_checkpoint_layer_input`

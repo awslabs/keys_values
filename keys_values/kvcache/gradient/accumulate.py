@@ -360,13 +360,16 @@ class GradientAccumulator:
             max_cache_length = max(
                 clen for clens in self.cache_lengths for clen in clens
             )
+            # Note: `allocate_buffers=False` means that `quant_buffers` space is
+            # allocated at first use, when the device is correct. Early allocation
+            # risks using the wrong device, and has no advantage.
             quant_buffers = create_quantized_kv_buffers(
                 qname=self.qname,
                 cache_lengths=[max_cache_length],
                 cache_params=self._cache_params,
                 cache_kwargs=self.cache_kwargs,
                 dequant_kwargs=dequant_kwargs,
-                allocate_buffers=not self._delay_allocation,
+                allocate_buffers=False,
             )[0]
             num_entries = sum(num_required.values())
             if not self._delay_allocation:
@@ -384,7 +387,8 @@ class GradientAccumulator:
                         state_allocator=self._state_allocator,
                     )
                     for _ in wrap_tqdm_conditional(
-                        range(num), do_wrap=not self._delay_allocation
+                        range(num),
+                        do_wrap=not self._delay_allocation,
                     )
                 ]
                 for cache_length, num in num_required.items()

@@ -922,9 +922,9 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
         batch_size: int,
         qname: str,
         cache_kwargs: Optional[Dict[str, Any]] = None,
-        allocate_buffers: bool = False,
         device: Optional[torch.device] = None,
         pin_memory: Optional[List[bool]] = None,
+        delay_allocation: bool = False,
         state_allocator: Optional[QuantizerStateForCheckpoint] = None,
     ):
         """
@@ -940,13 +940,13 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             qname: Determines quantization buffers
             cache_kwargs: Additional keyword arguments for
                 :class:`QuantizedKVCacheBuffers`.
-            allocate_buffers: If `True`, we allocate buffers here. Otherwise,
-                they are allocated at first use
             device: Device for buffer allocations, needed if
                 `allocate_buffers=True`
             pin_memory: If given, must have the same length as `layer_numbers`.
                 Checkpoints for layers with `True` entries are pinned in CPU
                 memory. Default: No checkpoints are pinned.
+            delay_allocation: If `True`, checkpoint buffers (i.e., quantizer
+                states) are allocated at first use only.
             state_allocator: See :class:`KVCacheBufferQuantizedCheckpoints`.
         """
 
@@ -970,17 +970,20 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             dequant_kwargs = dict(max_num_ranges=cache_kwargs.get("max_num_ranges"))
         else:
             dequant_kwargs = None
+        # Note: `allocate_buffers=False` means that `quant_buffers` space is
+        # allocated at first use, when the device is correct. Early allocation
+        # risks using the wrong device, and has no advantage.
         quant_buffers = create_quantized_kv_buffers(
             qname=qname,
             cache_lengths=[max_cell_length],
             cache_params=cache_params,
             cache_kwargs=cache_kwargs,
             dequant_kwargs=dequant_kwargs,
-            allocate_buffers=allocate_buffers,
+            allocate_buffers=False,
             device=device,
         )[0]
         # Internally, we use :class:`KVCacheBufferQuantizedCheckpoints` objects
-        if allocate_buffers:
+        if not delay_allocation:
             print(
                 f"LayerInputQuantizedCheckpoints: Create _checkpoints_int ({len(cell_ranges)} entries)"
             )
@@ -990,11 +993,12 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
                 quant_buffers=quant_buffers,
                 cache_length=end - start,
                 pin_memory=pin_memory,
-                delay_allocation=not allocate_buffers,
+                delay_allocation=delay_allocation,
                 state_allocator=state_allocator,
             )
             for start, end in wrap_tqdm_conditional(
-                cell_ranges, do_wrap=allocate_buffers
+                cell_ranges,
+                do_wrap=not delay_allocation,
             )
         ]
         self.n_embd = model.config.n_embd
@@ -1074,7 +1078,7 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
         n_embd: int,
         dtype: Optional[torch.dtype],
         pin_memory: Optional[List[bool]] = None,
-        allocate_buffers: bool = False,
+        delay_allocation: bool = False,
     ):
         """
         Args:
@@ -1087,8 +1091,8 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
             pin_memory: If given, must have the same length as `layer_numbers`.
                 Checkpoints for layers with `True` entries are pinned in CPU
                 memory. Default: No checkpoints are pinned.
-            allocate_buffers: If `True`, we allocate buffers here. Otherwise,
-                they are allocated at first use
+            delay_allocation: If `True`, checkpoint buffers are allocated at
+                first use only.
         """
 
         super().__init__(layer_numbers, cell_ranges)
@@ -1103,7 +1107,7 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
             dtype=dtype,
             device=torch.device("cpu"),
         )
-        if allocate_buffers:
+        if not delay_allocation:
             print(
                 f"LayerInputDefaultCheckpoints: Create _checkpoints_int ({len(cell_ranges)} entries)"
             )
@@ -1113,10 +1117,11 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
                 params=self._buffer_params,
                 cache_length=end - start,
                 pin_memory=pin_memory,
-                delay_allocation=not allocate_buffers,
+                delay_allocation=delay_allocation,
             )
             for start, end in wrap_tqdm_conditional(
-                cell_ranges, do_wrap=allocate_buffers
+                cell_ranges,
+                do_wrap=not delay_allocation,
             )
         ]
         self.n_embd = n_embd
