@@ -13,7 +13,7 @@
 # limitations under the License.
 import csv
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from pprint import pprint
 from typing import Dict, Optional, Union, Any, List, Tuple
@@ -60,6 +60,7 @@ from keys_values.finetune.longcontext_full import (
     wrap_gpt_model,
     get_mha_and_cache_kwargs,
     create_gpt_model,
+    default_head_model,
 )
 from keys_values.finetune.utils import (
     check_kv_cache,
@@ -99,7 +100,7 @@ class ConfigLoRA_OLD(ConfigLoRA):
 @dataclass(frozen=True)
 class ModelConfiguration:
     config: Union[ConfigFull, ConfigLoRA]
-    head_model_name: str
+    head_model_name: Optional[str]
     head_model_kwargs: Dict[str, Any]
 
 
@@ -487,6 +488,13 @@ def main(
                 raise ValueError(f"Data class path {_data_class_path} is not supported")
             data_class_path = _data_class_path
             data_init_args = _data_init_args
+        # At this point, `data` is determined, so the default head model name
+        # can be set
+        if model_config.head_model_name is None:
+            model_config = replace(
+                model_config,
+                head_model_name=default_head_model(data),
+            )
 
         # Enable/disable fused operators
         set_fused_rope_enabled(sdpa.fused_rope)
@@ -933,7 +941,9 @@ def load_configuration(
                 **kwargs,
             )
     # Head model
-    head_model_name = hyp_pars["head_model"]
+    # Note: `head_model_name` can be `None`, in which case the default head
+    # model is used. This can be set only once the dataset type is known.
+    head_model_name = hyp_pars.get("head_model")
     head_model_kwargs = hyp_pars.get("head_model_kwargs", dict())
     return (
         ModelConfiguration(

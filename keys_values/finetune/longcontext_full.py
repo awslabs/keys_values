@@ -367,6 +367,14 @@ def setup(
     )
 
 
+# TODO: Move this functionality into :class:`DataModule`, do not hardcode it here!
+def default_head_model(data: DataModule) -> str:
+    if isinstance(data, LongBenchV2):
+        return SequenceClassificationOnLogits.NAME
+    else:
+        return CrossEntropyOnLogits.NAME
+
+
 def setup_internal(
     do_cpu_offload: bool,
     original_setup: Callable,
@@ -415,22 +423,19 @@ def setup_internal(
             dataset_key="trec_coarse",
             max_length="128k",
         )
-    # TODO: Let `data` decide on default head model, not hardcoded here!
-    default_head_model = CrossEntropyOnLogits.NAME
-    if isinstance(data, LongBenchV2):
-        if data.metadata_dir is None:
+    if data.metadata_dir is None:
+        if isinstance(data, LongBenchV2):
             data.metadata_dir = str(out_dir / "data")
             print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
-        default_head_model = SequenceClassificationOnLogits.NAME
-    if isinstance(data, Helmet) and data.metadata_dir is None:
-        data.metadata_dir = str(out_dir / "data")
-        print(f"Setting Helmet.metadata_dir to {data.metadata_dir}")
+        elif isinstance(data, Helmet) and data.metadata_dir is None:
+            data.metadata_dir = str(out_dir / "data")
+            print(f"Setting Helmet.metadata_dir to {data.metadata_dir}")
     if not isinstance(data, Helmet) and eval.use_sample_metric:
         raise ValueError(
             "use_sample_metric=True currently supported only for Helmet datasets"
         )
     if head_model is None:
-        head_model = default_head_model
+        head_model = default_head_model(data)
     elif head_model not in SUPPORTED_HEAD_MODELS:
         raise ValueError(
             f"head_model={head_model} is not supported (choose from {SUPPORTED_HEAD_MODELS})"
