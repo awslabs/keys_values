@@ -123,6 +123,21 @@ done
 
 Here, <data> denotes the dataset.
 
+## Step 7 Symlinks to Tokenizer Files
+
+The merged checkpoints typically do not contain the tokenizer files. This would
+be redundant, since these files are always the same. Make sure to create a symlink
+so that `./checkpoints/Qwen/Qwen3-4B-Instruct-2507/` contains `tokenizer.json`,
+`tokenizer_config.json`. Then:
+
+for d in nq_64k pop_qa_64k trivia_qa_64k hotpot_qa_64k
+do
+  cd ${CHECKPOINT_DIR}/$d/merged
+  ln -s ../../../checkpoints/Qwen/Qwen3-4B-Instruct-2507/tokenizer.json tokenizer.json
+  ln -s ../../../checkpoints/Qwen/Qwen3-4B-Instruct-2507/tokenizer_config.json tokenizer_config.json
+  cd ../../../
+done
+
 ## Common Issues
 
 If the merged model gives poor answers, the most likely reason is that the adapter was merged into the wrong base model. Use the exact base model used during LoRA training.
@@ -134,3 +149,45 @@ If LitGPT conversion fails, upgrade LitGPT and check that the merged Hugging Fac
 This workflow creates a full merged model. It does not preserve the LoRA adapter as a separate LitGPT adapter.
 
 This is the most reliable path for inference, evaluation, and deployment in LitGPT.
+
+## All In One Go
+
+```bash
+export CHECKPOINT_DIR="baseline_new_128k"; \
+for d in banking77_128k hotpot_qa_128k infinite_bench_qa_128k nlu_128k pop_qa_128k trec_fine_128k clinc150_128k infinite_bench_mc_128k json_kv_128k nq_128k trec_coarse_128k trivia_qa_128k
+do
+  echo "*** $d ***"
+  python merge_qwen3_lora.py \
+    --base-model Qwen/Qwen3-4B-Instruct-2507 \
+    --adapter-dir ${CHECKPOINT_DIR}/$d/lora_adapter \
+    --output-dir ${CHECKPOINT_DIR}/$d/merged
+  litgpt convert_to_litgpt ${CHECKPOINT_DIR}/$d/merged --model_name Qwen3-4B
+  cp baseline_3epochs_128k/$d/merged/model_config.yaml ${CHECKPOINT_DIR}/$d/merged/.
+  cp baseline_3epochs_128k/$d/merged/generation_config.json ${CHECKPOINT_DIR}/$d/merged/.
+  cp baseline_3epochs_128k/$d/merged/hyperparameters.yaml ${CHECKPOINT_DIR}/$d/merged/.
+  cd ${CHECKPOINT_DIR}/$d/merged
+  ln -s ../../../checkpoints/Qwen/Qwen3-4B-Instruct-2507/tokenizer.json tokenizer.json
+  ln -s ../../../checkpoints/Qwen/Qwen3-4B-Instruct-2507/tokenizer_config.json tokenizer_config.json
+  cd ../../../  
+done
+```
+
+```bash
+export CHECKPOINT_DIR="baseline_new_64k"; \
+for d in hotpot_qa_64k pop_qa_64k nq_64k trivia_qa_64k
+do
+  echo "*** $d ***"
+  python merge_qwen3_lora.py \
+    --base-model Qwen/Qwen3-4B-Instruct-2507 \
+    --adapter-dir ${CHECKPOINT_DIR}/$d/lora_adapter \
+    --output-dir ${CHECKPOINT_DIR}/$d/merged
+  litgpt convert_to_litgpt ${CHECKPOINT_DIR}/$d/merged --model_name Qwen3-4B
+  cp baseline_3epochs_64k/$d/merged/model_config.yaml ${CHECKPOINT_DIR}/$d/merged/.
+  cp baseline_3epochs_64k/$d/merged/generation_config.json ${CHECKPOINT_DIR}/$d/merged/.
+  cp baseline_3epochs_64k/$d/merged/hyperparameters.yaml ${CHECKPOINT_DIR}/$d/merged/.
+  cd ${CHECKPOINT_DIR}/$d/merged
+  ln -s ../../../checkpoints/Qwen/Qwen3-4B-Instruct-2507/tokenizer.json tokenizer.json
+  ln -s ../../../checkpoints/Qwen/Qwen3-4B-Instruct-2507/tokenizer_config.json tokenizer_config.json
+  cd ../../../  
+done
+```
