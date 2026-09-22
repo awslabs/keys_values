@@ -153,10 +153,11 @@ class PackArgumentAsAnnotation:
 class ParkedBufferState:
     """
     Buffer state reconstructed ahead of its unpack request (chain walk, see
-    :meth:`CellComputationAutogradHooks._unpack_from_annotation`). Parked on
-    CPU: parking happens during backward, when device memory is tightest,
-    and a full-size device clone per walked chunk can push a large
-    configuration into OOM.
+    :meth:`CellComputationAutogradHooks._unpack_from_annotation`). The copy
+    `x_cpu` always lives on CPU: parking happens during backward, when device
+    memory is tightest, and a full-size device clone per walked chunk can
+    push a large configuration into OOM. `device` is where the buffer is
+    restored to; if it is the CPU device, restoring is a no-op (no copy).
     """
 
     x_cpu: torch.Tensor
@@ -623,12 +624,8 @@ class CellComputationAutogradHooks(AutogradHooks):
         # below): by pack-argument ID, and by (layer, is_keys, chunk) for
         # outstanding "ext-*" annotations. Kept apart from `_id_to_unpacked`,
         # which holds already-served values for IDs matched twice.
-        self._parked_states: Dict[int, Union[torch.Tensor, ParkedBufferState]] = (
-            dict()
-        )
-        self._ext_states: Dict[
-            Tuple[int, bool, int], Union[torch.Tensor, ParkedBufferState]
-        ] = dict()
+        self._parked_states: Dict[int, ParkedBufferState] = dict()
+        self._ext_states: Dict[Tuple[int, bool, int], ParkedBufferState] = dict()
         # Memory accounting for parked states: key -> bytes retained.
         # Peaks are reported in :meth:`annotation_usage_log`
         self._parked_bytes_for_key: Dict[Tuple, int] = dict()
@@ -986,10 +983,19 @@ class CellComputationAutogradHooks(AutogradHooks):
                     idd, prior_annotation = found
                     if self.debug_print_annotations:
                         print(f"--> Doing {str(prior_annotation)} first")
-                    # The entry is applied early, so it is removed here. We
-                    # park the state it reconstructs (below), unless nothing
-                    # in the autograd graph can ask for this ID: orphan IDs
-                    # are inserted by
+                    # The entry is applied early here, so it must be removed
+                    # from `_packed_arg_for_id`. Normally, the entry would be
+                    # removed by :meth:`unpack_hook` when autograd asks for
+                    # `idd`. But since we consume it now, that request will
+                    # instead be served from `_parked_states` (see below);
+                    # the `unpack_hook` code path that pops
+                    # `_packed_arg_for_id` is never reached for this ID.
+                    # Leaving the entry in place would retain the annotation
+                    # (and its delta tensors) until `clear()`, and
+                    # `_find_chain_annotation` could find the already-applied
+                    # annotation again. We park the state it reconstructs
+                    # (below), unless nothing in the autograd graph can ask
+                    # for this ID: orphan IDs are inserted by
                     # :meth:`_flush_remaining_pack_arguments` purely to keep
                     # the chain complete, and parking those would retain
                     # full-size buffers that are never fetched.
@@ -1027,17 +1033,26 @@ class CellComputationAutogradHooks(AutogradHooks):
                     if park_id is not None:
                         # (2) `annot` was applied earlier than autograd asks
                         #     for its own ID. Park a copy so :meth:`unpack_hook`
-                        #     can serve that ID later.
+                        #     can serve that ID later. `_id_counts` is not
+                        #     touched: it counts how often autograd asks for
+                        #     an ID (entries only for IDs matched >= 2x), and
+                        #     parking does not change that number, only where
+                        #     the request is served from. :meth:`unpack_hook`
+                        #     treats a missing entry as one remaining request.
                         self._parked_states[park_id] = self._park_buffer(
                             buffer, park_dtype, ("id", park_id)
                         )
-                        if park_id not in self._id_counts:
-                            self._id_counts[park_id] = 1
                         if self._debug_test_args:
                             self._debug_log_args.append((buffer.clone(), annot))
                     # (3) If an "ext-*" annotation for this very chunk is still
                     #     outstanding, autograd may ask for it after the buffer
-                    #     has moved on. Park a copy for it now.
+                    #     has moved on. Park a copy for it now. If (2) applied
+                    #     as well, the same buffer state is parked twice, under
+                    #     ("id", park_id) and under ("ext", ...). This is
+                    #     intended: the two copies serve different requests
+                    #     (the scatter/cat ID, and the ext annotation), possibly
+                    #     with different dtypes, and each is released
+                    #     independently when its request is served.
                     self._park_for_outstanding_ext(
                         layer_idx, annot.is_keys, annot.chunk_idx, buffer
                     )
@@ -1058,30 +1073,38 @@ class CellComputationAutogradHooks(AutogradHooks):
 
     # --- Parked buffer states -----------------------------------------------
     #
-    # A parked state is a copy of a reconstructed cache buffer that autograd
-    # has not asked for yet, kept because a request for it is provably still
-    # outstanding. Two kinds:
+    # Parking is the exception, not the rule. It only happens when autograd
+    # asks for nodes out of order: a request for a node further down the
+    # chain forces annotations for earlier chunks to be applied before
+    # autograd asks for their own IDs (chain walk in
+    # :meth:`_unpack_from_annotation`). A parked state is a copy of such an
+    # early-reconstructed cache buffer, kept because a request for it is
+    # provably still outstanding. In an in-order backward pass, nothing is
+    # ever parked. Two kinds:
     #   ("id", idd)                      -- the scatter/cat annotation with
     #                                       pack-argument ID `idd` was applied
     #                                       early (chain walk);
     #   ("ext", layer, is_keys, chunk)   -- an "ext-*" annotation for this
     #                                       chunk is still in
     #                                       `_packed_arg_for_id`.
-    # Copies live on CPU for device buffers. Every copy is released on fetch.
+    # Copies always live on CPU (`ParkedBufferState.x_cpu`); restoring to a
+    # CPU device is a no-op. Every copy is released on fetch.
 
     def _park_buffer(
         self,
         buffer: torch.Tensor,
         target_dtype: Optional[torch.dtype],
         key: Tuple,
-    ) -> Union[torch.Tensor, ParkedBufferState]:
+    ) -> ParkedBufferState:
         dtype = target_dtype if target_dtype is not None else buffer.dtype
         if buffer.device.type == "cpu":
-            parked = buffer.detach().clone().to(dtype=dtype)
-            tensor = parked
+            # `.to` would not copy for same device and dtype; the parked
+            # state must not alias `buffer`, which is modified in place
+            # further down the chain
+            tensor = buffer.detach().clone().to(dtype=dtype)
         else:
             tensor = buffer.detach().to(device="cpu", dtype=dtype)
-            parked = ParkedBufferState(x_cpu=tensor, device=buffer.device)
+        parked = ParkedBufferState(x_cpu=tensor, device=buffer.device)
         num_bytes = tensor.numel() * tensor.element_size()
         self._parked_bytes_for_key[key] = num_bytes
         self._parked_bytes += num_bytes
@@ -1092,12 +1115,9 @@ class CellComputationAutogradHooks(AutogradHooks):
         return parked
 
     @staticmethod
-    def _restore_parked(
-        parked: Union[torch.Tensor, ParkedBufferState],
-    ) -> torch.Tensor:
-        if isinstance(parked, ParkedBufferState):
-            return parked.x_cpu.to(device=parked.device)
-        return parked
+    def _restore_parked(parked: ParkedBufferState) -> torch.Tensor:
+        # No copy if `parked.device` is the CPU device
+        return parked.x_cpu.to(device=parked.device)
 
     def _release_parked_bytes(self, key: Tuple):
         self._parked_bytes -= self._parked_bytes_for_key.pop(key, 0)
