@@ -76,7 +76,7 @@ def main(
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
-    eval_dir = "eval"
+    eval_dir = "eval_128"
     print_tar = False
     # dataset_size = "64k"
     dataset_size = "128k"
