@@ -331,10 +331,6 @@ class GradientAccumulator:
         num_required = self._get_num_required()
         if self.qname == "default":
             num_entries = sum(num_required.values())
-            if not self._delay_allocation:
-                print(
-                    f"GradientAccumulator: Allocate _checkpoints_per_length ({num_entries} entries)"
-                )
             self._checkpoints_per_length = {
                 cache_length: [
                     KVCacheBufferDefaultCheckpoints(
@@ -372,10 +368,6 @@ class GradientAccumulator:
                 allocate_buffers=False,
             )[0]
             num_entries = sum(num_required.values())
-            if not self._delay_allocation:
-                print(
-                    f"GradientAccumulator: Allocate _checkpoints_per_length ({num_entries} entries)"
-                )
             self._checkpoints_per_length = {
                 cache_length: [
                     KVCacheBufferQuantizedCheckpoints(

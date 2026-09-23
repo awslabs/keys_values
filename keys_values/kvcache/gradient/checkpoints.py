@@ -983,10 +983,6 @@ class LayerInputQuantizedCheckpoints(LayerInputCheckpoints):
             device=device,
         )[0]
         # Internally, we use :class:`KVCacheBufferQuantizedCheckpoints` objects
-        if not delay_allocation:
-            print(
-                f"LayerInputQuantizedCheckpoints: Create _checkpoints_int ({len(cell_ranges)} entries)"
-            )
         self._checkpoints_int = [
             KVCacheBufferQuantizedCheckpoints(
                 chunk_numbers=layer_numbers,
@@ -1107,10 +1103,6 @@ class LayerInputDefaultCheckpoints(LayerInputCheckpoints):
             dtype=dtype,
             device=torch.device("cpu"),
         )
-        if not delay_allocation:
-            print(
-                f"LayerInputDefaultCheckpoints: Create _checkpoints_int ({len(cell_ranges)} entries)"
-            )
         self._checkpoints_int = [
             KVCacheBufferDefaultCheckpoints(
                 chunk_numbers=layer_numbers,
