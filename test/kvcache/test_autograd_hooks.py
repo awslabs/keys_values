@@ -295,11 +295,13 @@ def test_unpack_walks_multi_chunk_annotation_chain(device, num_states):
     torch.testing.assert_close(x1, states[1])
     assert hooks.node_annotations.get_final(layer_idx, kind)[1] == 1
 
-    # The intermediate annotations were applied early and consumed. They were
-    # inserted by the flush purely to keep the chain complete (no autograd
-    # node refers to them), so their states are not retained
-    for c in range(2, num_states):
-        assert ids[c] not in hooks._packed_arg_for_id
+    # The intermediate annotations were applied early. They were inserted by
+    # the flush purely to keep the chain complete (no autograd node refers
+    # to them), so no claim was recorded and no full-size state was parked
+    # for them. Their entries only hold the small per-chunk deltas until the
+    # cell is cleared.
+    assert not hooks._early_applied
+    assert hooks._parked_bytes == 0
     assert not hooks._id_to_unpacked
 
 
@@ -416,9 +418,12 @@ def test_unpack_out_of_order_request_after_walking_past(device):
     # after the buffer has been walked past it. The chunk-1 annotation is
     # flushed as usual.
     matched_id = 4242
-    hooks._packed_arg_for_id[matched_id] = PackArgumentAsAnnotation(
-        annot=annotations[2],
-        target_dtype=None,
+    hooks._add_packed_annotation(
+        matched_id,
+        PackArgumentAsAnnotation(
+            annot=annotations[2],
+            target_dtype=None,
+        ),
     )
     hooks.node_annotations.nodes.remove(annotations[2])
     hooks._match_annotations(flush_pack_args=True)
@@ -547,8 +552,8 @@ def test_parked_memory_is_bounded_and_released(device):
     # Case 1: the whole chain is flush-inserted (orphan) except the one being
     # requested. Walking 5 links must park nothing at all.
     matched_id = 9001
-    hooks._packed_arg_for_id[matched_id] = PackArgumentAsAnnotation(
-        annot=annotations[1], target_dtype=None
+    hooks._add_packed_annotation(
+        matched_id, PackArgumentAsAnnotation(annot=annotations[1], target_dtype=None)
     )
     hooks.node_annotations.nodes.remove(annotations[1])
     hooks._match_annotations(flush_pack_args=True)
@@ -574,8 +579,8 @@ def test_parked_memory_is_bounded_and_released(device):
     ids = {}
     for chunk_idx, annot in annotations.items():
         ids[chunk_idx] = 9100 + chunk_idx
-        hooks._packed_arg_for_id[ids[chunk_idx]] = PackArgumentAsAnnotation(
-            annot=annot, target_dtype=None
+        hooks._add_packed_annotation(
+            ids[chunk_idx], PackArgumentAsAnnotation(annot=annot, target_dtype=None)
         )
     hooks.node_annotations.set_final(
         x=states[num_states],
@@ -716,8 +721,8 @@ def test_late_ext_request_served_from_parked_state(device):
     # no reorder info, shape has n_head in dim 1)
     ids = {1: 9101, 2: 9102}
     for c, idd in ids.items():
-        hooks._packed_arg_for_id[idd] = PackArgumentAsAnnotation(
-            annot=scatter_annots[c], target_dtype=None
+        hooks._add_packed_annotation(
+            idd, PackArgumentAsAnnotation(annot=scatter_annots[c], target_dtype=None)
         )
     ext_shape = (batch_size, n_head, cache_length, head_size)
     ext_annot = NodeAnnotation(
@@ -729,8 +734,8 @@ def test_late_ext_request_served_from_parked_state(device):
         delta=None,
     )
     ext_id = 9200
-    hooks._packed_arg_for_id[ext_id] = PackArgumentAsAnnotation(
-        annot=ext_annot, target_dtype=None
+    hooks._add_packed_annotation(
+        ext_id, PackArgumentAsAnnotation(annot=ext_annot, target_dtype=None)
     )
     hooks._match_annotations(flush_pack_args=True)
 
@@ -748,3 +753,158 @@ def test_late_ext_request_served_from_parked_state(device):
     # The parked copy was released on fetch
     assert not hooks._ext_states
     assert hooks._parked_bytes == 0
+
+
+@pytest.mark.parametrize("device", available_backends())
+def test_in_order_ext_first_ordering_parks_nothing(device):
+    """
+    Performance regression test for issue #152.
+
+    The common ordering in long fine-tuning runs is "ext one step early":
+    for each chunk c (descending), autograd asks for `ext-*` at chunk c
+    while the buffer is one step ahead (final = c + 1), then for the
+    "scatter-*" annotation of chunk c. The pre-#149 code served this with
+    zero copies (apply the scatter early, serve its own request later from
+    the live buffer). The first #149 fix instead parked a CPU copy of every
+    early-applied state, which meant a blocking GPU-CPU round trip per
+    chunk per layer per kind, and GPU utilization dropped to 20-40% on
+    multi-hundred-chunk workloads (issue #152).
+
+    This test replays that ordering and asserts that NOTHING is ever
+    parked: all claims are served from the live buffer, so the lazy scheme
+    is copy-free on the fast path.
+    """
+    torch.random.manual_seed(1618033)
+    dtype = torch.float32
+    batch_size = 2
+    n_head = 4
+    n_query_groups = 2
+    head_size = 8
+    cache_length = 32
+    chunk_size = 8
+    num_states = 4
+    layer_idx = 0
+    kind = "scatter-value"
+
+    config = Config(
+        n_layer=1,
+        n_head=n_head,
+        n_query_groups=n_query_groups,
+        n_embd=n_head * head_size,
+        block_size=cache_length + num_states * chunk_size,
+        vocab_size=48,
+        rotary_percentage=1,
+    )
+    params = KVCacheParams(
+        max_batch_size=batch_size,
+        n_query_groups=n_query_groups,
+        cache_length=cache_length,
+        head_size=head_size,
+        n_head=n_head,
+        dtype=dtype,
+    )
+    hooks = CellComputationAutogradHooks(config=config, batch_size=batch_size)
+    token_kwargs = dict(dtype=torch.int64, device=device)
+    replay_log = DefaultKVCacheReplayLog(
+        token_chunks=[torch.zeros(batch_size, cache_length, **token_kwargs)]
+        + [
+            torch.zeros(batch_size, chunk_size, **token_kwargs)
+            for _ in range(num_states)
+        ],
+        cache_length=cache_length,
+        max_prefill_length=cache_length,
+        grace_period=0,
+    )
+    hooks.initialize_cell(
+        eff_num_layers=1,
+        num_chunks=num_states + 1,
+        first_layer_idx=layer_idx,
+        first_chunk_idx=0,
+        cache_lengths=[cache_length],
+        replay_logs=[replay_log],
+    )
+
+    buffer_kwargs = dict(dtype=dtype, device=device)
+    states = {
+        1: torch.randn(
+            batch_size, n_query_groups, cache_length, head_size, **buffer_kwargs
+        )
+    }
+    scatter_annots = {}
+    for c in range(2, num_states + 1):
+        prev = states[c - 1]
+        index = expand_index(
+            random_index(params, 0, cache_length, num=chunk_size, device=device),
+            head_size,
+        )
+        scatter_annots[c - 1] = NodeAnnotation(
+            kind=kind,
+            layer_idx=layer_idx,
+            chunk_idx=c - 1,
+            shape=tuple(prev.shape),
+            index=index,
+            delta=prev.gather(2, index),
+        )
+        states[c] = prev.scatter(
+            2,
+            index,
+            torch.randn(
+                batch_size, n_query_groups, chunk_size, head_size, **buffer_kwargs
+            ),
+        )
+    hooks.node_annotations.set_final(
+        x=states[num_states],
+        layer_idx=layer_idx,
+        chunk_idx=num_states,
+        kind=kind,
+    )
+
+    # Register scatter annotations for chunks 1..num_states-1 and ext-value
+    # annotations for the same chunks
+    ext_shape = (batch_size, n_head, cache_length, head_size)
+    scatter_ids = {}
+    ext_ids = {}
+    next_id = 9300
+    for c in range(1, num_states):
+        scatter_ids[c] = next_id
+        hooks._add_packed_annotation(
+            next_id,
+            PackArgumentAsAnnotation(annot=scatter_annots[c], target_dtype=None),
+        )
+        next_id += 1
+        ext_ids[c] = next_id
+        hooks._add_packed_annotation(
+            next_id,
+            PackArgumentAsAnnotation(
+                annot=NodeAnnotation(
+                    kind="ext-value",
+                    layer_idx=layer_idx,
+                    chunk_idx=c,
+                    shape=ext_shape,
+                    index=None,
+                    delta=None,
+                ),
+                target_dtype=None,
+            ),
+        )
+        next_id += 1
+    hooks._match_annotations(flush_pack_args=True)
+
+    from keys_values.utils import repeat_interleave
+
+    # The common in-order sequence: per chunk c (descending), ext(c) arrives
+    # one step early, then scatter(c) itself
+    for c in range(num_states - 1, 0, -1):
+        x_ext = hooks.unpack_hook(ext_ids[c])
+        torch.testing.assert_close(x_ext, repeat_interleave(states[c], n_head))
+        x_scatter = hooks.unpack_hook(scatter_ids[c])
+        torch.testing.assert_close(x_scatter, states[c])
+        # The fast path must never copy: nothing parked, ever
+        assert hooks._parked_bytes == 0
+        assert not hooks._parked_states
+        assert not hooks._ext_states
+
+    log = hooks.annotation_usage_log()
+    assert log.parked_peak_count == 0
+    assert log.parked_peak_bytes == 0
+    assert not hooks._early_applied
