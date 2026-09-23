@@ -38,7 +38,10 @@ from litgpt.utils import (
 )
 
 from keys_values.config import Config
-from keys_values.data.constants import LIT_MODEL_FNAME
+from keys_values.data.constants import (
+    LIT_MODEL_FNAME,
+)
+from keys_values.constants import DEFAULT_IGNORE_INDEX
 from keys_values.kvcache.factory import (
     deallocate_kv_cache_buffers_of_model,
     KVCacheFactory,
@@ -222,7 +225,7 @@ def batched_generate_fn(
     prompts: torch.Tensor,
     max_returned_tokens: int,
     *,
-    ignore_index: int = -100,
+    ignore_index: int = DEFAULT_IGNORE_INDEX,
     sample_args: Union[list[dict], dict],
     stop_tokens: Tuple[List[int], ...] = (),
     deallocate_cache_buffers: bool = True,

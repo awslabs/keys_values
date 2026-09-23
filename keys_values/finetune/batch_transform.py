@@ -15,7 +15,11 @@ from typing import Dict, Any
 
 import torch
 
-from keys_values.data import INPUT_IDS_NAME, LABELS_NAME
+from keys_values.data.constants import (
+    INPUT_IDS_NAME,
+    LABELS_NAME,
+)
+from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import SUPPORTED_HEAD_MODELS
 
@@ -87,8 +91,8 @@ class SFTBatchTransform(BatchTransform):
     def __init__(
         self,
         eos_id: int,
-        ignore_index: int = -100,
-        pad_id: int = 0,
+        ignore_index: int = DEFAULT_IGNORE_INDEX,
+        pad_id: int = DEFAULT_PAD_ID,
     ):
         assert eos_id is not None
         self._eos_id = eos_id
@@ -193,7 +197,7 @@ class SequenceClassificationBatchTransform(BatchTransform):
     def __init__(
         self,
         eos_id: int,
-        pad_id: int = 0,
+        pad_id: int = DEFAULT_PAD_ID,
     ):
         assert eos_id is not None
         self._eos_id = eos_id
@@ -260,8 +264,8 @@ class BatchTransformFactory:
     def from_head_model(
         head_model: str,
         eos_id: int,
-        pad_id: int = 0,
-        ignore_index: int = -100,
+        pad_id: int = DEFAULT_PAD_ID,
+        ignore_index: int = DEFAULT_IGNORE_INDEX,
     ) -> BatchTransform:
         if head_model not in SUPPORTED_HEAD_MODELS:
             raise ValueError(

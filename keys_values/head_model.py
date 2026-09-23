@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from keys_values.config import Config
+from keys_values.constants import DEFAULT_IGNORE_INDEX
 
 from keys_values.utils import copy_parameters
 
@@ -169,7 +170,7 @@ class CrossEntropyOnLogits(HeadModel):
     def __init__(
         self,
         config: Config,
-        ignore_index: int = -100,
+        ignore_index: int = DEFAULT_IGNORE_INDEX,
     ):
         super().__init__()
         self._vocab_size = config.padded_vocab_size

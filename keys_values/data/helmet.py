@@ -29,6 +29,7 @@ from keys_values.data.constants import (
     METADATA_TRAIN_VAL_SPLIT_KEY,
     Collator,
 )
+from keys_values.constants import DEFAULT_IGNORE_INDEX
 from keys_values.data.load_helmet_dev_eval import (
     load_helmet_dev_eval,
     DATASET_PARENT_DIR,
@@ -157,7 +158,7 @@ class Helmet(SequenceLengthFilteredDataModule):
         dataset_parent_dir: str = DATASET_PARENT_DIR,
         mask_prompt: bool = True,
         val_split_fraction: float = 0.1,
-        ignore_index: int = -100,
+        ignore_index: int = DEFAULT_IGNORE_INDEX,
         max_seq_length: Optional[int] = None,
         seed: int = 42,
         metadata_dir: Optional[str] = None,
