@@ -250,13 +250,17 @@ def load_helmet_dev_eval(
         if tokenizer is None:
             raise ValueError("tokenizer must be provided")
         dev_data, eval_data = load_long_doc_qa(
-            dataset_key, max_length, tokenizer,
+            dataset_key,
+            max_length,
+            tokenizer,
         )
     elif dataset_key in ["infinite_bench_sum", "multi_lex_sum"]:
         if tokenizer is None:
             raise ValueError("tokenizer must be provided")
         dev_data, eval_data = load_summarization(
-            dataset_key, max_length, tokenizer,
+            dataset_key,
+            max_length,
+            tokenizer,
         )
     elif dataset_key in ["json_kv", "ruler_mk_needle", "ruler_mk_uuid", "ruler_mv"]:
         dev_data, eval_data = load_synthetic(
@@ -479,8 +483,12 @@ def load_rag(
     instance_data = load_dataset("json", data_files=instance_path)["train"]
     demon_data = load_dataset("json", data_files=demo_path)["train"]
 
+    # Seeded RNG: the dev/eval question split must be identical across
+    # machines, otherwise results computed against different split caches
+    # are not comparable (the split is drawn once and cached to disk).
+    split_rng = random.Random(42)
     if dataset_key in ["nq", "trivia_qa", "hotpot_qa"]:
-        eval_questions = random.sample(
+        eval_questions = split_rng.sample(
             sorted(set(instance_data["question"])), eval_questions_num
         )
         eval_data = instance_data.filter(lambda x: x["question"] in eval_questions)
@@ -490,7 +498,7 @@ def load_rag(
         popularity_filtered = instance_data.filter(
             lambda x: math.log10(x["s_pop"]) < popularity_threshold
         )
-        eval_questions = random.sample(
+        eval_questions = split_rng.sample(
             sorted(set(popularity_filtered["id"])), eval_questions_num
         )
         eval_data = popularity_filtered.filter(lambda x: x["id"] in eval_questions)
@@ -622,6 +630,16 @@ def load_cited_generation(
                 for idx, d in enumerate(instance["docs"][:num_docs])
             ]
         )
+        # Deterministic per-instance demo choice (mirrors the hash-seeded
+        # demo shuffle in the RAG loader): unseeded sampling here made the
+        # constructed prompts differ between machines / cache rebuilds.
+        h = (
+            int(
+                hashlib.sha256(str(instance["question"]).encode("utf-8")).hexdigest(),
+                16,
+            )
+            % 2**31
+        )
         demos = "\n\n\n".join(
             [
                 demo_template.format(
@@ -633,7 +651,7 @@ def load_cited_generation(
                         ]
                     ),
                 )
-                for demo in random.sample(demo_data["demos"], shots)
+                for demo in random.Random(h).sample(demo_data["demos"], shots)
             ]
         )
         return {
@@ -912,9 +930,7 @@ def _truncate_context_to_length(instance, tokenizer, length=131072, text_key="co
 
 
 def load_long_doc_qa(
-    dataset_key: Literal[
-        "narrative_qa", "infinite_bench_qa", "infinite_bench_mc"
-    ],
+    dataset_key: Literal["narrative_qa", "infinite_bench_qa", "infinite_bench_mc"],
     max_length: Literal["8k", "16k", "32k", "64k", "128k"],
     tokenizer: PreTrainedTokenizerFast,
 ):

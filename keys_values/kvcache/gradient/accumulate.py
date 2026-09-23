@@ -21,7 +21,6 @@ import torch
 
 from keys_values.config import Config
 
-from keys_values.attention.base import do_softcapping
 from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.base import (
@@ -51,6 +50,7 @@ from keys_values.kvcache.gradient.checkpoints import (
     KVCacheBufferCheckpoints,
     KVCacheBufferQuantizedCheckpoints,
     KVCacheBufferDefaultCheckpoints,
+    QuantizerStateForCheckpoint,
 )
 from keys_values.kvcache.gradient.inference_replay import inference_replay_cache_factory
 from keys_values.kvcache.stack_layers import CellBlocks
@@ -60,7 +60,7 @@ from keys_values.long_context import (
     HEAD_OR_INITIAL_TENSORS_MAX_BYTES,
 )
 from keys_values.model import GPT
-from keys_values.utils import VerbosityLevels
+from keys_values.utils import VerbosityLevels, wrap_tqdm_conditional
 
 
 def checkpoint_hook(
@@ -227,6 +227,8 @@ class GradientAccumulator:
         train_cache_kwargs: Optional[Dict[str, Any]] = None,
         pin_memory: bool = False,
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        delay_allocation: bool = False,
+        state_allocator: Optional[QuantizerStateForCheckpoint] = None,
     ):
         if qname is None:
             qname = "torch-quantized8"
@@ -267,6 +269,8 @@ class GradientAccumulator:
         self._train_cache_kwargs = train_cache_kwargs
         self._pin_memory = pin_memory
         self._debug_tensors = debug_tensors
+        self._delay_allocation = delay_allocation
+        self._state_allocator = state_allocator
 
     def annotation_usage_logs(self) -> Dict[int, AnnotationUsageLog]:
         return self._annotation_usage_logs
@@ -395,6 +399,11 @@ class GradientAccumulator:
         # How many checkpointers per cache length?
         num_required = self._get_num_required()
         if self.qname == "default":
+            num_entries = sum(num_required.values())
+            if not self._delay_allocation:
+                print(
+                    f"GradientAccumulator: Allocate _checkpoints_per_length ({num_entries} entries)"
+                )
             self._checkpoints_per_length = {
                 cache_length: [
                     KVCacheBufferDefaultCheckpoints(
@@ -403,8 +412,11 @@ class GradientAccumulator:
                         cache_length=cache_length,
                         batch_size=self._batch_size,
                         pin_memory=pin_memory,
+                        delay_allocation=self._delay_allocation,
                     )
-                    for _ in range(num)
+                    for _ in wrap_tqdm_conditional(
+                        range(num), do_wrap=not self._delay_allocation
+                    )
                 ]
                 for cache_length, num in num_required.items()
             }
@@ -417,13 +429,22 @@ class GradientAccumulator:
             max_cache_length = max(
                 clen for clens in self.cache_lengths for clen in clens
             )
+            # Note: `allocate_buffers=False` means that `quant_buffers` space is
+            # allocated at first use, when the device is correct. Early allocation
+            # risks using the wrong device, and has no advantage.
             quant_buffers = create_quantized_kv_buffers(
                 qname=self.qname,
                 cache_lengths=[max_cache_length],
                 cache_params=self._cache_params,
                 cache_kwargs=self.cache_kwargs,
                 dequant_kwargs=dequant_kwargs,
+                allocate_buffers=False,
             )[0]
+            num_entries = sum(num_required.values())
+            if not self._delay_allocation:
+                print(
+                    f"GradientAccumulator: Allocate _checkpoints_per_length ({num_entries} entries)"
+                )
             self._checkpoints_per_length = {
                 cache_length: [
                     KVCacheBufferQuantizedCheckpoints(
@@ -431,8 +452,13 @@ class GradientAccumulator:
                         quant_buffers=quant_buffers,
                         cache_length=cache_length,
                         pin_memory=pin_memory,
+                        delay_allocation=self._delay_allocation,
+                        state_allocator=self._state_allocator,
                     )
-                    for _ in range(num)
+                    for _ in wrap_tqdm_conditional(
+                        range(num),
+                        do_wrap=not self._delay_allocation,
+                    )
                 ]
                 for cache_length, num in num_required.items()
             }
@@ -636,9 +662,9 @@ class GradientAccumulator:
         temporarily replaced by specific replau caches, the setup is restored
         in the end.
 
-        Note that `get_inputs_slice` and `write_head_gradients_slice` can refer
-        to the same checkpoint object. We guarantee that any slice is read
-        before it is written to.
+        Note that `get_head_gradients_slice` and `write_head_gradients_slice`
+        can refer to the same checkpoint object. We guarantee that any slice is
+        read before it is written to.
 
         If `device_to_host_stream` and `host_to_device_stream` are provided,
         we try to run CPU -> GPU (`host_to_device_stream`) and GPU -> CPU
@@ -1138,9 +1164,9 @@ class GradientAccumulator:
         given by `input_ids`, targets by `targets`. These two are aligned on
         the right.
 
-        Note that `get_inputs_slice` and `write_outputs_slice` can refer to the
-        same underlying buffer or checkpoint object. We guarantee that any slice
-        is read before it is written to.
+        Note that `get_inputs_slice` and `write_head_gradients_slice` can refer
+        to the same underlying buffer or checkpoint object. We guarantee that
+        any slice is read before it is written to.
 
         Note: `gpt_model` passed here only needs to contain the blocks
         `gpt_model.transformer.ln_f` and `gpt_model.lm_head` related to the
@@ -1188,13 +1214,6 @@ class GradientAccumulator:
             raise ValueError(
                 f"targets.shape[1] = {num_output_tokens} must in [1, seq_length = {self.seq_length}]"
             )
-        if head_model.needs_logits():
-            clamp_head = partial(
-                do_softcapping, thresh=self.config.final_logit_softcapping
-            )
-        else:
-            clamp_head = None
-        # Head model must be on the same device as the final outputs
         if self._verbose_more:
             print("\nGradient accumulation for head model")
         # Normalization (per batch dimension):
@@ -1213,15 +1232,14 @@ class GradientAccumulator:
         loss_full = 0
         for start, end in self.top_bottom_ranges:
             x = copy_requires_grad(get_inputs_slice(start, end))
-            model_outputs = gpt_model.transformer.ln_f(x)
-            if head_model.needs_logits():
-                model_outputs = clamp_head(gpt_model.lm_head(model_outputs))
             loss_part = compute_loss_for_chunk(
+                gpt_model=gpt_model,
                 head_model=head_model,
-                model_outputs_for_chunk=model_outputs,
+                model_outputs_for_chunk=x,
                 targets=targets,
                 num_input_tokens=self.seq_length,
                 input_pos=start,
+                limited_logits_tensor=False,
             )
             # Normalization
             loss_part = (loss_part * _scale).mean()

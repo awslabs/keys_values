@@ -10,6 +10,7 @@ of a production system will require substantial extra efforts.
 
 ## What's New (Release 0.2.0)?
 
+* Technical report on novelties released: [arxiv](https://arxiv.org/abs/2608.19920)
 * New scaled dot product attention kernels returning attention weights (major
   speed-up of H2O cache strategies)
   - Add FlashInfer CUDA kernels and Triton score-sum for efficient attention weight computation
@@ -29,6 +30,18 @@ of a production system will require substantial extra efforts.
   - Refactor evaluation script so it can run with baseline checkpoints ([#123](https://github.com/awslabs/keys_values/pull/123))
 * Store training state and resume training from stored state. Fix bug in `SFTDataset.__getitem__` ([#103](https://github.com/awslabs/keys_values/pull/103))
 * Speed-ups by kernel fusion ([#105](https://github.com/awslabs/keys_values/pull/105))
+
+
+## Table of Contents
+
+* [Getting Started](#getting-started)
+* [Example: Long Context Fine-tuning on Helmet](#example-long-context-fine-tuning-on-helmet)
+* [Long Context Inference](#long-context-inference)
+* [Long Context Fine-tuning](#long-context-fine-tuning)
+* [Evaluation of Fine-tuned Models](#evaluation-of-fine-tuned-models)
+* [Implementing New KV Cache Policies](#implementing-new-kv-cache-policies)
+* [Profiling GPU Memory and Runtime](#profiling-gpu-memory-and-runtime)
+* [Publications](#publications)
 
 
 ## Getting Started
@@ -139,19 +152,19 @@ python build_ext.py
 ```
 
 
-## Example: Long Context Fine-tuning on LongBench V2
+## Example: Long Context Fine-tuning on Helmet
 
 This example runs on a single `Nvidia A 100` GPU with 40 GB of RAM.
 
 ```bash
 cd ${KEYS_VALUES_PATH}
 python3 keys_values/__main__.py finetune_long_lora \
-    Qwen/Qwen2.5-0.5B \
+    Qwen/Qwen3-4B-Instruct-2507 \
     --out_dir /home/ubuntu/out/finetune/longcontext_lora \
-    --data LongBenchV2 \
-        --data.max_seq_length 100000 \
+    --data Helmet \
+        --data.dataset_key trec_coarse \
+        --data.max_length 128k \
         --data.metadata_dir /home/ubuntu/out/finetune/longcontext_lora/data \
-    --head_model seq_classification_on_logits \
     --precision bf16-true \
     --verbose some \
     --kv_cache.name h2o-torch-quantized8 \
@@ -159,7 +172,9 @@ python3 keys_values/__main__.py finetune_long_lora \
         --kv_cache.chunk_size 1024 \
     --train.save_interval 10 \
         --train.micro_batch_size 4 \
-    --eval.interval 10
+    --eval.interval 10 \
+    --optimizer.name AdamW \
+        --optimizer.learning_rate 0.0005
 ```
 
 What is happening here?
@@ -168,38 +183,55 @@ What is happening here?
 * `--out_dir`: Path for results. For example, checkpoints are written to
   directories `step-000010`, `step-000020`, ... below this path (due to
   `--train.save_interval 10`, checkpoints are written every 10 iterations).
-* `--data LongBenchV2`: Using the `LongBenchV2` benchmark with its data loaders.
-  `--data.max_seq_length 100000` filters for sequences less than 100k tokens.
-  `--data.metadata_dir` stores metadata information about the dataset, so this
-  filtering runs much faster next time.
-* `--head_model seq_classification_on_logits` selects head model and loss
-  function. The benchmark task is 4-way classification, each class represented
-  by a single letter. This loss function reduces the logits to these 4 tokens.
-  This is much like asking the model to output a single letter, but only allowing
-  for valid class labels.
+* `--data Helmet`: Using the `Helmet` benchmark with its data loaders.
+  `--data.dataset_key trec_coarse` selects one Helmet dataset.
+  `--data.max_length 128k` ensures that sequences are close to 128k tokens.
+  `--data.metadata_dir` stores metadata information about the dataset, which
+  saves time the next time this dataset is chosen.
 * `--kv_cache.name h2o-default` selects the KV cache policy (`h2o`) and its
-  buffer strategy (`default` -- no quantization). `--kv_cache.cache_length` sets
-  the cache length (number of slots). Inference with batches at most this length
-  are done exactly with a single forward pass. `--kv_cache.chunk_size` sets the
-  chunk size. Sequences are processed in chunks of size
-  `cache_length, chunk_size, chunk_size, ...`, the first is called the prefill
-  chunk.
+  buffer strategy (`default` -- no quantization).
+  `--kv_cache.cache_length` sets the cache length (number of slots). Inference
+  with batches at most this length are done exactly with a single forward
+  pass.
+  `--kv_cache.chunk_size` sets the chunk size. Sequences are processed in
+  chunks of size `cache_length, chunk_size, chunk_size, ...`, the first is
+  called the *prefill* chunk.
 * `--train.micro_batch_size` sets the batch size for forward and backward
-  computations. `--train.global_batch_size` can be a multiple of the former, in
-  which case we use gradient averaging.
+  computations. The global batch size depends on how many devices are being
+  used.
+* `--train.save_interval`: The training scripts store checkpoints each K
+  training updates. These can be used for test set evaluations, or also for
+  restarting a stopped run.
+* `--eval.interval`: The scripts run evaluation on a validation set each K
+  training updates (the development set is split into training and
+  validation). Can be used to monitor training progress and to select the
+  best performing checkpoints afterwards.
 
 If you use an AWS `p4d.24xlarge` instance, you can use 8 A 100 GPUs in parallel.
-Modifying the CLI command above like runs training with an effective batch size
+Modifying the CLI command above like runs training with a global batch size
 of 32:
 
 ```bash
 cd ${KEYS_VALUES_PATH}
 python3 keys_values/__main__.py finetune_long_lora \
-    Qwen/Qwen2.5-0.5B --out_dir /home/ubuntu/out/finetune/longcontext_lora --devices 8 --data LongBenchV2 --data.max_seq_length 100000 --data.metadata_dir /home/ubuntu/out/finetune/longcontext_lora/data --head_model seq_classification_on_logits --precision bf16-true --verbose some --kv_cache.name h2o-default --kv_cache.cache_length 16384 --kv_cache.chunk_size 1024 --train.save_interval 10 --train.micro_batch_size 4 --eval.interval 10
+    Qwen/Qwen3-4B-Instruct-2507 \
+    --out_dir /home/ubuntu/out/finetune/longcontext_lora \
+    --devices 8 \
+    --data Helmet \
+        --data.dataset_key trec_coarse \
+        --data.max_length 128k \
+        --data.metadata_dir /home/ubuntu/out/finetune/longcontext_lora/data \
+    --precision bf16-true \
+    --verbose some \
+    --kv_cache.name h2o-torch-quantized8 \
+        --kv_cache.cache_length 16384 \
+        --kv_cache.chunk_size 1024 \
+    --train.save_interval 10 \
+        --train.micro_batch_size 4 \
+    --eval.interval 10 \
+    --optimizer.name AdamW \
+        --optimizer.learning_rate 0.0005
 ```
-
-Here, `--devices 8 --train.micro_batch_size 4` sets `train.global_batch_size`
-to 32, the per-device batch size to 4, and asks to use 8 devices.
 
 ### What's Next?
 
@@ -210,8 +242,10 @@ to 32, the per-device batch size to 4, and asks to use 8 devices.
   `--kv_cache.name h2o-torch-quantized8` halves the amount of GPU memory
   required for KV cache buffers and may even run faster (our code offloads
   KV cache buffers to CPU, which runs faster for less memory).
-* Play round with different datasets. `--data Helmet` gives access to datasets
-  from the Helmet benchmark.
+* Play round with different datasets. `--data LongBenchV2` gives access to the
+  `LongBench V2` dataset (for which you also want to add
+  `--head_model seq_classification_on_logits`, as this is a multi-way
+  classification problem).
 * Try using `finetune_offload_lora` instead of `finetune_long_lora`, and
   `--kv_cache.cpu_offload True`. This uses CPU offloading to free up memory
   during forward and backward pass, allowing you to explore options like
@@ -263,8 +297,8 @@ of money on many GPUs, and we think that advanced selective KV cache policies
 are an important direction towards this goal.
 
 Scripts for evaluating fine-tuned models on long context test data are provided
-in [finetune/longcontext_eval.py](./keys_values/finetune/longcontext_eval.py) and
-[finetune/longcontext_eval_ext.py](./keys_values/finetune/longcontext_eval_ext.py),
+in [finetune/longcontext_eval.py](keys_values/evaluation/longcontext_eval.py) and
+[finetune/longcontext_eval_ext.py](keys_values/evaluation/longcontext_eval_ext.py),
 more details are given [below](#evaluation-of-fine-tuned-models).
 
 
@@ -417,17 +451,24 @@ An example is given by [data.LongBenchV2](./keys_values/data/longbench_v2.py#L12
 All `DataModule` subclasses imported in the script file can be chosen by `--data`.
 Moreover, `--data.*` is used to set constructor parameters for the dataset.
 
-Relevant arguments for `LongBenchV2` (which is the default dataset):
+Relevant arguments for `LongBenchV2`:
 
+* `data.test_set_tag`: Determines how the complete dataset is split into train,
+  validation, and test sets. Defaults to "stratified". Current choices:
+  - "stratified": Stratified random split with fixed bucket sizes.
+    `val_split_fraction`, `max_seq_length` are ignored.
+  - "rest": Test set contains all cases with sequence length >
+    `max_seq_length`, sorted by token sequence length (non-decreasing).
 * `data.max_seq_length`: If given, we filter sequences to have token length
   less or equal this limit. The remaining data is split into training and
-  validation sets.
+  validation sets. Ignored if `test_set_tag == "stratified"`.
 * `data.metadata_dir`: If given, we store meta data into this directory. In
   particular, we tokenize all sequences and determine their token lengths, so
   that filtering runs much faster in the next call, independent of the value
-  of `data.max_seq_length`.
-* `data.val_split_fraction`: The fraction of the dataset to use for the
-  validation dataset. The rest is used for training.
+  of `data.max_seq_length`. Also, the train/validation split is stored here.
+* `data.val_split_fraction`: The fraction of the dev dataset to use for the
+  validation dataset. The rest is used for training. Ignored if
+  `test_set_tag == "stratified"`.
 * `data.trainloader_longest_first`: If `True`, the training dataloader returns
   the longest sequences in the first batch. This is useful in order to detect
   out of memory errors early.
@@ -435,11 +476,6 @@ Relevant arguments for `LongBenchV2` (which is the default dataset):
   the shortest sequences in the first batch. This can be useful for debugging.
 * `data.num_workers`, `data.pin_memory`: Arguments passed to
   `torch.utils.data.DataLoader`.
-* `data.test_set_tag`: If this is given, we also maintain a test dataset and
-  serve a test dataloader. The tag determines how the test set is chosen. Current
-  choices:
-  - "rest": All cases with sequence length > `data.max_seq_length`, sorted by
-    token sequence length (non-decreasing).
 
 > When implementing a new `DataModule` for your dataset, we strongly recommend
 > you adopting [SimilarSequenceLengthIterable](./keys_values/data/iterators.py#L172)
@@ -818,8 +854,7 @@ library (and would be very happy for help, see
   [scaled_dot_product_attention_in_blocks](keys_values/attention/base.py#L477).
   The computation is done in blocks so that no more than `tmp_array_limit_gb`
   GB of GPU memory is needed for the temporary buffers. These kernels are
-  used for `forward` when attention weights are required, and for `backward`
-  if `--grad.use_old_cache True`.
+  used for `forward` when attention weights are required.
 
 We ran an experiment for many different `kv_len` to determine from which
 `q_len` value onwards query-padded SDPA is faster than naive SDPA. However, if
@@ -1004,11 +1039,6 @@ Other arguments for fine-tuning are:
   Defaults to "torch-quantized8". For "default", the checkpoints are not
   quantized. This is more accurate, but needs more CPU memory and is slower,
   because more memory has to be transferred to CPU.
-* `--grad.use_old_cache`: If this is `True`, an older training replay cache is
-  used for gradient computations. This used a fused naive SDPA kernel, which
-  requires less GPU memory, but is also slower (if `flex_attention` is used).
-  It is an open issue to provide a fast SDPA kernel fused with `torch.scatter`,
-  the best of both worlds.
 * `--grad.single_tokens_for_targets`: If `True`, the targets part of a sequence
   is processed token per token (i.e., with chunk size 1). This is slower, but
   more realistic, mirroring how inference looks like. If the targets part is
@@ -1022,6 +1052,51 @@ Other arguments for fine-tuning are:
   checkpoints are pinned. This can run faster, but needs more real CPU memory.
 * `--grad.cachecp_pin_memory`: If `True`, the CPU memory pages for KV cache
   checkpoints are pinned. This can run faster, but needs more real CPU memory.
+
+### Training with Very Long Sequences
+
+Recall that we checkpoint both layer inputs and key-value cache buffers to
+ensure that gradient computation works with any sequence length and number
+of layers. The catch is that the combined size of checkpoints scales linearly
+with sequence length and number of layers. By default, all checkpoints are
+stored in CPU RAM, but this can fill up for very long sequences. Since `PyTorch`
+uses the underlying OS for CPU memory management, this often leads to nasty
+crashes without sensible error messaging.
+
+Our library contains dedicated code in order to save and load checkpoints to
+disk. It is designed so that available CPU memory is used first, equalized over
+processes linked with each device, but files are used once CPU RAM is full up
+to a fraction. It is activated by using the following arguments:
+
+```bash
+    --grad.layercp_qname torch-quantized8 \
+    --grad.cachecp_qname torch-quantized8 \
+    --grad.layercp_pin_memory False \
+    --grad.cachecp_pin_memory False \
+    --grad.checkpoint_temp_dir /opt/dlami/nvme/swapspace \
+    --grad.checkpoint_frac_ram 0.1 \
+```
+
+* `--grad.layercp_qname`, `--grad.cachecp_qname`: Use quantization here, to 8
+  or even to 4 bits, in order to save CPU and disk space.
+* `--grad.layercp_pin_memory`, `--grad.cachecp_pin_memory`: Don't use memory
+  pinning for checkpoints. Once files are used, transfer is slow anyway, and
+  pinning may reduce the amount of CPU space available.
+* `--grad.checkpoint_temp_dir`: Path to write checkpoint files to. Must point
+  to a disk with sufficient free space, ideally some ephemeral storage local
+  to compute. Our implementation works with AWS EFS as well, but this can be
+  much slower than a local disk.
+* `--grad.checkpoint_frac_ram`: Roughly this fraction of available CPU RAM is
+  protected and will not be used to store checkpoints. If more than one device
+  is used (so `--devices` larger than one), the non-protected memory is split
+  between them. Defaults to 0.1. If your code crashes or freezes due to filling
+  up CPU memory, consider increasing this value.
+
+Note that training becomes quite a bit slower if most checkpoints have to be
+stored to disk. It is always better to choose a compute instance with lots of
+CPU memory. You can use `--grad.checkpoint_temp_dir` to be on the safe side,
+since file-based checkpoints are used only if the available CPU memory fills
+up.
 
 
 ## Evaluation of Fine-tuned Models
@@ -1052,9 +1127,9 @@ from the loss which drives the training. Some naming:
 
 The following scripts can be used for evaluation:
 
-* [longcontext_eval](./keys_values/finetune/longcontext_eval.py): Short `eval_long`.
+* [longcontext_eval](keys_values/evaluation/longcontext_eval.py): Short `eval_long`.
   Run evaluation for a single setup.
-* [longcontext_eval_ext](./keys_values/finetune/longcontext_eval_ext.py): Short
+* [longcontext_eval_ext](keys_values/evaluation/longcontext_eval_ext.py): Short
   `eval_long_ext`. Run evaluation for several setups, each with its own tasks.
 
 ### Evaluation for Single Setup: `eval_long`
@@ -1069,7 +1144,8 @@ python keys_values/__main__.py eval_long \
     --batch_size 2 \
     --use_sample_metric True \
     --sample_metric_max_generated_tokens 20 \
-    --tasks "step-000310,final,step-000410"
+    --tasks "step-000310,final,step-000410" \
+    --eval_dir "eval"
 ```
 
 * `/home/ubuntu/out/finetune/lora/qwen3_4b/helmet_hotpot_qa_64k/h2o_lr5` is the
@@ -1084,6 +1160,9 @@ python keys_values/__main__.py eval_long \
 * `--tasks`: Name of tasks (or checkpoints) for which evaluation is to run. If
   this is not given, the script runs evaluation for all checkpoints detected
   under the `out_dir`.
+* `--eval_dir`: Subdirectory where evaluation result files (and generated
+  samples) are written to, see below. Defaults to "eval". Use this to store
+  evaluations under different conditions for the same checkpoints.
 
 Note that dataset and configurations are taken from the hyperparameters stored
 with checkpoints (these must be the same for all checkpoints). Some of them can
@@ -1101,10 +1180,11 @@ The evaluation script works like this:
 
 * On each device, a list of all jobs (i.e., tuples `(task, batch)`) is created.
 * These jobs are worked on in parallel, on a first-come-first-served basis. The
-  outcome for a job is a file `<out_dir>/<task>/eval/eval_metrics_<no>.csv`, a
-  CSV file with one row per case in a batch. Here, `<no>` is the index of the
-  first case in the batch. For our example above, this could be
-  `.../h2o_lr5/step-000310/eval_metrics_256.csv`.
+  outcome for a job is a file `<out_dir>/<task>/<eval_dir>/eval_metrics_<no>.csv`,
+  a CSV file with one row per case in a batch. Here, `<no>` is the index of the
+  first case in the batch. `<eval_dir>` is the value of `--eval_dir`, which
+  defaults to "eval". For our example above, this could be
+  `.../h2o_lr5/step-000310/eval/eval_metrics_256.csv`.
 * Jobs are iterated over in a nested loop, tasks in outer, batches in inner loop.
 * A worker locks a job by writing the result file, but with bogus content. Once
   the job is finished, this content is overwritten by the results.
@@ -1195,7 +1275,7 @@ If you like to write out samples for all dataset cases, set this to a very
 large number.
 
 Generated samples are written to files
-`<out_dir>/<task>/eval/generated_samples_<no>.yaml`. Example:
+`<out_dir>/<task>/<eval_dir>/generated_samples_<no>.yaml`. Example:
 ```yaml
 - idx: 225
   output: Debbie Gibson
@@ -1248,7 +1328,7 @@ python keys_values/__main__.py eval_long \
   `--out_dir` path, but checkpoints are not loaded from there.
 * Instead, a single checkpoint is read from
   `/home/ubuntu/out/finetune/checkpoints/mycheckpoint`, the value of `--checkpoint_dir`.
-* Results are written to `<out_dir>/eval/eval_metrics_<no>.csv`.
+* Results are written to `<out_dir>/<eval_dir>/eval_metrics_<no>.csv`.
 
 The scripts [collect_eval_results](./keys_values/scripts/collect_eval_results.py)
 and [cleanup_evaluation](./keys_values/scripts/cleanup_evaluation.py) work in
@@ -1465,3 +1545,21 @@ nsys profile --trace=cuda,nvtx --output <report_name> \
 
 Once the script terminates or is stopped, results are written to
 `<report_name>.nsys-rep`. You can then use `nsys-ui` to look at results.
+
+
+## Publications
+
+If you use this library, please do cite the following publication:
+
+Matthias Seeger, Zeyu Zhang, Vihang Patil, Konstantinos Benidis, Sebastian Schelter<br>
+Learning how to Forget: Fine-tuning for Long-Context Sparse Attention<br>
+[arXiv:2608.19920 \[cs.CL\]](https://arxiv.org/abs/2608.19920)
+
+```bibtex
+@techreport{Seeger:26,
+  author      = {Seeger, M. and Zhang, Z. and Patil, V. and Benidis, K. and Schelter, S.},
+  title       = {Learning how to Forget: Fine-tuning for Long-Context Sparse Attention},
+  number      = {arXiv:2608.19920 [cs.CL]},
+  year        = {2026}
+}
+```

@@ -17,10 +17,11 @@ from pathlib import Path
 from typing import List, Optional
 
 from keys_values.evaluation.tasks import EvaluationTasks
+from keys_values.scripts.cleanup_evaluation import datasets_and_cases
 
 EVAL_METRICS_ALL_FILENAME = "eval_metrics_all.csv"
 
-SWEEP_TAR_FILENAME = "eval_metrics_transfer_{dataset_size}.tgz"
+SWEEP_TAR_FILENAME = "eval_metrics_transfer_{extra}{dataset_size}.tgz"
 
 
 def main(
@@ -28,14 +29,16 @@ def main(
     model_type: str,
     tasks: Optional[List[str]] = None,
     multiple_tasks: bool = True,
+    eval_dir: str = "eval",
 ):
     # Collect results from all files across all tasks
     print(f"\nLoading evaluation result files from {out_dir}")
     eval_tasks = EvaluationTasks(
-        out_dir,
-        model_type,
-        tasks,
+        out_dir=out_dir,
+        model_type=model_type,
+        tasks=tasks,
         collect_results=True,
+        eval_dir=eval_dir,
         multiple_tasks=multiple_tasks,
     )
     all_data = []
@@ -73,64 +76,57 @@ def main(
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
-    mode = "collect"
-    # mode = "sweep"
-    dataset_size = "64k"
-    # dataset_size = "128k"
+    eval_dir = "eval_128"
+    print_tar = False
+    # dataset_size = "64k"
+    dataset_size = "128k"
+    is_rerun = True
     is_baseline = False
-    # is_baseline = True
-    # is_base_model = False
-    is_base_model = True
+    is_base_model = False
+    extra_data = False
+    filter_dataset = None
+    filter_case = None
+
     multiple_tasks = not is_baseline and not is_base_model
-    if is_baseline:
+    if is_rerun:
+        base_path = base_path / "rerun"
+    elif is_baseline:
         base_path = base_path / "baseline"
     elif is_base_model:
         base_path = base_path / "basemod"
-    datasets = [
-        f"helmet_nq_{dataset_size}",
-        f"helmet_trivia_qa_{dataset_size}",
-        f"helmet_hotpot_qa_{dataset_size}",
-        f"helmet_pop_qa_{dataset_size}",
-    ]
-    cases = [
-        "lr_4gpu_cs2048_lr5",
-        "slr_4gpu_cs2048_lr5",
-        "h2o_4gpu_cs2048_lr5",
-        "h2onorm_4gpu_cs2048_lr5",
-        "h2oorig_4gpu_cs2048_lr5",
-        "lr_4gpu_cs1024_lr5",
-        "slr_4gpu_cs1024_lr5",
-        "h2o_4gpu_cs1024_lr5",
-        "h2onorm_4gpu_cs1024_lr5",
-        "h2oorig_4gpu_cs1024_lr5",
-    ]
-    if multiple_tasks:
-        cases.extend(
-            [
-                "qh2o_4gpu_cs2048_lr5",
-                "qh2onorm_4gpu_cs2048_lr5",
-            ]
-        )
+    datasets, cases = datasets_and_cases(
+        dataset_size,
+        extra_data,
+        is_baseline,
+        is_base_model,
+        filter_dataset=filter_dataset,
+        filter_case=filter_case,
+    )
+
     model_type = "lora"
-    if mode == "collect":
-        for dataset, case in product(datasets, cases):
-            out_dir = base_path / dataset / case
-            if out_dir.exists():
-                main(out_dir, model_type, multiple_tasks=multiple_tasks)
-            else:
-                print(f"\nResults for {dataset}/{case} do not exist")
-    elif mode == "sweep":
-        names = []
-        for dataset, case in product(datasets, cases):
-            name = "/".join((dataset, case, EVAL_METRICS_ALL_FILENAME))
-            if (base_path / name).exists():
-                names.append(name)
+    names = []
+    for dataset, case in product(datasets, cases):
+        out_dir = base_path / dataset / case
+        if out_dir.exists():
+            main(
+                out_dir=out_dir,
+                model_type=model_type,
+                multiple_tasks=multiple_tasks,
+                eval_dir=eval_dir,
+            )
+            if print_tar:
+                name = "/".join((dataset, case, EVAL_METRICS_ALL_FILENAME))
+                if (base_path / name).exists():
+                    names.append(name)
+        else:
+            print(f"\nResults for {dataset}/{case} do not exist")
+    if print_tar:
+        extra = "extra_" if extra_data else ""
         print(
-            f"\nCollected {len(names)} result files. Run at {base_path}:\n"
+            f"\nCollected {len(names)} result files:\n"
+            f"cd {base_path}; "
             + "tar cfz "
-            + SWEEP_TAR_FILENAME.format(dataset_size=dataset_size)
+            + SWEEP_TAR_FILENAME.format(dataset_size=dataset_size, extra=extra)
             + " "
             + " ".join(names)
         )
-    else:
-        raise NotImplementedError(f"Unknown mode: {mode}")

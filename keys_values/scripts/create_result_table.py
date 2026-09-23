@@ -12,8 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
+
+from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
+from keys_values.scripts.cleanup_evaluation import datasets_and_cases
 
 EVAL_METRICS_ALL_FILENAME = "eval_metrics_all.csv"
 
@@ -29,24 +33,30 @@ def _sort_entries(entries):
     return non_fin + [(st, v) for st, v in entries if st == "fin"]
 
 
-# We ran evaluations for more than the task for which evaluation loss was
-# lowest. With this predicate, we filter for the winning tasks only.
+# Can be used to filter out invalid results
 def _filter_dataset_case(
     dataset: str,
     case: str,
     task: str,
 ) -> bool:
-    if dataset.endswith("_128k"):
-        return not (case.startswith("lr_4gpu_cs1024") and task == "410")
-    # Filter out error in results:
-    if task == "380" and case.startswith("lr_") and dataset.startswith("helmet_trivia"):
-        return False
-    if task == "fin":
-        # Only those for which "fin" is the only result
-        return dataset.startswith("helmet_pop") and (
-            case.startswith("slr_") or case.startswith("h2onorm_")
-        )
-    return task != "010"
+    return True
+
+
+_PREFIX = "helmet_"
+
+_POSTFIXES = ("_64k", "_128k")
+
+
+def _metric_name_for_dataset(dataset: str) -> str:
+    assert dataset.startswith(_PREFIX)
+    len_post = None
+    for post in _POSTFIXES:
+        if dataset.endswith(post):
+            len_post = len(post)
+            break
+    assert len_post is not None
+    key = dataset[len(_PREFIX) : -len_post]
+    return SampleBasedMetricsEvaluator.metric_for_helmet_task(key)
 
 
 def main(
@@ -55,7 +65,7 @@ def main(
     result_path,
     final_table: bool,
     multiple_tasks: bool,
-    metric_name: str = "sub_exact_match",
+    metric_name: Optional[str] = None,
 ):
     if not multiple_tasks and not final_table:
         raise ValueError("If multiple_tasks=False, then final_table must be True")
@@ -71,28 +81,38 @@ def main(
     for case_key, _ in cases:
         row = []
         for dataset in datasets:
+            if metric_name is None:
+                _metric_name = _metric_name_for_dataset(dataset)
+            else:
+                _metric_name = metric_name
             csv_path = base_path / dataset / case_key / EVAL_METRICS_ALL_FILENAME
             if not csv_path.exists():
                 row.append([])
             else:
-                df = pd.read_csv(csv_path)
-                if multiple_tasks:
-                    avg = df.groupby("task")[metric_name].mean()
-                    row.append(
-                        _sort_entries(
-                            [
-                                (_short_task(t), v)
-                                for t, v in avg.items()
-                                if not final_table
-                                or _filter_dataset_case(
-                                    dataset, case_key, _short_task(t)
-                                )
-                            ]
+                try:
+                    df = pd.read_csv(csv_path)
+                    if multiple_tasks:
+                        avg = df.groupby("task")[_metric_name].mean()
+                        row.append(
+                            _sort_entries(
+                                [
+                                    (_short_task(t), v)
+                                    for t, v in avg.items()
+                                    if not final_table
+                                    or _filter_dataset_case(
+                                        dataset, case_key, _short_task(t)
+                                    )
+                                ]
+                            )
                         )
+                    else:
+                        avg = df[_metric_name].mean()
+                        row.append([(None, avg.item())])
+                except KeyError as ex:
+                    print(
+                        f"dataset = {dataset}, case_key = {case_key}, metric_name = {_metric_name}"
                     )
-                else:
-                    avg = df[metric_name].mean()
-                    row.append([(None, avg.item())])
+                    raise ex
         table.append(row)
 
     # - final_table == False:
@@ -149,6 +169,7 @@ def main(
         tex_lines.append(r"\noalign{\smallskip}\hline\noalign{\smallskip}")
     tex_lines.append(r"\end{tabular}")
 
+    print(f"Writing results to {result_path}")
     if result_path.exists():
         result_path.unlink()
     result_path.write_text("\n".join(tex_lines) + "\n")
@@ -157,44 +178,42 @@ def main(
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
-    dataset_size = "64k"
-    # dataset_size = "128k"
+    metric_name = None  # Select automatically
+    # metric_name = "sub_exact_match"  # Override
+    # dataset_size = "64k"
+    dataset_size = "128k"
+    is_rerun = True
     is_baseline = False
-    # is_baseline = True
-    # is_base_model = False
-    is_base_model = True
-    if is_baseline:
+    is_base_model = False
+    extra_data = False
+    filter_dataset = None
+    filter_case = None
+
+    if is_rerun:
+        base_path = base_path / "rerun"
+    elif is_baseline:
         base_path = base_path / "baseline"
     elif is_base_model:
         base_path = base_path / "basemod"
     multiple_tasks = not is_baseline and not is_base_model
-    datasets = [
-        f"helmet_nq_{dataset_size}",
-        f"helmet_trivia_qa_{dataset_size}",
-        f"helmet_hotpot_qa_{dataset_size}",
-        f"helmet_pop_qa_{dataset_size}",
-    ]
-    cases = [
-        ("lr_4gpu_cs2048_lr5", "lr_2048"),
-        ("slr_4gpu_cs2048_lr5", "slr_2048"),
-        ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
-        ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
-        ("h2oorig_4gpu_cs2048_lr5", "h2oorig_2048"),
-        ("lr_4gpu_cs1024_lr5", "lr_1024"),
-        ("slr_4gpu_cs1024_lr5", "slr_1024"),
-        ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
-        ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
-        ("h2oorig_4gpu_cs1024_lr5", "h2oorig_1024"),
-    ]
-    if not is_baseline and not is_base_model:
-        cases.extend(
-            [
-                ("qh2o_4gpu_cs2048_lr5", "qh2o_2048"),
-                ("qh2onorm_4gpu_cs2048_lr5", "qh2onorm_2048"),
-            ]
-        )
+    datasets, cases = datasets_and_cases(
+        dataset_size,
+        extra_data,
+        is_baseline,
+        is_base_model,
+        with_short=True,
+        filter_dataset=filter_dataset,
+        filter_case=filter_case,
+    )
     result_path = base_path / f"results_{dataset_size}.tex"
     # final_table = False
     final_table = True
 
-    main(datasets, cases, result_path, final_table, multiple_tasks=multiple_tasks)
+    main(
+        datasets,
+        cases,
+        result_path,
+        final_table,
+        multiple_tasks=multiple_tasks,
+        metric_name=metric_name,
+    )

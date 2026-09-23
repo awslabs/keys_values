@@ -429,10 +429,7 @@ def may_match_twice_factory(
         `may_match_twice` predicate
 
     """
-    if grad.use_old_cache:
-        return may_match_twice_fused_eager_sdpa
-    else:
-        return may_match_twice_flex_attention_sdpa
+    return may_match_twice_flex_attention_sdpa
 
 
 def fix_dtype_of_score_buffers(gpt_model: GPT):

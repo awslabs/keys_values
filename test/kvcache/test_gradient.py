@@ -21,10 +21,7 @@ import pytest
 from keys_values.config import Config
 
 from keys_values.kvcache.base import KVCacheParams
-from keys_values.finetune.utils import (
-    may_match_twice_flex_attention_sdpa,
-    may_match_twice_fused_eager_sdpa,
-)
+from keys_values.finetune.utils import may_match_twice_flex_attention_sdpa
 from keys_values.attention.flex_attention import FlexAttentionArgs
 from keys_values.kvcache.gradient.accumulate import GradientAccumulator
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
@@ -54,9 +51,9 @@ def make_write_outputs_slice(x: torch.Tensor) -> WriteOutputsSlice:
 
 def args_gradient_row_of_cells():
     setups = [
-        a + b + (c, d)
-        for d, a, b, c in product(
-            available_backends(),
+        a + b + (c,)
+        for c, a, b in product(
+            available_backends(do_mps=False),
             [
                 ("lastrec", dict()),
                 ("h2o", {"replay_log_blocksize": 64}),
@@ -68,7 +65,6 @@ def args_gradient_row_of_cells():
                 ([512, 512], [512, 8, 4, 8, 2, 8, 2, 8, 8], [1, 3, 3, 2]),
                 ([512, 504], [504, 4, 4, 8, 4, 8, 2, 8, 2, 8, 8], [1, 2, 3, 3, 2]),
             ],
-            [True, False],
         )
     ]
     # `limit_num_unmatched` depends on the scenario. These are the numbers of
@@ -85,45 +81,25 @@ def args_gradient_row_of_cells():
             zip(
                 setups,
                 [
-                    ([4, 8, 8, 12], tol_kwargs),
-                    ([4, 10, 10, 12], tol_kwargs),
-                    ([4, 8, 8, 8, 12], tol_kwargs),
+                    ([4, 10, 10, 12], tol_kwargs),  # CPU
                     ([4, 10, 10, 8, 12], tol_kwargs3),
-                    ([4, 8, 8, 12], tol_kwargs),
                     ([8, 14, 14, 12], tol_kwargs),
-                    ([4, 8, 8, 8, 12], tol_kwargs),
                     ([8, 14, 14, 10, 12], tol_kwargs2),
-                    ([4, 8, 8, 12], tol_kwargs),
                     ([8, 14, 14, 12], tol_kwargs),
-                    ([4, 8, 8, 8, 12], tol_kwargs),
                     ([8, 14, 14, 10, 12], tol_kwargs2),
-                    ([4, 8, 8, 12], tol_kwargs),
                     ([16, 26, 26, 12], tol_kwargs),
-                    ([4, 8, 8, 8, 12], tol_kwargs),
                     ([16, 26, 26, 14, 12], tol_kwargs3),
-                    ([4, 8, 8, 12], tol_kwargs),
                     ([16, 26, 26, 12], tol_kwargs),
-                    ([4, 8, 8, 8, 12], tol_kwargs),
                     ([16, 26, 26, 14, 12], tol_kwargs3),
-                    ([4, 8, 8, 12], tol_kwargs),
-                    ([0, 4, 4, 12], tol_kwargs),
-                    ([4, 8, 8, 8, 12], tol_kwargs),
+                    ([0, 4, 4, 12], tol_kwargs),  # GPU
                     ([0, 4, 4, 4, 12], tol_kwargs3),
                     ([4, 8, 8, 12], tol_kwargs),
-                    ([4, 8, 8, 12], tol_kwargs),
-                    ([4, 8, 8, 8, 12], tol_kwargs),
                     ([4, 8, 8, 6, 12], tol_kwargs2),
                     ([4, 8, 8, 12], tol_kwargs),
-                    ([4, 8, 8, 12], tol_kwargs),
-                    ([4, 8, 8, 8, 12], tol_kwargs),
                     ([4, 8, 8, 6, 12], tol_kwargs2),
-                    ([4, 8, 8, 12], tol_kwargs),
                     ([12, 20, 20, 12], tol_kwargs),
-                    ([4, 8, 8, 8, 12], tol_kwargs),
                     ([12, 20, 20, 10, 12], tol_kwargs3),
-                    ([4, 8, 8, 12], tol_kwargs),
                     ([12, 20, 20, 12], tol_kwargs),
-                    ([4, 8, 8, 8, 12], tol_kwargs),
                     ([12, 20, 20, 10, 12], tol_kwargs3),
                 ],
             )
@@ -132,7 +108,7 @@ def args_gradient_row_of_cells():
 
 
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, use_old_cache, device, limit_num_unmatched, tol_kwargs",
+    "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, device, limit_num_unmatched, tol_kwargs",
     args_gradient_row_of_cells(),
 )
 def test_gradient_row_of_cells(
@@ -141,7 +117,6 @@ def test_gradient_row_of_cells(
     cache_lengths,
     tokens_per_chunk,
     chunks_per_cell,
-    use_old_cache,
     device,
     limit_num_unmatched,
     tol_kwargs,
@@ -150,7 +125,7 @@ def test_gradient_row_of_cells(
     torch.random.manual_seed(seed)
     print(f"cache_name={cache_name}, cache_kwargs={cache_kwargs}")
     print(
-        f"cache_length={cache_lengths}\ntokens_per_chunk={tokens_per_chunk}\nchunks_per_cell={chunks_per_cell}\nuse_old_cache={use_old_cache}"
+        f"cache_length={cache_lengths}\ntokens_per_chunk={tokens_per_chunk}\nchunks_per_cell={chunks_per_cell}"
     )
     error_prefix = "\n".join(
         [
@@ -159,7 +134,6 @@ def test_gradient_row_of_cells(
             f"cache_lengths:    {cache_lengths}",
             f"tokens_per_chunk: {tokens_per_chunk}",
             f"chunks_per_cell:  {chunks_per_cell}",
-            f"use_old_cache:    {use_old_cache}",
             f"device:           {device}",
         ]
     )
@@ -278,11 +252,7 @@ def test_gradient_row_of_cells(
 
     # Setup gradient accumulator
     if use_autograd_hooks:
-        may_match_twice = (
-            may_match_twice_fused_eager_sdpa
-            if use_old_cache
-            else may_match_twice_flex_attention_sdpa
-        )
+        may_match_twice = may_match_twice_flex_attention_sdpa
         autograd_hooks = CellComputationAutogradHooks(
             config=config,
             batch_size=batch_size,
@@ -305,7 +275,6 @@ def test_gradient_row_of_cells(
         debug_tensors=debug_cache_tensors,
         verbose=VerbosityLevels.SOME,
         train_cache_kwargs=dict(
-            use_old_cache=use_old_cache,
             debug_full_args=True,
             debug_print_annotations=True,
         ),
@@ -359,7 +328,7 @@ def test_gradient_row_of_cells(
         qname="torch-quantized8",  # will not be used
         debug_tensors=debug_cache_tensors_comp,
         verbose=VerbosityLevels.SOME,
-        train_cache_kwargs=dict(use_old_cache=use_old_cache),
+        train_cache_kwargs=dict(),
     )
     accumulator_comp._batch_size = batch_size
     accumulator_comp._initialize_internal(

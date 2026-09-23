@@ -24,7 +24,7 @@ from keys_values.data.constants import (
     LORA_WEIGHTS_FNAME_OLD,
 )
 
-EVAL_METRICS_FNAME = "eval/eval_metrics_{}.csv"
+EVAL_METRICS_FNAME = "eval_metrics_{}.csv"
 
 REGEX_TASKNAME = re.compile(r"step-[0-9]{6}|final")
 
@@ -50,7 +50,8 @@ class EvaluationTasks:
     are available.
 
     If `multiple_tasks == False`, we do not use tasks, but look for evaluation
-    files of name :const:`EVAL_METRICS_FNAME` directly under `out_dir`.
+    files of name `eval_dir` + "/" + :const:`EVAL_METRICS_FNAME` directly under
+    `out_dir`. Here, `eval_dir` defaults to "eval".
     """
 
     def __init__(
@@ -60,6 +61,7 @@ class EvaluationTasks:
         tasks: Optional[List[str]] = None,
         collect_results: bool = False,
         eval_metrics_filename: Optional[str] = None,
+        eval_dir: Optional[str] = None,
         multiple_tasks: bool = True,
     ):
         if isinstance(out_dir, str):
@@ -69,7 +71,9 @@ class EvaluationTasks:
         self._tasks = tasks.copy() if tasks is not None and multiple_tasks else None
         self._multiple_tasks = multiple_tasks
         if eval_metrics_filename is None:
-            eval_metrics_filename = EVAL_METRICS_FNAME
+            if eval_dir is None:
+                eval_dir = "eval"
+            eval_metrics_filename = eval_dir + "/" + EVAL_METRICS_FNAME
         self._eval_metrics_filename = eval_metrics_filename
         self._eval_metrics_glob = eval_metrics_filename.replace("{}", "*")
         if multiple_tasks:
@@ -201,6 +205,7 @@ class EvaluationWithTasksHelper:
         out_dir: Path,
         tag: Optional[str] = None,
         eval_metrics_filename: Optional[str] = None,
+        eval_dir: Optional[str] = None,
         multiple_tasks: bool = True,
     ):
         self._out_dir = out_dir
@@ -208,7 +213,9 @@ class EvaluationWithTasksHelper:
             tag = ""
         self._tag = tag
         if eval_metrics_filename is None:
-            eval_metrics_filename = EVAL_METRICS_FNAME
+            if eval_dir is None:
+                eval_dir = "eval"
+            eval_metrics_filename = eval_dir + "/" + EVAL_METRICS_FNAME
         self._eval_metrics_filename = eval_metrics_filename
         self._multiple_tasks = multiple_tasks
 

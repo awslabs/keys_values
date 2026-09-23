@@ -105,7 +105,7 @@ class KVCacheArgs:
     randomize_chunk_sizes: bool = False
     allocate_buffers: bool = False
     grace_period: int = 0
-    init_grace_tokens: int = 0
+    init_grace_tokens: Optional[int] = None
     cpu_offload: bool = False
     normalize_scores: bool = False
     range_is_prefix: bool = True
@@ -125,7 +125,9 @@ class KVCacheArgs:
             raise ValueError(
                 f"grace_period = {self.grace_period}, must be in [0, {self.cache_length}])"
             )
-        if not (0 <= self.init_grace_tokens < self.cache_length):
+        if self.init_grace_tokens is not None and not (
+            0 <= self.init_grace_tokens < self.cache_length
+        ):
             raise ValueError(
                 f"init_grace_tokens = {self.init_grace_tokens}, must be in [0, {self.cache_length}])"
             )
@@ -213,11 +215,6 @@ class GradientArgs:
         single_tokens_for_targets: If `True`, the targets part of a sequence is
             processed token per token (i.e., with chunk size 1). This is slower,
             but more realistic, mirroring how inference looks like.
-        use_old_cache: If `True`, we use
-            :class:`TrainingAttnWeightsReplayCacheOld` instead of
-            :class:`TrainingAttnWeightsReplayCache`. The old code uses the
-            fused naive SDPA during backward, which is slower, but also needs
-            less GPU memory.
         max_match_trials_pack_arg: Parameter controlling autograd saved tensors
             hook mechanism, see :class:`CellComputationAutogradHooks`.
             Arguments of :meth:`pack_hook` are matched against annotations. A
@@ -235,6 +232,23 @@ class GradientArgs:
             during gradient computation are run on separate CUDA streams, in
             parallel with GPU computation. Requires `layercp_pin_memory=True`
             and `cachecp_pin_memory=True`. Defaults to `False`.
+        checkpoint_temp_dir: If given, we use a file-based manager for virtual
+            memory for checkpoints. Different to the default swap space of the
+            system, this can be on an external file system. File-based
+            allocations are used only once the normal CPU RAM is has been used
+            for checkpoints to some extent, see `checkpoint_frac_ram`.
+        checkpoint_frac_ram: Only used if `checkpoint_temp_dir` is given.
+            Whenever a new checkpoint buffer is allocated, it is either taken
+            from normal CPU RAM or managed as file. The former is chosen if
+            `available_cpu > max(threshold, n_bytes * 1.1)`, where `n_bytes` is
+            the size of the new buffer, and
+            `threshold = checkpoint_frac_ram * available_cpu_0`. Here,
+            `available_cpu_0` is the amount of CPU RAM available just before
+            layer input checkpoints are allocated.
+            This means that `threshold` bytes of CPU RAM are protected to not
+            be used for checkpoints. The smaller `checkpoint_frac_ram`, the more
+            of CPU RAM can be used for checkpoints before files are used. Too
+            small fractions can lead to crashes or freezing.
         debug_print_annotations: If `True`, debug logging during `backward`
             computations are written which allow to track annotations for
             `autograd` saved tensors hooks.
@@ -245,11 +259,12 @@ class GradientArgs:
     layercp_qname: Optional[str] = None
     cachecp_qname: Optional[str] = None
     single_tokens_for_targets: bool = False
-    use_old_cache: bool = False
     max_match_trials_pack_arg: Optional[int] = None
     layercp_pin_memory: bool = True
     cachecp_pin_memory: bool = True
     async_cpu_transfer: bool = False
+    checkpoint_temp_dir: Optional[str] = None
+    checkpoint_frac_ram: float = 0.1
     debug_print_annotations: bool = False
 
     def __post_init__(self):
@@ -486,7 +501,7 @@ class TrainArgs:
             Defaults to `True`.
     """
 
-    save_interval: Optional[int] = 1000
+    save_interval: Optional[int] = 50
     """Number of optimizer steps between saving checkpoints"""
     log_interval: int = 1
     """Number of iterations between logging calls"""
@@ -494,7 +509,7 @@ class TrainArgs:
     """Legacy argument: Do not use"""
     micro_batch_size: int = 4
     """Number of samples per data-parallel rank"""
-    lr_warmup_steps: Optional[int] = 100
+    lr_warmup_steps: Optional[int] = None
     """Number of iterations with learning rate warmup active"""
     lr_warmup_fraction: Optional[float] = None
     """The fraction of an epoch to use for learning rate warmup"""

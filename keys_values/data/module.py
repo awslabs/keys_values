@@ -18,7 +18,7 @@ from torch.utils.data import random_split, Subset
 
 from keys_values.data.constants import (
     RawDatasetType,
-    CollateFnType,
+    Collator,
     NUM_TOKENS_NAME,
 )
 from litgpt.data import DataModule
@@ -139,7 +139,8 @@ class SequenceLengthFilteredDataModule(DataModule):
             ignore_index: The index to use for elements to be ignored in the
                 label.
             max_seq_length: Sequences longer than this number of tokens are
-                filtered out.
+                filtered out from training and validation dataset (but not from
+                the test dataset).
             seed: The random seed for creating the train/val splits and shuffling
                 the dataset.
             trainloader_longest_first: If set, :meth:`train_dataloader` returns
@@ -160,6 +161,7 @@ class SequenceLengthFilteredDataModule(DataModule):
         self.ignore_index = ignore_index
         self.max_seq_length = max_seq_length
         self.seed = seed
+        self._generator = torch.Generator().manual_seed(self.seed)
         self.head_model = None
         self._is_sequence_classification = None
         self.prompt_style = Default()
@@ -282,6 +284,11 @@ class SequenceLengthFilteredDataModule(DataModule):
         """
         raise NotImplementedError()
 
+    def _get_train_val_split_from_metadata(
+        self,
+    ) -> Optional[Dict[str, List[int]]]:
+        return None
+
     def setup(self, stage: str = "") -> None:
         """
         Note: Datasets `train_dataset`, `val_dataset`, `test_dataset` are
@@ -296,29 +303,40 @@ class SequenceLengthFilteredDataModule(DataModule):
         """
         data, test_data = self._get_dataset()
         # Partition the dataset into train and validation. If a training
-        # state is given, this is part of it
-        if self.training_state is None:
+        # state is given, this is part of it. Otherwise, the split can also
+        # be obtained from metadata.
+        train_ind = val_ind = None
+        if self.training_state is not None:
+            train_ind = self.training_state.train_data_index
+            val_ind = self.training_state.val_data_index
+            print(
+                f"Development set split loaded from training state: training ({len(train_ind)}) and validation ({len(val_ind)})"
+            )
+        else:
+            result = self._get_train_val_split_from_metadata()
+            if result is not None:
+                train_ind, val_ind = result["train"], result["val"]
+                print(
+                    f"Development set split loaded from metadata: training ({len(train_ind)}) and validation ({len(val_ind)})"
+                )
+        if train_ind is None:
             train_data, val_data = random_split(
                 data,
                 [1.0 - self.val_split_fraction, self.val_split_fraction],
-                generator=torch.Generator().manual_seed(self.seed),
+                generator=self._generator,
             )
             # Retain split indices
             train_ind = [int(x) for x in train_data.indices]
             val_ind = [int(x) for x in val_data.indices]
-            self.training_state = SequenceLengthFilteredDataTrainState()
-            self.training_state.initialize(train_ind, val_ind)
             print(
                 f"Split development set into training ({len(train_ind)}) and validation ({len(val_ind)})"
             )
         else:
-            train_ind = self.training_state.train_data_index
-            val_ind = self.training_state.val_data_index
             train_data = Subset(data, train_ind)
             val_data = Subset(data, val_ind)
-            print(
-                f"Development set split loaded from training state: training ({len(train_ind)}) and validation ({len(val_ind)})"
-            )
+        if self.training_state is None:
+            self.training_state = SequenceLengthFilteredDataTrainState()
+            self.training_state.initialize(train_ind, val_ind)
         train_data, val_data = list(train_data), list(val_data)
         self._sequence_lengths = {
             "train": [record[NUM_TOKENS_NAME] for record in train_data],
@@ -356,6 +374,7 @@ class SequenceLengthFilteredDataModule(DataModule):
             max_seq_length=self.max_seq_length,
         )
         if test_data is not None:
+            # Test set sequences are not restricted by `max_seq_length`
             test_kwargs = dict(
                 data=pad_dataset(
                     test_data,
@@ -370,7 +389,7 @@ class SequenceLengthFilteredDataModule(DataModule):
             test_kwargs = None
         self._create_datasets(train_kwargs, val_kwargs, test_kwargs)
 
-    def _get_collate_fn(self) -> CollateFnType:
+    def _get_collate_fn(self) -> Collator:
         """
         Returns:
             Collator function, to create batch from list of cases. Must filter

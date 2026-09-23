@@ -17,7 +17,7 @@ from typing import List, Optional, Dict, Any
 import yaml
 
 from keys_values.evaluation.tasks import EvaluationTasks
-from keys_values.finetune.longcontext_eval_ext import GENERATED_SAMPLES_FILENAME
+from keys_values.evaluation.longcontext_eval_ext import GENERATED_SAMPLES_FILENAME
 
 GENERATED_SAMPLES_ALL_FILENAME = "generated_samples_all.yaml"
 
@@ -27,17 +27,19 @@ SWEEP_TAR_FILENAME = "generated_samples_transfer_{dataset_size}.tgz"
 def main(
     out_dir: Path,
     model_type: str,
+    metric_name: str,
     tasks: Optional[List[str]] = None,
     multiple_tasks: bool = True,
+    eval_dir: str = "eval",
 ):
     # Collect results from all files across all tasks
     print(f"\nLoading generated samples files from {out_dir}")
     eval_tasks = EvaluationTasks(
-        out_dir,
-        model_type,
-        tasks,
+        out_dir=out_dir,
+        model_type=model_type,
+        tasks=tasks,
         collect_results=True,
-        eval_metrics_filename="eval/" + GENERATED_SAMPLES_FILENAME,
+        eval_metrics_filename=eval_dir + "/" + GENERATED_SAMPLES_FILENAME,
         multiple_tasks=multiple_tasks,
     )
     all_data: Dict[str, List[Dict[str, Any]]] = dict()
@@ -51,7 +53,7 @@ def main(
         num_total += len(records)
         records = sorted(
             records,
-            key=lambda x: (x["sub_exact_match"], x["idx"]),
+            key=lambda x: (x[metric_name], x["idx"]),
         )
         all_data[task_name] = records
 
@@ -67,20 +69,37 @@ def main(
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
+    metric_name = "match_first_word_or_phrase"  # New setup
+    # metric_name = "sub_exact_match"  # Old setup
+    eval_dir = "eval"
     mode = "collect"
     # mode = "sweep"
     dataset_size = "64k"
     # dataset_size = "128k"
     is_baseline = False
     # is_baseline = True
+    # extra_data = False
+    extra_data = True
     if is_baseline:
         base_path = base_path / "baseline"
-    datasets = [
-        f"helmet_nq_{dataset_size}",
-        f"helmet_trivia_qa_{dataset_size}",
-        f"helmet_hotpot_qa_{dataset_size}",
-        f"helmet_pop_qa_{dataset_size}",
-    ]
+    if not extra_data:
+        datasets = [
+            f"helmet_nq_{dataset_size}",
+            f"helmet_trivia_qa_{dataset_size}",
+            f"helmet_hotpot_qa_{dataset_size}",
+            f"helmet_pop_qa_{dataset_size}",
+        ]
+    else:
+        datasets = [
+            f"helmet_trec_coarse_{dataset_size}",
+            f"helmet_ms_macro_{dataset_size}",
+            f"helmet_nlu_{dataset_size}",
+            f"helmet_clinc150_{dataset_size}",
+            f"helmet_infinite_bench_qa_{dataset_size}",
+            f"helmet_infinite_bench_mc_{dataset_size}",
+            f"helmet_json_kv_{dataset_size}",
+            f"helmet_ruler_mk_uuid_{dataset_size}",
+        ]
     cases = [
         "lr_4gpu_cs2048_lr5",
         "slr_4gpu_cs2048_lr5",
@@ -98,7 +117,13 @@ if __name__ == "__main__":
         for dataset, case in product(datasets, cases):
             out_dir = base_path / dataset / case
             if out_dir.exists():
-                main(out_dir, model_type, multiple_tasks=not is_baseline)
+                main(
+                    out_dir=out_dir,
+                    model_type=model_type,
+                    metric_name=metric_name,
+                    multiple_tasks=not is_baseline,
+                    eval_dir=eval_dir,
+                )
             else:
                 print(f"\nResults for {dataset}/{case} do not exist")
     elif mode == "sweep":
