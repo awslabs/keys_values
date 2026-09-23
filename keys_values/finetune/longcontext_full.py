@@ -1222,6 +1222,7 @@ def wrap_gpt_model(
             cache_kwargs=cache_kwargs,
             train_cache_kwargs=train_cache_kwargs,
             backward_tmp_array_limit_gb=backward_tmp_array_limit_gb,
+            async_cpu_transfer=grad.async_cpu_transfer,
             layercp_pin_memory=grad.layercp_pin_memory,
             cachecp_pin_memory=grad.cachecp_pin_memory,
             checkpoint_name_manager=checkpoint_name_manager,
