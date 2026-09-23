@@ -33,6 +33,7 @@ from keys_values.data.constants import (
     OUTPUT_NAME,
     NUM_TOKENS_NAME,
 )
+from keys_values.constants import DEFAULT_PAD_ID
 
 
 class SequenceClassificationDataset(LongContextDataset):
@@ -142,13 +143,13 @@ class SequenceClassificationDataset(LongContextDataset):
         return result
 
 
-def get_seq_class_collate_fn(pad_id: int = 0):
+def get_seq_class_collate_fn(pad_id: int = DEFAULT_PAD_ID) -> Callable:
     return partial(_seq_class_collate_fn, pad_id=pad_id)
 
 
 def _seq_class_collate_fn(
     samples: List[Dict[str, Any]],
-    pad_id: int = 0,
+    pad_id: int = DEFAULT_PAD_ID,
 ) -> Dict[str, Union[Tensor, Dict[str, Any]]]:
     """
     Padding is done on the right, using `pad_id` for the :const:`INPUT_IDS_NAME`

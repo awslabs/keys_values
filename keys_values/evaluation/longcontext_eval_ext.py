@@ -46,6 +46,7 @@ from keys_values.data.constants import (
     LORA_WEIGHTS_FNAME,
     LORA_WEIGHTS_FNAME_OLD,
 )
+from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
 from keys_values.evaluation.evaluator import (
     SampleBasedMetricsEvaluator,
     TargetType,
@@ -640,7 +641,7 @@ def eval_for_setup(
         fabric=fabric,
         model_name=model_name,
     )
-    ignore_index = getattr(data, "ignore_index", -100)
+    ignore_index = getattr(data, "ignore_index", DEFAULT_IGNORE_INDEX)
 
     if use_sample_metric:
         assert isinstance(data, Helmet)
@@ -691,7 +692,7 @@ def eval_for_setup_internal(
     checkpoint_dir: Optional[Path],
     num_store_generated_batches: Optional[int],
     skip_eval: bool,
-    ignore_index: int = -100,
+    ignore_index: int,
 ) -> None:
     multiple_tasks = checkpoint_dir is None
     # Loop over test set batches
@@ -700,7 +701,7 @@ def eval_for_setup_internal(
     # Others skip any batch that is locked or already done.
     batch_transform = BatchTransformFactory.from_head_model(
         head_model=model_config.head_model_name,
-        pad_id=0,
+        pad_id=DEFAULT_PAD_ID,
         eos_id=tokenizer.eos_id,
         ignore_index=ignore_index,
     )

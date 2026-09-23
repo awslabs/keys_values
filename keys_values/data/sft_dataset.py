@@ -34,6 +34,7 @@ from keys_values.data.constants import (
     NUM_TOKENS_NAME,
     Collator,
 )
+from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
 from keys_values.data import INPUT_IDS_NAME, LABELS_NAME
 
 
@@ -63,7 +64,7 @@ class SFTDataset(LongContextDataset):
         prompt_style: Union[str, PromptStyle],
         max_seq_length: Optional[int] = None,
         mask_prompt: bool = True,
-        ignore_index: int = -100,
+        ignore_index: int = DEFAULT_IGNORE_INDEX,
         transform: Optional[Callable[[Dict[str, str]], Dict[str, str]]] = None,
         target_choice: Optional[List[int]] = None,
         seed: Optional[int] = None,
@@ -184,7 +185,10 @@ def sample_target_choice(
         ]
 
 
-def get_sft_collate_fn(pad_id: int = 0, ignore_index: int = -100) -> Collator:
+def get_sft_collate_fn(
+    pad_id: int = DEFAULT_PAD_ID,
+    ignore_index: int = DEFAULT_IGNORE_INDEX,
+) -> Collator:
     """Returns the collate function for supervised finetuning (needed in the DataLoader).
 
     The collate function gets a list of dicts with keys `input_ids` and `labels`.
@@ -198,8 +202,8 @@ def get_sft_collate_fn(pad_id: int = 0, ignore_index: int = -100) -> Collator:
 
 def _sft_collate_fn(
     samples: List[Dict[str, Any]],
-    pad_id: int = 0,
-    ignore_index: int = -100,
+    pad_id: int = DEFAULT_PAD_ID,
+    ignore_index: int = DEFAULT_IGNORE_INDEX,
 ) -> Dict[str, Any]:
     """
     Padding is done on the right, using `pad_id` for the :const:`INPUT_IDS_NAME`

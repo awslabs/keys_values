@@ -40,6 +40,7 @@ from keys_values.data.constants import (
     LIT_MODEL_FNAME,
     HEAD_MODEL_FNAME,
 )
+from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
 from keys_values.evaluation.longcontext_eval_ext import (
     load_configuration,
     cleanup_kvcache_kwargs,
@@ -504,12 +505,11 @@ def eval_for_setup(
         fabric=fabric,
         training_state=data_train_state,
     )
-    ignore_index = getattr(data, "ignore_index", -100)
     batch_transform = BatchTransformFactory.from_head_model(
         head_model=model_config.head_model_name,
-        pad_id=0,
+        pad_id=DEFAULT_PAD_ID,
         eos_id=tokenizer.eos_id,
-        ignore_index=ignore_index,
+        ignore_index=getattr(data, "ignore_index", DEFAULT_IGNORE_INDEX),
     )
 
     new_records: List[Tuple[int, float]] = []

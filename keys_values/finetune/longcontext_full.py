@@ -14,7 +14,6 @@
 # limitations under the License.
 import csv
 import dataclasses
-from dataclasses import dataclass
 import gc
 
 import os
@@ -54,7 +53,10 @@ from keys_values.attention.attention_utils import (
 from keys_values.config import Config as ConfigFull
 from keys_values.cpu_memory import FileNameManager
 from keys_values.data import Helmet, LongBenchV2, MyDataLoader, INPUT_IDS_NAME
-from keys_values.data.constants import TARGETS_STRINGS_NAME
+from keys_values.data.constants import (
+    TARGETS_STRINGS_NAME,
+)
+from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
 from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
 from keys_values.attention.flashinfer_wrapper import get_flashinfer_sdpa
 from keys_values.attention.flex_attention import FlexAttentionArgs, choose_q_lens
@@ -76,7 +78,7 @@ from keys_values.finetune.resume_state import (
     load_training_state,
     restore_dataset_from_training_state,
     restore_from_training_state,
-    TRAINSTATE_ITERATOR_FNAME,
+    TrainingStateVars,
 )
 from keys_values.finetune.utils import (
     print_but_limit_size,
@@ -180,7 +182,7 @@ def setup(
         interval=600,
         max_new_tokens=100,
         max_iters=100,
-        initial_validation=None,  # Default set below
+        initial_validation=False,
         final_validation=True,
         micro_batch_size=None,
         use_sample_metric=False,
@@ -423,13 +425,11 @@ def setup_internal(
             dataset_key="trec_coarse",
             max_length="128k",
         )
-    if data.metadata_dir is None:
-        if isinstance(data, LongBenchV2):
-            data.metadata_dir = str(out_dir / "data")
-            print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
-        elif isinstance(data, Helmet) and data.metadata_dir is None:
-            data.metadata_dir = str(out_dir / "data")
-            print(f"Setting Helmet.metadata_dir to {data.metadata_dir}")
+    if data.metadata_dir is None and (
+        isinstance(data, LongBenchV2) or isinstance(data, Helmet)
+    ):
+        data.metadata_dir = str(out_dir / "data")
+        print(f"Setting data.metadata_dir to {data.metadata_dir}")
     if not isinstance(data, Helmet) and eval.use_sample_metric:
         raise ValueError(
             "use_sample_metric=True currently supported only for Helmet datasets"
@@ -450,10 +450,6 @@ def setup_internal(
         raise ValueError(
             f"devices = {devices}, must be in [1, {torch.cuda.device_count()}]"
         )
-    if eval.initial_validation is None:
-        # Run initial evaluation in multi-device setup, but not with a
-        # single device
-        eval.initial_validation = devices > 1
     if optimizer is None:
         optimizer = OptimizerArgs(name="AdamW")
         print(
@@ -493,6 +489,7 @@ def setup_internal(
     # Legacy arguments
     if verbose is None:
         if kv_cache.verbose is not None:
+            print("--kv_cache.verbose is deprecated. Use --verbose instead")
             verbose = kv_cache.verbose
             kv_cache.verbose = None
         else:
@@ -500,12 +497,18 @@ def setup_internal(
     verbose = VerbosityLevels(verbose)
     if attention_forward_temp_size_gb is None:
         if kv_cache.attention_forward_temp_size_gb is not None:
+            print(
+                "--kv_cache.attention_forward_temp_size_gb is deprecated. Use --attention_forward_temp_size_gb instead"
+            )
             attention_forward_temp_size_gb = kv_cache.attention_forward_temp_size_gb
             kv_cache.attention_forward_temp_size_gb = None
         else:
             attention_forward_temp_size_gb = 4
     if attention_backward_temp_size_gb is None:
         if kv_cache.attention_backward_temp_size_gb is not None:
+            print(
+                "--kv_cache.attention_backward_temp_size_gb is deprecated. Use --attention_backward_temp_size_gb instead"
+            )
             attention_backward_temp_size_gb = kv_cache.attention_backward_temp_size_gb
             kv_cache.attention_backward_temp_size_gb = None
         else:
@@ -562,6 +565,7 @@ def setup_internal(
         record_gpu_memory_snapshots = RecordGPUMemory(
             max_entries=record_gpu_memory_snapshots,
         )
+
     fabric.launch(
         main,
         do_cpu_offload=do_cpu_offload,
@@ -596,47 +600,6 @@ def setup_internal(
         size_log_quantiles=size_log_quantiles,
         debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
     )
-
-
-def create_gpt_model(
-    config: Union[ConfigFull, ConfigLoRA],
-    **mha_kwargs,
-) -> Union[GPTFull, GPTLoRA]:
-    if not isinstance(config, ConfigLoRA):
-        gpt_model = GPTFull(config, **mha_kwargs)
-    else:
-        gpt_model = GPTLoRA(config, **mha_kwargs)
-        mark_only_lora_as_trainable(gpt_model, lora_kind=config.lora_kind)
-    gpt_model.apply(gpt_model._init_weights)
-    return gpt_model
-
-
-@dataclass(frozen=True)
-class TrainingStateVars:
-    manager: TrainingStateManager
-    files: List[Tuple[Path, ...]]
-    training_state_num: int
-    devices: int
-
-    def save_state(
-        self,
-        fabric: L.Fabric,
-        file_dir: Path,
-    ):
-        print_message(f"Storing training state to {file_dir}", fabric)
-        new_files = self.manager.save_training_state(fabric, file_dir)
-        if fabric.global_rank == 0 and self.devices > 1:
-            # Add files written by other ranks: They are removed by rank 0 only
-            new_files += tuple(
-                file_dir / TRAINSTATE_ITERATOR_FNAME.format(rank=rank)
-                for rank in range(1, self.devices)
-            )
-        self.files.append(new_files)
-        if len(self.files) > self.training_state_num and fabric.global_rank == 0:
-            # Remove oldest files
-            rem_files = self.files.pop(0)
-            for path in rem_files:
-                path.unlink()
 
 
 def main(
@@ -689,6 +652,7 @@ def main(
         resume_path = None
         data_train_state = None
 
+    # Tokenizer, data loaders, batch transform
     tokenizer = Tokenizer(checkpoint_dir)
     train_dataloader, val_dataloader = get_dataloaders(
         data=data,
@@ -699,13 +663,13 @@ def main(
         fabric=fabric,
         training_state=data_train_state,
     )
-    ignore_index = getattr(data, "ignore_index", -100)
     batch_transform = BatchTransformFactory.from_head_model(
         head_model=head_model_name,
         eos_id=tokenizer.eos_id,
-        pad_id=0,
-        ignore_index=ignore_index,
+        pad_id=DEFAULT_PAD_ID,
+        ignore_index=getattr(data, "ignore_index", DEFAULT_IGNORE_INDEX),
     )
+
     steps_per_epoch = len(train_dataloader)
     lr_max_steps = min(
         train.epochs * steps_per_epoch, (train.max_steps or float("inf"))
@@ -716,15 +680,18 @@ def main(
     )
     fabric.seed_everything(seed)
     if do_cpu_offload:
+        # CPU offloading: The optimizer state is kept on CPU
         cpu_offload_device = torch.device("cuda", fabric.local_rank)
         optim_device = torch.device("cpu")
     else:
         cpu_offload_device = None
         optim_device = fabric.device
+
     # Enable/disable fused operators
     set_fused_rope_enabled(sdpa.fused_rope)
     set_fused_rmsnorm_enabled(sdpa.fused_rmsnorm)
     set_fused_swiglu_enabled(sdpa.fused_swiglu)
+
     # Create file-based manager for virtual memory to be used for checkpoints
     if grad.checkpoint_temp_dir is not None:
         # Create `checkpoint_name_manager`, which creates the names for storage
@@ -742,6 +709,7 @@ def main(
     if fabric.global_rank == 0:
         os.makedirs(out_dir, exist_ok=True)
 
+    # Create the model
     with fabric.init_module(empty_init=(fabric.world_size > 1)):
         # Updates `kv_cache.cache_kwargs` from other args:
         kv_cache = kv_cache.update_cache_kwargs()
@@ -761,7 +729,8 @@ def main(
         dtype = fabric_precision_to_dtype(fabric._precision.precision)
         torch.set_default_dtype(dtype)
         if do_cpu_offload:
-            # We create the GPT model on the device, then copy. This is faster
+            # We create the GPT model on the device, then copy to CPU. This is
+            # faster than creating it on the CPU.
             with torch.device(cpu_offload_device):
                 gpt_model = create_gpt_model(config, **mha_kwargs)
                 head_model = HeadModelFactory.create(
@@ -818,65 +787,23 @@ def main(
             fabric,
         )
 
-    if do_cpu_offload:
-        # We use a optimizer on CPU for all parameters of `gpt_model`. If
-        # `head_model` has parameters, we use another optimizer on GPU for them.
-        gpt_param_prefixes = tuple(
-            BlockComponentName.h(layer_idx) for layer_idx in range(config.n_layer)
-        ) + (
-            BlockComponentName.wte(),
-            BlockComponentName.ln_f(),
-        )
-        if head_model.needs_logits():
-            gpt_param_prefixes += (BlockComponentName.lm_head(),)
-        cpu_optimizer = create_optimizer(
-            optim_args=optimizer,
-            gpt_model=gpt_model,
-            gpt_param_prefixes=gpt_param_prefixes,
-        )
-        cpu_scheduler = get_lr_scheduler(
-            cpu_optimizer,
-            train_args=train,
-            max_steps=lr_max_steps,
-        )
-        state = {
-            "model": model,
-            "cache_offloader": cache_offloader,
-            "cpu_optimizer": cpu_optimizer,
-            "cpu_scheduler": cpu_scheduler,
-            "iter_num": 0,
-        }
-        head_model_params = list(head_model.parameters())
-        if head_model_params:
-            state["gpu_optimizer"] = instantiate_torch_optimizer(
-                optimizer.name,
-                head_model_params,
-                **optimizer.optimizer_kwargs(),
-            )
-            state["gpu_scheduler"] = get_lr_scheduler(
-                state["gpu_optimizer"],
-                train_args=train,
-                max_steps=lr_max_steps,
-            )
-    else:
-        # Note: We do not wrap `model` or `optimizer` in `fabric`, since we do
-        # not use their abstraction (which creates endless trouble with DDP,
-        # such as autograd graphs not being deallocated)
-        optimizer = instantiate_torch_optimizer(
-            optimizer.name,
-            model.parameters(),
-            **optimizer.optimizer_kwargs(),
-        )
-        scheduler = get_lr_scheduler(
-            optimizer, train_args=train, max_steps=lr_max_steps
-        )
-        state = {
-            "model": model,
-            "cache_offloader": cache_offloader,
-            "optimizer": optimizer,
-            "scheduler": scheduler,
-            "iter_num": 0,
-        }
+    # Create optimizer and learning rate scheduler. For CPU offloading, there
+    # can be optimizers on CPU and GPU.
+    # `state` collects all objects affected by training
+    state = {
+        "model": model,
+        "cache_offloader": cache_offloader,
+        "iter_num": 0,
+    }
+    create_optimizer_and_scheduler(
+        state=state,
+        config=config,
+        head_model=head_model,
+        optimizer=optimizer,
+        train=train,
+        do_cpu_offload=do_cpu_offload,
+        lr_max_steps=lr_max_steps,
+    )
 
     if eval.use_sample_metric:
         assert isinstance(data, Helmet)
@@ -893,6 +820,8 @@ def main(
         print("Evaluation metric: eval_loss (same as training loss)")
         evaluator = None
 
+    # Initialize training state storage (alongside checkpoints; required for
+    # resuming from stopped runs)
     if training_state_num is not None:
         training_state = TrainingStateVars(
             manager=TrainingStateManager(
@@ -919,6 +848,8 @@ def main(
         }
     else:
         profile_grad_params = None
+
+    # Call `fit` which runs the training loop
     train_time = time.perf_counter()
     token_counts = fit(
         fabric=fabric,
@@ -1006,6 +937,19 @@ def main(
         save_hyperparameters(original_setup, save_dir)
         if hasattr(data, "prompt_style"):
             save_prompt_style(data.prompt_style, save_dir)
+
+
+def create_gpt_model(
+    config: Union[ConfigFull, ConfigLoRA],
+    **mha_kwargs,
+) -> Union[GPTFull, GPTLoRA]:
+    if not isinstance(config, ConfigLoRA):
+        gpt_model = GPTFull(config, **mha_kwargs)
+    else:
+        gpt_model = GPTLoRA(config, **mha_kwargs)
+        mark_only_lora_as_trainable(gpt_model, lora_kind=config.lora_kind)
+    gpt_model.apply(gpt_model._init_weights)
+    return gpt_model
 
 
 def get_mha_and_cache_kwargs(
@@ -1240,23 +1184,73 @@ def wrap_gpt_model(
     return model, cache_offloader
 
 
-def create_baseline_model(
-    gpt_model: Union[GPTFull, GPTLoRA],
+def create_optimizer_and_scheduler(
+    state: Dict[str, Any],
     config: Union[ConfigFull, ConfigLoRA],
-    head_model_name: str,
-    data: DataModule,
-    head_model_kwargs: Dict[str, Any],
-) -> NaiveGPTAndHeadModel:
-    head_model = HeadModelFactory.create(
-        name=head_model_name,
-        config=config,
-        data=data,
-        **head_model_kwargs,
-    )
-    return NaiveGPTAndHeadModel(
-        gpt_model=gpt_model,
-        head_model=head_model,
-    )
+    head_model: HeadModel,
+    optimizer: OptimizerArgs,
+    train: TrainArgs,
+    do_cpu_offload: bool,
+    lr_max_steps: int,
+):
+    model = state["model"]
+    if do_cpu_offload:
+        # We use a optimizer on CPU for all parameters of `gpt_model`. If
+        # `head_model` has parameters, we use another optimizer on GPU for them.
+        gpt_param_prefixes = tuple(
+            BlockComponentName.h(layer_idx) for layer_idx in range(config.n_layer)
+        ) + (
+            BlockComponentName.wte(),
+            BlockComponentName.ln_f(),
+        )
+        if head_model.needs_logits():
+            gpt_param_prefixes += (BlockComponentName.lm_head(),)
+        cpu_optimizer = create_optimizer(
+            optim_args=optimizer,
+            gpt_model=model.gpt_model,
+            gpt_param_prefixes=gpt_param_prefixes,
+        )
+        cpu_scheduler = get_lr_scheduler(
+            cpu_optimizer,
+            train_args=train,
+            max_steps=lr_max_steps,
+        )
+        state.update(
+            {
+                "cpu_optimizer": cpu_optimizer,
+                "cpu_scheduler": cpu_scheduler,
+            }
+        )
+        head_model_params = list(head_model.parameters())
+        if head_model_params:
+            state["gpu_optimizer"] = instantiate_torch_optimizer(
+                optimizer.name,
+                head_model_params,
+                **optimizer.optimizer_kwargs(),
+            )
+            state["gpu_scheduler"] = get_lr_scheduler(
+                state["gpu_optimizer"],
+                train_args=train,
+                max_steps=lr_max_steps,
+            )
+    else:
+        # Note: We do not wrap `model` or `optimizer` in `fabric`, since we do
+        # not use their abstraction (which creates endless trouble with DDP,
+        # such as autograd graphs not being deallocated)
+        optimizer = instantiate_torch_optimizer(
+            optimizer.name,
+            model.parameters(),
+            **optimizer.optimizer_kwargs(),
+        )
+        scheduler = get_lr_scheduler(
+            optimizer, train_args=train, max_steps=lr_max_steps
+        )
+        state.update(
+            {
+                "optimizer": optimizer,
+                "scheduler": scheduler,
+            }
+        )
 
 
 def fit(
@@ -1309,7 +1303,7 @@ def fit(
 
     try:
 
-        # Initial evaluation
+        # Part of metrics
         token_counts = {
             "raw_tokens": torch.tensor(0, device=fabric.device, dtype=torch.long),
             "raw_tokens_plus_prompt_template": torch.tensor(
@@ -1322,79 +1316,23 @@ def fit(
 
         val_loss = "n/a"
         if resume_path is None:
-            if record_gpu_memory_kind == 3:
-                path = out_dir / "gpu_memory_snapshots" / "snapshot_validation.pickle"
-                record_gpu_memory_snapshots = RecordGPUMemory(
-                    path=str(path),
-                    max_entries=record_gpu_memory_snapshots.max_entries,
-                    verbose=VerbosityLevels.MORE,
-                )
-                record_gpu_memory_snapshots.start_recording()
-
-            if do_cpu_offloading:
-                valid_model = model.copy_model_for_evaluation()
-            else:
-                valid_model = model
-            if record_gpu_memory_kind == 3:
-                valid_model.set_record_gpu_memory(
-                    record_gpu_memory_snapshots,
-                    record_gpu_memory_kind,
-                )
-            if eval.initial_validation:
-                print_with_rank_and_timestamp(
-                    "Starting validation evaluations.",
-                    fabric.global_rank,
-                )
-                print_message(
-                    f"\nInitial validation evaluation  (batch_size = {val_dataloader.batch_size}) ...",
-                    fabric,
-                )
-                if generate_with_eval:
-                    generate_example_kwargs = dict(
-                        tokenizer=tokenizer,
-                        data=data,
-                    )
-                else:
-                    generate_example_kwargs = None
-                metrics = validate_and_all_reduce(
-                    model=valid_model,
-                    evaluator=evaluator,
-                    val_dataloader=val_dataloader,
-                    eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
-                    batch_transform=batch_transform,
-                    generate_example_kwargs=generate_example_kwargs,
-                    fabric=fabric,
-                )
-                val_loss = metrics[eval_metric_name]
-                print_message(
-                    f"Initial evaluation          | "
-                    + string_for_val_metrics(metrics, evaluator)
-                    + f" | val_time: {metrics['val_time']:.3f} s",
-                    fabric,
-                )
-            else:
-                print_message("Verifying settings ...", fabric)
-                with torch.no_grad():
-                    if evaluator is None:
-                        validate(
-                            valid_model,
-                            val_dataloader,
-                            dataclasses.replace(eval, max_iters=1),
-                            batch_transform,
-                        )
-                    else:
-                        validate_sample_metric(
-                            valid_model,
-                            evaluator,
-                            val_dataloader,
-                            dataclasses.replace(eval, max_iters=1),
-                            batch_transform,
-                        )
-            flush_io_streams()
-            if do_cpu_offloading:
-                deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
-                del valid_model
-
+            # Initial evaluation (optional). For resume, this is skipped
+            val_loss = initial_evaluation(
+                fabric=fabric,
+                out_dir=out_dir,
+                model=model,
+                val_dataloader=val_dataloader,
+                eval=eval,
+                batch_transform=batch_transform,
+                data=data,
+                evaluator=evaluator,
+                tokenizer=tokenizer,
+                do_cpu_offloading=do_cpu_offloading,
+                eval_metric_name=eval_metric_name,
+                generate_with_eval=generate_with_eval,
+                record_gpu_memory_kind=record_gpu_memory_kind,
+                record_gpu_memory_snapshots=record_gpu_memory_snapshots,
+            )
             if record_gpu_memory_kind == 3:
                 if record_gpu_memory_snapshots.is_recording:
                     record_gpu_memory_snapshots.store_current_snapshot()
@@ -1405,7 +1343,9 @@ def fit(
 
         # Prepare start of training loop
         max_steps = train.max_steps or float("inf")
+        # Extend `train_dataloader` to multiple epochs
         train_iterator = CycleIterator(train_dataloader)
+        throughput = ThroughputMonitor(fabric, window_size=50)
         if resume_path is not None:
             # Restore from training state
             print_message(
@@ -1426,97 +1366,16 @@ def fit(
             )
         if training_state is not None:
             training_state.manager.init_train_iterator(train_iterator)
-        throughput = ThroughputMonitor(fabric, window_size=50)
+
         if size_log_quantiles is not None and fabric.global_rank == 0:
             print_message(
                 f"Logging size distributions for weights and gradients: quantiles = {size_log_quantiles}",
                 fabric,
             )
-            config = model.gpt_model.config
-            mapper = None
-            store_weights_rules = None
-            store_grads_rules = None
-            if not isinstance(config, ConfigLoRA):
-                # Rules to split qkv variables into q, k, v. Only for full
-                # fine-tuning
-                hs = config.head_size
-                query_size = config.n_head * hs
-                key_size = config.n_query_groups * hs
-                rules = [
-                    SizeLogMapperRule(
-                        postfix="qkv.weight",
-                        sizes_names=(
-                            (query_size, "q.weight"),
-                            (key_size, "k.weight"),
-                            (key_size, "v.weight"),
-                        ),
-                        dim=0,
-                    ),
-                    SizeLogMapperRule(
-                        postfix="qkv.bias",
-                        sizes_names=(
-                            (query_size, "q.bias"),
-                            (key_size, "k.bias"),
-                            (key_size, "v.bias"),
-                        ),
-                        dim=0,
-                    ),
-                ]
-                mapper = SizeLogMapper(rules=rules)
-                # We also store weights and gradients for q.bias, k.bias,
-                # reshaping these vectors into matrices
-                do_store_weights = False
-                if do_store_weights:
-                    store_weights_rules = [
-                        StoreWeightsRule(
-                            match=get_match_for_store_rule("attn.k.bias"),
-                            name="attn_k_bias",
-                            shape=(config.n_query_groups, hs),
-                            num_layers=config.n_layer,
-                        ),
-                        StoreWeightsRule(
-                            match=get_match_for_store_rule("attn.q.bias"),
-                            name="attn_q_bias",
-                            shape=(config.n_head, hs),
-                            num_layers=config.n_layer,
-                        ),
-                    ]
-                    if config.n_embd % hs == 0:
-                        shape_norm1 = (config.n_embd // hs, hs)
-                    else:
-                        shape_norm1 = (1, config.n_embd)
-                    store_grads_rules = [
-                        StoreWeightsRule(
-                            match=get_match_for_store_rule("attn.v.bias"),
-                            name="attn_v_bias",
-                            shape=(config.n_query_groups, hs),
-                            num_layers=config.n_layer,
-                        ),
-                        StoreWeightsRule(
-                            match=get_match_for_store_rule("attn.v.weight"),
-                            name="attn_v_weight",
-                            shape=(key_size, config.n_embd),
-                            num_layers=config.n_layer,
-                        ),
-                        StoreWeightsRule(
-                            match=get_match_for_store_rule("norm_1.weight"),
-                            name="norm_1_weight",
-                            shape=shape_norm1,
-                            num_layers=config.n_layer,
-                        ),
-                        StoreWeightsRule(
-                            match=get_match_for_store_rule("attn.q.bias"),
-                            name="attn_q_bias",
-                            shape=(config.n_head, hs),
-                            num_layers=config.n_layer,
-                        ),
-                    ]
-            size_logs = SizeWeightsGradientsLog(
-                quantiles=size_log_quantiles,
-                path=out_dir,
-                mapper=mapper,
-                store_weights_rules=store_weights_rules,
-                store_grads_rules=store_grads_rules,
+            size_logs = setup_size_logging(
+                config=model.gpt_model.config,
+                out_dir=out_dir,
+                size_log_quantiles=size_log_quantiles,
             )
         else:
             size_logs = None
@@ -1532,6 +1391,7 @@ def fit(
         )
         total_t0 = time.perf_counter()
 
+        # Loop over training updates
         while state["iter_num"] < max_steps:
             state["iter_num"] += 1
             iter_t0 = time.perf_counter()
@@ -1551,44 +1411,14 @@ def fit(
                     fabric.all_reduce(avg_tokens_tensor, reduce_op="mean")
                     loss_weight = num_tokens_batch.item() / avg_tokens_tensor.item()
 
-            if record_gpu_memory_snapshots is not None:
-                run_no = state["iter_num"] - 1
-                if record_gpu_memory_period >= 1:
-                    run_no = run_no % record_gpu_memory_period
-                if record_gpu_memory_kind == 0:
-                    name = "snapshot.pickle"
-                    path = (
-                        out_dir / "gpu_memory_snapshots" / f"iteration{run_no}" / name
-                    )
-                    verbose = VerbosityLevels.MORE
-                elif record_gpu_memory_kind == 1:
-                    name = "snapshot_initial.pickle"
-                    path = (
-                        out_dir / "gpu_memory_snapshots" / f"iteration{run_no}" / name
-                    )
-                    verbose = VerbosityLevels.NONE
-                else:
-                    path = out_dir / "gpu_memory_snapshots" / "snapshot_forward.pickle"
-                    verbose = VerbosityLevels.MORE
-                record_gpu_memory_snapshots = RecordGPUMemory(
-                    path=str(path),
-                    max_entries=record_gpu_memory_snapshots.max_entries,
-                    verbose=verbose,
-                )
-                record_gpu_memory_snapshots.start_recording()
+            gpu_memory_snapshot_start_recording(
+                record_gpu_memory_snapshots=record_gpu_memory_snapshots,
+                record_gpu_memory_kind=record_gpu_memory_kind,
+                record_gpu_memory_period=record_gpu_memory_period,
+                out_dir=out_dir,
+                run_no=state["iter_num"] - 1,
+            )
 
-            # DEBUG
-            # Compute loss and gradient naively for the current batch, to compare
-            # with what is done below. Works only for short enough sequences
-            # assert devices == 1, "DEBUG only for single device"
-            # debug_gradient, debug_loss = debug_compute_loss_and_gradient(
-            #    gpt_model=model.gpt_model,
-            #    batch=batch,
-            #    device=fabric.device,
-            #    average_loss_per_batch=train.average_loss_per_batch,
-            # )
-            # model.gpt_model.reset()
-            # END DEBUG
             print_with_rank_and_timestamp(
                 "Starting gradient computation.",
                 fabric.global_rank,
@@ -1625,39 +1455,10 @@ def fit(
             flush_io_streams()
             if size_logs is not None:
                 size_logs(model.gpt_model)
-            if profile_grad_params is not None:
-                records = model.profile_records()
-                skip_names = ("path", "profile_grad_times")
-                fixed_col_names = [
-                    name
-                    for name in profile_grad_params.keys()
-                    if name not in skip_names
-                ]
-                prefix = [profile_grad_params[name] for name in fixed_col_names]
-                var_col_names = list(records[0].keys())
-                with profile_grad_params["path"].open("w") as fp:
-                    writer = csv.writer(fp, delimiter=",")
-                    writer.writerow(fixed_col_names + var_col_names)
-                    for record in records:
-                        row = prefix + [record[name] for name in var_col_names]
-                        writer.writerow(row)
-                num_steps = profile_grad_params["profile_grad_times"]
-                if len(records) >= num_steps:
-                    print(f"Done {num_steps} updates. Stopping.")
-                    exit(0)
-
-            # DEBUG
-            # Compare loss and gradient to naively computed ones
-            # real_loss = loss.item()
-            # real_gradient = debug_get_gradient(model.gpt_model)
-            # print(f"real_loss = {real_loss}, debug_loss = {debug_loss}")
-            # for name, real_grad in real_gradient.items():
-            #    print(name)
-            #    debug_grad = debug_gradient.get(name)
-            #    if debug_grad is None:
-            #        raise IndexError(f"{name} is in real_gradient, but not in debug_gradient")
-            #    torch.testing.assert_close(real_grad, debug_grad)
-            # END DEBUG
+            update_profile_grad_params(
+                profile_grad_params=profile_grad_params,
+                model=model,
+            )
 
             if record_gpu_memory_snapshots is not None and record_gpu_memory_kind != 2:
                 # Stop recording and store snapshot. For kind 0, this is the single
@@ -1666,10 +1467,13 @@ def fit(
                 record_gpu_memory_snapshots.stop_recording()
 
             if train.max_grad_norm is not None:
+                # Clip the gradient norm
                 torch.nn.utils.clip_grad_norm_(
                     model.parameters(),
                     train.max_grad_norm,
                 )
+            # Update optimizer and learning rate scheduler. Clear gradients as
+            # well
             if cpu_optimizer is not None:
                 cpu_optimizer.step()
                 cpu_optimizer.zero_grad(set_to_none=True)
@@ -1697,94 +1501,45 @@ def fit(
             )
             num_tokens = batch[INPUT_IDS_NAME].numel()
             token_counts["raw_tokens_plus_prompt_template_and_padding"] += num_tokens
-
             total_lengths += num_tokens
-            if state["iter_num"] % train.log_interval == 0:
-                loss = running_loss.compute().item()
-                t1 = time.perf_counter()
-                throughput.update(
-                    time=t1 - total_t0,
-                    batches=state["iter_num"],
-                    samples=state["iter_num"] * train.micro_batch_size,
-                    lengths=total_lengths,
-                )
-                throughput.compute_and_log(step=state["iter_num"])
-                if gpu_scheduler is not None:
-                    learning_rate = gpu_scheduler.get_last_lr()[0]
-                else:
-                    assert cpu_scheduler is not None
-                    learning_rate = cpu_scheduler.get_last_lr()[0]
-                metrics = {
-                    "loss": loss,
-                    "iter": state["iter_num"],
-                    "epoch": train_iterator.epoch,
-                    "iter_time": t1 - iter_t0,
-                    "tokens": token_counts["raw_tokens_plus_prompt_template"],
-                    "total_tokens": token_counts["raw_tokens_plus_prompt_template"]
-                    * fabric.world_size,
-                    "learning_rate": learning_rate,
-                    **log_memory_all_devices(),
-                }
-                if not isinstance(val_loss, str):
-                    val_loss = f"{val_loss:.3f}"
-                print_message(
-                    f"\nEpoch {metrics['epoch']} | iter {metrics['iter']:3d} |"
-                    f" loss train: {metrics['loss']:.3f},"
-                    f" {eval_metric_name} valid: {val_loss} |"
-                    f" iter time: {metrics['iter_time']:.3f} s |"
-                    f" seq_len: {batch[INPUT_IDS_NAME].shape[-1]}",
-                    fabric,
-                )
-                fabric.log_dict(metrics, step=state["iter_num"])
 
-            if state["iter_num"] % eval.interval == 0:
-                print_with_rank_and_timestamp(
-                    "Starting validation evaluations.",
-                    fabric.global_rank,
-                )
-                print_message(
-                    f"\nPeriodic validation evaluation  (batch_size = {val_dataloader.batch_size}) ...",
-                    fabric,
-                )
-                if generate_with_eval:
-                    generate_example_kwargs = dict(
-                        tokenizer=tokenizer,
-                        data=data,
-                    )
-                else:
-                    generate_example_kwargs = None
-                if do_cpu_offloading:
-                    valid_model = model.copy_model_for_evaluation()
-                else:
-                    valid_model = model
-                metrics = validate_and_all_reduce(
-                    model=valid_model,
-                    evaluator=evaluator,
-                    val_dataloader=val_dataloader,
-                    eval=eval,
-                    batch_transform=batch_transform,
-                    generate_example_kwargs=generate_example_kwargs,
-                    log_metrics=False,
-                    fabric=fabric,
-                )
-                val_loss = metrics[eval_metric_name]
-                fabric.log_dict(metrics, step=state["iter_num"])
-                print_with_rank_and_timestamp(
-                    "Finished validation evaluations.",
-                    fabric.global_rank,
-                )
-                print_message(
-                    f"Epoch {train_iterator.epoch} | iter {state['iter_num']:3d}          | "
-                    + string_for_val_metrics(metrics, evaluator)
-                    + f" | val_time: {metrics['val_time']:.3f} s",
-                    fabric,
-                )
-                flush_io_streams()
-                if do_cpu_offloading:
-                    deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
-                    del valid_model
-                fabric.barrier()
+            # Periodic publishing of metrics
+            periodic_log_metrics(
+                fabric=fabric,
+                iter_num=state["iter_num"],
+                train=train,
+                cpu_scheduler=cpu_scheduler,
+                gpu_scheduler=gpu_scheduler,
+                running_loss=running_loss,
+                throughput=throughput,
+                train_iterator=train_iterator,
+                total_t0=total_t0,
+                iter_t0=iter_t0,
+                val_loss=val_loss,
+                total_lengths=total_lengths,
+                token_counts=token_counts,
+                eval_metric_name=eval_metric_name,
+                batch=batch,
+            )
 
+            # Periodic evaluation on validation set
+            periodic_evaluation(
+                fabric=fabric,
+                iter_num=state["iter_num"],
+                model=model,
+                val_dataloader=val_dataloader,
+                train_iterator=train_iterator,
+                eval=eval,
+                batch_transform=batch_transform,
+                data=data,
+                evaluator=evaluator,
+                tokenizer=tokenizer,
+                do_cpu_offloading=do_cpu_offloading,
+                eval_metric_name=eval_metric_name,
+                generate_with_eval=generate_with_eval,
+            )
+
+            # Periodic storage of checkpoints
             save_checkpoint_regular(
                 fabric=fabric,
                 model=model,
@@ -1808,6 +1563,366 @@ def fit(
         key: fabric.all_reduce(token_counts[key], reduce_op="sum").item()
         for key in token_counts.keys()
     }
+
+
+def initial_evaluation(
+    fabric: L.Fabric,
+    out_dir: Path,
+    model: LongContextInferenceModel,
+    val_dataloader: MyDataLoader,
+    eval: EvalArgs,
+    batch_transform: BatchTransform,
+    data: DataModule,
+    evaluator: Optional[SampleBasedMetricsEvaluator],
+    tokenizer: Tokenizer,
+    do_cpu_offloading: bool,
+    eval_metric_name: str,
+    generate_with_eval: bool,
+    record_gpu_memory_kind: int,
+    record_gpu_memory_snapshots: Optional[RecordGPUMemory],
+) -> Union[str, float]:
+    val_loss = "n/a"
+    if record_gpu_memory_kind == 3:
+        path = out_dir / "gpu_memory_snapshots" / "snapshot_validation.pickle"
+        record_gpu_memory_snapshots = RecordGPUMemory(
+            path=str(path),
+            max_entries=record_gpu_memory_snapshots.max_entries,
+            verbose=VerbosityLevels.MORE,
+        )
+        record_gpu_memory_snapshots.start_recording()
+
+    if do_cpu_offloading:
+        valid_model = model.copy_model_for_evaluation()
+    else:
+        valid_model = model
+    if record_gpu_memory_kind == 3:
+        valid_model.set_record_gpu_memory(
+            record_gpu_memory_snapshots,
+            record_gpu_memory_kind,
+        )
+    if eval.initial_validation:
+        print_with_rank_and_timestamp(
+            "Starting validation evaluations.",
+            fabric.global_rank,
+        )
+        print_message(
+            f"\nInitial validation evaluation  (batch_size = {val_dataloader.batch_size}) ...",
+            fabric,
+        )
+        if generate_with_eval:
+            generate_example_kwargs = dict(
+                tokenizer=tokenizer,
+                data=data,
+            )
+        else:
+            generate_example_kwargs = None
+        metrics = validate_and_all_reduce(
+            model=valid_model,
+            evaluator=evaluator,
+            val_dataloader=val_dataloader,
+            eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
+            batch_transform=batch_transform,
+            generate_example_kwargs=generate_example_kwargs,
+            fabric=fabric,
+        )
+        val_loss = metrics[eval_metric_name]
+        print_message(
+            f"Initial evaluation          | "
+            + string_for_val_metrics(metrics, evaluator)
+            + f" | val_time: {metrics['val_time']:.3f} s",
+            fabric,
+        )
+    else:
+        print_message("Verifying settings ...", fabric)
+        with torch.no_grad():
+            if evaluator is None:
+                validate(
+                    valid_model,
+                    val_dataloader,
+                    dataclasses.replace(eval, max_iters=1),
+                    batch_transform,
+                )
+            else:
+                validate_sample_metric(
+                    valid_model,
+                    evaluator,
+                    val_dataloader,
+                    dataclasses.replace(eval, max_iters=1),
+                    batch_transform,
+                )
+    flush_io_streams()
+    if do_cpu_offloading:
+        deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
+        del valid_model
+
+    return val_loss
+
+
+def setup_size_logging(
+    config: Union[ConfigFull, ConfigLoRA],
+    out_dir: Path,
+    size_log_quantiles: List[float],
+) -> SizeWeightsGradientsLog:
+    mapper = None
+    store_weights_rules = None
+    store_grads_rules = None
+    if not isinstance(config, ConfigLoRA):
+        # Rules to split qkv variables into q, k, v. Only for full
+        # fine-tuning
+        hs = config.head_size
+        query_size = config.n_head * hs
+        key_size = config.n_query_groups * hs
+        rules = [
+            SizeLogMapperRule(
+                postfix="qkv.weight",
+                sizes_names=(
+                    (query_size, "q.weight"),
+                    (key_size, "k.weight"),
+                    (key_size, "v.weight"),
+                ),
+                dim=0,
+            ),
+            SizeLogMapperRule(
+                postfix="qkv.bias",
+                sizes_names=(
+                    (query_size, "q.bias"),
+                    (key_size, "k.bias"),
+                    (key_size, "v.bias"),
+                ),
+                dim=0,
+            ),
+        ]
+        mapper = SizeLogMapper(rules=rules)
+        # We also store weights and gradients for q.bias, k.bias,
+        # reshaping these vectors into matrices
+        do_store_weights = False
+        if do_store_weights:
+            store_weights_rules = [
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("attn.k.bias"),
+                    name="attn_k_bias",
+                    shape=(config.n_query_groups, hs),
+                    num_layers=config.n_layer,
+                ),
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("attn.q.bias"),
+                    name="attn_q_bias",
+                    shape=(config.n_head, hs),
+                    num_layers=config.n_layer,
+                ),
+            ]
+            if config.n_embd % hs == 0:
+                shape_norm1 = (config.n_embd // hs, hs)
+            else:
+                shape_norm1 = (1, config.n_embd)
+            store_grads_rules = [
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("attn.v.bias"),
+                    name="attn_v_bias",
+                    shape=(config.n_query_groups, hs),
+                    num_layers=config.n_layer,
+                ),
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("attn.v.weight"),
+                    name="attn_v_weight",
+                    shape=(key_size, config.n_embd),
+                    num_layers=config.n_layer,
+                ),
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("norm_1.weight"),
+                    name="norm_1_weight",
+                    shape=shape_norm1,
+                    num_layers=config.n_layer,
+                ),
+                StoreWeightsRule(
+                    match=get_match_for_store_rule("attn.q.bias"),
+                    name="attn_q_bias",
+                    shape=(config.n_head, hs),
+                    num_layers=config.n_layer,
+                ),
+            ]
+
+    return SizeWeightsGradientsLog(
+        quantiles=size_log_quantiles,
+        path=out_dir,
+        mapper=mapper,
+        store_weights_rules=store_weights_rules,
+        store_grads_rules=store_grads_rules,
+    )
+
+
+def gpu_memory_snapshot_start_recording(
+    record_gpu_memory_snapshots: Optional[RecordGPUMemory],
+    record_gpu_memory_kind: int,
+    record_gpu_memory_period: int,
+    out_dir: Path,
+    run_no: int,
+):
+    if record_gpu_memory_snapshots is not None:
+        if record_gpu_memory_period >= 1:
+            run_no = run_no % record_gpu_memory_period
+        if record_gpu_memory_kind == 0:
+            name = "snapshot.pickle"
+            path = out_dir / "gpu_memory_snapshots" / f"iteration{run_no}" / name
+            verbose = VerbosityLevels.MORE
+        elif record_gpu_memory_kind == 1:
+            name = "snapshot_initial.pickle"
+            path = out_dir / "gpu_memory_snapshots" / f"iteration{run_no}" / name
+            verbose = VerbosityLevels.NONE
+        else:
+            path = out_dir / "gpu_memory_snapshots" / "snapshot_forward.pickle"
+            verbose = VerbosityLevels.MORE
+        record_gpu_memory_snapshots = RecordGPUMemory(
+            path=str(path),
+            max_entries=record_gpu_memory_snapshots.max_entries,
+            verbose=verbose,
+        )
+        record_gpu_memory_snapshots.start_recording()
+
+
+def update_profile_grad_params(
+    profile_grad_params: Optional[Dict[str, Any]],
+    model: LongContextGradientModel,
+):
+    if profile_grad_params is not None:
+        records = model.profile_records()
+        skip_names = ("path", "profile_grad_times")
+        fixed_col_names = [
+            name for name in profile_grad_params.keys() if name not in skip_names
+        ]
+        prefix = [profile_grad_params[name] for name in fixed_col_names]
+        var_col_names = list(records[0].keys())
+        with profile_grad_params["path"].open("w") as fp:
+            writer = csv.writer(fp, delimiter=",")
+            writer.writerow(fixed_col_names + var_col_names)
+            for record in records:
+                row = prefix + [record[name] for name in var_col_names]
+                writer.writerow(row)
+        num_steps = profile_grad_params["profile_grad_times"]
+        if len(records) >= num_steps:
+            print(f"Done {num_steps} updates. Stopping.")
+            exit(0)
+
+
+def periodic_log_metrics(
+    fabric: L.Fabric,
+    iter_num: int,
+    train: TrainArgs,
+    cpu_scheduler: Optional[Any],
+    gpu_scheduler: Optional[Any],
+    running_loss: RunningMean,
+    throughput: ThroughputMonitor,
+    train_iterator: CycleIterator,
+    total_t0: float,
+    iter_t0: float,
+    val_loss: Union[str, float],
+    total_lengths: int,
+    token_counts: Dict[str, Any],
+    eval_metric_name: str,
+    batch: Dict[str, Any],
+):
+    if iter_num % train.log_interval == 0:
+        loss = running_loss.compute().item()
+        t1 = time.perf_counter()
+        throughput.update(
+            time=t1 - total_t0,
+            batches=iter_num,
+            samples=iter_num * train.micro_batch_size,
+            lengths=total_lengths,
+        )
+        throughput.compute_and_log(step=iter_num)
+        if gpu_scheduler is not None:
+            learning_rate = gpu_scheduler.get_last_lr()[0]
+        else:
+            assert cpu_scheduler is not None
+            learning_rate = cpu_scheduler.get_last_lr()[0]
+        metrics = {
+            "loss": loss,
+            "iter": iter_num,
+            "epoch": train_iterator.epoch,
+            "iter_time": t1 - iter_t0,
+            "tokens": token_counts["raw_tokens_plus_prompt_template"],
+            "total_tokens": token_counts["raw_tokens_plus_prompt_template"]
+            * fabric.world_size,
+            "learning_rate": learning_rate,
+            **log_memory_all_devices(),
+        }
+        if not isinstance(val_loss, str):
+            val_loss = f"{val_loss:.3f}"
+        print_message(
+            f"\nEpoch {metrics['epoch']} | iter {metrics['iter']:3d} |"
+            f" loss train: {metrics['loss']:.3f},"
+            f" {eval_metric_name} valid: {val_loss} |"
+            f" iter time: {metrics['iter_time']:.3f} s |"
+            f" seq_len: {batch[INPUT_IDS_NAME].shape[-1]}",
+            fabric,
+        )
+        fabric.log_dict(metrics, step=iter_num)
+
+
+# TODO: Common code with `initial_evaluation`. Unify
+def periodic_evaluation(
+    fabric: L.Fabric,
+    iter_num: int,
+    model: LongContextInferenceModel,
+    val_dataloader: MyDataLoader,
+    train_iterator: CycleIterator,
+    eval: EvalArgs,
+    batch_transform: BatchTransform,
+    data: DataModule,
+    evaluator: Optional[SampleBasedMetricsEvaluator],
+    tokenizer: Tokenizer,
+    do_cpu_offloading: bool,
+    eval_metric_name: str,
+    generate_with_eval: bool,
+):
+    if iter_num % eval.interval == 0:
+        print_with_rank_and_timestamp(
+            "Starting validation evaluations.",
+            fabric.global_rank,
+        )
+        print_message(
+            f"\nPeriodic validation evaluation  (batch_size = {val_dataloader.batch_size}) ...",
+            fabric,
+        )
+        if generate_with_eval:
+            generate_example_kwargs = dict(
+                tokenizer=tokenizer,
+                data=data,
+            )
+        else:
+            generate_example_kwargs = None
+        if do_cpu_offloading:
+            valid_model = model.copy_model_for_evaluation()
+        else:
+            valid_model = model
+        metrics = validate_and_all_reduce(
+            model=valid_model,
+            evaluator=evaluator,
+            val_dataloader=val_dataloader,
+            eval=eval,
+            batch_transform=batch_transform,
+            generate_example_kwargs=generate_example_kwargs,
+            log_metrics=False,
+            fabric=fabric,
+        )
+        val_loss = metrics[eval_metric_name]
+        fabric.log_dict(metrics, step=iter_num)
+        print_with_rank_and_timestamp(
+            "Finished validation evaluations.",
+            fabric.global_rank,
+        )
+        print_message(
+            f"Epoch {train_iterator.epoch} | iter {iter_num:3d}          | "
+            + string_for_val_metrics(metrics, evaluator)
+            + f" | val_time: {metrics['val_time']:.3f} s",
+            fabric,
+        )
+        flush_io_streams()
+        if do_cpu_offloading:
+            deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
+            del valid_model
+        fabric.barrier()
 
 
 def print_flex_attn_report(
@@ -2058,7 +2173,7 @@ def debug_loss_function(
     logits: torch.Tensor,
     targets: torch.Tensor,
     average_loss_per_batch: bool,
-    ignore_index: int = -100,
+    ignore_index: int = DEFAULT_IGNORE_INDEX,
 ) -> torch.Tensor:
     assert logits.ndim == 3 and targets.ndim == 2
     assert logits.shape[:2] == targets.shape
@@ -2094,7 +2209,7 @@ def debug_compute_loss_and_gradient(
     batch: Dict[str, Any],
     device: torch.device,
     average_loss_per_batch: bool,
-    ignore_index: int = -100,
+    ignore_index: int = DEFAULT_IGNORE_INDEX,
 ) -> Tuple[Dict[str, torch.Tensor], float]:
     input_ids = batch[INPUT_IDS_NAME].to(device=device)
     targets = batch["targets"].to(device=device)

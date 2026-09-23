@@ -26,6 +26,7 @@ from litgpt.prompts import Default
 from litgpt.tokenizer import Tokenizer
 
 from keys_values.data.base import pad_dataset
+from keys_values.constants import DEFAULT_IGNORE_INDEX
 from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.iterators import SimilarSequenceLengthSampler
 from keys_values.data.evaluation import (
@@ -124,7 +125,7 @@ class SequenceLengthFilteredDataModule(DataModule):
         self,
         mask_prompt: bool = True,
         val_split_fraction: float = 0.1,
-        ignore_index: int = -100,
+        ignore_index: int = DEFAULT_IGNORE_INDEX,
         max_seq_length: Optional[int] = None,
         seed: int = 42,
         trainloader_longest_first: bool = False,

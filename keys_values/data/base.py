@@ -18,7 +18,11 @@ from torch.utils.data import Dataset
 
 from litgpt import Tokenizer, PromptStyle
 
-from keys_values.data.constants import POSITION_NAME, INPUT_IDS_NAME
+from keys_values.data.constants import (
+    POSITION_NAME,
+    INPUT_IDS_NAME,
+)
+from keys_values.constants import DEFAULT_PAD_ID
 
 
 class LongContextDataset(Dataset):
@@ -77,7 +81,7 @@ def pad_dataset(
 
 def common_collate_fn(
     samples: List[Dict[str, Any]],
-    pad_id: int = 0,
+    pad_id: int = DEFAULT_PAD_ID,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     # Batch can contain padding entries
     _samples = samples

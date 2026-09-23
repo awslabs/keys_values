@@ -32,6 +32,7 @@ from keys_values.data.constants import (
     OUTPUT_NAME,
     NUM_TOKENS_NAME,
 )
+from keys_values.constants import DEFAULT_IGNORE_INDEX
 from keys_values.data.module import SequenceLengthFilteredDataModule
 from keys_values.data.sequence_classification import (
     SequenceClassificationDataset,
@@ -117,7 +118,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
         self,
         mask_prompt: bool = True,
         val_split_fraction: float = 0.1,
-        ignore_index: int = -100,
+        ignore_index: int = DEFAULT_IGNORE_INDEX,
         max_seq_length: Optional[int] = None,
         seed: int = 42,
         repo_id: str = "THUDM/LongBench-v2",
@@ -758,7 +759,7 @@ class LongBenchV2Truncated(LongBenchV2):
         metadata_dir: str,
         mask_prompt: bool = True,
         val_split_fraction: float = 0.1,
-        ignore_index: int = -100,
+        ignore_index: int = DEFAULT_IGNORE_INDEX,
         max_seq_length: Optional[int] = None,
         seed: int = 42,
         repo_id: str = "THUDM/LongBench-v2",
