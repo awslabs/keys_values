@@ -46,7 +46,7 @@ def main(
             print(f"{eval_path} does not exist. Skipping.")
             return None
     else:
-        for path in setup_path.glob("setup-00*"):
+        for path in setup_path.glob("step-00*"):
             if path.is_dir():
                 _eval_path = path / eval_name
                 if _eval_path.exists():
