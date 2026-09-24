@@ -166,6 +166,7 @@ class Helmet(SequenceLengthFilteredDataModule):
         trainloader_longest_first: bool = False,
         trainloader_shortest_first: bool = False,
         recompute_lengths: bool = False,
+        use_old_metrics: bool = False,
     ):
         """
         Args:
@@ -198,6 +199,9 @@ class Helmet(SequenceLengthFilteredDataModule):
             recompute_lengths: If `True`, sequence lengths are recomputed even
                 if they are in the metadata file. The previous information is
                 overwritten.
+            use_old_metrics: If `True`, we use the old mapping from `dataset_key`
+                to metric, which used "sub_exact_match" for the QA datasets. This
+                is deprecated.
 
         """
         super().__init__(
@@ -221,6 +225,7 @@ class Helmet(SequenceLengthFilteredDataModule):
         self.store_split_in_metadata = store_split_in_metadata
         self._recompute_lengths = recompute_lengths
         self._split_from_metadata: Optional[Dict[str, List[int]]] = None
+        self.use_old_metrics = use_old_metrics
 
     def _metadata_keys(
         self,

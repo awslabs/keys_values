@@ -647,7 +647,10 @@ def eval_for_setup(
         assert isinstance(data, Helmet)
         evaluator = SampleBasedMetricsEvaluator(
             metrics=[
-                SampleBasedMetricsEvaluator.metric_for_helmet_task(data.dataset_key)
+                SampleBasedMetricsEvaluator.metric_for_helmet_task(
+                    data.dataset_key,
+                    old_setup=getattr(data, "use_old_metrics", False),
+                )
             ],
             max_generated_tokens=sample_metric_max_generated_tokens,
             tokenizer=tokenizer,

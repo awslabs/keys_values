@@ -47,7 +47,10 @@ _PREFIX = "helmet_"
 _POSTFIXES = ("_64k", "_128k")
 
 
-def _metric_name_for_dataset(dataset: str) -> str:
+def _metric_name_for_dataset(
+    dataset: str,
+    old_setup: bool,
+) -> str:
     assert dataset.startswith(_PREFIX)
     len_post = None
     for post in _POSTFIXES:
@@ -56,7 +59,10 @@ def _metric_name_for_dataset(dataset: str) -> str:
             break
     assert len_post is not None
     key = dataset[len(_PREFIX) : -len_post]
-    return SampleBasedMetricsEvaluator.metric_for_helmet_task(key)
+    return SampleBasedMetricsEvaluator.metric_for_helmet_task(
+        key,
+        old_setup=old_setup,
+    )
 
 
 def main(
@@ -66,6 +72,7 @@ def main(
     final_table: bool,
     multiple_tasks: bool,
     metric_name: Optional[str] = None,
+    old_setup: bool = False,
 ):
     if not multiple_tasks and not final_table:
         raise ValueError("If multiple_tasks=False, then final_table must be True")
@@ -82,7 +89,7 @@ def main(
         row = []
         for dataset in datasets:
             if metric_name is None:
-                _metric_name = _metric_name_for_dataset(dataset)
+                _metric_name = _metric_name_for_dataset(dataset, old_setup)
             else:
                 _metric_name = metric_name
             csv_path = base_path / dataset / case_key / EVAL_METRICS_ALL_FILENAME
@@ -180,6 +187,7 @@ if __name__ == "__main__":
 
     metric_name = None  # Select automatically
     # metric_name = "sub_exact_match"  # Override
+    old_setup = False
     # dataset_size = "64k"
     dataset_size = "128k"
     is_rerun = True
@@ -216,4 +224,5 @@ if __name__ == "__main__":
         final_table,
         multiple_tasks=multiple_tasks,
         metric_name=metric_name,
+        old_setup=old_setup,
     )
