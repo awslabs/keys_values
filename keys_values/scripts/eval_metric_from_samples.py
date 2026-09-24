@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple, Union
 import yaml
 
 from keys_values.evaluation.evaluator import (
@@ -38,42 +38,37 @@ def main(
     metric: str,
     eval_name: str,
     search_through_checkpoints: bool,
-) -> Optional[Tuple[float, int]]:
+) -> Union[Tuple[float, int], str]:
     eval_path = None
     if not search_through_checkpoints:
         eval_path = setup_path / eval_name
         if not eval_path.exists():
-            print(f"{eval_path} does not exist. Skipping.")
-            return None
+            return f"{eval_path} does not exist. Skipping."
     else:
         for path in setup_path.glob("step-00*"):
             if path.is_dir():
                 _eval_path = path / eval_name
                 if _eval_path.exists():
                     if eval_path is not None:
-                        print(f"Found {eval_path} and {_eval_path}, must be one only. Skipping.")
-                        return None
+                        return f"Found {eval_path} and {_eval_path}, must be one only. Skipping."
                     eval_path = _eval_path
         if eval_path is None:
-            print(f"No eval path step-*/{eval_name} found at {setup_path}. Skipping.")
-            return None
+            return f"No eval path step-*/{eval_name} found at {setup_path}. Skipping."
 
     metric_vals = []
-    num_vals = 0
     for path in eval_path.glob(GENERATED_SAMPLES_FILENAME.replace("{}", "*")):
         with open(path, "r") as f:
             records = yaml.safe_load(f)
-        metric_vals.extend(
-            [
-                compute_metric(
-                    output=record["output"],
-                    targets=record["raw_target"],
-                    metric=metric,
-                )
-                for record in records
-            ]
-        )
-        num_vals += len(metric_vals)
+        new_vals = [
+            compute_metric(
+                output=record["output"],
+                targets=record["raw_target"],
+                metric=metric,
+            )
+            for record in records
+        ]
+        metric_vals.extend(new_vals)
+    num_vals = len(metric_vals)
     return sum(metric_vals) / num_vals, num_vals
 
 
@@ -84,6 +79,7 @@ if __name__ == "__main__":
     eval_name = "eval_128"
     search_through_checkpoints = True
 
+    skip_lines = []
     for dataset in DATASETS:
         if fixed_metric is not None:
             metric = fixed_metric
@@ -96,8 +92,11 @@ if __name__ == "__main__":
         for setup_path in data_path.glob("*"):
             if setup_path.is_dir():
                 result = main(setup_path, metric, eval_name, search_through_checkpoints)
-                if result is not None:
+                if isinstance(result, str):
+                    skip_lines.append(result)
+                else:
                     avg_metric_val, num_vals = result
                     print(
                         f"{dataset}/{setup_path.name}: {metric} = {(avg_metric_val * 100):.3f} [{num_vals}]"
                     )
+    print("\n".join(skip_lines))
