@@ -1,0 +1,75 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License").
+# You may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+from pathlib import Path
+from typing import Tuple
+import yaml
+
+from keys_values.evaluation.evaluator import (
+    compute_metric,
+    SampleBasedMetricsEvaluator,
+)
+from keys_values.evaluation.longcontext_eval_ext import GENERATED_SAMPLES_FILENAME
+
+DATASETS = [
+    "hotpot_qa_64k",
+    "nq_64k",
+    "pop_qa_64k",
+    "trivia_qa_64k",
+]
+
+
+def _strip_name(name: str) -> str:
+    return name[:-4] if name.endswith("_64k") else name[:-5]
+
+
+def main(base_path: Path, metric: str) -> Tuple[float, int]:
+    metric_vals = []
+    num_vals = 0
+    for path in base_path.glob(GENERATED_SAMPLES_FILENAME.replace("{}", "*")):
+        with open(path, "r") as f:
+            records = yaml.safe_load(f)
+        metric_vals.extend(
+            [
+                compute_metric(
+                    output=record["output"],
+                    targets=record["raw_target"],
+                    metric=metric,
+                )
+                for record in records
+            ]
+        )
+        num_vals += len(metric_vals)
+    return sum(metric_vals) / num_vals, num_vals
+
+
+if __name__ == "__main__":
+    base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b/rerun"
+    use_old_metrics = True
+    fixed_metric = None
+
+    for dataset in DATASETS:
+        if fixed_metric is not None:
+            metric = fixed_metric
+        else:
+            metric = SampleBasedMetricsEvaluator.metric_for_helmet_task(
+                _strip_name(dataset),
+                old_setup=use_old_metrics,
+            )
+        data_path = base_path / dataset
+        for setup_path in data_path.glob("*"):
+            if setup_path.is_dir():
+                avg_metric_val, num_vals = main(setup_path, metric)
+                print(
+                    f"{dataset}/{setup_path.name}: {metric} = {(avg_metric_val * 100):.3f} [{num_vals}]"
+                )
