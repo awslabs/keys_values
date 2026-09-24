@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Optional
 import yaml
 
 from keys_values.evaluation.evaluator import (
@@ -33,10 +33,34 @@ def _strip_name(name: str) -> str:
     return name[:-4] if name.endswith("_64k") else name[:-5]
 
 
-def main(base_path: Path, metric: str) -> Tuple[float, int]:
+def main(
+    setup_path: Path,
+    metric: str,
+    eval_name: str,
+    search_through_checkpoints: bool,
+) -> Optional[Tuple[float, int]]:
+    eval_path = None
+    if not search_through_checkpoints:
+        eval_path = setup_path / eval_name
+        if not eval_path.exists():
+            print(f"{eval_path} does not exist. Skipping.")
+            return None
+    else:
+        for path in setup_path.glob("setup-00*"):
+            if path.is_dir():
+                _eval_path = path / eval_name
+                if _eval_path.exists():
+                    if eval_path is not None:
+                        print(f"Found {eval_path} and {_eval_path}, must be one only. Skipping.")
+                        return None
+                    eval_path = _eval_path
+        if eval_path is None:
+            print(f"No eval path step-*/{eval_name} found at {setup_path}. Skipping.")
+            return None
+
     metric_vals = []
     num_vals = 0
-    for path in base_path.glob(GENERATED_SAMPLES_FILENAME.replace("{}", "*")):
+    for path in eval_path.glob(GENERATED_SAMPLES_FILENAME.replace("{}", "*")):
         with open(path, "r") as f:
             records = yaml.safe_load(f)
         metric_vals.extend(
@@ -57,6 +81,8 @@ if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b/rerun"
     use_old_metrics = True
     fixed_metric = None
+    eval_name = "eval_128"
+    search_through_checkpoints = True
 
     for dataset in DATASETS:
         if fixed_metric is not None:
