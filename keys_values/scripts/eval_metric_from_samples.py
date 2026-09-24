@@ -92,7 +92,7 @@ if __name__ == "__main__":
                 _strip_name(dataset),
                 old_setup=use_old_metrics,
             )
-        data_path = base_path / dataset
+        data_path = base_path / ("helmet_" + dataset)
         for setup_path in data_path.glob("*"):
             if setup_path.is_dir():
                 result = main(setup_path, metric, eval_name, search_through_checkpoints)
