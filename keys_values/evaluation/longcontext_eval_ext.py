@@ -136,6 +136,7 @@ def setup(
     sample_metric_top_p: Optional[float] = None,
     num_store_generated_samples: Optional[int] = None,
     skip_eval: bool = False,
+    use_old_metrics: Optional[bool] = None,
 ) -> None:
     """Evaluate a range of checkpoints for several models on a test set
 
@@ -188,6 +189,9 @@ def setup(
             `use_sample_metric == True`.
         skip_eval: If `True`, we skip evaluations and only write files related
             to `num_store_generated_samples`.
+        use_old_metrics: If given, this overrides `data.use_old_metrics`. If
+            `True` for Helmet datasets, we use the old setup with
+            "sub_exact_match" for the QA datasets (deprecated).
 
     """
     devices = parse_devices(devices)
@@ -228,6 +232,7 @@ def setup(
         sample_metric_kwargs,
         num_store_generated_samples,
         skip_eval,
+        use_old_metrics,
     )
 
 
@@ -246,6 +251,7 @@ def setup_internal(
     sample_metric_kwargs: Dict[str, Any],
     num_store_generated_samples: Optional[int],
     skip_eval: bool,
+    use_old_metrics: Optional[bool],
 ) -> None:
     if num_store_generated_samples is None and skip_eval:
         raise ValueError(
@@ -313,6 +319,7 @@ def setup_internal(
         access_token=access_token,
         num_store_generated_samples=num_store_generated_samples,
         skip_eval=skip_eval,
+        use_old_metrics=use_old_metrics,
     )
 
 
@@ -332,6 +339,7 @@ def main(
     access_token: Optional[str],
     num_store_generated_samples: Optional[int],
     skip_eval: bool,
+    use_old_metrics: Optional[bool],
 ) -> None:
     fabric.seed_everything(seed)
 
@@ -606,6 +614,7 @@ def main(
             skip_eval,
             model_name,
             checkpoint_dir if eval_tasks is None else None,
+            use_old_metrics,
         )
 
 
@@ -628,6 +637,7 @@ def eval_for_setup(
     skip_eval: bool,
     model_name: str,
     checkpoint_dir: Optional[Path],
+    use_old_metrics: Optional[bool],
 ) -> None:
     # Test dataloader is over cross product of test dataset batches and
     # evaluation tasks
@@ -645,11 +655,13 @@ def eval_for_setup(
 
     if use_sample_metric:
         assert isinstance(data, Helmet)
+        if use_old_metrics is None:
+            use_old_metrics = getattr(data, "use_old_metrics", False)
         evaluator = SampleBasedMetricsEvaluator(
             metrics=[
                 SampleBasedMetricsEvaluator.metric_for_helmet_task(
                     data.dataset_key,
-                    old_setup=getattr(data, "use_old_metrics", False),
+                    old_setup=use_old_metrics,
                 )
             ],
             max_generated_tokens=sample_metric_max_generated_tokens,

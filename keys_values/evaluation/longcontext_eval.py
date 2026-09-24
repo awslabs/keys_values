@@ -41,6 +41,7 @@ def setup(
     sample_metric_top_p: Optional[float] = None,
     num_store_generated_samples: Optional[int] = None,
     skip_eval: bool = False,
+    use_old_metrics: Optional[bool] = None,
 ) -> None:
     """Evaluate a range of model checkpoints on a test set
 
@@ -126,6 +127,9 @@ def setup(
             `use_sample_metric == True`.
         skip_eval: If `True`, we skip evaluations and only write files related
             to `num_store_generated_samples`.
+        use_old_metrics: If given, this overrides `data.use_old_metrics`. If
+            `True` for Helmet datasets, we use the old setup with
+            "sub_exact_match" for the QA datasets (deprecated).
 
     """
     entry = {
@@ -162,4 +166,5 @@ def setup(
         sample_metric_kwargs,
         num_store_generated_samples,
         skip_eval,
+        use_old_metrics,
     )

@@ -435,7 +435,9 @@ def setup_internal(
             "use_sample_metric=True currently supported only for Helmet datasets"
         )
     if isinstance(data, Helmet) and data.use_old_metrics:
-        print("Using old metrics setup with Helmet: sub_exact_match for QA datasets (this is deprecated!)")
+        print(
+            "Using old metrics setup with Helmet: sub_exact_match for QA datasets (this is deprecated!)"
+        )
     if head_model is None:
         head_model = default_head_model(data)
     elif head_model not in SUPPORTED_HEAD_MODELS:
