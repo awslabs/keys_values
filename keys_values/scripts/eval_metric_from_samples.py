@@ -95,7 +95,9 @@ if __name__ == "__main__":
         data_path = base_path / dataset
         for setup_path in data_path.glob("*"):
             if setup_path.is_dir():
-                avg_metric_val, num_vals = main(setup_path, metric)
-                print(
-                    f"{dataset}/{setup_path.name}: {metric} = {(avg_metric_val * 100):.3f} [{num_vals}]"
-                )
+                result = main(setup_path, metric, eval_name, search_through_checkpoints)
+                if result is not None:
+                    avg_metric_val, num_vals = result
+                    print(
+                        f"{dataset}/{setup_path.name}: {metric} = {(avg_metric_val * 100):.3f} [{num_vals}]"
+                    )
