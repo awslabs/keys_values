@@ -122,13 +122,13 @@ if __name__ == "__main__":
             is_last = i == len(DATASETS) - 1
             if v is not None:
                 if search_through_checkpoints:
-                    row = r" {\small\!" + f"{v * 100:.1f}" + "} & - "
+                    row = r"  {\small\!" + f"{v * 100:.1f}" + "} & - "
                     if is_last:
                         row += r"\\"
                     else:
                         row += "&"
                 else:
-                    row = r" - & {\small\!" + f"{v * 100:.1f}" + "} "
+                    row = r"  - & {\small\!" + f"{v * 100:.1f}" + "} "
                     if is_last:
                         row += r"\\"
                     else:
