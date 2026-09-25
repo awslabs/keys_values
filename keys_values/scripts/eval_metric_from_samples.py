@@ -78,7 +78,7 @@ def main(
 
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b/rerun"
-    use_old_metrics = True
+    use_old_metrics = False
     fixed_metric = None
     eval_name = "eval_128"
     search_through_checkpoints = True
