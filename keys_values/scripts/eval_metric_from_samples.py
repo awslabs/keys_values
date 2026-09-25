@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from typing import Tuple, Union
+from typing import Tuple, Union, List
 import yaml
 
 from keys_values.evaluation.evaluator import (
@@ -22,10 +22,14 @@ from keys_values.evaluation.evaluator import (
 from keys_values.evaluation.longcontext_eval_ext import GENERATED_SAMPLES_FILENAME
 
 DATASETS = [
-    "hotpot_qa_64k",
     "nq_64k",
-    "pop_qa_64k",
     "trivia_qa_64k",
+    "hotpot_qa_64k",
+    "pop_qa_64k",
+    "nq_128k",
+    "trivia_qa_128k",
+    "hotpot_qa_128k",
+    "pop_qa_128k",
 ]
 
 
@@ -36,24 +40,28 @@ def _strip_name(name: str) -> str:
 def main(
     setup_path: Path,
     metric: str,
-    eval_name: str,
+    eval_name: List[str],
     search_through_checkpoints: bool,
 ) -> Union[Tuple[float, int], str]:
     eval_path = None
     if not search_through_checkpoints:
-        eval_path = setup_path / eval_name
-        if not eval_path.exists():
-            return f"{eval_path} does not exist. Skipping."
+        for ename in eval_name:
+            _eval_path = setup_path / ename
+            if _eval_path.exists():
+                eval_path = _eval_path
+                break
     else:
         for path in setup_path.glob("step-00*"):
             if path.is_dir():
-                _eval_path = path / eval_name
-                if _eval_path.exists():
-                    if eval_path is not None:
-                        return f"Found {eval_path} and {_eval_path}, must be one only. Skipping."
-                    eval_path = _eval_path
-        if eval_path is None:
-            return f"No eval path step-*/{eval_name} found at {setup_path}. Skipping."
+                for ename in eval_name:
+                    _eval_path = path / ename
+                    if _eval_path.exists():
+                        if eval_path is not None:
+                            return f"Found {eval_path} and {_eval_path}, must be one only. Skipping."
+                        eval_path = _eval_path
+                        break  # Leave loop over `eval_name`
+    if eval_path is None:
+        return f"No evals under {setup_path}. Skipping."
 
     metric_vals = []
     for path in eval_path.glob(GENERATED_SAMPLES_FILENAME.replace("{}", "*")):
@@ -74,12 +82,13 @@ def main(
 
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b/rerun"
-    use_old_metrics = True
+    use_old_metrics = False
     fixed_metric = None
-    eval_name = "eval_128"
+    eval_name = ["eval_new", "eval_128"]
     search_through_checkpoints = True
 
     skip_lines = []
+    results = dict()
     for dataset in DATASETS:
         if fixed_metric is not None:
             metric = fixed_metric
@@ -96,7 +105,34 @@ if __name__ == "__main__":
                     skip_lines.append(result)
                 else:
                     avg_metric_val, num_vals = result
+                    setup_name = setup_path.stem
+                    entries = results.get(setup_name, dict())
+                    entries[dataset] = avg_metric_val
+                    results[setup_name] = entries
                     print(
                         f"{dataset}/{setup_path.name}: {metric} = {(avg_metric_val * 100):.3f} [{num_vals}]"
                     )
     print("\n".join(skip_lines))
+    # Print table entries from `results`
+    print("\n")
+    for setup_name, entries in results.items():
+        print(setup_name)
+        for i, dataset in enumerate(DATASETS):
+            v = entries.get(dataset)
+            is_last = i == len(DATASETS) - 1
+            if v is not None:
+                if search_through_checkpoints:
+                    row = r"  {\small\!" + f"{v * 100:.1f}" + "} & - "
+                    if is_last:
+                        row += r"\\"
+                    else:
+                        row += "&"
+                else:
+                    row = r"  - & {\small\!" + f"{v * 100:.1f}" + "} "
+                    if is_last:
+                        row += r"\\"
+                    else:
+                        row += "&"
+            else:
+                row = " ... " + dataset + "..."
+            print(row)
