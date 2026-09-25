@@ -22,10 +22,14 @@ from keys_values.evaluation.evaluator import (
 from keys_values.evaluation.longcontext_eval_ext import GENERATED_SAMPLES_FILENAME
 
 DATASETS = [
-    "hotpot_qa_64k",
     "nq_64k",
-    "pop_qa_64k",
     "trivia_qa_64k",
+    "hotpot_qa_64k",
+    "pop_qa_64k",
+    "nq_128k",
+    "trivia_qa_128k",
+    "hotpot_qa_128k",
+    "pop_qa_128k",
 ]
 
 
@@ -80,6 +84,7 @@ if __name__ == "__main__":
     search_through_checkpoints = True
 
     skip_lines = []
+    results = dict()
     for dataset in DATASETS:
         if fixed_metric is not None:
             metric = fixed_metric
@@ -96,7 +101,34 @@ if __name__ == "__main__":
                     skip_lines.append(result)
                 else:
                     avg_metric_val, num_vals = result
+                    setup_name = setup_path.stem
+                    entries = results.get(setup_name, dict())
+                    entries[dataset] = avg_metric_val
+                    results[setup_name] = entries
                     print(
                         f"{dataset}/{setup_path.name}: {metric} = {(avg_metric_val * 100):.3f} [{num_vals}]"
                     )
     print("\n".join(skip_lines))
+    # Print table entries from `results`
+    print("\n")
+    for setup_name, entries in results.items():
+        print(setup_name)
+        for i, dataset in enumerate(DATASETS):
+            v = entries.get(dataset)
+            is_last = i == len(DATASETS) - 1
+            if v is not None:
+                if search_through_checkpoints:
+                    row = r" {\small\!" + f"{v * 100:.1f}" + "} & - "
+                    if is_last:
+                        row += r"\\"
+                    else:
+                        row += "&"
+                else:
+                    row = r" - & {\small\!" + f"{v * 100:.1f}" + "} "
+                    if is_last:
+                        row += r"\\"
+                    else:
+                        row += "&"
+            else:
+                row = " ... " + dataset + "..."
+            print(row)
