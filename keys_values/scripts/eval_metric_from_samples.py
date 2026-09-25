@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from typing import Tuple, Union
+from typing import Tuple, Union, List
 import yaml
 
 from keys_values.evaluation.evaluator import (
@@ -40,24 +40,28 @@ def _strip_name(name: str) -> str:
 def main(
     setup_path: Path,
     metric: str,
-    eval_name: str,
+    eval_name: List[str],
     search_through_checkpoints: bool,
 ) -> Union[Tuple[float, int], str]:
     eval_path = None
     if not search_through_checkpoints:
-        eval_path = setup_path / eval_name
-        if not eval_path.exists():
-            return f"{eval_path} does not exist. Skipping."
+        for ename in eval_name:
+            _eval_path = setup_path / ename
+            if _eval_path.exists():
+                eval_path = _eval_path
+                break
     else:
         for path in setup_path.glob("step-00*"):
             if path.is_dir():
-                _eval_path = path / eval_name
-                if _eval_path.exists():
-                    if eval_path is not None:
-                        return f"Found {eval_path} and {_eval_path}, must be one only. Skipping."
-                    eval_path = _eval_path
-        if eval_path is None:
-            return f"No eval path step-*/{eval_name} found at {setup_path}. Skipping."
+                for ename in eval_name:
+                    _eval_path = path / ename
+                    if _eval_path.exists():
+                        if eval_path is not None:
+                            return f"Found {eval_path} and {_eval_path}, must be one only. Skipping."
+                        eval_path = _eval_path
+                        break  # Leave loop over `eval_name`
+    if eval_path is None:
+        return f"No evals under {setup_path}. Skipping."
 
     metric_vals = []
     for path in eval_path.glob(GENERATED_SAMPLES_FILENAME.replace("{}", "*")):
@@ -80,7 +84,7 @@ if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b/rerun"
     use_old_metrics = False
     fixed_metric = None
-    eval_name = "eval_128"
+    eval_name = ["eval_new", "eval_128"]
     search_through_checkpoints = True
 
     skip_lines = []
