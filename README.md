@@ -287,8 +287,8 @@ way than what we currently have. As for inference, neither vLLM nor SGLang
 support advanced selective KV cache policies in more than an adhoc fashion. If
 you want long contexts, you need to provide many GPUs (and cannot use them to
 increase batch size). A good strategy would be to try and integrate our KV cache
-abstractions and basic implementations there, but rely on their advanced scaled
-dot product attention (SDPA) kernels and multi-device low level code.
+abstractions and basic implementations there. However, their reliance on paged
+memory management makes it hard to properly support sparse attention.
 
 If you are motivated to work on such an integration, please do get in touch
 (see [CONTRIBUTING.md](./CONTRIBUTING.md)). We would love to support users

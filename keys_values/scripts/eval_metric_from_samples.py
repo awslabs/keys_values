@@ -38,7 +38,7 @@ def _strip_name(name: str) -> str:
 
 
 def main(
-    setup_path: Path,
+    case_path: Path,
     metric: str,
     eval_name: List[str],
     search_through_checkpoints: bool,
@@ -46,12 +46,12 @@ def main(
     eval_path = None
     if not search_through_checkpoints:
         for ename in eval_name:
-            _eval_path = setup_path / ename
+            _eval_path = case_path / ename
             if _eval_path.exists():
                 eval_path = _eval_path
                 break
     else:
-        for path in setup_path.glob("step-00*"):
+        for path in case_path.glob("step-00*"):
             if path.is_dir():
                 for ename in eval_name:
                     _eval_path = path / ename
@@ -61,7 +61,7 @@ def main(
                         eval_path = _eval_path
                         break  # Leave loop over `eval_name`
     if eval_path is None:
-        return f"No evals under {setup_path}. Skipping."
+        return f"No evals under {case_path}. Skipping."
 
     metric_vals = []
     for path in eval_path.glob(GENERATED_SAMPLES_FILENAME.replace("{}", "*")):
@@ -86,7 +86,10 @@ if __name__ == "__main__":
     fixed_metric = None
     eval_name = ["eval_new", "eval_128"]
     search_through_checkpoints = True
+    filter_case = None
 
+    if filter_case is None:
+        filter_case = lambda name: True
     skip_lines = []
     results = dict()
     for dataset in DATASETS:
@@ -98,25 +101,25 @@ if __name__ == "__main__":
                 old_setup=use_old_metrics,
             )
         data_path = base_path / ("helmet_" + dataset)
-        for setup_path in data_path.glob("*"):
-            if setup_path.is_dir():
-                result = main(setup_path, metric, eval_name, search_through_checkpoints)
+        for case_path in data_path.glob("*"):
+            if case_path.is_dir() and filter_case(case_path.stem):
+                result = main(case_path, metric, eval_name, search_through_checkpoints)
                 if isinstance(result, str):
                     skip_lines.append(result)
                 else:
                     avg_metric_val, num_vals = result
-                    setup_name = setup_path.stem
-                    entries = results.get(setup_name, dict())
+                    case_name = case_path.stem
+                    entries = results.get(case_name, dict())
                     entries[dataset] = avg_metric_val
-                    results[setup_name] = entries
+                    results[case_name] = entries
                     print(
-                        f"{dataset}/{setup_path.name}: {metric} = {(avg_metric_val * 100):.3f} [{num_vals}]"
+                        f"{dataset}/{case_path.name}: {metric} = {(avg_metric_val * 100):.3f} [{num_vals}]"
                     )
     print("\n".join(skip_lines))
     # Print table entries from `results`
     print("\n")
-    for setup_name, entries in results.items():
-        print(setup_name)
+    for case_name, entries in results.items():
+        print(case_name)
         for i, dataset in enumerate(DATASETS):
             v = entries.get(dataset)
             is_last = i == len(DATASETS) - 1
