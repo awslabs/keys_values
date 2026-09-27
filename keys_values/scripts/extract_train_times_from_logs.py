@@ -16,7 +16,7 @@ import re
 import statistics
 from itertools import product
 from pathlib import Path
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 _TRAIN_RE = re.compile(
     r"Epoch\s+(\d+)\s*\|\s*iter\s+(\d+)\s*\|.*\|\s*iter time:\s*([\d.]+)\s*(ms|s)"
