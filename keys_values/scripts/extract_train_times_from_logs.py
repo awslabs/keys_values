@@ -71,6 +71,10 @@ def _for_output(paths: List[Path], len_base: int) -> List[str]:
     return [str(path)[off:] for path in paths]
 
 
+def _print_ratios(ratios: List[Optional[float]]) -> str:
+    return ", ".join(f"{((r - 1) * 100):.1f}" for r in ratios if r is not None)
+
+
 def main(
     mode: str,
     dataset_size: str,
@@ -108,6 +112,7 @@ def main(
         if times:
             times_by_combo[(dataset, policy)] = times
 
+    # CSV file
     csv_path = base_path / f"times_{mode}_{dataset_size}.csv"
     with csv_path.open("w", newline="") as f:
         writer = csv.DictWriter(
@@ -116,6 +121,7 @@ def main(
         writer.writeheader()
         writer.writerows(all_rows)
 
+    # LaTeX file
     tex_lines = [
         r"\begin{tabular}{l" + "c" * len(datasets) + "}",
         r"\hline",
@@ -134,10 +140,46 @@ def main(
                 cells.append(_wrap(f"{mean:.2f} ({std:.2f})"))
         tex_lines.append(" & ".join(cells) + r" \\")
     tex_lines += [r"\hline", r"\end{tabular}"]
-
     tex_path = base_path / f"times_{mode}_{dataset_size}.tex"
-    print(f"Writing timing table to {tex_path}")
+    print(f"\nWriting timing table to {tex_path}")
     tex_path.write_text("\n".join(tex_lines) + "\n")
+
+    # Ratios
+    for policy in policies:
+        if "2048" in policy:
+            pol_1024 = policy.replace("2048", "1024")
+            pol_128 = policy.replace("2048", "128")
+            do_128 = pol_128 in policies
+            ratios_2048_1024 = []
+            ratios_2048_128 = []
+            for dataset in datasets:
+                times = times_by_combo.get((dataset, policy))
+                if times is None:
+                    ratios_2048_1024.append(None)
+                    if do_128:
+                        ratios_2048_128.append(None)
+                else:
+                    mean_2048 = statistics.mean(times)
+                    times = times_by_combo.get((dataset, pol_1024))
+                    if times is None:
+                        ratios_2048_1024.append(None)
+                    else:
+                        mean_1024 = statistics.mean(times)
+                        ratios_2048_1024.append(mean_1024 / mean_2048)
+                    if do_128:
+                        times = times_by_combo.get((dataset, pol_128))
+                        if times is None:
+                            ratios_2048_128.append(None)
+                        else:
+                            mean_128 = statistics.mean(times)
+                            ratios_2048_128.append(mean_128 / mean_2048)
+            num_1024 = sum(r is not None for r in ratios_2048_1024)
+            if num_1024 > 0:
+                print(f"{policy}: 1k/2k  = [{_print_ratios(ratios_2048_1024)}]")
+            if do_128:
+                num_128 = sum(r is not None for r in ratios_2048_128)
+                if num_128 > 0:
+                    print(f"{policy}: 128/2k = [{_print_ratios(ratios_2048_128)}]")
 
 
 if __name__ == "__main__":
