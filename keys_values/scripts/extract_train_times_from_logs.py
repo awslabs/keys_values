@@ -96,7 +96,9 @@ def main(
         if not log_files:
             continue
         records = _parse_logs(log_files, mode, filter_epochs)
-        print(f"({dataset}, {policy}): {len(records)} records from {_for_output(log_files, len_base)}")
+        print(
+            f"({dataset}, {policy}): {len(records)} records from {_for_output(log_files, len_base)}"
+        )
         times = []
         for epoch, iter_val, time_secs in records:
             all_rows.append(
