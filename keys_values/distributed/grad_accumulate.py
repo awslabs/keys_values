@@ -15,73 +15,10 @@ import time
 from typing import List, Tuple, Optional, Callable
 
 import torch
-import torch.distributed as dist
 import lightning as L
 
 from keys_values.distributed.fabric import Fabric
 from keys_values.distributed.module_wrapper import AccessWeightsGradients
-
-
-class DistributedPrimitives:
-    @staticmethod
-    def world_size(fabric: Optional[L.Fabric] = None) -> int:
-        if fabric is not None:
-            return Fabric.world_size()
-        elif torch.cuda.is_available():
-            return dist.get_world_size()
-        else:
-            return 1
-
-    @staticmethod
-    def rank(fabric: Optional[L.Fabric] = None) -> int:
-        if fabric is not None:
-            return Fabric.rank()
-        elif torch.cuda.is_available():
-            return dist.get_rank()
-        else:
-            return 0
-
-    @staticmethod
-    def device(fabric: Optional[L.Fabric] = None) -> torch.device:
-        if fabric is not None:
-            return fabric.device
-        elif torch.cuda.is_available():
-            return torch.device("cuda", DistributedPrimitives.rank(fabric))
-        else:
-            return torch.device("cpu")
-
-    @staticmethod
-    def all_reduce_sum(
-        x: torch.Tensor,
-        fabric: Optional[L.Fabric] = None,
-        group: Optional[List[int]] = None,
-    ):
-        if fabric is not None or torch.cuda.is_available():
-            if x.device != DistributedPrimitives.device(fabric):
-                raise ValueError(
-                    f"x.device = {x.device}, must be {DistributedPrimitives.device(fabric)}"
-                )
-            if fabric is not None:
-                fabric.all_reduce(x, reduce_op="sum")
-            else:
-                dist.all_reduce(x, op=dist.ReduceOp.SUM, group=group)
-
-    @staticmethod
-    def all_reduce_mean(
-        x: torch.Tensor,
-        fabric: Optional[L.Fabric] = None,
-        group: Optional[List[int]] = None,
-    ):
-        if fabric is not None or torch.cuda.is_available():
-            if x.device != DistributedPrimitives.device(fabric):
-                raise ValueError(
-                    f"x.device = {x.device}, must be {DistributedPrimitives.device(fabric)}"
-                )
-            if fabric is not None:
-                fabric.all_reduce(x, reduce_op="mean")
-            else:
-                dist.all_reduce(x, op=dist.ReduceOp.AVG, group=group)
-
 
 DebugStoreGradsNamePredicate = Callable[[str], bool]
 
@@ -109,10 +46,10 @@ class CPUOffloadAccumulateGradients:
         debug_store_grads_name_predicate: Optional[DebugStoreGradsNamePredicate] = None,
     ):
         if group is None:
-            world_size = DistributedPrimitives.world_size(fabric)
+            world_size = Fabric.world_size()
             group = list(range(world_size))
         elif len(group) > 1:
-            world_size = DistributedPrimitives.world_size(fabric)
+            world_size = Fabric.world_size()
             group = sorted(group)
             if fabric is not None and group != list(range(world_size)):
                 raise ValueError(
@@ -144,15 +81,13 @@ class CPUOffloadAccumulateGradients:
 
     def _all_reduce(self, vec: torch.Tensor, mean_reduction: bool):
         if mean_reduction and self._is_mean_reducible(vec.dtype):
-            DistributedPrimitives.all_reduce_mean(
+            Fabric.all_reduce_mean(
                 vec,
-                self.fabric,
                 self.group,
             )
         else:
-            DistributedPrimitives.all_reduce_sum(
+            Fabric.all_reduce_sum(
                 vec,
-                self.fabric,
                 self.group,
             )
 
@@ -246,8 +181,8 @@ class CPUOffloadAccumulateGradients:
         return idle_time if use_dist else None
 
     def test_all_reduce(self):
-        device = DistributedPrimitives.device(self.fabric)
-        my_rank = DistributedPrimitives.rank(self.fabric)
+        device = Fabric.device()
+        my_rank = Fabric.rank()
         vec = (
             torch.arange(
                 1,
@@ -257,7 +192,7 @@ class CPUOffloadAccumulateGradients:
             )
             * my_rank
         )
-        DistributedPrimitives.all_reduce_sum(vec, self.fabric, self.group)
+        Fabric.all_reduce_sum(vec, self.group)
         all_factor = sum(self.group)
         should_be = (
             torch.arange(
@@ -278,4 +213,4 @@ class CPUOffloadAccumulateGradients:
         return len(self.group) > 1
 
     def rank(self) -> int:
-        return DistributedPrimitives.rank(self.fabric) if self.is_distributed else 0
+        return Fabric.rank() if self.is_distributed else 0

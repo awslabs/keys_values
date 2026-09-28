@@ -24,7 +24,6 @@ from typing import Dict, Literal, Optional, Union, Any, Tuple, List, Callable
 
 import lightning as L
 from lightning.fabric.strategies import DDPStrategy
-from lightning.fabric.utilities import ThroughputMonitor
 import torch
 from torchmetrics import RunningMean
 
@@ -451,10 +450,14 @@ def setup_internal(
     if head_model_kwargs is None:
         head_model_kwargs = dict()
     devices = parse_devices(devices)
-    if not (1 <= devices <= torch.cuda.device_count()):
-        raise ValueError(
-            f"devices = {devices}, must be in [1, {torch.cuda.device_count()}]"
-        )
+    if Fabric.cuda_is_available():
+        device_count = Fabric.device_count()
+        if not (1 <= devices <= device_count):
+            raise ValueError(
+                f"devices = {devices}, must be in [1, {device_count}]"
+            )
+    elif devices != 1:
+        raise ValueError("CUDA is not available, can only do devices = 1")
     if optimizer is None:
         optimizer = OptimizerArgs(name="AdamW")
         print(
@@ -563,8 +566,8 @@ def setup_internal(
         loggers=logger,
     )
 
-    if torch.cuda.is_available() and devices > 1:
-        check_nvlink_connectivity(fabric)
+    if Fabric.cuda_is_available() and devices > 1:
+        check_nvlink_connectivity()
 
     if record_gpu_memory_snapshots is not None:
         record_gpu_memory_snapshots = RecordGPUMemory(
@@ -1335,7 +1338,6 @@ def fit(
         max_steps = train.max_steps or float("inf")
         # Extend `train_dataloader` to multiple epochs
         train_iterator = CycleIterator(train_dataloader)
-        throughput = ThroughputMonitor(fabric, window_size=50)
         if resume_path is not None:
             # Restore from training state
             Fabric.print(
@@ -1394,7 +1396,7 @@ def fit(
                     avg_tokens_tensor = num_tokens_batch.to(
                         device=fabric.device
                     ).clone()
-                    fabric.all_reduce(avg_tokens_tensor, reduce_op="mean")
+                    Fabric.all_reduce_mean(avg_tokens_tensor)
                     loss_weight = num_tokens_batch.item() / avg_tokens_tensor.item()
 
             gpu_memory_snapshot_start_recording(
@@ -1435,7 +1437,7 @@ def fit(
                     module_pairs=module_pairs,
                     mean_reduction=True,
                 )
-                fabric.all_reduce(loss, reduce_op="mean")
+                Fabric.all_reduce_mean(loss)
 
             running_loss.update(loss.detach().to(device=optim_device))
             flush_io_streams()
@@ -1496,7 +1498,6 @@ def fit(
                 cpu_scheduler=cpu_scheduler,
                 gpu_scheduler=gpu_scheduler,
                 running_loss=running_loss,
-                throughput=throughput,
                 train_iterator=train_iterator,
                 total_t0=total_t0,
                 iter_t0=iter_t0,
@@ -1545,7 +1546,7 @@ def fit(
         raise ex
 
     return {
-        key: fabric.all_reduce(token_counts[key], reduce_op="sum").item()
+        key: Fabric.all_reduce_sum(token_counts[key]).item()
         for key in token_counts.keys()
     }
 
@@ -1794,7 +1795,6 @@ def periodic_log_metrics(
     cpu_scheduler: Optional[Any],
     gpu_scheduler: Optional[Any],
     running_loss: RunningMean,
-    throughput: ThroughputMonitor,
     train_iterator: CycleIterator,
     total_t0: float,
     iter_t0: float,
@@ -1807,13 +1807,6 @@ def periodic_log_metrics(
     if iter_num % train.log_interval == 0:
         loss = running_loss.compute().item()
         t1 = time.perf_counter()
-        throughput.update(
-            time=t1 - total_t0,
-            batches=iter_num,
-            samples=iter_num * train.micro_batch_size,
-            lengths=total_lengths,
-        )
-        throughput.compute_and_log(step=iter_num)
         if gpu_scheduler is not None:
             learning_rate = gpu_scheduler.get_last_lr()[0]
         else:
@@ -1952,7 +1945,6 @@ def validate_and_all_reduce(
             metric_name = evaluator.metrics[0]
         if generate_example_kwargs is not None:
             generate_example(
-                fabric=fabric,
                 model=model,
                 eval=eval,
                 **generate_example_kwargs,
@@ -1962,28 +1954,27 @@ def validate_and_all_reduce(
         # buffers not to waste memory
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
 
-    if fabric is not None:
-        sum_num_entries_tensor = torch.tensor(
-            num_entries,
-            device=fabric.device,
-            dtype=torch.int64,
-        )
-        fabric.all_reduce(sum_num_entries_tensor, reduce_op="sum")
-        weight = num_entries / sum_num_entries_tensor.item()
-        val_loss_tensor = torch.tensor(
-            avg_loss * weight,
-            device=fabric.device,
-            dtype=torch.float32,
-        )
-        fabric.all_reduce(val_loss_tensor, reduce_op="sum")
-        avg_loss = val_loss_tensor.item()
-        val_time_tensor = torch.tensor(
-            val_time,
-            device=fabric.device,
-            dtype=torch.float32,
-        )
-        fabric.all_reduce(val_time_tensor, reduce_op="mean")
-        val_time = val_time_tensor.item()
+    sum_num_entries_tensor = torch.tensor(
+        num_entries,
+        device=Fabric.device(),
+        dtype=torch.int64,
+    )
+    Fabric.all_reduce_sum(sum_num_entries_tensor)
+    weight = num_entries / sum_num_entries_tensor.item()
+    val_loss_tensor = torch.tensor(
+        avg_loss * weight,
+        device=Fabric.device(),
+        dtype=torch.float32,
+    )
+    Fabric.all_reduce_sum(val_loss_tensor)
+    avg_loss = val_loss_tensor.item()
+    val_time_tensor = torch.tensor(
+        val_time,
+        device=Fabric.device(),
+        dtype=torch.float32,
+    )
+    Fabric.all_reduce_mean(val_time_tensor)
+    val_time = val_time_tensor.item()
 
     metrics = {
         metric_name: avg_loss,
@@ -2054,7 +2045,6 @@ def string_for_val_metrics(
 
 @torch.no_grad()
 def generate_example(
-    fabric: L.Fabric,
     model: GPTAndHeadModel,
     tokenizer: Tokenizer,
     eval: EvalArgs,
@@ -2062,12 +2052,12 @@ def generate_example(
 ):
     instruction = select_sft_generate_example(eval, data)
     Fabric.print("\n[Instruction]:")
-    print_but_limit_size(fabric, instruction)
+    print_but_limit_size(instruction)
     if hasattr(data, "prompt_style"):
         prompt = data.prompt_style.apply(instruction)
     else:
         prompt = instruction
-    encoded = tokenizer.encode(prompt, device=fabric.device)
+    encoded = tokenizer.encode(prompt, device=Fabric.device())
     gpt_model = model.gpt_model
     if not gpt_model.are_kv_caches_assigned():
         raise IndexError("model.gpt_model must have KV caches assigned")
@@ -2090,7 +2080,7 @@ def generate_example(
         model.train()
         output = tokenizer.decode(output)
         Fabric.print("\n[Generated Output (without prompt)]:")
-        print_but_limit_size(fabric, output)
+        print_but_limit_size(output)
     else:
         Fabric.print(
             f"Length of encoded instruction ({len(encoded)}) and eval.max_new_tokens ({eval.max_new_tokens}) "

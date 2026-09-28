@@ -283,8 +283,8 @@ def setup_internal(
         strategy=strategy,
         precision=precision,
     )
-    if torch.cuda.is_available() and devices > 1:
-        check_nvlink_connectivity(fabric)
+    if Fabric.cuda_is_available() and devices > 1:
+        check_nvlink_connectivity()
 
     fabric.launch(
         main,

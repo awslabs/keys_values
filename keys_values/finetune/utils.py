@@ -75,10 +75,7 @@ MAX_PRINT_HEAD = 256
 MAX_PRINT_TAIL = 128
 
 
-def print_but_limit_size(
-    fabric: L.Fabric,
-    text: str,
-):
+def print_but_limit_size(text: str):
     text_length = len(text)
     if text_length <= MAX_PRINT_HEAD + MAX_PRINT_TAIL:
         Fabric.print("\n" + text)
@@ -138,13 +135,11 @@ def get_dataloaders(
     fabric: Optional[L.Fabric] = None,
     training_state: Optional[DataTrainState] = None,
 ) -> Tuple[MyDataLoader, MyDataLoader]:
-    num_devices = 1 if fabric is None else Fabric.world_size()
-    rank = 0 if fabric is None else Fabric.rank()
     data.connect(
         tokenizer=tokenizer,
         batch_size=train.micro_batch_size,
-        num_devices=num_devices,
-        rank=rank,
+        num_devices=Fabric.world_size(),
+        rank=Fabric.rank(),
         max_seq_length=train.max_seq_length,
         head_model=head_model,
         val_batch_size=eval.micro_batch_size,

@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Optional, List
+
 import torch
 import torch.distributed as dist
 # import torch.multiprocessing as mp
@@ -43,7 +45,7 @@ class Fabric:
 
     @staticmethod
     def world_size() -> int:
-        return dist.get_world_size() if Fabric.cuda_is_available() else 0
+        return dist.get_world_size() if Fabric.cuda_is_available() else 1
 
     @staticmethod
     def print(msg: str):
@@ -54,3 +56,27 @@ class Fabric:
     def barrier():
         if Fabric.cuda_is_available():
             dist.barrier()
+
+    @staticmethod
+    def all_reduce_sum(
+        x: torch.Tensor,
+        group: Optional[List[int]] = None,
+    ):
+        if Fabric.cuda_is_available():
+            if x.device != Fabric.device():
+                raise ValueError(
+                    f"x.device = {x.device}, must be {Fabric.device()}"
+                )
+            dist.all_reduce(x, op=dist.ReduceOp.SUM, group=group)
+
+    @staticmethod
+    def all_reduce_mean(
+        x: torch.Tensor,
+        group: Optional[List[int]] = None,
+    ):
+        if Fabric.cuda_is_available():
+            if x.device != Fabric.device():
+                raise ValueError(
+                    f"x.device = {x.device}, must be {Fabric.device()}"
+                )
+            dist.all_reduce(x, op=dist.ReduceOp.AVG, group=group)
