@@ -39,6 +39,7 @@ from keys_values.data.constants import (
 )
 from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.trainstate import DataTrainState
+from keys_values.distributed.fabric import Fabric
 from keys_values.finetune.args import (
     TrainArgs,
     EvalArgs,
@@ -80,11 +81,10 @@ def print_but_limit_size(
 ):
     text_length = len(text)
     if text_length <= MAX_PRINT_HEAD + MAX_PRINT_TAIL:
-        print_message("\n" + text, fabric)
+        Fabric.print("\n" + text)
     else:
-        print_message(
+        Fabric.print(
             "\n" + text[:MAX_PRINT_HEAD] + "\n\n[...]\n\n" + text[(-MAX_PRINT_TAIL):],
-            fabric,
         )
 
 
@@ -138,8 +138,8 @@ def get_dataloaders(
     fabric: Optional[L.Fabric] = None,
     training_state: Optional[DataTrainState] = None,
 ) -> Tuple[MyDataLoader, MyDataLoader]:
-    num_devices = 1 if fabric is None else fabric.world_size
-    rank = 0 if fabric is None else fabric.local_rank
+    num_devices = 1 if fabric is None else Fabric.world_size()
+    rank = 0 if fabric is None else Fabric.rank()
     data.connect(
         tokenizer=tokenizer,
         batch_size=train.micro_batch_size,
@@ -203,17 +203,11 @@ def save_model_checkpoint(
         file_path = file_dir / LIT_MODEL_FNAME
         save_kwargs = dict()
     file_dir.mkdir(parents=True, exist_ok=True)
-    print_message(
-        f"\nSaving model weights to {str(file_path)!r}",
-        fabric,
-    )
+    Fabric.print(f"\nSaving model weights to {str(file_path)!r}")
     fabric.save(file_path, state={"model": model.gpt_model}, **save_kwargs)
     if model.head_model.state_dict():
         file_path = file_dir / HEAD_MODEL_FNAME
-        print_message(
-            f"Saving head model weights to {str(file_path)!r}",
-            fabric,
-        )
+        Fabric.print(f"Saving head model weights to {str(file_path)!r}")
         fabric.save(file_path, state={"model": model.head_model})
 
 
@@ -244,15 +238,15 @@ def load_model_checkpoint(
     file_path = checkpoint_dir / LIT_MODEL_FNAME
     if not is_lora and resume_dir is not None:
         file_path = resume_dir / LIT_MODEL_FNAME
-    print_message(f"Loading model checkpoint: {file_path}", fabric)
+    Fabric.print(f"Loading model checkpoint: {file_path}")
     load_checkpoint(fabric, model.gpt_model, file_path, strict=not is_lora)
     if is_lora:
         if resume_dir is not None:
             file_path = resume_dir / LORA_WEIGHTS_FNAME
-            print_message("Loading LoRA weights checkpoint", fabric)
+            Fabric.print("Loading LoRA weights checkpoint")
             load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
         else:
-            print_message("Reset/initialize LoRA weights", fabric)
+            Fabric.print("Reset/initialize LoRA weights")
             model.gpt_model.reset_lora_parameters()
     # If there are head model weights, load them as well. Otherwise, we use
     # random initialization (or the head model may not have weights)
@@ -339,7 +333,7 @@ def adapt_requires_grad(
         head_model (HeadModel): Head model
 
     """
-    from keys_values.optimize.model_factory import BlockComponentName
+    from keys_values.distributed.model_factory import BlockComponentName
 
     if not head_model.needs_logits():
         prefix = BlockComponentName.lm_head()
@@ -360,13 +354,6 @@ def print_with_rank_and_timestamp(
     print(prefix + msg)
     if flush_streams:
         flush_io_streams()
-
-
-def print_message(msg: str, fabric: Optional[L.Fabric] = None):
-    if fabric is not None:
-        fabric.print(msg)
-    else:
-        print(msg)
 
 
 def check_kv_cache(kv_cache: KVCacheArgs):

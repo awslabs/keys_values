@@ -58,9 +58,9 @@ from keys_values.long_context import (
     oom_exception_action,
 )
 from keys_values.model import GPT
-from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
-from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
-from keys_values.optimize.model_factory import GPTShardCellBlock
+from keys_values.distributed.clone_model import clone_model_shard_via_flat_vectors
+from keys_values.distributed.grad_accumulate import CPUOffloadAccumulateGradients
+from keys_values.distributed.model_factory import GPTShardCellBlock
 from keys_values.tools.intermediates import DebugIntermediates
 from keys_values.utils import (
     check_for_nan_module_weights,

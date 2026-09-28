@@ -35,6 +35,7 @@ from litgpt.utils import (
 
 from keys_values.attention.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.config import Config as ConfigFull
+from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
 from keys_values.data import LongBenchV2, Helmet, INPUT_IDS_NAME
 from keys_values.data.evaluation import EvaluationDataLoader
 from keys_values.data.constants import (
@@ -46,7 +47,7 @@ from keys_values.data.constants import (
     LORA_WEIGHTS_FNAME,
     LORA_WEIGHTS_FNAME_OLD,
 )
-from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
+from keys_values.distributed.fabric import Fabric
 from keys_values.evaluation.evaluator import (
     SampleBasedMetricsEvaluator,
     TargetType,
@@ -83,6 +84,7 @@ from keys_values.utils import (
     VerbosityLevels,
     fabric_precision_to_dtype,
     remove_keys,
+    seed_everything,
 )
 
 GENERATED_SAMPLES_FILENAME = "generated_samples_{}.yaml"
@@ -195,10 +197,11 @@ def setup(
 
     """
     devices = parse_devices(devices)
-    if torch.cuda.is_available():
-        if not (1 <= devices <= torch.cuda.device_count()):
+    if Fabric.cuda_is_available():
+        device_count = Fabric.device_count()
+        if not (1 <= devices <= device_count):
             raise ValueError(
-                f"devices = {devices}, must be in [1, {torch.cuda.device_count()}]"
+                f"devices = {devices}, must be in [1, {device_count}]"
             )
     elif devices != 1:
         raise ValueError("CUDA is not available, can only do devices = 1")
@@ -341,7 +344,7 @@ def main(
     skip_eval: bool,
     use_old_metrics: Optional[bool],
 ) -> None:
-    fabric.seed_everything(seed)
+    seed_everything(seed)
 
     # Loop over setups
     _batch_size = batch_size
@@ -512,7 +515,7 @@ def main(
 
         # Create model
         if torch.cuda.is_available():
-            device = torch.device("cuda", fabric.local_rank)
+            device = Fabric.device()
         else:
             device = torch.device("cpu")
         try:
@@ -527,7 +530,7 @@ def main(
                 tokenizer = Tokenizer(base_checkpoint_dir)
             else:
                 raise ex
-        with fabric.init_module(empty_init=(fabric.world_size > 1)):
+        with fabric.init_module(empty_init=(Fabric.world_size() > 1)):
             # Updates `kv_cache.cache_kwargs` from other args:
             kv_cache = kv_cache.update_cache_kwargs()
             # Set `mha_kwargs`, update kv_cache.cache_kwargs` with that as well:
@@ -591,7 +594,7 @@ def main(
             if devices > 1:
                 num_store_generated_batches = (
                     num_store_generated_batches // devices
-                    + int(fabric.local_rank < num_store_generated_batches % devices)
+                    + int(Fabric.rank() < num_store_generated_batches % devices)
                 )
         else:
             num_store_generated_batches = None
@@ -742,7 +745,7 @@ def eval_for_setup_internal(
     if devices > 1:
         # Ensure that lock for first batch is not checked at exactly the same
         # time by all devices
-        time.sleep(0.05 * fabric.global_rank)
+        time.sleep(0.05 * Fabric.rank())
     batch_idx = 0  # Batch counter per task
     skip_until_next_task = False
     for batch in test_dataiter:
@@ -773,7 +776,7 @@ def eval_for_setup_internal(
         try:
             print_with_rank_and_timestamp(
                 f"Running inference for batch {batch_name}",
-                fabric.global_rank,
+                Fabric.rank(),
             )
             if getattr(test_dataloader, "delay_tokenization", False):
                 # Tokenization only happens here
@@ -821,7 +824,7 @@ def eval_for_setup_internal(
             eval_time = time.perf_counter() - t0
             print_with_rank_and_timestamp(
                 f"Batch {batch_name}: {metric_name} = {metric_values.mean().item():.3f}, eval_time = {eval_time * 1000:.2f} ms",
-                fabric.global_rank,
+                Fabric.rank(),
             )
             flush_io_streams()
             if not skip_eval:
@@ -898,12 +901,12 @@ def get_dataloader(
         Data loader for cross product of test dataset with evaluation tasks
 
     """
-    num_devices = 1 if fabric is None else fabric.world_size
+    num_devices = Fabric.world_size() if Fabric.cuda_is_available() else 1
     data.connect(
         tokenizer=tokenizer,
         batch_size=batch_size,
         num_devices=num_devices,
-        rank=None if fabric is None else fabric.local_rank,
+        rank=Fabric.rank() if Fabric.cuda_is_available() else None,
         head_model=head_model,
         test_batch_size=batch_size,
         eval_tasks=eval_tasks,

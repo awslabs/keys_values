@@ -24,6 +24,7 @@ from litgpt.utils import _RunIf
 
 from keys_values.finetune.utils import may_match_twice_flex_attention_sdpa
 from keys_values.attention.flex_attention import FlexAttentionArgs
+from keys_values.distributed.fabric import Fabric
 from keys_values.head_model import CrossEntropyOnLogits, SequenceClassification
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
@@ -36,7 +37,7 @@ from keys_values.kvcache.test_utils import (
 )
 from keys_values.kvcache.test_utils_advanced import cache_kwargs_for_smart_lastrec
 from keys_values.model import GPT
-from keys_values.optimize.grad_accumulate import CPUOffloadAccumulateGradients
+from keys_values.distributed.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.utils import randint_torch
 
 
@@ -280,7 +281,7 @@ def run_copy_model_to_device(
     torch.set_default_dtype(dtype)
 
     device = torch.device("cpu")
-    cpu_offload_device = torch.device("cuda", fabric.local_rank)
+    cpu_offload_device = torch.device("cuda", Fabric.rank())
     cache_lengths = [128, 128]
     batch_size = 5
     n_layer = len(cache_lengths)

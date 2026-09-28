@@ -20,13 +20,13 @@ import torch
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
 
-from keys_values.finetune.utils import print_message
 from litgpt.utils import CycleIterator
 
 from keys_values.data.dataloader import MyDataLoaderIterator
 from keys_values.data.iterators import SimilarSequenceLengthIterator
 from keys_values.data.module import SequenceLengthFilteredDataModule
 from keys_values.data.trainstate import DataTrainState
+from keys_values.distributed.fabric import Fabric
 
 TRAINSTATE_OPTIMIZER_FNAME = "training_state_optimizer.pth"
 
@@ -176,7 +176,7 @@ class TrainingStateManager:
         filter_names = self._optimizer_names
         # This part depends on the rank
         name = "train_iterator"
-        rank = fabric.local_rank
+        rank = Fabric.rank()
         iter_state = {name: train_state[name]}
         iter_path = file_dir / TRAINSTATE_ITERATOR_FNAME.format(rank=rank)
         # Runs for all ranks, not just 0:
@@ -280,16 +280,16 @@ class TrainingStateVars:
         fabric: L.Fabric,
         file_dir: Path,
     ):
-        print_message(f"Storing training state to {file_dir}", fabric)
+        Fabric.print(f"Storing training state to {file_dir}")
         new_files = self.manager.save_training_state(fabric, file_dir)
-        if fabric.global_rank == 0 and self.devices > 1:
+        if Fabric.rank() == 0 and self.devices > 1:
             # Add files written by other ranks: They are removed by rank 0 only
             new_files += tuple(
                 file_dir / TRAINSTATE_ITERATOR_FNAME.format(rank=rank)
                 for rank in range(1, self.devices)
             )
         self.files.append(new_files)
-        if len(self.files) > self.training_state_num and fabric.global_rank == 0:
+        if len(self.files) > self.training_state_num and Fabric.rank() == 0:
             # Remove oldest files
             rem_files = self.files.pop(0)
             for path in rem_files:

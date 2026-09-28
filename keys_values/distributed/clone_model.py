@@ -19,7 +19,7 @@ from keys_values.adapter import GPT as GPTAdapter
 from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.lora import GPT as GPTLoRA
 from keys_values.model import GPT as GPTFull
-from keys_values.optimize.model_factory import (
+from keys_values.distributed.model_factory import (
     BlockComponentName,
     GPTFullWrapper,
     GPTLoRAWrapper,
@@ -27,7 +27,7 @@ from keys_values.optimize.model_factory import (
     ModelFromFlatVectorsFactory,
     names_and_modules_for_shard,
 )
-from keys_values.optimize.module_wrapper import AccessWeightsGradients
+from keys_values.distributed.module_wrapper import AccessWeightsGradients
 
 
 def clone_model_shard_via_flat_vectors(

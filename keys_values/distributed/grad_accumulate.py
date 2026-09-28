@@ -18,14 +18,15 @@ import torch
 import torch.distributed as dist
 import lightning as L
 
-from keys_values.optimize.module_wrapper import AccessWeightsGradients
+from keys_values.distributed.fabric import Fabric
+from keys_values.distributed.module_wrapper import AccessWeightsGradients
 
 
 class DistributedPrimitives:
     @staticmethod
     def world_size(fabric: Optional[L.Fabric] = None) -> int:
         if fabric is not None:
-            return fabric.world_size
+            return Fabric.world_size()
         elif torch.cuda.is_available():
             return dist.get_world_size()
         else:
@@ -34,7 +35,7 @@ class DistributedPrimitives:
     @staticmethod
     def rank(fabric: Optional[L.Fabric] = None) -> int:
         if fabric is not None:
-            return fabric.local_rank
+            return Fabric.rank()
         elif torch.cuda.is_available():
             return dist.get_rank()
         else:
