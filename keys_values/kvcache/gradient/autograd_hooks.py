@@ -150,21 +150,6 @@ class PackArgumentAsAnnotation:
 
 
 @dataclass(frozen=True)
-class ParkedBufferState:
-    """
-    Buffer state reconstructed ahead of its unpack request (chain walk, see
-    :meth:`CellComputationAutogradHooks._unpack_from_annotation`). The copy
-    `x_cpu` always lives on CPU: parking happens during backward, when device
-    memory is tightest, and a full-size device clone per walked chunk can
-    push a large configuration into OOM. `device` is where the buffer is
-    restored to; if it is the CPU device, restoring is a no-op (no copy).
-    """
-
-    x_cpu: torch.Tensor
-    device: torch.device
-
-
-@dataclass(frozen=True)
 class PackArgumentAsIndex:
     index_3d: torch.Tensor
     final_dim: int
@@ -626,8 +611,8 @@ class CellComputationAutogradHooks(AutogradHooks):
         # below): by pack-argument ID, and by (layer, is_keys, chunk) for
         # outstanding "ext-*" annotations. Kept apart from `_id_to_unpacked`,
         # which holds already-served values for IDs matched twice.
-        self._parked_states: Dict[int, ParkedBufferState] = dict()
-        self._ext_states: Dict[Tuple[int, bool, int], ParkedBufferState] = dict()
+        self._parked_states: Dict[int, torch.Tensor] = dict()
+        self._ext_states: Dict[Tuple[int, bool, int], torch.Tensor] = dict()
         # Lazy parking bookkeeping (see "Parked buffer states" below).
         # `_early_applied`: (layer_idx, is_keys, chunk_idx) -> pack-argument
         # ID of a "scatter"/"cat" annotation applied ahead of its own unpack
@@ -863,10 +848,10 @@ class CellComputationAutogradHooks(AutogradHooks):
                 # keep it for the remaining request(s).
                 remaining = self._id_counts.get(idd, 1)
                 if remaining > 1:
-                    x = self._restore_parked(self._parked_states[idd])
+                    x = self._parked_states[idd]
                     self._id_counts[idd] = remaining - 1
                 else:
-                    x = self._restore_parked(self._parked_states.pop(idd))
+                    x = self._parked_states.pop(idd)
                     self._id_counts.pop(idd, None)
                     self._release_parked_bytes(("id", idd))
             elif idd in self._id_to_unpacked:
@@ -991,7 +976,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                         ("ext", layer_idx, annotation.is_keys, chunk_idx)
                     )
                     return apply_ext_annotation(
-                        self._restore_parked(parked),
+                        parked,
                         annotation,
                         target_dim1=annotation.shape[1],
                     )
@@ -1116,25 +1101,22 @@ class CellComputationAutogradHooks(AutogradHooks):
     #   ("ext", layer, is_keys, chunk)   -- an "ext-*" annotation for this
     #                                       chunk is still in
     #                                       `_packed_arg_for_id`.
-    # Copies always live on CPU (`ParkedBufferState.x_cpu`); restoring to a
-    # CPU device is a no-op. Every copy is released on fetch.
+    # Copies stay on the same device as the buffer. A CPU round trip would
+    # stall the GPU on every park and restore (issue #152); since parking is
+    # rare and each copy is released on fetch, the device memory cost is a
+    # small number of buffers, and only for the duration of the walk.
 
     def _park_buffer(
         self,
         buffer: torch.Tensor,
         target_dtype: Optional[torch.dtype],
         key: Tuple,
-    ) -> ParkedBufferState:
+    ) -> torch.Tensor:
+        # Must not alias `buffer`, which is modified in place further down
+        # the chain: `clone` copies even for same device and dtype
         dtype = target_dtype if target_dtype is not None else buffer.dtype
-        if buffer.device.type == "cpu":
-            # `.to` would not copy for same device and dtype; the parked
-            # state must not alias `buffer`, which is modified in place
-            # further down the chain
-            tensor = buffer.detach().clone().to(dtype=dtype)
-        else:
-            tensor = buffer.detach().to(device="cpu", dtype=dtype)
-        parked = ParkedBufferState(x_cpu=tensor, device=buffer.device)
-        num_bytes = tensor.numel() * tensor.element_size()
+        parked = buffer.detach().clone().to(dtype=dtype)
+        num_bytes = parked.numel() * parked.element_size()
         self._parked_bytes_for_key[key] = num_bytes
         self._parked_bytes += num_bytes
         self._parked_peak_bytes = max(self._parked_peak_bytes, self._parked_bytes)
@@ -1142,11 +1124,6 @@ class CellComputationAutogradHooks(AutogradHooks):
             self._parked_peak_count, len(self._parked_bytes_for_key)
         )
         return parked
-
-    @staticmethod
-    def _restore_parked(parked: ParkedBufferState) -> torch.Tensor:
-        # No copy if `parked.device` is the CPU device
-        return parked.x_cpu.to(device=parked.device)
 
     def _release_parked_bytes(self, key: Tuple):
         self._parked_bytes -= self._parked_bytes_for_key.pop(key, 0)
