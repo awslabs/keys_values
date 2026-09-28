@@ -114,7 +114,7 @@ def setup(
     Makes use of devices `range(devices)`. If `devices > 1`, we run distributed
     data parallel (DDP). We use `lightning.Fabric` here as well, but just to
     launch the processes. Model and optimizer are not wrapped, and we only make
-    use of `fabric.all_reduce`.
+    use of `Fabric.all_reduce_*`.
 
     Arguments:
         checkpoint_dir: The path to the base model's checkpoint directory to

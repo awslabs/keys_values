@@ -666,12 +666,11 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             )
 
     def token_positions(self) -> torch.Tensor:
-        result = index_to_3d(
+        return index_to_3d(
             self.token_pos[: self.current_length],
             self.batch_size,
             self.n_query_groups,
         )
-        return result
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         tk_p = bitsize_of(self.token_pos)
