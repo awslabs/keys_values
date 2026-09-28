@@ -500,7 +500,6 @@ def eval_for_setup(
         head_model=model_config.head_model_name,
         train=train,
         eval=evals,
-        fabric=fabric,
         training_state=data_train_state,
     )
     batch_transform = BatchTransformFactory.from_head_model(

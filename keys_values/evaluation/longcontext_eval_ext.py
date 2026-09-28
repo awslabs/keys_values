@@ -651,7 +651,6 @@ def eval_for_setup(
         head_model=model_config.head_model_name,
         batch_size=batch_size,
         devices=devices,
-        fabric=fabric,
         model_name=model_name,
     )
     ignore_index = getattr(data, "ignore_index", DEFAULT_IGNORE_INDEX)
@@ -875,7 +874,6 @@ def get_dataloader(
     head_model: str,
     batch_size: int,
     devices: int,
-    fabric: Optional[L.Fabric],
     model_name: Optional[str] = None,
 ) -> EvaluationDataLoader:
     """
@@ -912,9 +910,12 @@ def get_dataloader(
         eval_tasks=eval_tasks,
         model_name=model_name,
     )
-    if fabric is not None:
-        with fabric.rank_zero_first():
-            data.prepare_data()
+
+    # Everybody needs to wait until `data.prepare_data()` finished on rank 0
+    if Fabric.rank() == 0:
+        data.prepare_data()
+    Fabric.barrier()
+
     data.setup()
     test_dataloader = data.test_dataloader(num_devices=devices)
     return test_dataloader

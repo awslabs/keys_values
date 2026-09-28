@@ -548,7 +548,6 @@ def setup_internal(
         logger_name,
         out_dir,
         name=f"finetune-{config.name}",
-        use_fabric=True,
         resume=resume is not None,
         log_interval=train.log_interval,
     )
@@ -668,7 +667,6 @@ def main(
         head_model=head_model_name,
         train=train,
         eval=eval,
-        fabric=fabric,
         training_state=data_train_state,
     )
     batch_transform = BatchTransformFactory.from_head_model(

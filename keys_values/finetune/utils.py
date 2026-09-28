@@ -27,7 +27,6 @@ from keys_values.kvcache.smart_lastrec import SmartInitialInformation
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
-    choose_logger as _choose_logger,
     instantiate_torch_optimizer,
     load_checkpoint,
 )
@@ -132,7 +131,6 @@ def get_dataloaders(
     head_model: str,
     train: TrainArgs,
     eval: EvalArgs,
-    fabric: Optional[L.Fabric] = None,
     training_state: Optional[DataTrainState] = None,
 ) -> Tuple[MyDataLoader, MyDataLoader]:
     data.connect(
@@ -145,9 +143,12 @@ def get_dataloaders(
         val_batch_size=eval.micro_batch_size,
         training_state=training_state,
     )
-    if fabric is not None:
-        with fabric.rank_zero_first():
-            data.prepare_data()
+
+    # Everybody needs to wait until `data.prepare_data()` finished on rank 0
+    if Fabric.rank() == 0:
+        data.prepare_data()
+    Fabric.barrier()
+
     data.setup()
     train_dataloader = data.train_dataloader()
     val_dataloader = data.val_dataloader()
@@ -255,63 +256,59 @@ def choose_logger(
     logger_name: Literal["csv", "tensorboard", "wandb", "mlflow"],
     out_dir: Path,
     name: str,
-    use_fabric: bool = True,
     log_interval: int = 1,
     log_args: Optional[Dict] = None,
     resume: Optional[bool] = None,
     **kwargs: Any,
 ):
-    if use_fabric:
-        return _choose_logger(logger_name, out_dir, name, log_interval, **kwargs)
-    else:
-        if logger_name == "csv":
-            from lightning.pytorch.loggers.csv_logs import CSVLogger
+    if logger_name == "csv":
+        from lightning.pytorch.loggers.csv_logs import CSVLogger
 
-            return CSVLogger(
-                out_dir,
-                name=name,
-                flush_logs_every_n_steps=log_interval,
-                **kwargs,
-            )
-        if logger_name == "tensorboard":
-            from lightning.pytorch.loggers.tensorboard import TensorBoardLogger
-
-            return TensorBoardLogger(
-                out_dir,
-                name=name,
-                **kwargs,
-            )
-        if logger_name == "wandb":
-            from lightning.pytorch.loggers.wandb import WandbLogger
-
-            if log_args is None:
-                log_args = dict()
-            project = log_args.get("project", name)
-            run = log_args.get("run", os.environ.get("WANDB_RUN_NAME"))
-            group = log_args.get("group", os.environ.get("WANDB_RUN_GROUP"))
-            return WandbLogger(
-                project=project,
-                name=run,
-                group=group,
-                resume=resume,
-                **kwargs,
-            )
-        if logger_name == "mlflow":
-            from lightning.pytorch.loggers.mlflow import MLFlowLogger
-
-            if log_args is None:
-                log_args = dict()
-            experiment_name = log_args.get("experiment_name", name)
-            tracking_uri = log_args.get("tracking_uri")
-            return MLFlowLogger(
-                experiment_name=experiment_name,
-                tracking_uri=tracking_uri,
-                save_dir=str(out_dir),
-                **kwargs,
-            )
-        raise ValueError(
-            f"`logger_name={logger_name}` is not a valid option. Choose from 'csv', 'tensorboard', 'wandb', 'mlflow'."
+        return CSVLogger(
+            out_dir,
+            name=name,
+            flush_logs_every_n_steps=log_interval,
+            **kwargs,
         )
+    if logger_name == "tensorboard":
+        from lightning.pytorch.loggers.tensorboard import TensorBoardLogger
+
+        return TensorBoardLogger(
+            out_dir,
+            name=name,
+            **kwargs,
+        )
+    if logger_name == "wandb":
+        from lightning.pytorch.loggers.wandb import WandbLogger
+
+        if log_args is None:
+            log_args = dict()
+        project = log_args.get("project", name)
+        run = log_args.get("run", os.environ.get("WANDB_RUN_NAME"))
+        group = log_args.get("group", os.environ.get("WANDB_RUN_GROUP"))
+        return WandbLogger(
+            project=project,
+            name=run,
+            group=group,
+            resume=resume,
+            **kwargs,
+        )
+    if logger_name == "mlflow":
+        from lightning.pytorch.loggers.mlflow import MLFlowLogger
+
+        if log_args is None:
+            log_args = dict()
+        experiment_name = log_args.get("experiment_name", name)
+        tracking_uri = log_args.get("tracking_uri")
+        return MLFlowLogger(
+            experiment_name=experiment_name,
+            tracking_uri=tracking_uri,
+            save_dir=str(out_dir),
+            **kwargs,
+        )
+    raise ValueError(
+        f"`logger_name={logger_name}` is not a valid option. Choose from 'csv', 'tensorboard', 'wandb', 'mlflow'."
+    )
 
 
 def adapt_requires_grad(
