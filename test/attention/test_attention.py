@@ -56,7 +56,7 @@ from keys_values.kvcache.test_utils import (
     random_args_cache_forward,
 )
 from keys_values.model import GPT, CausalSelfAttention
-from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
+from keys_values.distributed.clone_model import clone_model_shard_via_flat_vectors
 from keys_values.pos_encoding import LinearPositionEncoding
 from keys_values.utils import repeat_interleave, randint_torch, index_to_3d
 

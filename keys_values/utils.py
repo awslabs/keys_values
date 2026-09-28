@@ -410,3 +410,12 @@ def print_list_int(lst: List[int], min_collapse: int = 5) -> str:
             start = end
     assert start == len(lst)  # Sanity check
     return ", ".join(parts)
+
+
+def seed_everything(seed: int) -> None:
+    import numpy as np
+    import random
+
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
