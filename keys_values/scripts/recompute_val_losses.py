@@ -18,15 +18,12 @@ import re
 from typing import Dict, Optional, Union, Tuple, List
 import yaml
 
-import lightning as L
-from lightning.fabric.strategies import DDPStrategy
 import torch
 
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     auto_download_checkpoint,
-    load_checkpoint,
     check_nvlink_connectivity,
     check_valid_checkpoint_dir,
     get_default_supported_precision,
@@ -35,12 +32,13 @@ from litgpt.utils import (
 )
 
 from keys_values.attention.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
+from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
 from keys_values.data import Helmet, LongBenchV2
 from keys_values.data.constants import (
     LIT_MODEL_FNAME,
     HEAD_MODEL_FNAME,
 )
-from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
+from keys_values.distributed.fabric import Fabric
 from keys_values.evaluation.longcontext_eval_ext import (
     load_configuration,
     cleanup_kvcache_kwargs,
@@ -66,9 +64,10 @@ from keys_values.finetune.resume_state import restore_dataset_from_training_stat
 from keys_values.finetune.utils import (
     get_dataloaders,
     adapt_requires_grad,
-    print_message,
     check_kv_cache,
     adjust_cache_kwargs,
+    load_checkpoint,
+    init_module,
 )
 from keys_values.fused import (
     set_fused_swiglu_enabled,
@@ -81,6 +80,7 @@ from keys_values.utils import (
     flush_io_streams,
     VerbosityLevels,
     fabric_precision_to_dtype,
+    seed_everything,
 )
 
 RESULT_FILENAME = "recomp_val_losses/eval_record.yaml"
@@ -122,7 +122,7 @@ def get_checkpoints_to_evaluate(
 
     if not log_files:
         print(f"{out_dir}: No logs")
-        return [], []
+        return [], [], 0
 
     # Parse iter -> val_loss from all log files (last occurrence wins on collision)
     iter_pattern = re.compile(r"iter\s+(\d+)\s+\|.*val_loss:\s*([\d.]+)")
@@ -153,7 +153,7 @@ def get_checkpoints_to_evaluate(
 
     if not records:
         print(f"{out_dir}: No logs")
-        return [], []
+        return [], [], 0
 
     pairs = sorted(records.items())
     if pairs[0][0] == -1:
@@ -273,23 +273,13 @@ def setup_internal(
         model_type=model_type,
     )
     precision = hyp_pars["precision"] or get_default_supported_precision(training=True)
-    if devices > 1:
-        strategy = DDPStrategy(static_graph=True, broadcast_buffers=False)
-    else:
-        strategy = "auto"
-    fabric = L.Fabric(
-        devices=devices,
-        num_nodes=1,
-        strategy=strategy,
-        precision=precision,
-    )
-    if torch.cuda.is_available() and devices > 1:
-        check_nvlink_connectivity(fabric)
+    if Fabric.cuda_is_available() and devices > 1:
+        check_nvlink_connectivity()
 
-    fabric.launch(
-        main,
+    kwargs = dict(
         model_type=model_type,
         devices=devices,
+        precision=precision,
         checkpoint_indexes=checkpoint_indexes,
         old_topk_entries=old_topk_entries,
         final_cp_index=final_cp_index,
@@ -299,11 +289,20 @@ def setup_internal(
         access_token=access_token,
     )
 
+    if Fabric.cuda_is_available():
+        Fabric.launch(
+            main,
+            nprocs=devices,
+            **kwargs,
+        )
+    else:
+        main(**kwargs)
+
 
 def main(
-    fabric: L.Fabric,
     model_type: str,
     devices: int,
+    precision: str,
     checkpoint_indexes: List[int],
     old_topk_entries: List[Tuple[int, float]],
     final_cp_index: int,
@@ -312,7 +311,7 @@ def main(
     verbose: Optional[str],
     access_token: Optional[str],
 ) -> None:
-    fabric.seed_everything(seed)
+    seed_everything(seed)
     # Load configuration from first checkpoint (the same for all)
     task_path = get_checkpoint_path(out_dir, checkpoint_indexes[0])
     # Copied from `keys_values.finetune.longcontext_eval_ext.main`:
@@ -389,11 +388,14 @@ def main(
 
     # Create model
     if torch.cuda.is_available():
-        device = torch.device("cuda", fabric.local_rank)
+        device = torch.device("cuda", Fabric.rank())
     else:
         device = torch.device("cpu")
     tokenizer = Tokenizer(checkpoint_dir)
-    with fabric.init_module(empty_init=(fabric.world_size > 1)):
+    with init_module(
+        empty_init=(Fabric.world_size() > 1),
+        precision=precision,
+    ):
         # Updates `kv_cache.cache_kwargs` from other args:
         kv_cache = kv_cache.update_cache_kwargs()
         # Set `mha_kwargs`, update kv_cache.cache_kwargs` with that as well:
@@ -403,13 +405,12 @@ def main(
             kv_cache,
             sdpa,
             yarn_rope,
-            fabric,
             devices,
         )
         # Depending on the cache type `kv_cache.name`, the arguments
         # `kv_cache.cache_kwargs` are adjusted
         adjust_cache_kwargs(kv_cache, data, tokenizer)
-        dtype = fabric_precision_to_dtype(fabric._precision.precision)
+        dtype = fabric_precision_to_dtype(precision)
         torch.set_default_dtype(dtype)
         with torch.device(device):
             gpt_model = create_gpt_model(model_config.config, **mha_kwargs)
@@ -435,19 +436,17 @@ def main(
             max_batch_size=batch_size,
             dtype=dtype,
             average_loss_per_batch=False,
-            fabric=fabric,
         )
     # Load base model
     file_path = checkpoint_dir / LIT_MODEL_FNAME
-    load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
+    load_checkpoint(model.gpt_model, file_path, strict=False)
     # If there are head model weights, load them as well. Otherwise, we use
     # random initialization (or the head model may not have weights)
     file_path = checkpoint_dir / HEAD_MODEL_FNAME
     if file_path.exists():
-        load_checkpoint(fabric, model.head_model, file_path, strict=True)
+        load_checkpoint(model.head_model, file_path, strict=True)
 
     eval_for_setup(
-        fabric,
         checkpoint_indexes,
         old_topk_entries,
         final_cp_index,
@@ -463,7 +462,6 @@ def main(
 
 
 def eval_for_setup(
-    fabric: L.Fabric,
     checkpoint_indexes: List[int],
     old_topk_entries: List[Tuple[int, float]],
     final_cp_index: int,
@@ -476,10 +474,9 @@ def eval_for_setup(
     model_type: str,
     model_config: ModelConfiguration,
 ) -> None:
-    print_message(
+    Fabric.print(
         f"\nIterating over {len(checkpoint_indexes)} checkpoints:\n"
         + "\n".join([get_checkpoint_path(out_dir, i).stem for i in checkpoint_indexes]),
-        fabric,
     )
     # Training state can be obtained from the last checkpoint written, usually
     # removed for all other checkpoints. We only need the train/valid split,
@@ -487,11 +484,10 @@ def eval_for_setup(
     task_path = get_checkpoint_path(out_dir, final_cp_index)
     try:
         data_train_state = restore_dataset_from_training_state(data, task_path)
-        print_message(f"Training state loaded from {task_path}", fabric)
+        Fabric.print(f"Training state loaded from {task_path}")
     except FileNotFoundError:
-        print_message(
+        Fabric.print(
             f"No training state found at {task_path}.\nContinue with new random split.",
-            fabric,
         )
         data_train_state = None
     # Data loader for validation set: The train/valid split is obtained from
@@ -502,7 +498,6 @@ def eval_for_setup(
         head_model=model_config.head_model_name,
         train=train,
         eval=evals,
-        fabric=fabric,
         training_state=data_train_state,
     )
     batch_transform = BatchTransformFactory.from_head_model(
@@ -515,17 +510,16 @@ def eval_for_setup(
     new_records: List[Tuple[int, float]] = []
     for cp_ind in checkpoint_indexes:
         cp_path = get_checkpoint_path(out_dir, cp_ind)
-        print_message(f"\nComputing validation loss for {cp_path}", fabric)
+        Fabric.print(f"\nComputing validation loss for {cp_path}")
         # Load checkpoint
-        print_message("Loading checkpoint", fabric)
+        Fabric.print("Loading checkpoint")
         load_model_checkpoint(
             model=model,
             task_path=cp_path,
             model_type=model_type,
-            fabric=fabric,
         )
         # Compute validation loss
-        print_message("Evaluation on validation set", fabric)
+        Fabric.print("Evaluation on validation set")
         metrics = validate_and_all_reduce(
             model=model,
             evaluator=None,
@@ -533,24 +527,22 @@ def eval_for_setup(
             eval=evals,
             batch_transform=batch_transform,
             log_metrics=False,
-            fabric=fabric,
         )
         val_loss = metrics["val_loss"]
         new_records.append((cp_ind, val_loss))
-        print_message(
+        Fabric.print(
             f"Checkpoint {cp_path.stem}: "
             + string_for_val_metrics(metrics, None)
             + f" | val_time: {metrics['val_time']:.3f} s",
-            fabric,
         )
         flush_io_streams()
-        fabric.barrier()
+        Fabric.barrier()
 
     # Print and store results
     top_k = len(old_topk_entries)
     new_topk_entries = sorted(new_records, key=lambda x: x[1])[:top_k]
     for name, entries in (("old", old_topk_entries), ("new", new_topk_entries)):
-        print_message(
+        Fabric.print(
             f"\nBest {top_k} iterations for {name} validation loss code:\n"
             + "\n".join(
                 [
@@ -558,7 +550,6 @@ def eval_for_setup(
                     for ind, val in entries
                 ]
             ),
-            fabric,
         )
     winn_ind = new_topk_entries[0][0]
     winn_task = get_checkpoint_path(out_dir, winn_ind).stem

@@ -28,8 +28,8 @@ from keys_values.kvcache.gradient.accumulate import copy_requires_grad
 from keys_values.kvcache.gradient.main import LongContextGradientModel
 from keys_values.kvcache.test_utils import create_kv_cache, copy_gradients
 from keys_values.lora import GPT, Config, mark_only_lora_as_trainable
-from keys_values.optimize.clone_model import clone_model_shard_via_flat_vectors
-from keys_values.optimize.model_factory import (
+from keys_values.distributed.clone_model import clone_model_shard_via_flat_vectors
+from keys_values.distributed.model_factory import (
     GPTShardCellBlock,
     AccessWeightsGradients,
 )

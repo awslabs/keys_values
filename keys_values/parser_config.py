@@ -11,13 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional, Callable
+from jsonargparse import ArgumentParser, capture_parser, Namespace
 from pathlib import Path
+import sys
+from typing import List, Callable, Tuple
 
-from litgpt.parser_config import (
-    parser_commands as parser_commands_litgpt,
-    save_hyperparameters as save_hyperparameters_litgpt,
-)
+from litgpt.parser_config import parser_commands as parser_commands_litgpt
+from litgpt.utils import CLI
+
+HYPERPARAMETERS_FILENAME = "hyperparameters.yaml"
 
 
 def parser_commands() -> List[str]:
@@ -32,11 +34,44 @@ def parser_commands() -> List[str]:
     ]
 
 
-def save_hyperparameters(
+# From `litgpt.parser_config`. Apart from storing the hyperparameters instead
+# of returning them, the function there has a serious side effect: It modifies
+# `sys.argv` and does not restore it, which implies that subsequent calls of
+# `Fabric.launch` fail.
+def capture_parser_from_script(
     function: Callable,
-    checkpoint_dir: Path,
-    known_commands: Optional[List[str]] = None,
-) -> None:
+    known_commands: list[str] | None = None,
+) -> Tuple[ArgumentParser, Namespace]:
+    """
+    Captures the CLI parameters passed to `function` without running `function`.
+
+    """
+    # TODO: Make this more robust
+    # This hack strips away the subcommands from the top-level CLI
+    # to parse the file as if it was called as a script
     if known_commands is None:
         known_commands = parser_commands()
-    save_hyperparameters_litgpt(function, checkpoint_dir, known_commands)
+    _restore = None
+    if sys.argv[1] in known_commands:
+        _restore = sys.argv.pop(1)
+
+    parser = capture_parser(lambda: CLI(function))
+    config = parser.parse_args()
+    # Restore
+    if _restore is not None:
+        sys.argv.insert(1, _restore)
+
+    return parser, config
+
+
+def save_hyperparameters(
+    parser: ArgumentParser,
+    config: Namespace,
+    checkpoint_dir: Path,
+) -> None:
+    """
+    Use this instead of `litgpt.parser_commands.save_hyperparameters`, the
+    latter has serious side effects!
+
+    """
+    parser.save(config, checkpoint_dir / HYPERPARAMETERS_FILENAME, overwrite=True)

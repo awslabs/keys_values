@@ -12,25 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import replace
 from datetime import datetime
 import json
 from pathlib import Path
 import shutil
-from typing import Optional, Tuple, Literal, Dict, Any, Union
+from typing import Optional, Tuple, Literal, Dict, Any, Union, Callable, Mapping, List
 
-import lightning as L
+from lightning.fabric.connector import _convert_precision_to_unified_args
+from lightning.fabric.loggers import Logger
+from lightning.fabric.plugins.io.torch_io import TorchCheckpointIO
+from lightning.fabric.plugins.precision import (
+    Precision,
+    HalfPrecision,
+    DoublePrecision,
+    TransformerEnginePrecision,
+    MixedPrecision,
+)
+from lightning.fabric.utilities.apply_func import convert_tensors_to_scalars
+from lightning.fabric.utilities.init import _EmptyInit
+from lightning.fabric.utilities.load import _lazy_load as lazy_load
+from lightning.fabric.wrappers import _unwrap_objects
 from tokenizers import Tokenizer as HFTokenizer
 import torch
 
 from keys_values.kvcache.smart_lastrec import SmartInitialInformation
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
-from litgpt.utils import (
-    choose_logger as _choose_logger,
-    instantiate_torch_optimizer,
-    load_checkpoint,
-)
+from litgpt.utils import instantiate_torch_optimizer
 
 from keys_values.data.constants import (
     LIT_MODEL_FNAME,
@@ -39,6 +49,7 @@ from keys_values.data.constants import (
 )
 from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.trainstate import DataTrainState
+from keys_values.distributed.fabric import Fabric
 from keys_values.finetune.args import (
     TrainArgs,
     EvalArgs,
@@ -74,17 +85,13 @@ MAX_PRINT_HEAD = 256
 MAX_PRINT_TAIL = 128
 
 
-def print_but_limit_size(
-    fabric: L.Fabric,
-    text: str,
-):
+def print_but_limit_size(text: str):
     text_length = len(text)
     if text_length <= MAX_PRINT_HEAD + MAX_PRINT_TAIL:
-        print_message("\n" + text, fabric)
+        Fabric.print("\n" + text)
     else:
-        print_message(
+        Fabric.print(
             "\n" + text[:MAX_PRINT_HEAD] + "\n\n[...]\n\n" + text[(-MAX_PRINT_TAIL):],
-            fabric,
         )
 
 
@@ -135,24 +142,24 @@ def get_dataloaders(
     head_model: str,
     train: TrainArgs,
     eval: EvalArgs,
-    fabric: Optional[L.Fabric] = None,
     training_state: Optional[DataTrainState] = None,
 ) -> Tuple[MyDataLoader, MyDataLoader]:
-    num_devices = 1 if fabric is None else fabric.world_size
-    rank = 0 if fabric is None else fabric.local_rank
     data.connect(
         tokenizer=tokenizer,
         batch_size=train.micro_batch_size,
-        num_devices=num_devices,
-        rank=rank,
+        num_devices=Fabric.world_size(),
+        rank=Fabric.rank(),
         max_seq_length=train.max_seq_length,
         head_model=head_model,
         val_batch_size=eval.micro_batch_size,
         training_state=training_state,
     )
-    if fabric is not None:
-        with fabric.rank_zero_first():
-            data.prepare_data()
+
+    # Everybody needs to wait until `data.prepare_data()` finished on rank 0
+    if Fabric.rank() == 0:
+        data.prepare_data()
+    Fabric.barrier()
+
     data.setup()
     train_dataloader = data.train_dataloader()
     val_dataloader = data.val_dataloader()
@@ -189,8 +196,77 @@ def is_lora_model(model: GPTAndHeadModel) -> bool:
     return isinstance(model.gpt_model, GPTLoRA)
 
 
+# From `lightning.fabric.strategies.strategy`
+def _apply_filter(
+    key: str,
+    filter: dict[str, Callable[[str, Any], bool]],
+    source_dict: object,
+    target_dict: dict[str, Any],
+) -> None:
+    # filter out if necessary
+    if key in filter and isinstance(source_dict, dict):
+        filter_fn = filter[key]
+        for k, v in source_dict.items():
+            if filter_fn(k, v):
+                # save the state
+                target_dict.setdefault(key, {})
+                target_dict[key][k] = v
+    else:
+        # save the state
+        target_dict[key] = source_dict
+
+
+# From `lightning.fabric.strategies.strategy.Strategy`
+def _convert_stateful_objects_in_state(
+    state: dict[str, Union[torch.nn.Module, torch.optim.Optimizer, Any]],
+    filter: Optional[dict[str, Callable[[str, Any], bool]]] = None,
+) -> dict[str, Any]:
+    converted_state: dict[str, Any] = {}
+    for key, obj in state.items():
+        if hasattr(obj, "state_dict"):
+            converted = obj.state_dict()
+        else:
+            converted = obj
+        _apply_filter(key, filter, converted, converted_state)
+    return converted_state
+
+
+# From `lightning.Fabric.save`
+def save_checkpoint(
+    path: Union[str, Path],
+    state: dict[str, Union[torch.nn.Module, torch.optim.Optimizer, Any]],
+    storage_options: Optional[Any] = None,
+    filter: Optional[dict[str, Callable[[str, Any], bool]]] = None,
+):
+    """
+    All processes are synced by `Fabric.barrier()`.
+
+    """
+    if filter is not None:
+        if not isinstance(filter, dict):
+            raise TypeError(f"Filter should be a dictionary, given {filter!r}")
+        if not set(filter).issubset(state):
+            raise ValueError(
+                f"The filter keys {filter.keys() - state} are not present in the state keys {set(state)}."
+            )
+        for k, v in filter.items():
+            if not callable(v):
+                raise TypeError(
+                    f"Expected `save_checkpoint(filter=...)` for key {k!r} to be a callable, given {v!r}"
+                )
+    state = _convert_stateful_objects_in_state(
+        _unwrap_objects(state),
+        filter=(filter or {}),
+    )
+    if Fabric.rank() == 0:
+        checkpoint_io = TorchCheckpointIO()
+        checkpoint_io.save_checkpoint(
+            checkpoint=state, path=path, storage_options=storage_options
+        )
+    Fabric.barrier()
+
+
 def save_model_checkpoint(
-    fabric: L.Fabric,
     model: GPTAndHeadModel,
     file_dir: Path,
 ) -> None:
@@ -203,22 +279,26 @@ def save_model_checkpoint(
         file_path = file_dir / LIT_MODEL_FNAME
         save_kwargs = dict()
     file_dir.mkdir(parents=True, exist_ok=True)
-    print_message(
-        f"\nSaving model weights to {str(file_path)!r}",
-        fabric,
-    )
-    fabric.save(file_path, state={"model": model.gpt_model}, **save_kwargs)
+    Fabric.print(f"\nSaving model weights to {str(file_path)!r}")
+    save_checkpoint(file_path, state={"model": model.gpt_model}, **save_kwargs)
     if model.head_model.state_dict():
         file_path = file_dir / HEAD_MODEL_FNAME
-        print_message(
-            f"Saving head model weights to {str(file_path)!r}",
-            fabric,
-        )
-        fabric.save(file_path, state={"model": model.head_model})
+        Fabric.print(f"Saving head model weights to {str(file_path)!r}")
+        save_checkpoint(file_path, state={"model": model.head_model})
+
+
+# From `litgpt.utils.load_checkpoint`
+def load_checkpoint(
+    model: torch.nn.Module,
+    checkpoint_path: Path,
+    strict: bool = True,
+) -> None:
+    state_dict = lazy_load(checkpoint_path)
+    state_dict = state_dict.get("model", state_dict)
+    model.load_state_dict(state_dict, strict=strict)
 
 
 def load_model_checkpoint(
-    fabric: L.Fabric,
     model: GPTAndHeadModel,
     checkpoint_dir: Path,
     resume_dir: Optional[Path] = None,
@@ -244,85 +324,81 @@ def load_model_checkpoint(
     file_path = checkpoint_dir / LIT_MODEL_FNAME
     if not is_lora and resume_dir is not None:
         file_path = resume_dir / LIT_MODEL_FNAME
-    print_message(f"Loading model checkpoint: {file_path}", fabric)
-    load_checkpoint(fabric, model.gpt_model, file_path, strict=not is_lora)
+    Fabric.print(f"Loading model checkpoint: {file_path}")
+    load_checkpoint(model.gpt_model, file_path, strict=not is_lora)
     if is_lora:
         if resume_dir is not None:
             file_path = resume_dir / LORA_WEIGHTS_FNAME
-            print_message("Loading LoRA weights checkpoint", fabric)
-            load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
+            Fabric.print("Loading LoRA weights checkpoint")
+            load_checkpoint(model.gpt_model, file_path, strict=False)
         else:
-            print_message("Reset/initialize LoRA weights", fabric)
+            Fabric.print("Reset/initialize LoRA weights")
             model.gpt_model.reset_lora_parameters()
     # If there are head model weights, load them as well. Otherwise, we use
     # random initialization (or the head model may not have weights)
     if resume_dir is not None:
         file_path = resume_dir / HEAD_MODEL_FNAME
         if file_path.exists():
-            load_checkpoint(fabric, model.head_model, file_path, strict=True)
+            load_checkpoint(model.head_model, file_path, strict=True)
 
 
 def choose_logger(
     logger_name: Literal["csv", "tensorboard", "wandb", "mlflow"],
     out_dir: Path,
     name: str,
-    use_fabric: bool = True,
     log_interval: int = 1,
     log_args: Optional[Dict] = None,
     resume: Optional[bool] = None,
     **kwargs: Any,
-):
-    if use_fabric:
-        return _choose_logger(logger_name, out_dir, name, log_interval, **kwargs)
-    else:
-        if logger_name == "csv":
-            from lightning.pytorch.loggers.csv_logs import CSVLogger
+) -> Logger:
+    if logger_name == "csv":
+        from lightning.pytorch.loggers.csv_logs import CSVLogger
 
-            return CSVLogger(
-                out_dir,
-                name=name,
-                flush_logs_every_n_steps=log_interval,
-                **kwargs,
-            )
-        if logger_name == "tensorboard":
-            from lightning.pytorch.loggers.tensorboard import TensorBoardLogger
-
-            return TensorBoardLogger(
-                out_dir,
-                name=name,
-                **kwargs,
-            )
-        if logger_name == "wandb":
-            from lightning.pytorch.loggers.wandb import WandbLogger
-
-            if log_args is None:
-                log_args = dict()
-            project = log_args.get("project", name)
-            run = log_args.get("run", os.environ.get("WANDB_RUN_NAME"))
-            group = log_args.get("group", os.environ.get("WANDB_RUN_GROUP"))
-            return WandbLogger(
-                project=project,
-                name=run,
-                group=group,
-                resume=resume,
-                **kwargs,
-            )
-        if logger_name == "mlflow":
-            from lightning.pytorch.loggers.mlflow import MLFlowLogger
-
-            if log_args is None:
-                log_args = dict()
-            experiment_name = log_args.get("experiment_name", name)
-            tracking_uri = log_args.get("tracking_uri")
-            return MLFlowLogger(
-                experiment_name=experiment_name,
-                tracking_uri=tracking_uri,
-                save_dir=str(out_dir),
-                **kwargs,
-            )
-        raise ValueError(
-            f"`logger_name={logger_name}` is not a valid option. Choose from 'csv', 'tensorboard', 'wandb', 'mlflow'."
+        return CSVLogger(
+            out_dir,
+            name=name,
+            flush_logs_every_n_steps=log_interval,
+            **kwargs,
         )
+    if logger_name == "tensorboard":
+        from lightning.pytorch.loggers.tensorboard import TensorBoardLogger
+
+        return TensorBoardLogger(
+            out_dir,
+            name=name,
+            **kwargs,
+        )
+    if logger_name == "wandb":
+        from lightning.pytorch.loggers.wandb import WandbLogger
+
+        if log_args is None:
+            log_args = dict()
+        project = log_args.get("project", name)
+        run = log_args.get("run", os.environ.get("WANDB_RUN_NAME"))
+        group = log_args.get("group", os.environ.get("WANDB_RUN_GROUP"))
+        return WandbLogger(
+            project=project,
+            name=run,
+            group=group,
+            resume=resume,
+            **kwargs,
+        )
+    if logger_name == "mlflow":
+        from lightning.pytorch.loggers.mlflow import MLFlowLogger
+
+        if log_args is None:
+            log_args = dict()
+        experiment_name = log_args.get("experiment_name", name)
+        tracking_uri = log_args.get("tracking_uri")
+        return MLFlowLogger(
+            experiment_name=experiment_name,
+            tracking_uri=tracking_uri,
+            save_dir=str(out_dir),
+            **kwargs,
+        )
+    raise ValueError(
+        f"`logger_name={logger_name}` is not a valid option. Choose from 'csv', 'tensorboard', 'wandb', 'mlflow'."
+    )
 
 
 def adapt_requires_grad(
@@ -339,7 +415,7 @@ def adapt_requires_grad(
         head_model (HeadModel): Head model
 
     """
-    from keys_values.optimize.model_factory import BlockComponentName
+    from keys_values.distributed.model_factory import BlockComponentName
 
     if not head_model.needs_logits():
         prefix = BlockComponentName.lm_head()
@@ -360,13 +436,6 @@ def print_with_rank_and_timestamp(
     print(prefix + msg)
     if flush_streams:
         flush_io_streams()
-
-
-def print_message(msg: str, fabric: Optional[L.Fabric] = None):
-    if fabric is not None:
-        fabric.print(msg)
-    else:
-        print(msg)
 
 
 def check_kv_cache(kv_cache: KVCacheArgs):
@@ -545,3 +614,76 @@ def load_generation_config(
         )
         eval_args = replace(eval_args, sample_metric_kwargs=sample_kwargs)
     return eval_args
+
+
+# From `lightning.fabric.connector._check_and_init_precision`
+def _check_and_init_precision(precision: str) -> Precision:
+    if precision in ("16-true", "bf16-true"):
+        return HalfPrecision(precision)
+    if precision == "32-true":
+        return Precision()
+    if precision == "64-true":
+        return DoublePrecision()
+    if precision == "transformer-engine":
+        return TransformerEnginePrecision(weights_dtype=torch.bfloat16)
+    if precision == "transformer-engine-float16":
+        return TransformerEnginePrecision(weights_dtype=torch.float16)
+    if precision in ("16-mixed", "bf16-mixed"):
+        Fabric.print(
+            "Using 16-bit Automatic Mixed Precision (AMP)"
+            if precision == "16-mixed"
+            else "Using bfloat16 Automatic Mixed Precision (AMP)"
+        )
+        return MixedPrecision(precision=precision, device="cuda")
+    raise RuntimeError(f"precision={precision} not supported")
+
+
+# From `lightning.fabric.Fabric.__init__`,
+# `lightning.fabric.connector._Connector`.
+def get_fabric_precision(precision: Optional[str] = None) -> Precision:
+    precision_input = _convert_precision_to_unified_args(precision)
+    if precision_input is None:
+        precision_input = "32-true"
+    return _check_and_init_precision(precision_input)
+
+
+# From `lightning.fabric.fabric.Fabric.init_module`,
+# `lightning.fabric.strategies.strategy.Strategy.module_init_context`.
+def init_module(
+    empty_init: bool = False,
+    precision: Optional[str] = None,
+    device: Optional[torch.device] = None,
+) -> AbstractContextManager:
+    """
+    This context manager can be used to speed up model creation. By default,
+    PyTorch creates modules on CPU, using `float32` as type.
+
+    Args:
+        empty_init: If `True`, parameters are not initialized. Use this only
+            if a checkpoint is loaded afterwards, which initializes all parameters.
+        precision: Parameters are created for this precision and dtype. Defaults
+            to "32-true" (which is `float32`).
+        device: PyTorch creates all parameters on this device directly. Defaults
+            to `Fabric.device()`.
+
+    """
+    if device is None:
+        device = Fabric.device()
+    precision_module_ctx = get_fabric_precision(precision).module_init_context()
+    stack = ExitStack()
+    stack.enter_context(device)
+    stack.enter_context(_EmptyInit(enabled=empty_init))
+    stack.enter_context(precision_module_ctx)
+    return stack
+
+
+# From `lightning.fabric.fabric.Fabric.log_dict
+def fabric_log_dict(
+    loggers: List[Logger],
+    metrics: Mapping[str, Any],
+    step: Optional[int] = None,
+):
+    if loggers:
+        metrics = convert_tensors_to_scalars(metrics)
+        for logger in loggers:
+            logger.log_metrics(metrics=metrics, step=step)

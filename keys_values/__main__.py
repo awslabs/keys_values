@@ -119,7 +119,7 @@ def _setup_rank_logs(base_directory: str | None = None):
 
     # Register cleanup function to run at exit
     atexit.register(_restore)
-    print(f"[rank={local_rank}] logging to {prefix}.log]", flush=True)
+    print(f"[rank={local_rank}] Logging to {prefix}.log", flush=True)
 
 
 def main() -> None:

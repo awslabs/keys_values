@@ -16,7 +16,6 @@ from copy import deepcopy
 
 import pytest
 import torch
-from lightning import Fabric
 from torch._dynamo.backends import debugging
 from transformers.models.gemma import GemmaConfig, GemmaForCausalLM
 from transformers.models.gemma2 import Gemma2Config, Gemma2ForCausalLM
@@ -38,11 +37,12 @@ from keys_values.adapter_v2 import (
     CausalSelfAttention,
 )
 from keys_values.model import GPT as BaseGPT
+from keys_values.finetune.utils import save_checkpoint, init_module
 
 
 def test_config_identical():
     name = "pythia-14m"
-    with Fabric(accelerator="cpu").init_module(empty_init=True):
+    with init_module(empty_init=True, device=torch.device("cpu")):
         base_model = BaseGPT.from_name(name)
         adapter_model = AdapterV2GPT.from_name(name)
 
@@ -53,10 +53,9 @@ def test_config_identical():
 
 
 def test_adapter_v2_filter(tmp_path):
-    fabric = Fabric(devices=1)
     model = AdapterV2GPT.from_name("pythia-14m", n_layer=3)
     save_path = tmp_path / "model.pth"
-    fabric.save(save_path, {"model": model}, filter={"model": adapter_filter})
+    save_checkpoint(save_path, {"model": model}, filter={"model": adapter_filter})
     saved = torch.load(save_path)["model"]
 
     expected = {
