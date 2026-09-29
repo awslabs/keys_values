@@ -201,9 +201,7 @@ def setup(
     if Fabric.cuda_is_available():
         device_count = Fabric.device_count()
         if not (1 <= devices <= device_count):
-            raise ValueError(
-                f"devices = {devices}, must be in [1, {device_count}]"
-            )
+            raise ValueError(f"devices = {devices}, must be in [1, {device_count}]")
     elif devices != 1:
         raise ValueError("CUDA is not available, can only do devices = 1")
     sample_metric_kwargs = dict()

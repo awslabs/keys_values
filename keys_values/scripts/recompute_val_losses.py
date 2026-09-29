@@ -452,7 +452,6 @@ def main(
         load_checkpoint(model.head_model, file_path, strict=True)
 
     eval_for_setup(
-        fabric,
         checkpoint_indexes,
         old_topk_entries,
         final_cp_index,
@@ -468,7 +467,6 @@ def main(
 
 
 def eval_for_setup(
-    fabric: L.Fabric,
     checkpoint_indexes: List[int],
     old_topk_entries: List[Tuple[int, float]],
     final_cp_index: int,
@@ -534,7 +532,6 @@ def eval_for_setup(
             eval=evals,
             batch_transform=batch_transform,
             log_metrics=False,
-            fabric=fabric,
         )
         val_loss = metrics["val_loss"]
         new_records.append((cp_ind, val_loss))

@@ -18,9 +18,10 @@ from datetime import datetime
 import json
 from pathlib import Path
 import shutil
-from typing import Optional, Tuple, Literal, Dict, Any, Union, Callable
+from typing import Optional, Tuple, Literal, Dict, Any, Union, Callable, Mapping, List
 
 from lightning.fabric.connector import _convert_precision_to_unified_args
+from lightning.fabric.loggers import Logger
 from lightning.fabric.plugins.io.torch_io import TorchCheckpointIO
 from lightning.fabric.plugins.precision import (
     Precision,
@@ -29,6 +30,7 @@ from lightning.fabric.plugins.precision import (
     TransformerEnginePrecision,
     MixedPrecision,
 )
+from lightning.fabric.utilities.apply_func import convert_tensors_to_scalars
 from lightning.fabric.utilities.init import _EmptyInit
 from lightning.fabric.utilities.load import _lazy_load as lazy_load
 from lightning.fabric.wrappers import _unwrap_objects
@@ -249,14 +251,18 @@ def save_checkpoint(
             )
         for k, v in filter.items():
             if not callable(v):
-                raise TypeError(f"Expected `save_checkpoint(filter=...)` for key {k!r} to be a callable, given {v!r}")
+                raise TypeError(
+                    f"Expected `save_checkpoint(filter=...)` for key {k!r} to be a callable, given {v!r}"
+                )
     state = _convert_stateful_objects_in_state(
         _unwrap_objects(state),
         filter=(filter or {}),
     )
     if Fabric.rank() == 0:
         checkpoint_io = TorchCheckpointIO()
-        checkpoint_io.save_checkpoint(checkpoint=state, path=path, storage_options=storage_options)
+        checkpoint_io.save_checkpoint(
+            checkpoint=state, path=path, storage_options=storage_options
+        )
     Fabric.barrier()
 
 
@@ -344,7 +350,7 @@ def choose_logger(
     log_args: Optional[Dict] = None,
     resume: Optional[bool] = None,
     **kwargs: Any,
-):
+) -> Logger:
     if logger_name == "csv":
         from lightning.pytorch.loggers.csv_logs import CSVLogger
 
@@ -669,3 +675,15 @@ def init_module(
     stack.enter_context(_EmptyInit(enabled=empty_init))
     stack.enter_context(precision_module_ctx)
     return stack
+
+
+# From `lightning.fabric.fabric.Fabric.log_dict
+def fabric_log_dict(
+    loggers: List[Logger],
+    metrics: Mapping[str, Any],
+    step: Optional[int] = None,
+):
+    if loggers:
+        metrics = convert_tensors_to_scalars(metrics)
+        for logger in loggers:
+            logger.log_metrics(metrics=metrics, step=step)

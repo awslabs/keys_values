@@ -23,6 +23,7 @@ from pprint import pprint
 from typing import Dict, Literal, Optional, Union, Any, Tuple, List, Callable
 
 import lightning as L
+from lightning.fabric.loggers import Logger
 from lightning.fabric.strategies import DDPStrategy
 import torch
 from torchmetrics import RunningMean
@@ -97,6 +98,7 @@ from keys_values.finetune.utils import (
     copy_config_files,
     load_generation_config,
     init_module,
+    fabric_log_dict,
 )
 from keys_values.fused import (
     set_fused_swiglu_enabled,
@@ -455,9 +457,7 @@ def setup_internal(
     if Fabric.cuda_is_available():
         device_count = Fabric.device_count()
         if not (1 <= devices <= device_count):
-            raise ValueError(
-                f"devices = {devices}, must be in [1, {device_count}]"
-            )
+            raise ValueError(f"devices = {devices}, must be in [1, {device_count}]")
     elif devices != 1:
         raise ValueError("CUDA is not available, can only do devices = 1")
     if optimizer is None:
@@ -581,6 +581,7 @@ def setup_internal(
         original_setup=original_setup,
         devices=devices,
         precision=precision,
+        loggers=[logger],
         resume=resume,
         seed=seed,
         config=config,
@@ -618,6 +619,7 @@ def main(
     original_setup: Callable,
     devices: int,
     precision: str,
+    loggers: List[Logger],
     resume: Optional[str],
     seed: int,
     config: Union[ConfigFull, ConfigLoRA],
@@ -787,7 +789,9 @@ def main(
     num_trainable_params = num_parameters(model, requires_grad=True)
     Fabric.print(f"\nNumber of trainable parameters: {num_trainable_params:,}")
     if is_lora:
-        Fabric.print(f"Number of non-trainable parameters: {num_parameters(model, requires_grad=False):,}")
+        Fabric.print(
+            f"Number of non-trainable parameters: {num_parameters(model, requires_grad=False):,}"
+        )
 
     # Create optimizer and learning rate scheduler. For CPU offloading, there
     # can be optimizers on CPU and GPU.
@@ -857,7 +861,6 @@ def main(
     # Call `fit` which runs the training loop
     train_time = time.perf_counter()
     token_counts = fit(
-        fabric=fabric,
         original_setup=original_setup,
         state=state,
         train_dataloader=train_dataloader,
@@ -871,6 +874,7 @@ def main(
         data=data,
         evaluator=evaluator,
         tokenizer=tokenizer,
+        loggers=loggers,
         training_state=training_state,
         resume_path=resume_path,
         record_gpu_memory_snapshots=record_gpu_memory_snapshots,
@@ -916,9 +920,9 @@ def main(
             batch_transform=batch_transform,
             log_metrics=False,
             generate_example_kwargs=generate_example_kwargs,
-            fabric=fabric,
+            loggers=loggers,
         )
-        fabric.log_dict(metrics, step=state["iter_num"])
+        fabric_log_dict(loggers, metrics, step=state["iter_num"])
         Fabric.print(
             f"Final evaluation            | "
             + string_for_val_metrics(metrics, evaluator)
@@ -1247,7 +1251,6 @@ def create_optimizer_and_scheduler(
 
 
 def fit(
-    fabric: L.Fabric,
     original_setup: Callable,
     state: Dict[str, Any],
     train_dataloader: MyDataLoader,
@@ -1261,6 +1264,7 @@ def fit(
     data: DataModule,
     evaluator: Optional[SampleBasedMetricsEvaluator],
     tokenizer: Tokenizer,
+    loggers: List[Logger],
     training_state: Optional[TrainingStateVars],
     resume_path: Optional[Path],
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
@@ -1307,7 +1311,6 @@ def fit(
         if resume_path is None:
             # Initial evaluation (optional). For resume, this is skipped
             val_loss = initial_evaluation(
-                fabric=fabric,
                 out_dir=out_dir,
                 model=model,
                 val_dataloader=val_dataloader,
@@ -1321,6 +1324,7 @@ def fit(
                 generate_with_eval=generate_with_eval,
                 record_gpu_memory_kind=record_gpu_memory_kind,
                 record_gpu_memory_snapshots=record_gpu_memory_snapshots,
+                loggers=loggers,
             )
             if record_gpu_memory_kind == 3:
                 if record_gpu_memory_snapshots.is_recording:
@@ -1488,25 +1492,22 @@ def fit(
 
             # Periodic publishing of metrics
             periodic_log_metrics(
-                fabric=fabric,
                 iter_num=state["iter_num"],
                 train=train,
                 cpu_scheduler=cpu_scheduler,
                 gpu_scheduler=gpu_scheduler,
                 running_loss=running_loss,
                 train_iterator=train_iterator,
-                total_t0=total_t0,
                 iter_t0=iter_t0,
                 val_loss=val_loss,
-                total_lengths=total_lengths,
                 token_counts=token_counts,
                 eval_metric_name=eval_metric_name,
                 batch=batch,
+                loggers=loggers,
             )
 
             # Periodic evaluation on validation set
             periodic_evaluation(
-                fabric=fabric,
                 iter_num=state["iter_num"],
                 model=model,
                 val_dataloader=val_dataloader,
@@ -1519,6 +1520,7 @@ def fit(
                 do_cpu_offloading=do_cpu_offloading,
                 eval_metric_name=eval_metric_name,
                 generate_with_eval=generate_with_eval,
+                loggers=loggers,
             )
 
             # Periodic storage of checkpoints
@@ -1547,7 +1549,6 @@ def fit(
 
 
 def initial_evaluation(
-    fabric: L.Fabric,
     out_dir: Path,
     model: LongContextInferenceModel,
     val_dataloader: MyDataLoader,
@@ -1561,6 +1562,7 @@ def initial_evaluation(
     generate_with_eval: bool,
     record_gpu_memory_kind: int,
     record_gpu_memory_snapshots: Optional[RecordGPUMemory],
+    loggers: List[Logger],
 ) -> Union[str, float]:
     val_loss = "n/a"
     if record_gpu_memory_kind == 3:
@@ -1603,7 +1605,7 @@ def initial_evaluation(
             eval=dataclasses.replace(eval, max_iters=len(val_dataloader)),
             batch_transform=batch_transform,
             generate_example_kwargs=generate_example_kwargs,
-            fabric=fabric,
+            loggers=loggers,
         )
         val_loss = metrics[eval_metric_name]
         Fabric.print(
@@ -1784,20 +1786,18 @@ def update_profile_grad_params(
 
 
 def periodic_log_metrics(
-    fabric: L.Fabric,
     iter_num: int,
     train: TrainArgs,
     cpu_scheduler: Optional[Any],
     gpu_scheduler: Optional[Any],
     running_loss: RunningMean,
     train_iterator: CycleIterator,
-    total_t0: float,
     iter_t0: float,
     val_loss: Union[str, float],
-    total_lengths: int,
     token_counts: Dict[str, Any],
     eval_metric_name: str,
     batch: Dict[str, Any],
+    loggers: List[Logger],
 ):
     if iter_num % train.log_interval == 0:
         loss = running_loss.compute().item()
@@ -1827,12 +1827,11 @@ def periodic_log_metrics(
             f" iter time: {metrics['iter_time']:.3f} s |"
             f" seq_len: {batch[INPUT_IDS_NAME].shape[-1]}",
         )
-        fabric.log_dict(metrics, step=iter_num)
+        fabric_log_dict(loggers, metrics, step=iter_num)
 
 
 # TODO: Common code with `initial_evaluation`. Unify
 def periodic_evaluation(
-    fabric: L.Fabric,
     iter_num: int,
     model: LongContextInferenceModel,
     val_dataloader: MyDataLoader,
@@ -1845,6 +1844,7 @@ def periodic_evaluation(
     do_cpu_offloading: bool,
     eval_metric_name: str,
     generate_with_eval: bool,
+    loggers: List[Logger],
 ):
     if iter_num % eval.interval == 0:
         print_with_rank_and_timestamp(
@@ -1873,10 +1873,8 @@ def periodic_evaluation(
             batch_transform=batch_transform,
             generate_example_kwargs=generate_example_kwargs,
             log_metrics=False,
-            fabric=fabric,
         )
-        val_loss = metrics[eval_metric_name]
-        fabric.log_dict(metrics, step=iter_num)
+        fabric_log_dict(loggers, metrics, step=iter_num)
         print_with_rank_and_timestamp(
             "Finished validation evaluations.",
             Fabric.rank(),
@@ -1912,8 +1910,10 @@ def validate_and_all_reduce(
     batch_transform: BatchTransform,
     generate_example_kwargs: Optional[Dict[str, Any]] = None,
     log_metrics: bool = True,
-    fabric: Optional[L.Fabric] = None,
+    loggers: Optional[List[Logger]] = None,
 ) -> Dict[str, float]:
+    if loggers is None:
+        loggers = []
     val_time = None
     with torch.no_grad():
         deallocate_kv_cache_buffers_of_model(model.gpt_model)
@@ -1974,8 +1974,8 @@ def validate_and_all_reduce(
         metric_name: avg_loss,
         "val_time": val_time,
     }
-    if fabric is not None and log_metrics:
-        fabric.log_dict(metrics)
+    if log_metrics:
+        fabric_log_dict(loggers, metrics)
     return metrics
 
 

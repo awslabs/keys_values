@@ -11,13 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List
 
 import torch
 import torch.distributed as dist
-
-
-# import torch.multiprocessing as mp
 
 
 class Fabric:
@@ -29,6 +26,7 @@ class Fabric:
     something else is needed.
 
     """
+
     @staticmethod
     def cuda_is_available() -> bool:
         return torch.cuda.is_available()
@@ -43,7 +41,11 @@ class Fabric:
 
     @staticmethod
     def device() -> torch.device:
-        return torch.device("cuda", Fabric.rank()) if Fabric.cuda_is_available() else torch.device("cpu")
+        return (
+            torch.device("cuda", Fabric.rank())
+            if Fabric.cuda_is_available()
+            else torch.device("cpu")
+        )
 
     @staticmethod
     def world_size() -> int:
@@ -66,9 +68,7 @@ class Fabric:
     ):
         if Fabric.cuda_is_available():
             if x.device != Fabric.device():
-                raise ValueError(
-                    f"x.device = {x.device}, must be {Fabric.device()}"
-                )
+                raise ValueError(f"x.device = {x.device}, must be {Fabric.device()}")
             dist.all_reduce(x, op=dist.ReduceOp.SUM, group=group)
 
     @staticmethod
@@ -78,7 +78,5 @@ class Fabric:
     ):
         if Fabric.cuda_is_available():
             if x.device != Fabric.device():
-                raise ValueError(
-                    f"x.device = {x.device}, must be {Fabric.device()}"
-                )
+                raise ValueError(f"x.device = {x.device}, must be {Fabric.device()}")
             dist.all_reduce(x, op=dist.ReduceOp.AVG, group=group)
