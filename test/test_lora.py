@@ -54,6 +54,7 @@ from litgpt.scripts.convert_lit_checkpoint import qkv_reassemble as make_qkv_int
 from litgpt.utils import _RunIf
 
 from keys_values.dora_utils import LORA_SCALES_NAME
+from keys_values.finetune.utils import save_checkpoint
 from keys_values.lora import (
     GPT as LoRAGPT,
     Config,
@@ -208,7 +209,6 @@ def test_lora_mqa_gqa():
 
 @pytest.mark.parametrize("kind", ["default", "rms_norm", "dora"])
 def test_lora_filter(tmp_path, kind):
-    fabric = Fabric(devices=1)
     n_layer = 3
     model = LoRAGPT.from_name(
         "pythia-14m",
@@ -219,7 +219,7 @@ def test_lora_filter(tmp_path, kind):
         lora_kind=kind,
     )
     save_path = tmp_path / "model.pth"
-    fabric.save(save_path, {"model": model}, filter={"model": lora_filter})
+    save_checkpoint(save_path, {"model": model}, filter={"model": lora_filter})
     saved = torch.load(save_path)["model"]
 
     names = ("lora_A", "lora_B")

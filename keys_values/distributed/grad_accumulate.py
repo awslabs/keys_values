@@ -15,7 +15,6 @@ import time
 from typing import List, Tuple, Optional, Callable
 
 import torch
-import lightning as L
 
 from keys_values.distributed.fabric import Fabric
 from keys_values.distributed.module_wrapper import AccessWeightsGradients
@@ -42,7 +41,6 @@ class CPUOffloadAccumulateGradients:
     def __init__(
         self,
         group: Optional[List[int]] = None,
-        fabric: Optional[L.Fabric] = None,
         debug_store_grads_name_predicate: Optional[DebugStoreGradsNamePredicate] = None,
     ):
         if group is None:
@@ -51,10 +49,6 @@ class CPUOffloadAccumulateGradients:
         elif len(group) > 1:
             world_size = Fabric.world_size()
             group = sorted(group)
-            if fabric is not None and group != list(range(world_size)):
-                raise ValueError(
-                    f"group = {group}. If fabric is given, this must be {list(range(world_size))}"
-                )
             if group[0] < 0 or any(x == y for x, y in zip(group[:-1], group[1:])):
                 raise ValueError(
                     f"group = {group}, entries must be unique and non-negative"
@@ -66,7 +60,6 @@ class CPUOffloadAccumulateGradients:
         else:
             group = [0]
         self.group = group
-        self.fabric = fabric
         self._debug_store_grads_name_predicate = debug_store_grads_name_predicate
         self._debug_iter_count = 0
 

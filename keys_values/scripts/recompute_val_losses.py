@@ -26,7 +26,6 @@ from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     auto_download_checkpoint,
-    load_checkpoint,
     check_nvlink_connectivity,
     check_valid_checkpoint_dir,
     get_default_supported_precision,
@@ -69,6 +68,7 @@ from keys_values.finetune.utils import (
     adapt_requires_grad,
     check_kv_cache,
     adjust_cache_kwargs,
+    load_checkpoint,
 )
 from keys_values.fused import (
     set_fused_swiglu_enabled,
@@ -81,6 +81,7 @@ from keys_values.utils import (
     flush_io_streams,
     VerbosityLevels,
     fabric_precision_to_dtype,
+    seed_everything,
 )
 
 RESULT_FILENAME = "recomp_val_losses/eval_record.yaml"
@@ -290,6 +291,7 @@ def setup_internal(
         main,
         model_type=model_type,
         devices=devices,
+        precision=precision,
         checkpoint_indexes=checkpoint_indexes,
         old_topk_entries=old_topk_entries,
         final_cp_index=final_cp_index,
@@ -304,6 +306,7 @@ def main(
     fabric: L.Fabric,
     model_type: str,
     devices: int,
+    precision: str,
     checkpoint_indexes: List[int],
     old_topk_entries: List[Tuple[int, float]],
     final_cp_index: int,
@@ -312,7 +315,7 @@ def main(
     verbose: Optional[str],
     access_token: Optional[str],
 ) -> None:
-    fabric.seed_everything(seed)
+    seed_everything(seed)
     # Load configuration from first checkpoint (the same for all)
     task_path = get_checkpoint_path(out_dir, checkpoint_indexes[0])
     # Copied from `keys_values.finetune.longcontext_eval_ext.main`:
@@ -403,13 +406,12 @@ def main(
             kv_cache,
             sdpa,
             yarn_rope,
-            fabric,
             devices,
         )
         # Depending on the cache type `kv_cache.name`, the arguments
         # `kv_cache.cache_kwargs` are adjusted
         adjust_cache_kwargs(kv_cache, data, tokenizer)
-        dtype = fabric_precision_to_dtype(fabric._precision.precision)
+        dtype = fabric_precision_to_dtype(precision)
         torch.set_default_dtype(dtype)
         with torch.device(device):
             gpt_model = create_gpt_model(model_config.config, **mha_kwargs)
@@ -435,16 +437,15 @@ def main(
             max_batch_size=batch_size,
             dtype=dtype,
             average_loss_per_batch=False,
-            fabric=fabric,
         )
     # Load base model
     file_path = checkpoint_dir / LIT_MODEL_FNAME
-    load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
+    load_checkpoint(model.gpt_model, file_path, strict=False)
     # If there are head model weights, load them as well. Otherwise, we use
     # random initialization (or the head model may not have weights)
     file_path = checkpoint_dir / HEAD_MODEL_FNAME
     if file_path.exists():
-        load_checkpoint(fabric, model.head_model, file_path, strict=True)
+        load_checkpoint(model.head_model, file_path, strict=True)
 
     eval_for_setup(
         fabric,
@@ -519,7 +520,6 @@ def eval_for_setup(
             model=model,
             task_path=cp_path,
             model_type=model_type,
-            fabric=fabric,
         )
         # Compute validation loss
         Fabric.print("Evaluation on validation set")

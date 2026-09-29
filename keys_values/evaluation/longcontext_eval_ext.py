@@ -30,7 +30,6 @@ from litgpt.utils import (
     check_valid_checkpoint_dir,
     get_default_supported_precision,
     parse_devices,
-    load_checkpoint,
 )
 
 from keys_values.attention.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
@@ -70,6 +69,7 @@ from keys_values.finetune.utils import (
     print_with_rank_and_timestamp,
     adjust_cache_kwargs,
     load_generation_config,
+    load_checkpoint,
 )
 from keys_values.fused import (
     set_fused_swiglu_enabled,
@@ -312,6 +312,7 @@ def setup_internal(
         setups=setups,
         batch_size=batch_size,
         devices=devices,
+        precision=precision,
         verbose=verbose,
         attention_forward_temp_size_gb=attention_forward_temp_size_gb,
         use_sample_metric=use_sample_metric,
@@ -332,6 +333,7 @@ def main(
     setups: List[Dict[str, Any]],
     batch_size: int,
     devices: int,
+    precision: str,
     verbose: Optional[str],
     attention_forward_temp_size_gb: Optional[float],
     use_sample_metric: bool,
@@ -540,13 +542,12 @@ def main(
                 kv_cache,
                 sdpa,
                 yarn_rope,
-                fabric,
                 devices,
             )
             # Depending on the cache type `kv_cache.name`, the arguments
             # `kv_cache.cache_kwargs` are adjusted
             adjust_cache_kwargs(kv_cache, data, tokenizer)
-            dtype = fabric_precision_to_dtype(fabric._precision.precision)
+            dtype = fabric_precision_to_dtype(precision)
             torch.set_default_dtype(dtype)
             with torch.device(device):
                 gpt_model = create_gpt_model(model_config.config, **mha_kwargs)
@@ -572,16 +573,15 @@ def main(
                 max_batch_size=batch_size,
                 dtype=dtype,
                 average_loss_per_batch=False,
-                fabric=fabric,
             )
         # Load base model
         file_path = base_checkpoint_dir / LIT_MODEL_FNAME
-        load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
+        load_checkpoint(model.gpt_model, file_path, strict=False)
         # If there are head model weights, load them as well. Otherwise, we use
         # random initialization (or the head model may not have weights)
         file_path = base_checkpoint_dir / HEAD_MODEL_FNAME
         if file_path.exists():
-            load_checkpoint(fabric, model.head_model, file_path, strict=True)
+            load_checkpoint(model.head_model, file_path, strict=True)
 
         # Evaluation over tasks and batches
         # `num_store_generated_batches` is the number of batches for which
@@ -599,7 +599,6 @@ def main(
         else:
             num_store_generated_batches = None
         eval_for_setup(
-            fabric,
             model,
             data,
             tokenizer,
@@ -622,7 +621,6 @@ def main(
 
 
 def eval_for_setup(
-    fabric: L.Fabric,
     model: LongContextInferenceModel,
     data: DataModule,
     tokenizer: Tokenizer,
@@ -676,7 +674,6 @@ def eval_for_setup(
 
     # Loop over test set batches
     eval_for_setup_internal(
-        fabric,
         model,
         data,
         test_dataloader,
@@ -695,7 +692,6 @@ def eval_for_setup(
 
 
 def eval_for_setup_internal(
-    fabric: L.Fabric,
     model: LongContextInferenceModel,
     data: DataModule,
     test_dataloader: EvaluationDataLoader,
@@ -793,7 +789,6 @@ def eval_for_setup_internal(
                     model=model,
                     task_path=task_path,
                     model_type=model_type,
-                    fabric=fabric,
                 )
                 current_task = task
                 batch_idx = 0  # Reset
@@ -892,7 +887,6 @@ def get_dataloader(
         head_model: Head model name
         batch_size: Size of test batches
         devices: Number of devices to use
-        fabric: Fabric
         model_name: Sent to `data.connect`
 
     Returns:
@@ -979,7 +973,6 @@ def load_model_checkpoint(
     model: LongContextInferenceModel,
     task_path: Path,
     model_type: str,
-    fabric: L.Fabric,
 ):
     if model_type == "full":
         file_path = task_path / LIT_MODEL_FNAME
@@ -991,12 +984,12 @@ def load_model_checkpoint(
         if not file_path.exists():
             file_path = task_path / LORA_WEIGHTS_FNAME_OLD
         strict = False
-    load_checkpoint(fabric, model.gpt_model, file_path, strict=strict)
+    load_checkpoint(model.gpt_model, file_path, strict=strict)
     # If there are head model weights, load them as well. Otherwise, we use
     # random initialization (or the head model may not have weights)
     file_path = task_path / HEAD_MODEL_FNAME
     if file_path.exists():
-        load_checkpoint(fabric, model.head_model, file_path, strict=True)
+        load_checkpoint(model.head_model, file_path, strict=True)
 
 
 def store_eval_metrics(

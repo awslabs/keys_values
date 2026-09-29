@@ -38,6 +38,7 @@ from keys_values.adapter_v2 import (
     CausalSelfAttention,
 )
 from keys_values.model import GPT as BaseGPT
+from keys_values.finetune.utils import save_checkpoint
 
 
 def test_config_identical():
@@ -53,10 +54,9 @@ def test_config_identical():
 
 
 def test_adapter_v2_filter(tmp_path):
-    fabric = Fabric(devices=1)
     model = AdapterV2GPT.from_name("pythia-14m", n_layer=3)
     save_path = tmp_path / "model.pth"
-    fabric.save(save_path, {"model": model}, filter={"model": adapter_filter})
+    save_checkpoint(save_path, {"model": model}, filter={"model": adapter_filter})
     saved = torch.load(save_path)["model"]
 
     expected = {

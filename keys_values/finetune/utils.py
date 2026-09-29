@@ -17,19 +17,19 @@ from datetime import datetime
 import json
 from pathlib import Path
 import shutil
-from typing import Optional, Tuple, Literal, Dict, Any, Union
+from typing import Optional, Tuple, Literal, Dict, Any, Union, Callable
 
 import lightning as L
+from lightning.fabric.utilities.load import _lazy_load as lazy_load
+from lightning.fabric.wrappers import _unwrap_objects
+from lightning.fabric.plugins.io.torch_io import TorchCheckpointIO
 from tokenizers import Tokenizer as HFTokenizer
 import torch
 
 from keys_values.kvcache.smart_lastrec import SmartInitialInformation
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
-from litgpt.utils import (
-    instantiate_torch_optimizer,
-    load_checkpoint,
-)
+from litgpt.utils import instantiate_torch_optimizer
 
 from keys_values.data.constants import (
     LIT_MODEL_FNAME,
@@ -185,8 +185,73 @@ def is_lora_model(model: GPTAndHeadModel) -> bool:
     return isinstance(model.gpt_model, GPTLoRA)
 
 
+# From `lightning.fabric.strategies.strategy`
+def _apply_filter(
+    key: str,
+    filter: dict[str, Callable[[str, Any], bool]],
+    source_dict: object,
+    target_dict: dict[str, Any],
+) -> None:
+    # filter out if necessary
+    if key in filter and isinstance(source_dict, dict):
+        filter_fn = filter[key]
+        for k, v in source_dict.items():
+            if filter_fn(k, v):
+                # save the state
+                target_dict.setdefault(key, {})
+                target_dict[key][k] = v
+    else:
+        # save the state
+        target_dict[key] = source_dict
+
+
+# From `lightning.fabric.strategies.strategy.Strategy`
+def _convert_stateful_objects_in_state(
+    state: dict[str, Union[torch.nn.Module, torch.optim.Optimizer, Any]],
+    filter: Optional[dict[str, Callable[[str, Any], bool]]] = None,
+) -> dict[str, Any]:
+    converted_state: dict[str, Any] = {}
+    for key, obj in state.items():
+        if hasattr(obj, "state_dict"):
+            converted = obj.state_dict()
+        else:
+            converted = obj
+        _apply_filter(key, filter, converted, converted_state)
+    return converted_state
+
+
+# From `lightning.Fabric.save`
+def save_checkpoint(
+    path: Union[str, Path],
+    state: dict[str, Union[torch.nn.Module, torch.optim.Optimizer, Any]],
+    storage_options: Optional[Any] = None,
+    filter: Optional[dict[str, Callable[[str, Any], bool]]] = None,
+):
+    """
+    All processes are synced by `Fabric.barrier()`.
+
+    """
+    if filter is not None:
+        if not isinstance(filter, dict):
+            raise TypeError(f"Filter should be a dictionary, given {filter!r}")
+        if not set(filter).issubset(state):
+            raise ValueError(
+                f"The filter keys {filter.keys() - state} are not present in the state keys {set(state)}."
+            )
+        for k, v in filter.items():
+            if not callable(v):
+                raise TypeError(f"Expected `save_checkpoint(filter=...)` for key {k!r} to be a callable, given {v!r}")
+    state = _convert_stateful_objects_in_state(
+        _unwrap_objects(state),
+        filter=(filter or {}),
+    )
+    if Fabric.rank() == 0:
+        checkpoint_io = TorchCheckpointIO()
+        checkpoint_io.save_checkpoint(checkpoint=state, path=path, storage_options=storage_options)
+    Fabric.barrier()
+
+
 def save_model_checkpoint(
-    fabric: L.Fabric,
     model: GPTAndHeadModel,
     file_dir: Path,
 ) -> None:
@@ -200,15 +265,25 @@ def save_model_checkpoint(
         save_kwargs = dict()
     file_dir.mkdir(parents=True, exist_ok=True)
     Fabric.print(f"\nSaving model weights to {str(file_path)!r}")
-    fabric.save(file_path, state={"model": model.gpt_model}, **save_kwargs)
+    save_checkpoint(file_path, state={"model": model.gpt_model}, **save_kwargs)
     if model.head_model.state_dict():
         file_path = file_dir / HEAD_MODEL_FNAME
         Fabric.print(f"Saving head model weights to {str(file_path)!r}")
-        fabric.save(file_path, state={"model": model.head_model})
+        save_checkpoint(file_path, state={"model": model.head_model})
+
+
+# From `litgpt.utils.load_checkpoint`
+def load_checkpoint(
+    model: torch.nn.Module,
+    checkpoint_path: Path,
+    strict: bool = True,
+) -> None:
+    state_dict = lazy_load(checkpoint_path)
+    state_dict = state_dict.get("model", state_dict)
+    model.load_state_dict(state_dict, strict=strict)
 
 
 def load_model_checkpoint(
-    fabric: L.Fabric,
     model: GPTAndHeadModel,
     checkpoint_dir: Path,
     resume_dir: Optional[Path] = None,
@@ -235,12 +310,12 @@ def load_model_checkpoint(
     if not is_lora and resume_dir is not None:
         file_path = resume_dir / LIT_MODEL_FNAME
     Fabric.print(f"Loading model checkpoint: {file_path}")
-    load_checkpoint(fabric, model.gpt_model, file_path, strict=not is_lora)
+    load_checkpoint(model.gpt_model, file_path, strict=not is_lora)
     if is_lora:
         if resume_dir is not None:
             file_path = resume_dir / LORA_WEIGHTS_FNAME
             Fabric.print("Loading LoRA weights checkpoint")
-            load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
+            load_checkpoint(model.gpt_model, file_path, strict=False)
         else:
             Fabric.print("Reset/initialize LoRA weights")
             model.gpt_model.reset_lora_parameters()
@@ -249,7 +324,7 @@ def load_model_checkpoint(
     if resume_dir is not None:
         file_path = resume_dir / HEAD_MODEL_FNAME
         if file_path.exists():
-            load_checkpoint(fabric, model.head_model, file_path, strict=True)
+            load_checkpoint(model.head_model, file_path, strict=True)
 
 
 def choose_logger(

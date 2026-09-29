@@ -245,7 +245,8 @@ def setup(
             stored along the way.
         out_dir: Directory in which to save checkpoints and logs. If running in a Lightning Studio Job, look for it in
             /teamspace/jobs/<job-name>/share.
-        precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
+        precision: The precision to use for finetuning. Possible choices:
+            "bf16-true", "bf16-mixed", "16-true", "16-mixed", "32-true".
         devices: How many devices/GPUs to user
         data: Data-related arguments. Mandatory
         resume: Name of checkpoint directory from which training is to be
@@ -578,6 +579,7 @@ def setup_internal(
         do_cpu_offload=do_cpu_offload,
         original_setup=original_setup,
         devices=devices,
+        precision=precision,
         resume=resume,
         seed=seed,
         config=config,
@@ -614,6 +616,7 @@ def main(
     do_cpu_offload: bool,
     original_setup: Callable,
     devices: int,
+    precision: str,
     resume: Optional[str],
     seed: int,
     config: Union[ConfigFull, ConfigLoRA],
@@ -684,11 +687,11 @@ def main(
     seed_everything(seed)
     if do_cpu_offload:
         # CPU offloading: The optimizer state is kept on CPU
-        cpu_offload_device = torch.device("cuda", Fabric.rank())
+        cpu_offload_device = Fabric.device()
         optim_device = torch.device("cpu")
     else:
         cpu_offload_device = None
-        optim_device = fabric.device
+        optim_device = Fabric.device()
 
     # Enable/disable fused operators
     set_fused_rope_enabled(sdpa.fused_rope)
@@ -723,13 +726,12 @@ def main(
             kv_cache,
             sdpa,
             yarn_rope,
-            fabric,
             devices,
         )
         # Depending on the cache type `kv_cache.name`, the arguments
         # `kv_cache.cache_kwargs` are adjusted
         adjust_cache_kwargs(kv_cache, data, tokenizer)
-        dtype = fabric_precision_to_dtype(fabric._precision.precision)
+        dtype = fabric_precision_to_dtype(precision)
         torch.set_default_dtype(dtype)
         if do_cpu_offload:
             # We create the GPT model on the device, then copy to CPU. This is
@@ -772,7 +774,6 @@ def main(
             average_loss_per_batch=train.average_loss_per_batch,
             profile_grad_times=profile_grad_times > 0,
             profile_parts=profile_parts,
-            fabric=fabric,
             debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
             oom_error_recovery=oom_error_recovery,
             checkpoint_name_manager=checkpoint_name_manager,
@@ -835,7 +836,7 @@ def main(
     else:
         training_state = None
 
-    load_model_checkpoint(fabric, model, checkpoint_dir, resume_dir=resume_path)
+    load_model_checkpoint(model, checkpoint_dir, resume_dir=resume_path)
     check_for_nan_module_weights(model.gpt_model)
 
     if profile_grad_times > 0 and Fabric.rank() == 0:
@@ -879,7 +880,7 @@ def main(
     output = create_finetuning_performance_report(
         training_time,
         token_counts,
-        fabric.device.type,
+        Fabric.device().type,
     )
     Fabric.print(output)
 
@@ -926,9 +927,9 @@ def main(
 
     # Save the final checkpoint at the end of training
     save_dir = out_dir / "final"
-    save_model_checkpoint(fabric, model, save_dir)
+    save_model_checkpoint(model, save_dir)
     if training_state is not None:
-        training_state.save_state(fabric, save_dir)
+        training_state.save_state(save_dir)
     if Fabric.rank() == 0:
         # Copy checkpoint files from original checkpoint dir
         copy_config_files(checkpoint_dir, save_dir)
@@ -956,7 +957,6 @@ def get_mha_and_cache_kwargs(
     kv_cache: KVCacheArgs,
     sdpa: SDPAArgs,
     yarn_rope: bool,
-    fabric: Optional[L.Fabric],
     devices: int,
 ) -> Dict[str, Any]:
     """
@@ -1046,7 +1046,6 @@ def wrap_gpt_model(
     profile_parts: Optional[str] = None,
     cpu_offload_device: Optional[torch.device] = None,
     offload_num_devices: int = 1,
-    fabric: Optional[L.Fabric] = None,
     debug_dont_use_autograd_hooks: bool = False,
     oom_error_recovery: bool = False,
     model_kwargs: Optional[Dict[str, Any]] = None,
@@ -1135,7 +1134,6 @@ def wrap_gpt_model(
             common_kwargs["head_model"] = head_model.to(device=cpu_offload_device)
             offload_grad_accum = CPUOffloadAccumulateGradients(
                 group=list(range(offload_num_devices)),
-                fabric=fabric,
             )
             if offload_num_devices > 1:
                 # Test connection: all-reduce with sum must work
@@ -1275,10 +1273,9 @@ def fit(
         gpu_scheduler = state["scheduler"]
         cpu_optimizer = None
         cpu_scheduler = None
-        optim_device = fabric.device
+        optim_device = Fabric.device()
         grad_reducer = CPUOffloadAccumulateGradients(
             group=list(range(devices)),
-            fabric=fabric,
         )
     else:
         gpu_optimizer = state.get("gpu_optimizer")
@@ -1295,14 +1292,11 @@ def fit(
     try:
 
         # Part of metrics
+        tc_kwargs = dict(device=Fabric.device(), dtype=torch.long)
         token_counts = {
-            "raw_tokens": torch.tensor(0, device=fabric.device, dtype=torch.long),
-            "raw_tokens_plus_prompt_template": torch.tensor(
-                0, device=fabric.device, dtype=torch.long
-            ),
-            "raw_tokens_plus_prompt_template_and_padding": torch.tensor(
-                0, device=fabric.device, dtype=torch.long
-            ),
+            "raw_tokens": torch.tensor(0, **tc_kwargs),
+            "raw_tokens_plus_prompt_template": torch.tensor(0, **tc_kwargs),
+            "raw_tokens_plus_prompt_template_and_padding": torch.tensor(0, **tc_kwargs),
         }
 
         val_loss = "n/a"
@@ -1392,7 +1386,7 @@ def fit(
                 if num_tokens_batch is not None:
                     num_tokens_batch = num_tokens_batch.sum()
                     avg_tokens_tensor = num_tokens_batch.to(
-                        device=fabric.device
+                        device=Fabric.device()
                     ).clone()
                     Fabric.all_reduce_mean(avg_tokens_tensor)
                     loss_weight = num_tokens_batch.item() / avg_tokens_tensor.item()
@@ -1525,7 +1519,6 @@ def fit(
 
             # Periodic storage of checkpoints
             save_checkpoint_regular(
-                fabric=fabric,
                 model=model,
                 out_dir=out_dir,
                 checkpoint_dir=checkpoint_dir,
@@ -1540,7 +1533,7 @@ def fit(
         # This error is thrown by FlexAttention if too many graphs have been
         # compiled. We print all the graphs maintained, and how often each
         # has been used.
-        print_flex_attn_report(fabric, model)
+        print_flex_attn_report(model)
         raise ex
 
     return {
@@ -1897,7 +1890,6 @@ def periodic_evaluation(
 
 
 def print_flex_attn_report(
-    fabric: L.Fabric,
     model: NaiveGPTAndHeadModel,
 ):
     flexatt_args = model.gpt_model.mha.flexatt_args
@@ -2093,7 +2085,6 @@ def do_save(step: int, train: TrainArgs, intermed: bool) -> bool:
 
 
 def save_checkpoint_regular(
-    fabric: L.Fabric,
     model: GPTAndHeadModel,
     out_dir: Path,
     checkpoint_dir: Path,
@@ -2106,9 +2097,9 @@ def save_checkpoint_regular(
     save_intermed = do_save(step, train, intermed=True)
     if save_intermed or do_save(step, train, intermed=False):
         interval_dir = out_dir / f"step-{step:06d}"
-        save_model_checkpoint(fabric, model, interval_dir)
+        save_model_checkpoint(model, interval_dir)
         if training_state is not None:
-            training_state.save_state(fabric, interval_dir)
+            training_state.save_state(interval_dir)
         if Fabric.rank() == 0:
             copy_config_files(checkpoint_dir, interval_dir)
             save_hyperparameters(original_setup, interval_dir)
