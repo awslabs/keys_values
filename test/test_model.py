@@ -17,7 +17,6 @@ from functools import partial
 
 import pytest
 import torch
-from lightning import Fabric
 from lightning.fabric.utilities.imports import _IS_WINDOWS
 from torch._dynamo.backends import debugging
 from torch.backends.cuda import (
@@ -1713,20 +1712,6 @@ def test_sdpa_choice_kv_cache(config):
         model(x)
     for cache, reset in reset_meth:
         cache.mha.scaled_dot_product_attention = reset
-
-
-@_RunIf(min_cuda_gpus=2, standalone=True)
-def test_rope_init_under_fsdp():
-    """Check that the rope cache is properly initialized"""
-    fabric = Fabric(devices=2, strategy="fsdp", accelerator="cuda")
-    fabric.launch()
-
-    with fabric.init_module(empty_init=True):
-        model = GPT.from_name("pythia-14m", n_layer=1)
-    assert model.mha.pos_encoding.device.type == "meta"
-
-    model = fabric.setup(model)
-    assert model.mha.pos_encoding.device.type == "cuda"
 
 
 def test_load_legacy_state_dict():

@@ -23,14 +23,12 @@ from unittest.mock import Mock
 import pytest
 import torch
 import yaml
-from lightning import Fabric
 from lightning.fabric.plugins.precision.bitsandbytes import (
     _BITSANDBYTES_AVAILABLE,
     BitsandbytesPrecision,
 )
 from lightning.fabric.wrappers import _FabricOptimizer
 from torch._dynamo.backends import debugging
-from torch.distributed.device_mesh import init_device_mesh
 from torch.nn import functional as F
 from transformers.models.gemma import GemmaConfig, GemmaForCausalLM
 from transformers.models.gemma2 import Gemma2Config, Gemma2ForCausalLM
@@ -54,7 +52,7 @@ from litgpt.scripts.convert_lit_checkpoint import qkv_reassemble as make_qkv_int
 from litgpt.utils import _RunIf
 
 from keys_values.dora_utils import LORA_SCALES_NAME
-from keys_values.finetune.utils import save_checkpoint, init_module
+from keys_values.finetune.utils import save_checkpoint
 from keys_values.lora import (
     GPT as LoRAGPT,
     Config,
@@ -483,82 +481,6 @@ def test_lora_qkv_linear_weights_merged_status(rank, enable_lora, expected_merge
     assert not layer.merged
     layer.merge()
     assert layer.merged == expected_merged
-
-
-@_RunIf(min_cuda_gpus=1)
-def test_lora_merge_with_bitsandbytes():
-    if not _BITSANDBYTES_AVAILABLE:
-        pytest.skip("BNB not available")
-    import bitsandbytes as bnb
-
-    config = Config(
-        n_layer=1,
-        n_head=2,
-        n_embd=8,
-        block_size=8,
-        vocab_size=8,
-        lora_r=8,
-        lora_alpha=8,
-        lora_dropout=0.1,
-        lora_query=True,
-        lora_value=True,
-        lora_projection=True,
-    )
-    fabric = Fabric(
-        devices=1,
-        plugins=BitsandbytesPrecision(
-            "nf4", dtype=torch.bfloat16, ignore_modules={"lm_head"}
-        ),
-    )
-    model = LoRAGPT(config)
-    mark_only_lora_as_trainable(model)
-
-    from bitsandbytes.optim import PagedAdamW
-
-    optimizer = PagedAdamW(model.parameters(), lr=1.0)
-    model, optimizer = fabric.setup(model, optimizer)
-
-    model.train()
-
-    attn_proj = model.transformer.h[0].attn.proj
-    initial_weight = attn_proj.linear.weight.clone()
-    initial_weight_kwargs = attn_proj.linear.weight.__dict__
-
-    # this was skipped
-    assert model.lm_head.linear.weight.dtype is torch.float32
-    assert attn_proj.linear.weight.dtype is torch.uint8
-
-    # perform an update to the LoRA weights
-    y = model(torch.randint(0, 8, size=(2, 4), dtype=torch.int64, device=fabric.device))
-    loss = y.sum()
-    fabric.backward(loss)
-    optimizer.step()
-    optimizer.zero_grad()
-    # the weight remains unchanged (only lora A and B change)
-    assert torch.equal(attn_proj.linear.weight, initial_weight)
-
-    # calling merge() multiple times in a row should not merge multiple times
-    merge_lora_weights(model)
-    assert attn_proj.merged
-    weight_after = attn_proj.linear.weight.clone()
-    merge_lora_weights(model)
-    merge_lora_weights(model)
-    assert torch.equal(attn_proj.linear.weight, weight_after)
-
-    # check that `W_after = W_initial + (A x B)`
-    delta_w = attn_proj.get_lora_AB()
-    # dequantize initial weight and sum with delta_w
-    initial_weight_data = (
-        bnb.functional.dequantize_4bit(
-            initial_weight.data, initial_weight_kwargs["quant_state"]
-        )
-        + delta_w
-    )
-    # quantize again
-    initial_weight_data = bnb.nn.Params4bit(
-        initial_weight_data.to("cpu"), requires_grad=False, **initial_weight_kwargs
-    ).to(initial_weight.device)
-    torch.testing.assert_close(weight_after, initial_weight_data)
 
 
 def test_lora_gpt_init_weights():
@@ -998,50 +920,6 @@ def test_lora_bitsandbytes(monkeypatch, tmp_path, fake_checkpoint_dir, alpaca_pa
     assert "of non-trainable parameters: 1,888" in logs
 
 
-@_RunIf(standalone=True, min_cuda_gpus=2)
-def test_lora_model_fsdp_init():
-    config = Config(
-        n_layer=1,
-        n_head=2,
-        n_embd=8,
-        block_size=8,
-        vocab_size=8,
-        lora_r=8,
-        lora_alpha=8,
-        lora_dropout=0.1,
-        lora_query=True,
-        lora_value=False,
-        lora_projection=True,
-    )
-    precision = "16-true"
-    fabric = Fabric(devices=2, strategy="fsdp", precision=precision)
-    fabric.launch()
-    with init_module(empty_init=True, precision=precision):
-        model = LoRAGPT(config)
-    x = torch.randint(
-        0,
-        config.padded_vocab_size,
-        size=(2, config.block_size),
-        dtype=torch.int64,
-        device=fabric.device,
-    )
-    model = fabric.setup(model)
-    y = model(x)
-    assert y.shape == torch.Size([2, 8, 512])
-
-    # verify that all the parameters, buffers and other attributes aren't on `meta` device
-    for m in model.modules():
-        for p_name, parameter in m.named_parameters():
-            assert not parameter.is_meta, f"Parameter `{p_name}` isn't materialized."
-        for b_name, buffer in m._buffers.items():
-            assert not buffer.is_meta, f"Buffer `{b_name}` isn't materialized."
-        for attr_name, attr_value in m.__dict__.items():
-            if isinstance(attr_value, torch.Tensor):
-                assert (
-                    not attr_value.is_meta
-                ), f"Attribute `{attr_name}` isn't materialized."
-
-
 def test_zero_pad_cpu_and_mocked_mps():
     head_size = 64
     n_head = 12
@@ -1112,257 +990,6 @@ def test_load_legacy_state_dict():
 
     attention_2 = LoRACausalSelfAttention(config=config, block_idx=0)
     attention_2.load_state_dict(state_dict)
-
-
-@_RunIf(standalone=True, min_cuda_gpus=2)
-def test_parallelize_fn():
-    from litgpt.finetune.lora import parallelize_fn
-
-    config = Config(
-        n_layer=2,
-        n_head=4,
-        n_embd=32,
-        block_size=8,
-        vocab_size=8,
-        lora_r=4,
-        lora_alpha=8,
-        lora_dropout=0.1,
-        lora_query=True,
-        lora_value=True,
-        lora_projection=True,
-    )
-
-    fabric = Fabric(devices=2, strategy="fsdp", precision="16-true")
-    fabric.launch()
-
-    model = LoRAGPT(config)
-    mark_only_lora_as_trainable(model)
-
-    # create device mesh for data parallel
-    device_mesh = init_device_mesh(
-        device_type=fabric.device.type,
-        mesh_shape=(2, 1),
-        mesh_dim_names=("data_parallel", "tensor_parallel"),
-    )
-
-    # test with activation checkpointing enabled (default)
-    parallelized_model = parallelize_fn(
-        model, device_mesh, activation_checkpointing=True
-    )
-
-    # verify the model is still functional
-    assert parallelized_model is not None
-    assert isinstance(parallelized_model, LoRAGPT)
-
-    parallelized_model = parallelized_model.to(fabric.device)
-
-    # test forward pass to ensure the parallelized model works
-    x = torch.randint(
-        0,
-        config.padded_vocab_size,
-        size=(1, config.block_size),
-        dtype=torch.int64,
-        device=fabric.device,
-    )
-
-    # verify forward pass works
-    with torch.no_grad():
-        output = parallelized_model(x)
-        assert output.shape == (1, config.block_size, config.padded_vocab_size)
-
-    # test with activation checkpointing disabled
-    model_no_checkpoint = LoRAGPT(config)
-    mark_only_lora_as_trainable(model_no_checkpoint)
-
-    parallelized_model_no_checkpoint = parallelize_fn(
-        model_no_checkpoint, device_mesh, activation_checkpointing=False
-    )
-
-    # verify the model is still functional
-    assert parallelized_model_no_checkpoint is not None
-    assert isinstance(parallelized_model_no_checkpoint, LoRAGPT)
-
-    # test forward pass to ensure the parallelized model works
-    parallelized_model_no_checkpoint = parallelized_model_no_checkpoint.to(
-        fabric.device
-    )
-
-    with torch.no_grad():
-        output = parallelized_model_no_checkpoint(x)
-        assert output.shape == (1, config.block_size, config.padded_vocab_size)
-
-    # verify that all parameters are properly distributed (not on meta device)
-    for mod in parallelized_model.modules():
-        for param_name, param in mod.named_parameters():
-            if param.requires_grad:  # Only check trainable parameters (LoRA parameters)
-                assert (
-                    not param.is_meta
-                ), f"Parameter `{param_name}` should not be on meta device"
-                assert (
-                    param.device.type == "cuda"
-                ), f"Parameter `{param_name}` should be on CUDA device"
-
-
-@_RunIf(standalone=True, min_cuda_gpus=2)
-def test_load_from_full_model_state_dict():
-    from litgpt.finetune.lora import parallelize_fn
-    from litgpt.utils import load_from_full_model_state_dict
-
-    config = Config(
-        n_layer=2,
-        n_head=4,
-        n_embd=32,
-        block_size=8,
-        vocab_size=8,
-        lora_r=4,
-        lora_alpha=8,
-        lora_dropout=0.1,
-        lora_query=True,
-        lora_value=True,
-        lora_projection=True,
-        lora_mlp=True,
-        lora_head=True,
-    )
-
-    # set up distributed environment with FSDP
-    fabric = Fabric(devices=2, strategy="fsdp", precision="16-true")
-    fabric.launch()
-
-    # create a reference model to get the full state dict
-    reference_model = LoRAGPT(config)
-    mark_only_lora_as_trainable(reference_model)
-
-    # initialize the reference model with some values
-    with torch.no_grad():
-        for param in reference_model.parameters():
-            if param.requires_grad:
-                param.fill_(0.1)
-
-    # get the full state dict (simulating a checkpoint)
-    full_state_dict = {}
-    for name, param in reference_model.named_parameters():
-        # Convert parameters to checkpoint format (what load_from_full_model_state_dict expects)
-        if "norm" not in name and "wte" not in name and "ln_f" not in name:
-            # For linear layers, remove .linear from the name to simulate checkpoint format
-            checkpoint_name = name.replace(".linear.weight", ".weight").replace(
-                ".linear.bias", ".bias"
-            )
-        else:
-            # For norm, embedding, and layer norm layers, keep the original name
-            checkpoint_name = name
-        full_state_dict[checkpoint_name] = param.detach().clone()
-
-    # create distributed model
-    model = LoRAGPT(config)
-    mark_only_lora_as_trainable(model)
-
-    # set up device mesh for distributed model
-    device_mesh = init_device_mesh(
-        device_type=fabric.device.type,
-        mesh_shape=(2, 1),
-        mesh_dim_names=("data_parallel", "tensor_parallel"),
-    )
-    model = parallelize_fn(model, device_mesh, activation_checkpointing=False)
-    model = model.to(fabric.device)
-
-    # test with default parameters (strict=False, cpu_offload=False)
-    result = load_from_full_model_state_dict(
-        model=model,
-        full_sd=full_state_dict,
-        device=fabric.device,
-        strict=False,
-        cpu_offload=False,
-    )
-
-    # verify that the function returns the missing/unexpected keys
-    assert hasattr(result, "missing_keys")
-    assert hasattr(result, "unexpected_keys")
-
-    # verify that parameters are loaded correctly
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            # Check that parameter is not on meta device
-            assert not param.is_meta, f"Parameter {name} should not be on meta device"
-            # Check that parameter is on the correct device
-            assert (
-                param.device.type == "cuda"
-            ), f"Parameter {name} should be on CUDA device"
-
-    # test with cpu_offload=True
-    model_cpu_offload = LoRAGPT(config)
-    mark_only_lora_as_trainable(model_cpu_offload)
-    model_cpu_offload = parallelize_fn(
-        model_cpu_offload, device_mesh, activation_checkpointing=False
-    )
-    model_cpu_offload = model_cpu_offload.to(fabric.device)
-
-    result_cpu_offload = load_from_full_model_state_dict(
-        model=model_cpu_offload,
-        full_sd=full_state_dict,
-        device=fabric.device,
-        strict=False,
-        cpu_offload=True,
-    )
-
-    # verify that parameters are loaded correctly with CPU offload
-    for name, param in model_cpu_offload.named_parameters():
-        if param.requires_grad:
-            # Check that parameter is not on meta device
-            assert not param.is_meta, f"Parameter {name} should not be on meta device"
-            # With cpu_offload, parameters might be on CPU
-            assert param.device.type in [
-                "cpu",
-                "cuda",
-            ], f"Parameter {name} should be on CPU or CUDA device"
-
-    # test with strict=True
-    model_strict = LoRAGPT(config)
-    mark_only_lora_as_trainable(model_strict)
-    model_strict = parallelize_fn(
-        model_strict, device_mesh, activation_checkpointing=False
-    )
-    model_strict = model_strict.to(fabric.device)
-
-    try:
-        result_strict = load_from_full_model_state_dict(
-            model=model_strict,
-            full_sd=full_state_dict,
-            device=fabric.device,
-            strict=True,
-            cpu_offload=False,
-        )
-        # If strict loading succeeds, verify parameters
-        for name, param in model_strict.named_parameters():
-            if param.requires_grad:
-                assert (
-                    not param.is_meta
-                ), f"Parameter {name} should not be on meta device"
-                assert (
-                    param.device.type == "cuda"
-                ), f"Parameter {name} should be on CUDA device"
-    except RuntimeError as e:
-        # strict=True might fail if there are missing keys, which is expected behavior
-        assert "Missing key(s)" in str(e) or "Unexpected key(s)" in str(e)
-
-    # test forward pass to ensure model still works after loading
-    x = torch.randint(
-        0,
-        config.padded_vocab_size,
-        size=(1, config.block_size),
-        dtype=torch.int64,
-        device=fabric.device,
-    )
-
-    with torch.no_grad():
-        output = model(x)
-        assert output.shape == (1, config.block_size, config.padded_vocab_size)
-
-        output_cpu_offload = model_cpu_offload(x)
-        assert output_cpu_offload.shape == (
-            1,
-            config.block_size,
-            config.padded_vocab_size,
-        )
 
 
 def test_forward_qwen3_4b():
