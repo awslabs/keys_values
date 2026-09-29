@@ -641,6 +641,10 @@ def main(
     size_log_quantiles: List[float],
     debug_dont_use_autograd_hooks: bool,
 ) -> None:
+    Fabric.init_process_group_nccl(
+        rank=rank,
+        world_size=devices,
+    )
     validate_args(train, eval)
     is_lora = isinstance(config, ConfigLoRA)
     if resume is not None:

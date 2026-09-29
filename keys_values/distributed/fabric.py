@@ -18,6 +18,8 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from keys_values.constants import DEFAULT_MASTER_ADDR, DEFAULT_MASTER_PORT
+
 
 class Fabric:
     """
@@ -34,12 +36,16 @@ class Fabric:
         return torch.cuda.is_available()
 
     @staticmethod
+    def is_initialized() -> bool:
+        return Fabric.cuda_is_available() and dist.is_initialized()
+
+    @staticmethod
     def device_count() -> int:
         return torch.cuda.device_count() if Fabric.cuda_is_available() else 0
 
     @staticmethod
     def rank() -> int:
-        return dist.get_rank() if Fabric.cuda_is_available() else 0
+        return dist.get_rank() if Fabric.is_initialized() else 0
 
     @staticmethod
     def device() -> torch.device:
@@ -51,7 +57,7 @@ class Fabric:
 
     @staticmethod
     def world_size() -> int:
-        return dist.get_world_size() if Fabric.cuda_is_available() else 1
+        return dist.get_world_size() if Fabric.is_initialized() else 1
 
     @staticmethod
     def print(msg: str):
@@ -60,7 +66,7 @@ class Fabric:
 
     @staticmethod
     def barrier():
-        if Fabric.cuda_is_available():
+        if Fabric.is_initialized():
             dist.barrier()
 
     @staticmethod
@@ -68,7 +74,7 @@ class Fabric:
         x: torch.Tensor,
         group: Optional[List[int]] = None,
     ):
-        if Fabric.cuda_is_available():
+        if Fabric.is_initialized():
             if x.device != Fabric.device():
                 raise ValueError(f"x.device = {x.device}, must be {Fabric.device()}")
             dist.all_reduce(x, op=dist.ReduceOp.SUM, group=group)
@@ -78,7 +84,7 @@ class Fabric:
         x: torch.Tensor,
         group: Optional[List[int]] = None,
     ):
-        if Fabric.cuda_is_available():
+        if Fabric.is_initialized():
             if x.device != Fabric.device():
                 raise ValueError(f"x.device = {x.device}, must be {Fabric.device()}")
             dist.all_reduce(x, op=dist.ReduceOp.AVG, group=group)
@@ -88,18 +94,28 @@ class Fabric:
         func: Callable,
         args: tuple,
         nprocs: int,
-        master_addr: Optional[str] = None,
-        master_port: Optional[str] = None,
     ):
-        if master_addr is None:
-            master_addr = "localhost"
-        if master_port is None:
-            master_port = "29500"
-        os.environ.setdefault("MASTER_ADDR", master_addr)
-        os.environ.setdefault("MASTER_PORT", master_port)
+        os.environ.setdefault("MASTER_ADDR", DEFAULT_MASTER_ADDR)
+        os.environ.setdefault("MASTER_PORT", DEFAULT_MASTER_PORT)
         mp.spawn(
             func,
             args=args,
             nprocs=nprocs,
             join=True,
         )
+
+    @staticmethod
+    def init_process_group_nccl(
+        rank: int,
+        world_size: int,
+    ):
+        if Fabric.cuda_is_available():
+            torch.cuda.set_device(rank)
+            dist.init_process_group(
+                backend="nccl",
+                init_method="env://",
+                world_size=world_size,
+                rank=rank,
+            )
+            if rank != Fabric.rank():
+                raise ValueError(f"rank = {rank} != {Fabric.rank()} = Fabric.rank()")

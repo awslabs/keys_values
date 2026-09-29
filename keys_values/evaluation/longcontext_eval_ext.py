@@ -341,6 +341,10 @@ def main(
     skip_eval: bool,
     use_old_metrics: Optional[bool],
 ) -> None:
+    Fabric.init_process_group_nccl(
+        rank=rank,
+        world_size=devices,
+    )
     seed_everything(seed)
 
     # Loop over setups

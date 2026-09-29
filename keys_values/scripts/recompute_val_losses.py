@@ -312,6 +312,10 @@ def main(
     verbose: Optional[str],
     access_token: Optional[str],
 ) -> None:
+    Fabric.init_process_group_nccl(
+        rank=rank,
+        world_size=devices,
+    )
     seed_everything(seed)
     # Load configuration from first checkpoint (the same for all)
     task_path = get_checkpoint_path(out_dir, checkpoint_indexes[0])

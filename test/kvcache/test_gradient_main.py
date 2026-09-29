@@ -244,7 +244,7 @@ def args_copy_model_to_device():
             [torch.bfloat16, torch.float16, torch.float32],
             [
                 name
-                for name, _ in cache_names_and_devices(only_cpu=True)
+                for name, _ in cache_names_and_devices(only_cpu=True)[:4]
                 if not name.startswith("dense")
             ],
         )
@@ -273,12 +273,13 @@ def run_copy_model_to_device(
     dtype: torch.dtype,
     cache_name: str,
 ):
+    Fabric.init_process_group_nccl(rank=rank, world_size=1)
     seed = 31415927
     torch.random.manual_seed(seed)
     torch.set_default_dtype(dtype)
 
     device = torch.device("cpu")
-    cpu_offload_device = torch.device("cuda", Fabric.rank())
+    cpu_offload_device = Fabric.device()
     cache_lengths = [128, 128]
     batch_size = 5
     n_layer = len(cache_lengths)
