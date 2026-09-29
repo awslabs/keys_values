@@ -54,7 +54,7 @@ from litgpt.scripts.convert_lit_checkpoint import qkv_reassemble as make_qkv_int
 from litgpt.utils import _RunIf
 
 from keys_values.dora_utils import LORA_SCALES_NAME
-from keys_values.finetune.utils import save_checkpoint
+from keys_values.finetune.utils import save_checkpoint, init_module
 from keys_values.lora import (
     GPT as LoRAGPT,
     Config,
@@ -1013,9 +1013,10 @@ def test_lora_model_fsdp_init():
         lora_value=False,
         lora_projection=True,
     )
-    fabric = Fabric(devices=2, strategy="fsdp", precision="16-true")
+    precision = "16-true"
+    fabric = Fabric(devices=2, strategy="fsdp", precision=precision)
     fabric.launch()
-    with fabric.init_module(empty_init=True):
+    with init_module(empty_init=True, precision=precision):
         model = LoRAGPT(config)
     x = torch.randint(
         0,

@@ -70,6 +70,7 @@ from keys_values.finetune.utils import (
     adjust_cache_kwargs,
     load_generation_config,
     load_checkpoint,
+    init_module,
 )
 from keys_values.fused import (
     set_fused_swiglu_enabled,
@@ -532,7 +533,10 @@ def main(
                 tokenizer = Tokenizer(base_checkpoint_dir)
             else:
                 raise ex
-        with fabric.init_module(empty_init=(Fabric.world_size() > 1)):
+        with init_module(
+            empty_init=(Fabric.world_size() > 1),
+            precision=precision,
+        ):
             # Updates `kv_cache.cache_kwargs` from other args:
             kv_cache = kv_cache.update_cache_kwargs()
             # Set `mha_kwargs`, update kv_cache.cache_kwargs` with that as well:

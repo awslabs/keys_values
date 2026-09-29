@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import replace
 from datetime import datetime
 import json
@@ -19,10 +20,18 @@ from pathlib import Path
 import shutil
 from typing import Optional, Tuple, Literal, Dict, Any, Union, Callable
 
-import lightning as L
+from lightning.fabric.connector import _convert_precision_to_unified_args
+from lightning.fabric.plugins.io.torch_io import TorchCheckpointIO
+from lightning.fabric.plugins.precision import (
+    Precision,
+    HalfPrecision,
+    DoublePrecision,
+    TransformerEnginePrecision,
+    MixedPrecision,
+)
+from lightning.fabric.utilities.init import _EmptyInit
 from lightning.fabric.utilities.load import _lazy_load as lazy_load
 from lightning.fabric.wrappers import _unwrap_objects
-from lightning.fabric.plugins.io.torch_io import TorchCheckpointIO
 from tokenizers import Tokenizer as HFTokenizer
 import torch
 
@@ -599,3 +608,64 @@ def load_generation_config(
         )
         eval_args = replace(eval_args, sample_metric_kwargs=sample_kwargs)
     return eval_args
+
+
+# From `lightning.fabric.connector._check_and_init_precision`
+def _check_and_init_precision(precision: str) -> Precision:
+    if precision in ("16-true", "bf16-true"):
+        return HalfPrecision(precision)
+    if precision == "32-true":
+        return Precision()
+    if precision == "64-true":
+        return DoublePrecision()
+    if precision == "transformer-engine":
+        return TransformerEnginePrecision(weights_dtype=torch.bfloat16)
+    if precision == "transformer-engine-float16":
+        return TransformerEnginePrecision(weights_dtype=torch.float16)
+    if precision in ("16-mixed", "bf16-mixed"):
+        Fabric.print(
+            "Using 16-bit Automatic Mixed Precision (AMP)"
+            if precision == "16-mixed"
+            else "Using bfloat16 Automatic Mixed Precision (AMP)"
+        )
+        return MixedPrecision(precision=precision, device="cuda")
+    raise RuntimeError(f"precision={precision} not supported")
+
+
+# From `lightning.fabric.Fabric.__init__`,
+# `lightning.fabric.connector._Connector`.
+def get_fabric_precision(precision: Optional[str] = None) -> Precision:
+    precision_input = _convert_precision_to_unified_args(precision)
+    if precision_input is None:
+        precision_input = "32-true"
+    return _check_and_init_precision(precision_input)
+
+
+# From `lightning.fabric.fabric.Fabric.init_module`,
+# `lightning.fabric.strategies.strategy.Strategy.module_init_context`.
+def init_module(
+    empty_init: bool = False,
+    precision: Optional[str] = None,
+    device: Optional[torch.device] = None,
+) -> AbstractContextManager:
+    """
+    This context manager can be used to speed up model creation. By default,
+    PyTorch creates modules on CPU, using `float32` as type.
+
+    Args:
+        empty_init: If `True`, parameters are not initialized. Use this only
+            if a checkpoint is loaded afterwards, which initializes all parameters.
+        precision: Parameters are created for this precision and dtype. Defaults
+            to "32-true" (which is `float32`).
+        device: PyTorch creates all parameters on this device directly. Defaults
+            to `Fabric.device()`.
+
+    """
+    if device is None:
+        device = Fabric.device()
+    precision_module_ctx = get_fabric_precision(precision).module_init_context()
+    stack = ExitStack()
+    stack.enter_context(device)
+    stack.enter_context(_EmptyInit(enabled=empty_init))
+    stack.enter_context(precision_module_ctx)
+    return stack

@@ -96,6 +96,7 @@ from keys_values.finetune.utils import (
     adjust_cache_kwargs,
     copy_config_files,
     load_generation_config,
+    init_module,
 )
 from keys_values.fused import (
     set_fused_swiglu_enabled,
@@ -716,7 +717,10 @@ def main(
         os.makedirs(out_dir, exist_ok=True)
 
     # Create the model
-    with fabric.init_module(empty_init=(Fabric.world_size() > 1)):
+    with init_module(
+        empty_init=(Fabric.world_size() > 1),
+        precision=precision,
+    ):
         # Updates `kv_cache.cache_kwargs` from other args:
         kv_cache = kv_cache.update_cache_kwargs()
         # Set `mha_kwargs`, update kv_cache.cache_kwargs` with that as well:
