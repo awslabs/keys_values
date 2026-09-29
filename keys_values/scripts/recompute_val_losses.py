@@ -18,8 +18,6 @@ import re
 from typing import Dict, Optional, Union, Tuple, List
 import yaml
 
-import lightning as L
-from lightning.fabric.strategies import DDPStrategy
 import torch
 
 from litgpt.data import DataModule
@@ -275,36 +273,34 @@ def setup_internal(
         model_type=model_type,
     )
     precision = hyp_pars["precision"] or get_default_supported_precision(training=True)
-    if devices > 1:
-        strategy = DDPStrategy(static_graph=True, broadcast_buffers=False)
-    else:
-        strategy = "auto"
-    fabric = L.Fabric(
-        devices=devices,
-        num_nodes=1,
-        strategy=strategy,
-        precision=precision,
-    )
     if Fabric.cuda_is_available() and devices > 1:
         check_nvlink_connectivity()
 
-    fabric.launch(
-        main,
-        model_type=model_type,
-        devices=devices,
-        precision=precision,
-        checkpoint_indexes=checkpoint_indexes,
-        old_topk_entries=old_topk_entries,
-        final_cp_index=final_cp_index,
-        seed=seed,
-        out_dir=out_dir,
-        verbose=verbose,
-        access_token=access_token,
+    args = (
+        model_type,
+        devices,
+        precision,
+        checkpoint_indexes,
+        old_topk_entries,
+        final_cp_index,
+        seed,
+        out_dir,
+        verbose,
+        access_token,
     )
+
+    if Fabric.cuda_is_available():
+        Fabric.spawn(
+            func=main,
+            args=args,
+            nprocs=devices,
+        )
+    else:
+        main(*args)
 
 
 def main(
-    fabric: L.Fabric,
+    rank: int,
     model_type: str,
     devices: int,
     precision: str,

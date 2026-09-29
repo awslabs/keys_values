@@ -11,10 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, List
+import os
+from typing import Optional, List, Callable
 
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 
 
 class Fabric:
@@ -80,3 +82,24 @@ class Fabric:
             if x.device != Fabric.device():
                 raise ValueError(f"x.device = {x.device}, must be {Fabric.device()}")
             dist.all_reduce(x, op=dist.ReduceOp.AVG, group=group)
+
+    @staticmethod
+    def spawn(
+        func: Callable,
+        args: tuple,
+        nprocs: int,
+        master_addr: Optional[str] = None,
+        master_port: Optional[str] = None,
+    ):
+        if master_addr is None:
+            master_addr = "localhost"
+        if master_port is None:
+            master_port = "29500"
+        os.environ.setdefault("MASTER_ADDR", master_addr)
+        os.environ.setdefault("MASTER_PORT", master_port)
+        mp.spawn(
+            func,
+            args=args,
+            nprocs=nprocs,
+            join=True,
+        )

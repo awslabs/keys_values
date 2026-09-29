@@ -22,9 +22,7 @@ from pathlib import Path
 from pprint import pprint
 from typing import Dict, Literal, Optional, Union, Any, Tuple, List, Callable
 
-import lightning as L
 from lightning.fabric.loggers import Logger
-from lightning.fabric.strategies import DDPStrategy
 import torch
 from torchmetrics import RunningMean
 
@@ -417,7 +415,8 @@ def setup_internal(
     size_log_quantiles: Optional[str],
     debug_dont_use_autograd_hooks: bool,
 ) -> None:
-    if not torch.cuda.is_available():
+    # TODO: This precludes running on CPU. Do we want that?
+    if not Fabric.cuda_is_available():
         raise ValueError("CUDA not available")
     checkpoint_dir = auto_download_checkpoint(
         model_name=checkpoint_dir,
@@ -553,68 +552,61 @@ def setup_internal(
         resume=resume is not None,
         log_interval=train.log_interval,
     )
-
-    if devices > 1:
-        strategy = DDPStrategy(static_graph=True, broadcast_buffers=False)
-    else:
-        strategy = "auto"
-
-    fabric = L.Fabric(
-        devices=devices,
-        num_nodes=1,
-        strategy=strategy,
-        precision=precision,
-        loggers=logger,
-    )
-
     if Fabric.cuda_is_available() and devices > 1:
         check_nvlink_connectivity()
-
     if record_gpu_memory_snapshots is not None:
         record_gpu_memory_snapshots = RecordGPUMemory(
             max_entries=record_gpu_memory_snapshots,
         )
 
-    fabric.launch(
-        main,
-        do_cpu_offload=do_cpu_offload,
-        original_setup=original_setup,
-        devices=devices,
-        precision=precision,
-        loggers=[logger],
-        resume=resume,
-        seed=seed,
-        config=config,
-        data=data,
-        checkpoint_dir=checkpoint_dir,
-        out_dir=out_dir,
-        train=train,
-        eval=eval,
-        optimizer=optimizer,
-        kv_cache=kv_cache,
-        grad=grad,
-        head_model_name=head_model,
-        head_model_kwargs=head_model_kwargs,
-        verbose=verbose,
-        attention_forward_temp_size_gb=attention_forward_temp_size_gb,
-        attention_backward_temp_size_gb=attention_backward_temp_size_gb,
-        oom_error_recovery=oom_error_recovery,
-        yarn_rope=yarn_rope,
-        sdpa=sdpa,
-        training_state_num=training_state_num,
-        record_gpu_memory_snapshots=record_gpu_memory_snapshots,
-        record_gpu_memory_kind=record_gpu_memory_kind,
-        record_gpu_memory_period=record_gpu_memory_period,
-        generate_with_eval=generate_with_eval,
-        profile_grad_times=profile_grad_times,
-        profile_parts=profile_parts,
-        size_log_quantiles=size_log_quantiles,
-        debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
+    args = (
+        do_cpu_offload,
+        original_setup,
+        devices,
+        precision,
+        [logger],  # loggers
+        resume,
+        seed,
+        config,
+        data,
+        checkpoint_dir,
+        out_dir,
+        train,
+        eval,
+        optimizer,
+        kv_cache,
+        grad,
+        head_model,
+        head_model_kwargs,
+        verbose,
+        attention_forward_temp_size_gb,
+        attention_backward_temp_size_gb,
+        oom_error_recovery,
+        yarn_rope,
+        sdpa,
+        training_state_num,
+        record_gpu_memory_snapshots,
+        record_gpu_memory_kind,
+        record_gpu_memory_period,
+        generate_with_eval,
+        profile_grad_times,
+        profile_parts,
+        size_log_quantiles,
+        debug_dont_use_autograd_hooks,
     )
+
+    if Fabric.cuda_is_available():
+        Fabric.spawn(
+            func=main,
+            args=args,
+            nprocs=devices,
+        )
+    else:
+        main(*args)
 
 
 def main(
-    fabric: L.Fabric,
+    rank: int,
     do_cpu_offload: bool,
     original_setup: Callable,
     devices: int,

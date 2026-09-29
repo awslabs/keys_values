@@ -19,9 +19,7 @@ from pprint import pprint
 from typing import Dict, Optional, Union, Any, List, Tuple
 import yaml
 
-import lightning as L
 import torch
-from lightning.fabric.strategies import DDPStrategy
 
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
@@ -294,40 +292,38 @@ def setup_internal(
         model_type=model_type,
     )
     precision = hyp_pars["precision"] or get_default_supported_precision(training=True)
-    if devices > 1:
-        strategy = DDPStrategy(static_graph=True, broadcast_buffers=False)
-    else:
-        strategy = "auto"
-    fabric = L.Fabric(
-        devices=devices,
-        num_nodes=1,
-        strategy=strategy,
-        precision=precision,
+
+    args = (
+        seed,
+        setups,
+        batch_size,
+        devices,
+        precision,
+        verbose,
+        attention_forward_temp_size_gb,
+        use_sample_metric,
+        eval_dir,
+        sample_metric_max_generated_tokens,
+        sample_metric_kwargs,
+        lora_dropout,
+        access_token,
+        num_store_generated_samples,
+        skip_eval,
+        use_old_metrics,
     )
 
-    fabric.launch(
-        main,
-        seed=seed,
-        setups=setups,
-        batch_size=batch_size,
-        devices=devices,
-        precision=precision,
-        verbose=verbose,
-        attention_forward_temp_size_gb=attention_forward_temp_size_gb,
-        use_sample_metric=use_sample_metric,
-        eval_dir=eval_dir,
-        sample_metric_max_generated_tokens=sample_metric_max_generated_tokens,
-        sample_metric_kwargs=sample_metric_kwargs,
-        lora_dropout=lora_dropout,
-        access_token=access_token,
-        num_store_generated_samples=num_store_generated_samples,
-        skip_eval=skip_eval,
-        use_old_metrics=use_old_metrics,
-    )
+    if Fabric.cuda_is_available():
+        Fabric.spawn(
+            func=main,
+            args=args,
+            nprocs=devices,
+        )
+    else:
+        main(*args)
 
 
 def main(
-    fabric: L.Fabric,
+    rank: int,
     seed: int,
     setups: List[Dict[str, Any]],
     batch_size: int,

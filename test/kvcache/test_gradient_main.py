@@ -17,7 +17,6 @@ from typing import Any, Dict
 
 import torch
 import pytest
-import lightning as L
 
 from keys_values.config import Config
 from litgpt.utils import _RunIf
@@ -258,21 +257,19 @@ def args_copy_model_to_device():
     args_copy_model_to_device(),
 )
 def test_copy_model_to_device(dtype, cache_name):
-    fabric = L.Fabric(
-        devices=1,
-        num_nodes=1,
-        strategy="auto",
-        precision="bf16-true",
+    args = (
+        dtype,
+        cache_name,
     )
-    fabric.launch(
-        run_copy_model_to_device,
-        dtype=dtype,
-        cache_name=cache_name,
+    Fabric.spawn(
+        func=run_copy_model_to_device,
+        args=args,
+        nprocs=1,
     )
 
 
 def run_copy_model_to_device(
-    fabric: L.Fabric,
+    rank: int,
     dtype: torch.dtype,
     cache_name: str,
 ):
@@ -331,10 +328,7 @@ def run_copy_model_to_device(
         assert kv_cache.device in (device, None), (l_ix, kv_cache.device, device)
     with torch.device(cpu_offload_device):
         head_model = HeadModelFactory.create(name=head_model_name, config=config)
-    offload_grad_accum = CPUOffloadAccumulateGradients(
-        group=[0],
-        fabric=fabric,
-    )
+    offload_grad_accum = CPUOffloadAccumulateGradients(group=[0])
     model = LongContextGradientModel(
         gpt_model=gpt_model,
         head_model=head_model,
