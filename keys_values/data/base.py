@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Union, Callable, Tuple
 
 import torch
@@ -108,3 +109,22 @@ def common_collate_fn(
             for name in names
         },
     }, samples
+
+
+@dataclass(frozen=True)
+class DataModuleEncoding:
+    name: str
+    kwargs: Dict[str, Any]
+
+
+class EncodableDataModuleMixin:
+    """
+    Subclasses are data modules which can be encoded into a dictionary of
+    simple types. This is used when spawning processes.
+
+    Note: In general, data modules can be encoded and decoded only before
+    their `connect` method has been called.
+
+    """
+    def encode(self) -> DataModuleEncoding:
+        raise NotImplementedError()

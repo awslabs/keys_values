@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from dataclasses import replace
 import os
 from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
@@ -22,6 +23,8 @@ from tqdm import tqdm
 
 from litgpt.tokenizer import Tokenizer
 
+from keys_values.constants import DEFAULT_IGNORE_INDEX
+from keys_values.data.base import EncodableDataModuleMixin, DataModuleEncoding
 from keys_values.data.constants import (
     METADATA_SEQ_LENGTHS_KEY,
     METADATA_TRAIN_VAL_SPLIT_KEY,
@@ -32,7 +35,6 @@ from keys_values.data.constants import (
     OUTPUT_NAME,
     NUM_TOKENS_NAME,
 )
-from keys_values.constants import DEFAULT_IGNORE_INDEX
 from keys_values.data.module import SequenceLengthFilteredDataModule
 from keys_values.data.sequence_classification import (
     SequenceClassificationDataset,
@@ -75,7 +77,10 @@ LONGBENCH_NUM_CASES = 503
 LONGBENCH_BUCKET_SIZES = [(20, 1, 4)] * 9 + [(22, 1, 5)] + [(20, 1, 4)] * 10
 
 
-class LongBenchV2(SequenceLengthFilteredDataModule):
+class LongBenchV2(
+    SequenceLengthFilteredDataModule,
+    EncodableDataModuleMixin
+):
     """LongBench-V2 data module for supervised finetuning.
 
     Depending on `head_model`, the dataset is treated as next token prediction
@@ -113,6 +118,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
       `(max_seq_length, val_split_fraction)` pairs.
 
     """
+    EncodedName = "LongBenchV2"
 
     def __init__(
         self,
@@ -537,6 +543,27 @@ class LongBenchV2(SequenceLengthFilteredDataModule):
             include_end_string=True,
         )
 
+    def encode(self) -> DataModuleEncoding:
+        if self.tokenizer is not None:
+            raise RuntimeError("Cannot call encode after connect")
+        kwargs = dict(
+            mask_prompt=self.mask_prompt,
+            val_split_fraction=self.val_split_fraction,
+            ignore_index=self.ignore_index,
+            max_seq_length=self.max_seq_length,
+            seed=self.seed,
+            repo_id=self.repo_id,
+            access_token=self.access_token,
+            metadata_dir=self.metadata_dir,
+            store_split_in_metadata=self.store_split_in_metadata,
+            debug_num_cases=self.debug_num_cases,
+            trainloader_longest_first=self._trainloader_longest_first,
+            trainloader_shortest_first=self._trainloader_shortest_first,
+            test_set_tag=self.test_set_tag,
+            recompute_lengths=self._recompute_lengths,
+        )
+        return DataModuleEncoding(name=self.EncodedName, kwargs=kwargs)
+
 
 PROMPTLINES_PREFIX = [
     "Please read the following text and answer the question below.",
@@ -753,6 +780,7 @@ class LongBenchV2Truncated(LongBenchV2):
       :func:`truncate_contexts_and_transform`.
 
     """
+    EncodedName = "LongBenchV2Truncated"
 
     def __init__(
         self,
@@ -858,6 +886,12 @@ class LongBenchV2Truncated(LongBenchV2):
             metadata[METADATA_TRUNCATION_LENGHTS_KEY] = tl_map
             self._store_metadata(metadata)
         return transformed_data
+
+    def encode(self) -> DataModuleEncoding:
+        return replace(
+            super().encode(),
+            name=self.EncodedName,
+        )
 
 
 def truncate_contexts_and_transform(

@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from pprint import pprint
 from typing import Dict, Literal, Optional, Union, Any, Tuple, List, Callable
+import yaml
 
 from lightning.fabric.loggers import Logger
 import torch
@@ -48,13 +49,13 @@ from keys_values.attention.attention_utils import (
     DEFAULT_TMP_ARRAY_LIMIT_GB,
     SDPA_KERNELS_BEST_ORDERING,
 )
+from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
 from keys_values.config import Config as ConfigFull
 from keys_values.cpu_memory import FileNameManager
 from keys_values.data import Helmet, LongBenchV2, MyDataLoader, INPUT_IDS_NAME
-from keys_values.data.constants import (
-    TARGETS_STRINGS_NAME,
-)
-from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
+from keys_values.data.base import EncodableDataModuleMixin, DataModuleEncoding
+from keys_values.data.constants import TARGETS_STRINGS_NAME
+from keys_values.data.factory import data_module_from_encoding
 from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
 from keys_values.attention.flashinfer_wrapper import get_flashinfer_sdpa
 from keys_values.attention.flex_attention import FlexAttentionArgs, choose_q_lens
@@ -133,7 +134,10 @@ from keys_values.lora import (
 from keys_values.model import GPT as GPTFull
 from keys_values.distributed.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.distributed.model_factory import BlockComponentName
-from keys_values.parser_config import save_hyperparameters
+from keys_values.parser_config import (
+    save_hyperparameters,
+    HYPERPARAMETERS_FILENAME,
+)
 from keys_values.pos_encoding import (
     position_encoding_factory,
     set_fused_rope_enabled,
@@ -495,6 +499,20 @@ def setup_internal(
         raise ValueError(
             f"training_state_num = {training_state_num}, must be positive or None"
         )
+    # Replace `data` by encoding if this is supported. This gets us around
+    # serialization problems when calling `mp.spawn` below
+    if isinstance(data, EncodableDataModuleMixin):
+        data = data.encode()
+    # Extract hyperparameters (needed for storing checkpoints)
+    _hp_path = checkpoint_dir / "__TEMP_31415927__" / HYPERPARAMETERS_FILENAME
+    save_hyperparameters(
+        original_setup,
+        checkpoint_dir=_hp_path.parent,
+    )
+    hyperparameters = yaml.safe_load(_hp_path.open())
+    _hp_path.unlink()
+    _hp_path.parent.rmdir()
+
     # Legacy arguments
     if verbose is None:
         if kv_cache.verbose is not None:
@@ -554,14 +572,9 @@ def setup_internal(
     )
     if Fabric.cuda_is_available() and devices > 1:
         check_nvlink_connectivity()
-    if record_gpu_memory_snapshots is not None:
-        record_gpu_memory_snapshots = RecordGPUMemory(
-            max_entries=record_gpu_memory_snapshots,
-        )
 
     args = (
         do_cpu_offload,
-        original_setup,
         devices,
         precision,
         [logger],  # loggers
@@ -570,6 +583,7 @@ def setup_internal(
         config,
         data,
         checkpoint_dir,
+        hyperparameters,
         out_dir,
         train,
         eval,
@@ -608,15 +622,15 @@ def setup_internal(
 def main(
     rank: int,
     do_cpu_offload: bool,
-    original_setup: Callable,
     devices: int,
     precision: str,
-    loggers: List[Logger],
+    loggers: List[Logger],  # ?
     resume: Optional[str],
     seed: int,
     config: Union[ConfigFull, ConfigLoRA],
-    data: DataModule,
+    data: Union[DataModuleEncoding, DataModule],
     checkpoint_dir: Path,
+    hyperparameters: Dict[str, Any],
     out_dir: Path,
     train: TrainArgs,
     eval: EvalArgs,
@@ -632,7 +646,7 @@ def main(
     yarn_rope: bool,
     sdpa: SDPAArgs,
     training_state_num: Optional[int],
-    record_gpu_memory_snapshots: Optional[RecordGPUMemory],
+    record_gpu_memory_snapshots: Optional[int],
     record_gpu_memory_kind: int,
     record_gpu_memory_period: int,
     generate_with_eval: bool,
@@ -647,6 +661,14 @@ def main(
     )
     validate_args(train, eval)
     is_lora = isinstance(config, ConfigLoRA)
+    # Decode data module from encoding
+    if isinstance(data, DataModuleEncoding):
+        data = data_module_from_encoding(data)
+    if record_gpu_memory_snapshots is not None:
+        record_gpu_memory_snapshots = RecordGPUMemory(
+            max_entries=record_gpu_memory_snapshots,
+        )
+
     if resume is not None:
         resume_path = out_dir / resume
         if not resume_path.exists():
@@ -857,13 +879,13 @@ def main(
     # Call `fit` which runs the training loop
     train_time = time.perf_counter()
     token_counts = fit(
-        original_setup=original_setup,
         state=state,
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
         batch_transform=batch_transform,
         devices=devices,
         checkpoint_dir=checkpoint_dir,
+        hyperparameters=hyperparameters,
         out_dir=out_dir,
         train=train,
         eval=eval,
@@ -937,7 +959,8 @@ def main(
     if Fabric.rank() == 0:
         # Copy checkpoint files from original checkpoint dir
         copy_config_files(checkpoint_dir, save_dir)
-        save_hyperparameters(original_setup, save_dir)
+        with (save_dir / HYPERPARAMETERS_FILENAME).open() as fp:
+            yaml.safe_dump(hyperparameters, fp)
         if hasattr(data, "prompt_style"):
             save_prompt_style(data.prompt_style, save_dir)
 
@@ -1247,13 +1270,13 @@ def create_optimizer_and_scheduler(
 
 
 def fit(
-    original_setup: Callable,
     state: Dict[str, Any],
     train_dataloader: MyDataLoader,
     val_dataloader: MyDataLoader,
     batch_transform: BatchTransform,
     devices: int,
     checkpoint_dir: Path,
+    hyperparameters: Dict[str, Any],
     out_dir: Path,
     train: TrainArgs,
     eval: EvalArgs,
@@ -1527,7 +1550,7 @@ def fit(
                 step=state["iter_num"],
                 train=train,
                 data=data,
-                original_setup=original_setup,
+                hyperparameters=hyperparameters,
                 training_state=training_state,
             )
 
@@ -2091,7 +2114,7 @@ def save_checkpoint_regular(
     step: int,
     train: TrainArgs,
     data: DataModule,
-    original_setup: Callable,
+    hyperparameters: Dict[str, Any],
     training_state: Optional[TrainingStateVars],
 ):
     save_intermed = do_save(step, train, intermed=True)
@@ -2102,7 +2125,8 @@ def save_checkpoint_regular(
             training_state.save_state(interval_dir)
         if Fabric.rank() == 0:
             copy_config_files(checkpoint_dir, interval_dir)
-            save_hyperparameters(original_setup, interval_dir)
+            with (interval_dir / HYPERPARAMETERS_FILENAME).open() as fp:
+                yaml.safe_dump(hyperparameters, fp)
             if hasattr(data, "prompt_style"):
                 save_prompt_style(data.prompt_style, interval_dir)
     if save_intermed:

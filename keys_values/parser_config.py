@@ -19,6 +19,8 @@ from litgpt.parser_config import (
     save_hyperparameters as save_hyperparameters_litgpt,
 )
 
+HYPERPARAMETERS_FILENAME = "hyperparameters.yaml"
+
 
 def parser_commands() -> List[str]:
     return parser_commands_litgpt() + [
