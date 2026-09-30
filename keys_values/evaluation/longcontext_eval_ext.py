@@ -313,13 +313,13 @@ def setup_internal(
     )
 
     if Fabric.cuda_is_available():
-        Fabric.spawn(
+        Fabric.launch(
             func=main,
-            args=args,
             nprocs=devices,
+            *args,
         )
     else:
-        main(*args)
+        main(0, *args)
 
 
 def main(
@@ -341,10 +341,6 @@ def main(
     skip_eval: bool,
     use_old_metrics: Optional[bool],
 ) -> None:
-    Fabric.init_process_group_nccl(
-        rank=rank,
-        world_size=devices,
-    )
     seed_everything(seed)
 
     # Loop over setups

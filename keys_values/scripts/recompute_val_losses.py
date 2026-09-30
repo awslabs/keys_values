@@ -290,13 +290,13 @@ def setup_internal(
     )
 
     if Fabric.cuda_is_available():
-        Fabric.spawn(
+        Fabric.launch(
             func=main,
-            args=args,
             nprocs=devices,
+            *args,
         )
     else:
-        main(*args)
+        main(0, *args)
 
 
 def main(
@@ -312,10 +312,6 @@ def main(
     verbose: Optional[str],
     access_token: Optional[str],
 ) -> None:
-    Fabric.init_process_group_nccl(
-        rank=rank,
-        world_size=devices,
-    )
     seed_everything(seed)
     # Load configuration from first checkpoint (the same for all)
     task_path = get_checkpoint_path(out_dir, checkpoint_indexes[0])

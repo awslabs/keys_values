@@ -11,14 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import atexit
+from functools import partial
 import os
-from typing import Optional, List, Callable
+import signal
+from typing import Optional, List, Callable, Any
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-
-from keys_values.constants import DEFAULT_MASTER_ADDR, DEFAULT_MASTER_PORT
+from lightning.fabric.plugins.environments.lightning import LightningEnvironment
+from lightning.fabric.strategies.launchers.subprocess_script import _SubprocessScriptLauncher
 
 
 class Fabric:
@@ -90,32 +93,66 @@ class Fabric:
             dist.all_reduce(x, op=dist.ReduceOp.AVG, group=group)
 
     @staticmethod
-    def spawn(
+    def launch(
         func: Callable,
-        args: tuple,
         nprocs: int,
-    ):
-        os.environ.setdefault("MASTER_ADDR", DEFAULT_MASTER_ADDR)
-        os.environ.setdefault("MASTER_PORT", DEFAULT_MASTER_PORT)
-        mp.spawn(
-            func,
-            args=args,
-            nprocs=nprocs,
-            join=True,
-        )
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Launches processes for distributed training. This is done in the same
+        way as for :class:`lightning.fabric.strategies.ddp.DDPStrategy` and its
+        default. In particular, we wrap `func` so that a process group is
+        initialized via NCCL.
 
-    @staticmethod
-    def init_process_group_nccl(
-        rank: int,
-        world_size: int,
-    ):
-        if Fabric.cuda_is_available():
-            torch.cuda.set_device(rank)
-            dist.init_process_group(
-                backend="nccl",
-                init_method="env://",
-                world_size=world_size,
-                rank=rank,
-            )
-            if rank != Fabric.rank():
-                raise ValueError(f"rank = {rank} != {Fabric.rank()} = Fabric.rank()")
+        """
+        # Wrapper ensures that process group is initialized (NCCL) at the
+        # start of each process.
+        wrapped_func = partial(
+            wrap_init_process_group,
+            func=func,
+            world_size=nprocs,
+        )
+        # These are defaults of Lightning Fabric for DDPStrategy with a single
+        # node and no managed cluster.
+        cluster_environment = LightningEnvironment()
+        launcher = _SubprocessScriptLauncher(
+            cluster_environment=cluster_environment,
+            num_processes=nprocs,
+            num_nodes=1,
+        )
+        return launcher.launch(wrapped_func, *args, **kwargs)
+
+
+def wrap_init_process_group(
+    func: Callable,
+    world_size: int,
+    rank: int,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    torch.cuda.set_device(rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method="env://",
+        world_size=world_size,
+        rank=rank,
+    )
+    # PyTorch >= 2.4 warns about undestroyed NCCL process group, so we need to do it at program exit
+    atexit.register(destroy_process_group)
+    return func(rank, *args, **kwargs)
+
+
+def _distributed_is_initialized() -> bool:
+    # `is_initialized` is only defined conditionally
+    # https://github.com/pytorch/pytorch/blob/v2.1.0/torch/distributed/__init__.py#L25
+    # this might happen to MacOS builds from source (default) or any build from source that sets `USE_DISTRIBUTED=0`
+    return dist.is_available() and dist.is_initialized()
+
+
+def destroy_process_group() -> None:
+    # Don't allow Ctrl+C to interrupt this handler
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if _distributed_is_initialized():
+        dist.destroy_process_group()
+    signal.signal(signal.SIGINT, signal.SIG_DFL)

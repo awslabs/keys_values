@@ -261,10 +261,10 @@ def test_copy_model_to_device(dtype, cache_name):
         dtype,
         cache_name,
     )
-    Fabric.spawn(
+    Fabric.launch(
         func=run_copy_model_to_device,
-        args=args,
         nprocs=1,
+        *args,
     )
 
 
@@ -273,7 +273,6 @@ def run_copy_model_to_device(
     dtype: torch.dtype,
     cache_name: str,
 ):
-    Fabric.init_process_group_nccl(rank=rank, world_size=1)
     seed = 31415927
     torch.random.manual_seed(seed)
     torch.set_default_dtype(dtype)

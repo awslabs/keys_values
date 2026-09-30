@@ -498,7 +498,7 @@ def setup_internal(
             f"training_state_num = {training_state_num}, must be positive or None"
         )
     # Replace `data` by encoding if this is supported. This gets us around
-    # serialization problems when calling `mp.spawn` below
+    # serialization problems when calling `Fabric.launch` below
     if isinstance(data, EncodableDataModuleMixin):
         data = data.encode()
     # Extract hyperparameters (needed for storing checkpoints)
@@ -604,13 +604,13 @@ def setup_internal(
     )
 
     if Fabric.cuda_is_available():
-        Fabric.spawn(
+        Fabric.launch(
             func=main,
-            args=args,
             nprocs=devices,
+            *args,
         )
     else:
-        main(*args)
+        main(0, *args)
 
 
 def main(
@@ -649,10 +649,6 @@ def main(
     size_log_quantiles: List[float],
     debug_dont_use_autograd_hooks: bool,
 ) -> None:
-    Fabric.init_process_group_nccl(
-        rank=rank,
-        world_size=devices,
-    )
     validate_args(train, eval)
     is_lora = isinstance(config, ConfigLoRA)
     # Decode data module from encoding
