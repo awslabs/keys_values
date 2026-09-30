@@ -120,7 +120,6 @@ class Fabric:
             num_processes=nprocs,
             num_nodes=1,
         )
-        print(f"kwargs.keys() = {list(kwargs.keys())}")
         return launcher.launch(wrapped_func, **kwargs)
 
 
