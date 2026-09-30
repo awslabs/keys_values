@@ -94,9 +94,10 @@ class Fabric:
 
     @staticmethod
     def launch(
-        func: Callable,
+        function: Callable,
         nprocs: int,
-        args: tuple,
+        *args: Any,
+        **kwargs: Any,
     ) -> Any:
         """
         Launches processes for distributed training. This is done in the same
@@ -109,8 +110,8 @@ class Fabric:
         # start of each process.
         wrapped_func = partial(
             wrap_init_process_group,
-            func=func,
-            world_size=nprocs,
+            function,
+            nprocs,
         )
         # These are defaults of Lightning Fabric for DDPStrategy with a single
         # node and no managed cluster.
@@ -120,7 +121,7 @@ class Fabric:
             num_processes=nprocs,
             num_nodes=1,
         )
-        return launcher.launch(wrapped_func, *args)
+        return launcher.launch(wrapped_func, *args, **kwargs)
 
 
 def wrap_init_process_group(
@@ -128,6 +129,7 @@ def wrap_init_process_group(
     world_size: int,
     rank: int,
     *args: Any,
+    **kwargs: Any,
 ) -> Any:
     torch.cuda.set_device(rank)
     dist.init_process_group(
@@ -138,7 +140,7 @@ def wrap_init_process_group(
     )
     # PyTorch >= 2.4 warns about undestroyed NCCL process group, so we need to do it at program exit
     atexit.register(destroy_process_group)
-    return func(rank, *args)
+    return func(rank, *args, **kwargs)
 
 
 def _distributed_is_initialized() -> bool:

@@ -257,14 +257,11 @@ def args_copy_model_to_device():
     args_copy_model_to_device(),
 )
 def test_copy_model_to_device(dtype, cache_name):
-    args = (
-        dtype,
-        cache_name,
-    )
     Fabric.launch(
-        func=run_copy_model_to_device,
+        run_copy_model_to_device,
         nprocs=1,
-        args=args,
+        dtype=dtype,
+        cache_name=cache_name,
     )
 
 

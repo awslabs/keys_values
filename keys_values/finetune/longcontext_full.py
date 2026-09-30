@@ -567,50 +567,50 @@ def setup_internal(
     if Fabric.cuda_is_available() and devices > 1:
         check_nvlink_connectivity()
 
-    args = (
-        do_cpu_offload,
-        devices,
-        precision,
-        [logger],  # loggers
-        resume,
-        seed,
-        config,
-        data,
-        checkpoint_dir,
-        hyperparameters,
-        out_dir,
-        train,
-        eval,
-        optimizer,
-        kv_cache,
-        grad,
-        head_model,
-        head_model_kwargs,
-        verbose,
-        attention_forward_temp_size_gb,
-        attention_backward_temp_size_gb,
-        oom_error_recovery,
-        yarn_rope,
-        sdpa,
-        training_state_num,
-        record_gpu_memory_snapshots,
-        record_gpu_memory_kind,
-        record_gpu_memory_period,
-        generate_with_eval,
-        profile_grad_times,
-        profile_parts,
-        size_log_quantiles,
-        debug_dont_use_autograd_hooks,
+    kwargs = dict(
+        do_cpu_offload=do_cpu_offload,
+        devices=devices,
+        precision=precision,
+        loggers=[logger],
+        resume=resume,
+        seed=seed,
+        config=config,
+        data=data,
+        checkpoint_dir=checkpoint_dir,
+        hyperparameters=hyperparameters,
+        out_dir=out_dir,
+        train=train,
+        eval=eval,
+        optimizer=optimizer,
+        kv_cache=kv_cache,
+        grad=grad,
+        head_model=head_model,
+        head_model_kwargs=head_model_kwargs,
+        verbose=verbose,
+        attention_forward_temp_size_gb=attention_forward_temp_size_gb,
+        attention_backward_temp_size_gb=attention_backward_temp_size_gb,
+        oom_error_recovery=oom_error_recovery,
+        yarn_rope=yarn_rope,
+        sdpa=sdpa,
+        training_state_num=training_state_num,
+        record_gpu_memory_snapshots=record_gpu_memory_snapshots,
+        record_gpu_memory_kind=record_gpu_memory_kind,
+        record_gpu_memory_period=record_gpu_memory_period,
+        generate_with_eval=generate_with_eval,
+        profile_grad_times=profile_grad_times,
+        profile_parts=profile_parts,
+        size_log_quantiles=size_log_quantiles,
+        debug_dont_use_autograd_hooks=debug_dont_use_autograd_hooks,
     )
 
     if Fabric.cuda_is_available():
         Fabric.launch(
-            func=main,
+            main,
             nprocs=devices,
-            args=args,
+            **kwargs,
         )
     else:
-        main(0, *args)
+        main(rank=0, **kwargs)
 
 
 def main(
@@ -618,7 +618,7 @@ def main(
     do_cpu_offload: bool,
     devices: int,
     precision: str,
-    loggers: List[Logger],  # ?
+    loggers: List[Logger],
     resume: Optional[str],
     seed: int,
     config: Union[ConfigFull, ConfigLoRA],

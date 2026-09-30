@@ -293,33 +293,33 @@ def setup_internal(
     )
     precision = hyp_pars["precision"] or get_default_supported_precision(training=True)
 
-    args = (
-        seed,
-        setups,
-        batch_size,
-        devices,
-        precision,
-        verbose,
-        attention_forward_temp_size_gb,
-        use_sample_metric,
-        eval_dir,
-        sample_metric_max_generated_tokens,
-        sample_metric_kwargs,
-        lora_dropout,
-        access_token,
-        num_store_generated_samples,
-        skip_eval,
-        use_old_metrics,
+    kwargs = dict(
+        seed=seed,
+        setups=setups,
+        batch_size=batch_size,
+        devices=devices,
+        precision=precision,
+        verbose=verbose,
+        attention_forward_temp_size_gb=attention_forward_temp_size_gb,
+        use_sample_metric=use_sample_metric,
+        eval_dir=eval_dir,
+        sample_metric_max_generated_tokens=sample_metric_max_generated_tokens,
+        sample_metric_kwargs=sample_metric_kwargs,
+        lora_dropout=lora_dropout,
+        access_token=access_token,
+        num_store_generated_samples=num_store_generated_samples,
+        skip_eval=skip_eval,
+        use_old_metrics=use_old_metrics,
     )
 
     if Fabric.cuda_is_available():
         Fabric.launch(
-            func=main,
+            main,
             nprocs=devices,
-            args=args,
+            **kwargs,
         )
     else:
-        main(0, *args)
+        main(rank=0, **kwargs)
 
 
 def main(

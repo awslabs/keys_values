@@ -276,27 +276,27 @@ def setup_internal(
     if Fabric.cuda_is_available() and devices > 1:
         check_nvlink_connectivity()
 
-    args = (
-        model_type,
-        devices,
-        precision,
-        checkpoint_indexes,
-        old_topk_entries,
-        final_cp_index,
-        seed,
-        out_dir,
-        verbose,
-        access_token,
+    kwargs = dict(
+        model_type=model_type,
+        devices=devices,
+        precision=precision,
+        checkpoint_indexes=checkpoint_indexes,
+        old_topk_entries=old_topk_entries,
+        final_cp_index=final_cp_index,
+        seed=seed,
+        out_dir=out_dir,
+        verbose=verbose,
+        access_token=access_token,
     )
 
     if Fabric.cuda_is_available():
         Fabric.launch(
-            func=main,
+            main,
             nprocs=devices,
-            args=args,
+            **kwargs,
         )
     else:
-        main(0, *args)
+        main(rank=0, **kwargs)
 
 
 def main(
