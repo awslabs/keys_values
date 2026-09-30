@@ -316,7 +316,7 @@ def setup_internal(
         Fabric.launch(
             func=main,
             nprocs=devices,
-            *args,
+            args=args,
         )
     else:
         main(0, *args)

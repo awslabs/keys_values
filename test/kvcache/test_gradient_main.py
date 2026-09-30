@@ -264,7 +264,7 @@ def test_copy_model_to_device(dtype, cache_name):
     Fabric.launch(
         func=run_copy_model_to_device,
         nprocs=1,
-        *args,
+        args=args,
     )
 
 

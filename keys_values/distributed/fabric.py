@@ -96,8 +96,7 @@ class Fabric:
     def launch(
         func: Callable,
         nprocs: int,
-        *args: Any,
-        **kwargs: Any,
+        args: tuple,
     ) -> Any:
         """
         Launches processes for distributed training. This is done in the same
@@ -121,7 +120,7 @@ class Fabric:
             num_processes=nprocs,
             num_nodes=1,
         )
-        return launcher.launch(wrapped_func, *args, **kwargs)
+        return launcher.launch(wrapped_func, *args)
 
 
 def wrap_init_process_group(
