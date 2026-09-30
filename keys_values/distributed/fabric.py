@@ -96,7 +96,6 @@ class Fabric:
     def launch(
         function: Callable,
         nprocs: int,
-        *args: Any,
         **kwargs: Any,
     ) -> Any:
         """
@@ -121,14 +120,13 @@ class Fabric:
             num_processes=nprocs,
             num_nodes=1,
         )
-        return launcher.launch(wrapped_func, *args, **kwargs)
+        return launcher.launch(wrapped_func, **kwargs)
 
 
 def wrap_init_process_group(
-    func: Callable,
+    to_run: Callable,
     world_size: int,
     rank: int,
-    *args: Any,
     **kwargs: Any,
 ) -> Any:
     torch.cuda.set_device(rank)
@@ -140,7 +138,7 @@ def wrap_init_process_group(
     )
     # PyTorch >= 2.4 warns about undestroyed NCCL process group, so we need to do it at program exit
     atexit.register(destroy_process_group)
-    return func(rank, *args, **kwargs)
+    return to_run(rank, **kwargs)
 
 
 def _distributed_is_initialized() -> bool:
