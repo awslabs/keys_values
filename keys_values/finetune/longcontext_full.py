@@ -1530,7 +1530,7 @@ def fit(
             )
 
             # Periodic evaluation on validation set
-            periodic_evaluation(
+            _val_loss = periodic_evaluation(
                 fabric=fabric,
                 iter_num=state["iter_num"],
                 model=model,
@@ -1545,6 +1545,8 @@ def fit(
                 eval_metric_name=eval_metric_name,
                 generate_with_eval=generate_with_eval,
             )
+            if _val_loss is not None:
+                val_loss = _val_loss
 
             # Periodic storage of checkpoints
             save_checkpoint_regular(
@@ -1882,7 +1884,8 @@ def periodic_evaluation(
     do_cpu_offloading: bool,
     eval_metric_name: str,
     generate_with_eval: bool,
-):
+) -> Optional[float]:
+    val_loss = None
     if iter_num % eval.interval == 0:
         print_with_rank_and_timestamp(
             "Starting validation evaluations.",
@@ -1930,6 +1933,7 @@ def periodic_evaluation(
             deallocate_kv_cache_buffers_of_model(valid_model.gpt_model)
             del valid_model
         fabric.barrier()
+    return val_loss
 
 
 def print_flex_attn_report(
