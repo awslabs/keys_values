@@ -101,7 +101,7 @@ class Fabric:
         """
         Launches processes for distributed training. This is done in the same
         way as for :class:`lightning.fabric.strategies.ddp.DDPStrategy` and its
-        default. In particular, we wrap `func` so that a process group is
+        default. In particular, we wrap `function` so that a process group is
         initialized via NCCL.
 
         """
@@ -114,7 +114,7 @@ class Fabric:
             nprocs,
             cluster_environment,
         )
-        # These are defaults of Lightning Fabric for DDPStrategy with a single
+        # These are defaults of Lightning Fabric for `DDPStrategy` with a single
         # node and no managed cluster.
         launcher = _SubprocessScriptLauncher(
             cluster_environment=cluster_environment,
@@ -132,6 +132,8 @@ def wrap_init_process_group(
 ) -> Any:
     rank = cluster_environment.local_rank()
     torch.cuda.set_device(rank)
+    os.environ["MASTER_ADDR"] = cluster_environment.main_address
+    os.environ["MASTER_PORT"] = str(cluster_environment.main_port)
     dist.init_process_group(
         backend="nccl",
         init_method="env://",
