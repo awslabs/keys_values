@@ -35,9 +35,9 @@ class Quantizer(torch.nn.Module):
     `blocks_over_heads == True`, we use quantization blocks of
     size `n_query_groups * head_size`, and quantization states have shape
     `(batch_size, cache_length)`. A quantizer whose backend restricts the
-    block size may split the values of one (batch, slot) position into
-    several blocks instead (see :class:`BitsAndBytesQuantizer`), but a block
-    never contains values from different positions.
+    block size may zero-pad the values of one (batch, slot) position and split
+    them into several blocks instead (see :class:`BitsAndBytesQuantizer`), but
+    a block never contains values from different positions.
 
     Deallocating and allocating buffers:
 

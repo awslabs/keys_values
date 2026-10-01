@@ -32,6 +32,7 @@ from keys_values.kvcache.quantize.bitsandbytes import (
     ALLOWED_BLOCK_SIZE,
     ALLOWED_SOURCE_DTYPES,
     BitsAndBytesQuantizer,
+    determine_blocksize,
 )
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
@@ -384,24 +385,57 @@ def test_explore_bitsandbytes():
             torch.testing.assert_close(q_x[:, :, start:end, :], q_xpart)
 
 
+@pytest.mark.parametrize(
+    "n_query_groups, head_size, blocksize, blocks_per_position",
+    [
+        (8, 128, 1024, 1),
+        (16, 80, 256, 5),
+        (32, 136, 256, 17),
+        # Zero-padded to the next multiple of 64
+        (1, 96, 128, 1),
+        (2, 80, 64, 3),
+        (12, 38, 512, 1),
+        (26, 20, 64, 9),
+        (1, 16, 64, 1),
+    ],
+)
+def test_bitsandbytes_determine_blocksize(
+    n_query_groups,
+    head_size,
+    blocksize,
+    blocks_per_position,
+):
+    # Does not need a GPU or bitsandbytes. The result must not depend on the
+    # batch size
+    for batch_size in (1, 3, 8):
+        shape = (batch_size, n_query_groups, 16, head_size)
+        assert determine_blocksize(shape) == (blocksize, blocks_per_position)
+
+
 def args_bitsandbytes_with_blocks_over_heads() -> List[tuple]:
     qnames = ["bnb-quantized8", "bnb-quantized4"]
     # (batch_size, n_query_groups, head_size, blocksize, blocks_per_position,
     # is_valid). Blocks are formed over the `n_query_groups * head_size` values
     # of each (batch, slot) position, so neither `blocksize` nor
-    # `blocks_per_position` depend on `batch_size`.
+    # `blocks_per_position` depend on `batch_size`. If no allowed block size
+    # divides this number, positions are zero-padded to the next multiple
+    # of 64.
     args = [
         (1, 16, 5 * 16, 256, 5, True),
         (3 * 4, 8, 7 * 16, 128, 7, True),
         (1, 1, 1024, 1024, 1, True),
         (16, 32, 17 * 8, 256, 17, True),
-        (4, 3 * 4, 19 * 2, 8, 3 * 19, False),
+        # 456 values, padded to 512
+        (4, 3 * 4, 19 * 2, 512, 1, True),
         (3 * 16, 5 * 32, 7 * 16, 512, 5 * 7, True),
-        (1, 2 * 13, 4 * 5, 8, 13 * 5, False),
+        # 520 values, padded to 576 = 9 * 64
+        (1, 2 * 13, 4 * 5, 64, 9, True),
         (1, 8, 128, 1024, 1, True),
         (4, 8, 128, 1024, 1, True),
-        # A block would have to mix values from different positions
-        (2, 1, 3 * 32, 32, 3, False),
+        # 96 values, padded to 128
+        (2, 1, 3 * 32, 128, 1, True),
+        # head_size must be even
+        (2, 4, 33, 64, 3, False),
     ]
     return [
         (qname,) + tup[:3] + ((tup[4], tup[3] // (i + 1)), tup[-1])
@@ -452,12 +486,13 @@ def _bnb_reference_roundtrip(
     x: torch.Tensor,
     blocksize: int,
     num_bits: int,
+    padded_size: int,
 ) -> torch.Tensor:
     """
     Quantizes and dequantizes `x` of shape
-    `(batch_size, n_query_groups, num, head_size)` with bitsandbytes directly,
-    splitting the `n_query_groups * head_size` values of each (batch, slot)
-    position into blocks of size `blocksize`.
+    `(batch_size, n_query_groups, num, head_size)` with bitsandbytes directly:
+    the `n_query_groups * head_size` values of each (batch, slot) position are
+    zero-padded to `padded_size` and split into blocks of size `blocksize`.
 
     """
     from bitsandbytes.functional import (
@@ -468,27 +503,35 @@ def _bnb_reference_roundtrip(
     )
 
     batch_size, n_query_groups, num, head_size = x.shape
-    rows = x.transpose(1, 2).reshape(-1, blocksize).contiguous()
+    position_size = n_query_groups * head_size
+    rows = x.transpose(1, 2).reshape(-1, position_size)
+    rows = torch.nn.functional.pad(rows, (0, padded_size - position_size))
+    rows = rows.reshape(-1, blocksize).contiguous()
     if num_bits == 4:
         q_x, state = quantize_4bit(rows, blocksize=blocksize, quant_type="fp4")
         dq_x = dequantize_4bit(q_x, quant_state=state)
     else:
         q_x, state = quantize_blockwise(rows, blocksize=blocksize)
         dq_x = dequantize_blockwise(q_x, quant_state=state)
-    return dq_x.view(batch_size, num, n_query_groups, head_size).transpose(1, 2)
+    dq_x = dq_x.view(-1, padded_size)[:, :position_size]
+    return dq_x.reshape(batch_size, num, n_query_groups, head_size).transpose(1, 2)
 
 
 @_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
-    "num_bits, dtype, n_query_groups, head_size, blocksize",
+    "num_bits, dtype, n_query_groups, head_size, blocksize, padded_size",
     [
         a + b
         for a, b in product(
             product([8, 4], [torch.float32, torch.bfloat16]),
             [
-                (8, 128, 1024),
+                (8, 128, 1024, 1024),
                 # 16 * 80 = 1280 values per position, 5 blocks of size 256
-                (16, 80, 256),
+                (16, 80, 256, 1280),
+                # 96 values per position, padded to one block of size 128
+                (1, 96, 128, 128),
+                # 160 values per position, padded to 3 blocks of size 64
+                (2, 80, 64, 192),
             ],
         )
     ],
@@ -499,11 +542,13 @@ def test_bitsandbytes_blocks_over_heads_layout(
     n_query_groups,
     head_size,
     blocksize,
+    padded_size,
 ):
     """
     With `blocks_over_heads=True`, blocks must not contain values from
     different (batch, slot) positions. In particular, the quantization of one
-    sequence must not depend on the other sequences in the batch.
+    sequence must not depend on the other sequences in the batch. If needed,
+    positions are zero-padded.
 
     """
     seed = 31415927
@@ -525,7 +570,7 @@ def test_bitsandbytes_blocks_over_heads_layout(
     # Same as quantizing each (batch, slot) position on its own
     torch.testing.assert_close(
         dq_x,
-        _bnb_reference_roundtrip(x, blocksize, num_bits),
+        _bnb_reference_roundtrip(x, blocksize, num_bits, padded_size),
         rtol=0,
         atol=0,
     )
@@ -549,7 +594,7 @@ def test_bitsandbytes_blocks_over_heads_layout(
     )
     assert quantizer.blocksize == blocksize
     # A priori size estimate must match the allocated buffers, also if there
-    # are several blocks per position
+    # are several blocks per position or padding
     params = KVCacheBuffersParams(
         max_batch_size=max_batch_size,
         n_query_groups=n_query_groups,

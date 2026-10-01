@@ -31,30 +31,27 @@ ALLOWED_BLOCK_SIZE = (64, 128, 256, 512, 1024, 2048, 4096)
 ALLOWED_SOURCE_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 
 
-def determine_blocksize(shape: Tuple[int, ...]) -> Optional[Tuple[int, int]]:
+def determine_blocksize(shape: Tuple[int, ...]) -> Tuple[int, int]:
     """
     Block size for `blocks_over_heads == True`. The `n_query_groups * head_size`
-    values of one (batch, slot) position are split into blocks of equal size.
-    Blocks never span different batch entries or slots, so the quantization
-    of one sequence does not depend on other sequences in the batch.
+    values of one (batch, slot) position are zero-padded to the smallest
+    multiple of `min(ALLOWED_BLOCK_SIZE)`, which is then split into blocks of
+    the largest size in :const:`ALLOWED_BLOCK_SIZE` dividing it. Blocks never
+    span different batch entries or slots, so the quantization of one sequence
+    does not depend on other sequences in the batch. Padding values are zero,
+    so they do not change the absmax of a block.
 
     Returns:
-        `(blocksize, blocks_per_position)`, or `None` if
-        `n_query_groups * head_size` is not divisible by any size in
-        :const:`ALLOWED_BLOCK_SIZE`
+        `(blocksize, blocks_per_position)`. The padded size of a position is
+        `blocksize * blocks_per_position`.
 
     """
     _, n_query_groups, _, head_size = shape
-    a = n_query_groups * head_size
-    blocksize = None
-    for _blocksize in reversed(ALLOWED_BLOCK_SIZE):
-        if a % _blocksize == 0 and a >= _blocksize:
-            blocksize = _blocksize
-            break
-    if blocksize is None:
-        return None
-    else:
-        return blocksize, a // blocksize
+    min_blocksize = min(ALLOWED_BLOCK_SIZE)
+    padded_size = -(-n_query_groups * head_size // min_blocksize) * min_blocksize
+    for blocksize in reversed(ALLOWED_BLOCK_SIZE):
+        if padded_size % blocksize == 0:
+            return blocksize, padded_size // blocksize
 
 
 class BitsAndBytesQuantizer(Quantizer):
@@ -78,7 +75,9 @@ class BitsAndBytesQuantizer(Quantizer):
         In this case, the `n_query_groups * head_size` values for each
         (batch, slot) position are split into one or more blocks, but a block
         never contains values from different positions. The blocksize
-        therefore does not depend on the batch size.
+        therefore does not depend on the batch size. If no size in
+        :const:`ALLOWED_BLOCK_SIZE` divides `n_query_groups * head_size`, each
+        position is zero-padded first (see :func:`determine_blocksize`).
 
         For this quantizer, if `self.batch_size < self.shape[0]`, we still
         quantize and dequantize the full buffers, but then only use the slices
@@ -106,11 +105,11 @@ class BitsAndBytesQuantizer(Quantizer):
         self.max_batch_size = batch_size
         if head_size % 2 == 1:
             raise ValueError(f"head_size {head_size}, must be even")
+        self._init_blocksize_quant_shape()
         bits_per_entry = num_bits + 2 * bits_for_torch_dtype(torch.float32)
         self._bytes_per_entry = (
-            batch_size * n_query_groups * head_size / 8
+            batch_size * (n_query_groups * head_size + self._padding) / 8
         ) * bits_per_entry
-        self._init_blocksize_quant_shape()
         # Allocate buffers (optional)
         self.quant_buffer = None
         self.quant_absmax = None
@@ -136,12 +135,15 @@ class BitsAndBytesQuantizer(Quantizer):
         while not done:
             if blocks_over_heads:
                 # The `n_query_groups * head_size` values of each (batch, slot)
-                # position are split into `blocks_per_position` blocks, each
-                # of a size in :const:`ALLOWED_BLOCK_SIZE`. A block never
-                # crosses into another position, as for
-                # :class:`TorchBasicQuantizer` (which uses a single block per
-                # position).
-                self.blocksize, blocks_per_position = self._determine_blocksize()
+                # position are zero-padded by `self._padding` values if needed,
+                # and split into `blocks_per_position` blocks, each of a size
+                # in :const:`ALLOWED_BLOCK_SIZE`. A block never crosses into
+                # another position, as for :class:`TorchBasicQuantizer` (which
+                # uses a single block per position).
+                self.blocksize, blocks_per_position = determine_blocksize(self.shape)
+                self._padding = (
+                    self.blocksize * blocks_per_position - n_query_groups * head_size
+                )
                 self._quant_shape = (
                     batch_size,
                     cache_length,
@@ -151,6 +153,7 @@ class BitsAndBytesQuantizer(Quantizer):
                 self.blocks_over_heads = True
             else:
                 self.blocksize = head_size
+                self._padding = 0
                 self._quant_shape = (
                     batch_size * n_query_groups,
                     cache_length,
@@ -163,17 +166,6 @@ class BitsAndBytesQuantizer(Quantizer):
                     f"blocksize = {self.blocksize} not supported. Trying with blocks_over_heads=True."
                 )
                 blocks_over_heads = True
-
-    def _determine_blocksize(self) -> Tuple[int, int]:
-        result = determine_blocksize(self.shape)
-        if result is None:
-            a = self.shape[1] * self.shape[3]
-            raise ValueError(
-                f"Cannot find blocksize for shape = {self.shape}: "
-                f"n_query_groups * head_size = {a} must be divisible by one of:\n"
-                f"{ALLOWED_BLOCK_SIZE}"
-            )
-        return result
 
     def allocate_buffers(
         self,
@@ -272,6 +264,11 @@ class BitsAndBytesQuantizer(Quantizer):
                 # (batch, n_query_groups, slot, head_size)
                 #   -> (batch, slot, n_query_groups, head_size)
                 _values = _values.transpose(1, 2)
+                if self._padding > 0:
+                    _values = torch.nn.functional.pad(
+                        _values.reshape(*_values.shape[:2], -1),
+                        (0, self._padding),
+                    )
             _values = _values.reshape(
                 -1,
                 self.blocksize,
@@ -317,6 +314,9 @@ class BitsAndBytesQuantizer(Quantizer):
             _out = dequant_func(qq_x, quant_state=quant_state)
             del qq_x
             if self.blocks_over_heads:
+                _out = _out.reshape(self.shape[0], csize, -1)
+                if self._padding > 0:
+                    _out = _out[:, :, : -self._padding]
                 _out = _out.reshape(
                     self.shape[0],
                     csize,
@@ -419,14 +419,8 @@ class BitsAndBytesQuantizer(Quantizer):
         # Same fallback as in `_init_blocksize_quant_shape`
         if params.head_size not in ALLOWED_BLOCK_SIZE:
             blocks_over_heads = True
-        num_values = (
-            params.max_batch_size
-            * params.n_query_groups
-            * cache_length
-            * params.head_size
-        )
         if blocks_over_heads:
-            result = determine_blocksize(
+            blocksize, blocks_per_position = determine_blocksize(
                 (
                     params.max_batch_size,
                     params.n_query_groups,
@@ -434,14 +428,12 @@ class BitsAndBytesQuantizer(Quantizer):
                     params.head_size,
                 )
             )
-            if result is None:
-                raise ValueError(
-                    f"n_query_groups * head_size = {params.n_query_groups * params.head_size} "
-                    f"must be divisible by one of: {ALLOWED_BLOCK_SIZE}"
-                )
-            num_blocks = params.max_batch_size * cache_length * result[1]
+            num_blocks = params.max_batch_size * cache_length * blocks_per_position
         else:
+            blocksize = params.head_size
             num_blocks = params.max_batch_size * params.n_query_groups * cache_length
+        # Includes padding, if any
+        num_values = num_blocks * blocksize
         sz_buffer = num_values * num_bits
         sz_states = num_blocks * bits_for_torch_dtype(torch.float32)
         return sz_buffer + sz_states, dict(buffer=sz_buffer, q_states=sz_states)
@@ -452,8 +444,14 @@ class BitsAndBytesQuantizer(Quantizer):
         dequant_func = self._dequantize_func()
         if self.blocks_over_heads:
             _x = x.transpose(1, 2)
-            q_x, state = quant_func(_x.reshape(-1, self.blocksize).contiguous())
-            dq_x = dequant_func(q_x, quant_state=state).view_as(_x).transpose(1, 2)
+            rows = _x.reshape(*_x.shape[:2], -1)
+            if self._padding > 0:
+                rows = torch.nn.functional.pad(rows, (0, self._padding))
+            q_x, state = quant_func(rows.reshape(-1, self.blocksize).contiguous())
+            dq_x = dequant_func(q_x, quant_state=state).view(rows.shape)
+            if self._padding > 0:
+                dq_x = dq_x[:, :, : -self._padding]
+            dq_x = dq_x.reshape(_x.shape).transpose(1, 2)
         else:
             q_x, state = quant_func(x.reshape(-1, self.blocksize).contiguous())
             dq_x = dequant_func(q_x, quant_state=state).view_as(x)
