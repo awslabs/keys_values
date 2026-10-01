@@ -143,7 +143,6 @@ def wrap_init_process_group(
     )
     # PyTorch >= 2.4 warns about undestroyed NCCL process group, so we need to do it at program exit
     atexit.register(destroy_process_group)
-    print("CALLING to_run !!!")  # DEBUG
     return to_run(**kwargs)
 
 
