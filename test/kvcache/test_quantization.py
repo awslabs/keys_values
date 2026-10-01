@@ -23,6 +23,7 @@ from keys_values.config import Config
 from litgpt.utils import _RunIf
 
 from keys_values.kvcache.base import KVCacheParams
+from keys_values.kvcache.buffers import KVCacheBuffersParams
 from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.quant_buffers import QuantizedKVCacheBuffers
@@ -39,6 +40,7 @@ from keys_values.kvcache.test_utils import (
     cache_names_and_devices,
     random_args_cache_forward,
     random_index,
+    device_for_cache_name,
 )
 from keys_values.model import GPT
 from keys_values.utils import randint_torch
@@ -63,9 +65,6 @@ def args_for_one_cache(
     ]
 
 
-# TODO:
-# We currently skip blocks_over_heads = True, name = 'dense-bnb-quantized*'.
-# Need to understand what is going on there
 @pytest.mark.parametrize(
     "dtype, blocks_over_heads, name, device",
     args_for_one_cache("dense"),
@@ -73,87 +72,96 @@ def args_for_one_cache(
 def test_quantization_error(dtype, blocks_over_heads, name, device):
     seed = 31415927
     torch.random.manual_seed(seed)
-    if not ("bnb" in name and blocks_over_heads):
-        print(
-            f"dtype={dtype}, blocks_over_heads={blocks_over_heads}, name={name}, device={device}"
+    print(
+        f"dtype={dtype}, blocks_over_heads={blocks_over_heads}, name={name}, device={device}"
+    )
+
+    if "bnb" in name and not blocks_over_heads:
+        # Minimum blocksize for bitsandbytes is 64
+        head_sizes = (64, 128, 256)
+    else:
+        head_sizes = (16, 32, 64)
+    max_i = len(head_sizes) - 1
+    batch_size = 3
+    n_query_groups = 4
+    params = [
+        KVCacheParams(
+            max_batch_size=batch_size * 2 ** (max_i - i),
+            n_query_groups=4,
+            cache_length=32,
+            head_size=head_size,
+            n_head=4,
+            dtype=dtype,
         )
+        for i, head_size in enumerate(head_sizes)
+    ]
+    cache_length = params[0].cache_length
 
-        if "bnb" in name and not blocks_over_heads:
-            # Minimum blocksize for bitsandbytes is 64
-            head_sizes = (64, 128, 256)
-        else:
-            head_sizes = (16, 32, 64)
-        max_i = len(head_sizes) - 1
-        batch_size = 3
-        n_query_groups = 4
-        params = [
-            KVCacheParams(
-                max_batch_size=batch_size * 2 ** (max_i - i),
-                n_query_groups=4,
-                cache_length=32,
-                head_size=head_size,
-                n_head=4,
-                dtype=dtype,
+    kv_caches = [
+        create_kv_cache(name, p, blocks_over_heads=blocks_over_heads) for p in params
+    ]
+    keys = random_tensor(params[-1], num=cache_length)
+    assert keys.shape == (batch_size, n_query_groups, cache_length, head_sizes[-1])
+    # Errors with larger blocksize
+    q_errors = []
+    for i, kv_cache in enumerate(kv_caches[:-1]):
+        # Split blocks into parts
+        n_parts = 2 ** (max_i - i)
+        head_size = head_sizes[i]
+        assert n_parts * head_size == head_sizes[-1]
+        assert n_parts * batch_size == params[i].max_batch_size
+        _keys = (
+            keys.view(*keys.shape[:-1], n_parts, head_size)
+            .permute(
+                3,
+                0,
+                1,
+                2,
+                4,
             )
-            for i, head_size in enumerate(head_sizes)
-        ]
-        cache_length = params[0].cache_length
-
-        kv_caches = [
-            create_kv_cache(name, p, blocks_over_heads=blocks_over_heads)
-            for p in params
-        ]
-        keys = random_tensor(params[-1], num=cache_length)
-        assert keys.shape == (batch_size, n_query_groups, cache_length, head_sizes[-1])
-        # Errors with larger blocksize
-        q_errors = []
-        for i, kv_cache in enumerate(kv_caches[:-1]):
-            # Split blocks into parts
-            n_parts = 2 ** (max_i - i)
-            head_size = head_sizes[i]
-            assert n_parts * head_size == head_sizes[-1]
-            assert n_parts * batch_size == params[i].max_batch_size
-            _keys = (
-                keys.view(*keys.shape[:-1], n_parts, head_size)
-                .permute(
-                    3,
-                    0,
-                    1,
-                    2,
-                    4,
+            .reshape(n_parts * batch_size, n_query_groups, -1, head_size)
+        )
+        # Errors with smaller blocksize (should be smaller)
+        # Only error for keys, ignore for values
+        errors = kv_cache.kv_buffers.quantization_error(_keys, _keys)[0].view(
+            n_parts,
+            batch_size,
+            n_query_groups,
+            -1,
+        )
+        assert errors.shape[-1] == cache_length
+        errors = vector_norm(errors, dim=0)
+        q_errors.append(errors)
+    q_errors.append(kv_caches[-1].kv_buffers.quantization_error(keys, keys)[0])
+    assert q_errors[0].shape == q_errors[1].shape
+    assert q_errors[0].shape == q_errors[2].shape
+    # Weak test: The smaller the blocksize, the smaller the error should be,
+    # but this holds only "on average", since `round` is used in quantization,
+    # which is strongly nonlinear
+    total_sz = q_errors[0].numel()
+    # bitsandbytes uses non-linear codes (dynamic 8-bit map, FP4). With
+    # `blocks_over_heads=True`, the per-position relation is violated for more
+    # than a quarter of positions for many seeds (about 1 in 9 seeds for 8-bit,
+    # 7 in 10 for 4-bit), even though the round-trip output matches
+    # bitsandbytes applied directly per position (see
+    # `test_bitsandbytes_blocks_over_heads_layout`). In this case, we check
+    # that the mean error decreases instead.
+    check_mean_only = "bnb" in name and blocks_over_heads
+    for i in range(2):
+        index_lt = torch.lt(q_errors[i + 1], q_errors[i])
+        num_lt = int(index_lt.sum().item())
+        if num_lt > 0:
+            hs_gt = params[i + 1].head_size
+            hs_lt = params[i].head_size
+            index_lt = index_lt.nonzero()
+            print(f"{num_lt} violations of total {total_sz}")
+            for row in index_lt:
+                print(
+                    f"{row.tolist()}: err{hs_gt} = {q_errors[i + 1][*row]:.7f} < {q_errors[i][*row]:.7f} = err{hs_lt}"
                 )
-                .reshape(n_parts * batch_size, n_query_groups, -1, head_size)
-            )
-            # Errors with smaller blocksize (should be smaller)
-            # Only error for keys, ignore for values
-            errors = kv_cache.kv_buffers.quantization_error(_keys, _keys)[0].view(
-                n_parts,
-                batch_size,
-                n_query_groups,
-                -1,
-            )
-            assert errors.shape[-1] == cache_length
-            errors = vector_norm(errors, dim=0)
-            q_errors.append(errors)
-        q_errors.append(kv_caches[-1].kv_buffers.quantization_error(keys, keys)[0])
-        assert q_errors[0].shape == q_errors[1].shape
-        assert q_errors[0].shape == q_errors[2].shape
-        # Weak test: The smaller the blocksize, the smaller the error should be,
-        # but this holds only "on average", since `round` is used in quantization,
-        # which is strongly nonlinear
-        total_sz = q_errors[0].numel()
-        for i in range(2):
-            index_lt = torch.lt(q_errors[i + 1], q_errors[i])
-            num_lt = int(index_lt.sum().item())
-            if num_lt > 0:
-                hs_gt = params[i + 1].head_size
-                hs_lt = params[i].head_size
-                index_lt = index_lt.nonzero()
-                print(f"{num_lt} violations of total {total_sz}")
-                for row in index_lt:
-                    print(
-                        f"{row.tolist()}: err{hs_gt} = {q_errors[i + 1][*row]:.7f} < {q_errors[i][*row]:.7f} = err{hs_lt}"
-                    )
+        if check_mean_only:
+            assert q_errors[i].mean() < q_errors[i + 1].mean()
+        else:
             # Only a fraction of the comparisons should violate the relation
             # which holds "on average"
             assert num_lt < total_sz / 4
@@ -378,15 +386,22 @@ def test_explore_bitsandbytes():
 
 def args_bitsandbytes_with_blocks_over_heads() -> List[tuple]:
     qnames = ["bnb-quantized8", "bnb-quantized4"]
-    # (batch_size, n_query_groups, head_size, blocksize, reminder, is_valid)
+    # (batch_size, n_query_groups, head_size, blocksize, blocks_per_position,
+    # is_valid). Blocks are formed over the `n_query_groups * head_size` values
+    # of each (batch, slot) position, so neither `blocksize` nor
+    # `blocks_per_position` depend on `batch_size`.
     args = [
         (1, 16, 5 * 16, 256, 5, True),
-        (3 * 4, 8, 7 * 16, 512, 3 * 7, True),
+        (3 * 4, 8, 7 * 16, 128, 7, True),
         (1, 1, 1024, 1024, 1, True),
-        (16, 32, 17 * 8, 4096, 17, True),
-        (4, 3 * 4, 19 * 2, 32, 3 * 19, False),
-        (3 * 16, 5 * 32, 7 * 16, 4096, 2 * 3 * 5 * 7, True),
+        (16, 32, 17 * 8, 256, 17, True),
+        (4, 3 * 4, 19 * 2, 8, 3 * 19, False),
+        (3 * 16, 5 * 32, 7 * 16, 512, 5 * 7, True),
         (1, 2 * 13, 4 * 5, 8, 13 * 5, False),
+        (1, 8, 128, 1024, 1, True),
+        (4, 8, 128, 1024, 1, True),
+        # A block would have to mix values from different positions
+        (2, 1, 3 * 32, 32, 3, False),
     ]
     return [
         (qname,) + tup[:3] + ((tup[4], tup[3] // (i + 1)), tup[-1])
@@ -426,11 +441,129 @@ def test_bitsandbytes_with_blocks_over_heads(
         quantizer_k = kv_cache.kv_buffers.quantizer_k
         assert isinstance(quantizer_k, BitsAndBytesQuantizer)
         quant_shape = quantizer_k._quant_shape
-        required_shape = (params.cache_length,) + shape
+        required_shape = (batch_size, params.cache_length) + shape
         assert quant_shape == required_shape
     else:
         with pytest.raises(ValueError):
             kv_cache = create_kv_cache(name, params, blocks_over_heads=True)
+
+
+def _bnb_reference_roundtrip(
+    x: torch.Tensor,
+    blocksize: int,
+    num_bits: int,
+) -> torch.Tensor:
+    """
+    Quantizes and dequantizes `x` of shape
+    `(batch_size, n_query_groups, num, head_size)` with bitsandbytes directly,
+    splitting the `n_query_groups * head_size` values of each (batch, slot)
+    position into blocks of size `blocksize`.
+
+    """
+    from bitsandbytes.functional import (
+        quantize_4bit,
+        dequantize_4bit,
+        quantize_blockwise,
+        dequantize_blockwise,
+    )
+
+    batch_size, n_query_groups, num, head_size = x.shape
+    rows = x.transpose(1, 2).reshape(-1, blocksize).contiguous()
+    if num_bits == 4:
+        q_x, state = quantize_4bit(rows, blocksize=blocksize, quant_type="fp4")
+        dq_x = dequantize_4bit(q_x, quant_state=state)
+    else:
+        q_x, state = quantize_blockwise(rows, blocksize=blocksize)
+        dq_x = dequantize_blockwise(q_x, quant_state=state)
+    return dq_x.view(batch_size, num, n_query_groups, head_size).transpose(1, 2)
+
+
+@_RunIf(min_cuda_gpus=1)
+@pytest.mark.parametrize(
+    "num_bits, dtype, n_query_groups, head_size, blocksize",
+    [
+        a + b
+        for a, b in product(
+            product([8, 4], [torch.float32, torch.bfloat16]),
+            [
+                (8, 128, 1024),
+                # 16 * 80 = 1280 values per position, 5 blocks of size 256
+                (16, 80, 256),
+            ],
+        )
+    ],
+)
+def test_bitsandbytes_blocks_over_heads_layout(
+    num_bits,
+    dtype,
+    n_query_groups,
+    head_size,
+    blocksize,
+):
+    """
+    With `blocks_over_heads=True`, blocks must not contain values from
+    different (batch, slot) positions. In particular, the quantization of one
+    sequence must not depend on the other sequences in the batch.
+
+    """
+    seed = 31415927
+    torch.random.manual_seed(seed)
+    device = device_for_cache_name("bnb-quantized8")
+    max_batch_size, cache_length = 4, 16
+    shape = (max_batch_size, n_query_groups, cache_length, head_size)
+    quantizer = BitsAndBytesQuantizer(
+        shape=shape,
+        source_dtype=dtype,
+        num_bits=num_bits,
+        blocks_over_heads=True,
+        allocate_buffers=True,
+        device=device,
+    )
+    x = torch.randn(shape, dtype=dtype, device=device)
+    quantizer.quantize(0, cache_length, x)
+    dq_x = quantizer.dequantize(0, cache_length)
+    # Same as quantizing each (batch, slot) position on its own
+    torch.testing.assert_close(
+        dq_x,
+        _bnb_reference_roundtrip(x, blocksize, num_bits),
+        rtol=0,
+        atol=0,
+    )
+    # Much larger values in sequence 0 do not change the other sequences
+    x_large = x.clone()
+    x_large[0] *= 100
+    quantizer.quantize(0, cache_length, x_large)
+    dq_x_large = quantizer.dequantize(0, cache_length)
+    torch.testing.assert_close(dq_x[1:], dq_x_large[1:], rtol=0, atol=0)
+    # Effective batch size smaller than the maximum: unused rows are padded
+    # with zeros, which must not change the result
+    batch_size = 2
+    quantizer.allocate_buffers(batch_size, device)
+    assert quantizer.batch_size == batch_size
+    quantizer.quantize(0, cache_length, x[:batch_size])
+    torch.testing.assert_close(
+        quantizer.dequantize(0, cache_length),
+        dq_x[:batch_size],
+        rtol=0,
+        atol=0,
+    )
+    assert quantizer.blocksize == blocksize
+    # A priori size estimate must match the allocated buffers, also if there
+    # are several blocks per position
+    params = KVCacheBuffersParams(
+        max_batch_size=max_batch_size,
+        n_query_groups=n_query_groups,
+        head_size=head_size,
+        device=device,
+        dtype=dtype,
+    )
+    size_apriori = BitsAndBytesQuantizer.size_estimate_apriori(
+        params,
+        cache_length=cache_length,
+        blocks_over_heads=True,
+        num_bits=num_bits,
+    )
+    assert size_apriori == quantizer.size_estimate()
 
 
 def write_back_all(caches: List[KVCacheWithBuffers]):
