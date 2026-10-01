@@ -134,6 +134,7 @@ def wrap_init_process_group(
     torch.cuda.set_device(rank)
     os.environ["MASTER_ADDR"] = cluster_environment.main_address
     os.environ["MASTER_PORT"] = str(cluster_environment.main_port)
+    print(f"Initializing process group: world_size = {world_size}, rank = {rank}")
     dist.init_process_group(
         backend="nccl",
         init_method="env://",
@@ -142,6 +143,7 @@ def wrap_init_process_group(
     )
     # PyTorch >= 2.4 warns about undestroyed NCCL process group, so we need to do it at program exit
     atexit.register(destroy_process_group)
+    print("CALLING to_run !!!")  # DEBUG
     return to_run(**kwargs)
 
 
