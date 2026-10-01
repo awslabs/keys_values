@@ -614,7 +614,6 @@ def setup_internal(
 
 
 def main(
-    rank: int,
     do_cpu_offload: bool,
     devices: int,
     precision: str,

@@ -266,7 +266,6 @@ def test_copy_model_to_device(dtype, cache_name):
 
 
 def run_copy_model_to_device(
-    rank: int,
     dtype: torch.dtype,
     cache_name: str,
 ):

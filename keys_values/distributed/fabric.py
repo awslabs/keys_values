@@ -107,14 +107,15 @@ class Fabric:
         """
         # Wrapper ensures that process group is initialized (NCCL) at the
         # start of each process.
+        cluster_environment = LightningEnvironment()
         wrapped_func = partial(
             wrap_init_process_group,
             function,
             nprocs,
+            cluster_environment,
         )
         # These are defaults of Lightning Fabric for DDPStrategy with a single
         # node and no managed cluster.
-        cluster_environment = LightningEnvironment()
         launcher = _SubprocessScriptLauncher(
             cluster_environment=cluster_environment,
             num_processes=nprocs,
@@ -126,9 +127,10 @@ class Fabric:
 def wrap_init_process_group(
     to_run: Callable,
     world_size: int,
-    rank: int,
+    cluster_environment: LightningEnvironment,
     **kwargs: Any,
 ) -> Any:
+    rank = cluster_environment.local_rank()
     torch.cuda.set_device(rank)
     dist.init_process_group(
         backend="nccl",
@@ -138,7 +140,7 @@ def wrap_init_process_group(
     )
     # PyTorch >= 2.4 warns about undestroyed NCCL process group, so we need to do it at program exit
     atexit.register(destroy_process_group)
-    return to_run(rank, **kwargs)
+    return to_run(**kwargs)
 
 
 def _distributed_is_initialized() -> bool:

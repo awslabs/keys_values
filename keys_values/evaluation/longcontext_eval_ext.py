@@ -323,7 +323,6 @@ def setup_internal(
 
 
 def main(
-    rank: int,
     seed: int,
     setups: List[Dict[str, Any]],
     batch_size: int,

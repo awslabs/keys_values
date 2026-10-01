@@ -300,7 +300,6 @@ def setup_internal(
 
 
 def main(
-    rank: int,
     model_type: str,
     devices: int,
     precision: str,
