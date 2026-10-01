@@ -17,7 +17,7 @@ import os, sys
 import warnings
 
 import torch
-from jsonargparse import auto_cli, set_config_read_mode, set_docstring_parse_options
+from jsonargparse import auto_cli, set_parsing_settings
 
 from litgpt.__main__ import PARSER_DATA as PARSER_DATA_LITGPT
 
@@ -125,8 +125,10 @@ def _setup_rank_logs(base_directory: str | None = None):
 def main() -> None:
     _check_commands()
     _setup_rank_logs()
-    set_docstring_parse_options(attribute_docstrings=True)
-    set_config_read_mode(urls_enabled=True)
+    set_parsing_settings(
+        docstring_parse_attribute_docstrings=True,
+        config_read_mode_urls_enabled=True,
+    )
 
     # PyTorch bug that raises a false-positive warning
     # More info: https://github.com/Lightning-AI/litgpt/issues/1561

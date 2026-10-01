@@ -610,7 +610,7 @@ def setup_internal(
             **kwargs,
         )
     else:
-        main(rank=0, **kwargs)
+        main(**kwargs)
 
 
 def main(
