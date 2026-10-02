@@ -2289,3 +2289,6 @@ def debug_check_fabric(fabric: L.Fabric):
     print(f"\n*** fabric._strategy._process_group_backend = '{backend}', should be 'nccl'")
     command = _basic_subprocess_cmd()
     print(f"*** Processes to be launched with:\n{command}")
+    print(f"*** Environment:")
+    print("\n".join(f"{k} = {v}" for k, v in os.environ.items()))
+    print("*** DONE")
