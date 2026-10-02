@@ -32,6 +32,13 @@ class Fabric:
     Note: We start simple and incomplete, and rather extend this class when
     something else is needed.
 
+    For launching processes, we use the default DDP setup of Lightning Fabric:
+    - `cluster_environment` is `LightningEnvironment`, with its default settings
+      of `os.environ["MASTER_ADDR"], os.environ["MASTER_PORT"]` (these env
+      variables can be set, then `LightningEnvironment` uses them.
+    - Backend is "nccl"
+    - Launcher is `_SubprocessScriptLauncher`
+
     """
 
     @staticmethod
@@ -105,8 +112,6 @@ class Fabric:
         initialized via NCCL.
 
         """
-        from lightning.fabric.strategies.launchers.subprocess_script import _basic_subprocess_cmd  # DEBUG
-
         # Wrapper ensures that process group is initialized (NCCL) at the
         # start of each process.
         cluster_environment = LightningEnvironment()
@@ -123,10 +128,6 @@ class Fabric:
             num_processes=nprocs,
             num_nodes=1,
         )
-        print(f"\n*** Processes to be launched with:\n{_basic_subprocess_cmd()}")  # DEBUG!
-        print(f"*** Environment:")
-        print("\n".join(f"{k} = {v}" for k, v in os.environ.items()))
-        print("*** DONE")
         return launcher.launch(wrapped_func, **kwargs)
 
 

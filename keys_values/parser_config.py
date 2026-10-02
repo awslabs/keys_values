@@ -51,18 +51,14 @@ def _get_hyperparameters_internal(
     # to parse the file as if it was called as a script
     if known_commands is None:
         known_commands = parser_commands()
-    known_commands = [(c,) for c in known_commands]
-    _restore = []
-    for known_command in known_commands:
-        unwanted = slice(1, 1 + len(known_command))
-        if tuple(sys.argv[unwanted]) == known_command:
-            _restore.append((unwanted, known_command))
-            sys.argv[unwanted] = []
+    _restore = None
+    if sys.argv[1] in known_commands:
+        _restore = sys.argv.pop(1)
 
     parser = capture_parser(lambda: CLI(function))
     # Restore
-    for unwanted, known_command in _restore:
-        sys.argv[unwanted] = list(known_command)
+    if _restore is not None:
+        sys.argv.insert(1, _restore)
     return parser
 
 
