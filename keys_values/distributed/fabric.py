@@ -124,6 +124,9 @@ class Fabric:
             num_nodes=1,
         )
         print(f"\n*** Processes to be launched with:\n{_basic_subprocess_cmd()}")  # DEBUG!
+        print(f"*** Environment:")
+        print("\n".join(f"{k} = {v}" for k, v in os.environ.items()))
+        print("*** DONE")
         return launcher.launch(wrapped_func, **kwargs)
 
 
