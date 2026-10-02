@@ -54,11 +54,13 @@ def _get_hyperparameters_internal(
     _restore = None
     if sys.argv[1] in known_commands:
         _restore = sys.argv.pop(1)
+        print(f"\n*** sys.argv after modification:\n{sys.argv}")
 
     parser = capture_parser(lambda: CLI(function))
     # Restore
     if _restore is not None:
         sys.argv.insert(1, _restore)
+    print(f"\n*** sys.argv restored:\n{sys.argv}")
     return parser
 
 
