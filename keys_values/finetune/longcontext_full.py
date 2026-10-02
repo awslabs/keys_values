@@ -18,6 +18,7 @@ import gc
 
 import os
 import time
+from bdb import set_trace
 from pathlib import Path
 from pprint import pprint
 from typing import Dict, Literal, Optional, Union, Any, Tuple, List, Callable
@@ -561,6 +562,7 @@ def setup_internal(
         precision=precision,
         loggers=logger,
     )
+    debug_check_fabric(fabric)  # DEBUG
 
     if torch.cuda.is_available() and devices > 1:
         check_nvlink_connectivity(fabric)
@@ -2238,3 +2240,48 @@ def debug_compute_loss_and_gradient(
     gpt_model.zero_grad(set_to_none=True)
     loss_value = loss_value.item()
     return gradient, loss_value
+
+
+# What to check:
+# - fabric._strategy == DDPStrategy(static_graph=True, broadcast_buffers=False)
+# - fabric._accelerator == CUDAAccelarator()
+# - fabric._precision == HalfPrecision(bf16-true")
+# - fabric._strategy.checkpoint_io == TorchCheckpointIO()
+# - fabric._strategy.cluster_environment == LightningEnvironment()
+# - fabric._strategy.parallel_devices = [torch.device("cuda", i) for i in range(4)]
+# - fabric._strategy._launcher == _SubprocessScriptLauncher(self.cluster_environment, 4, 1)
+def debug_check_fabric(fabric: L.Fabric):
+    from lightning.fabric.strategies import DDPStrategy
+    from lightning.fabric.accelerators import CUDAAccelerator
+    from lightning.fabric.plugins import HalfPrecision, TorchCheckpointIO
+    from lightning.fabric.plugins.environments import LightningEnvironment
+    from lightning.fabric.strategies.launchers import _SubprocessScriptLauncher
+
+    strategy = fabric._strategy
+    if not isinstance(strategy, DDPStrategy):
+        print(f"fabric._strategy = {type(strategy)}, should be DDPStrategy")
+    accelerator = fabric._accelerator
+    if not isinstance(accelerator, CUDAAccelerator):
+        print(f"fabric._accelerator = {type(accelerator)}, should be CUDAAccelerator")
+    precision = fabric._precision
+    if not isinstance(precision, HalfPrecision):
+        print(f"fabric._precision = {type(precision)}, should be HalfPrecision")
+    if precision.precision != "bf16-true":
+        print(f"fabric._precision.precision = '{precision.precision}', should be 'bf16-true'")
+    checkpoint_io = strategy.checkpoint_io
+    if not isinstance(checkpoint_io, TorchCheckpointIO):
+        print(f"fabric._strategy.checkpoint_io = {type(checkpoint_io)}, should be TorchCheckpointIO")
+    cluster_environment = strategy.cluster_environment
+    if not isinstance(cluster_environment, LightningEnvironment):
+        print(f"fabric._strategy.cluster_environment = {type(cluster_environment)}, should be LightningEnvironment")
+    parallel_devices = strategy.parallel_devices
+    _parallel_devices = [torch.device("cuda", i) for i in range(4)]
+    if parallel_devices != _parallel_devices:
+        print(f"fabric._strategy.parallel_devices = {parallel_devices}, should be {_parallel_devices}")
+    launcher = strategy._launcher
+    if not isinstance(launcher, _SubprocessScriptLauncher):
+        print(f"fabric._strategy._launcher = {type(launcher)}, should be _SubprocessScriptLauncher")
+    if not isinstance(launcher.cluster_environment, LightningEnvironment) or launcher.num_nodes != 1 or launcher.num_processes != 4:
+        print(f"fabric._strategy._launcher: num_nodes = {launcher.num_nodes}, num_processes = {launcher.num_processes}, cluster_environment = {type(launcher.cluster_environment)}")
+    backend = strategy._get_process_group_backend()
+    print(f"fabric._strategy._process_group_backend = {backend}, should be 'nccl'")
