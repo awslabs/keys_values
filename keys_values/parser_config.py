@@ -13,7 +13,7 @@
 # limitations under the License.
 from pathlib import Path
 import sys
-from typing import List, Callable, Dict, Any
+from typing import List, Callable, Dict, Any, Tuple
 
 from litgpt.parser_config import parser_commands as parser_commands_litgpt
 from litgpt.utils import CLI
@@ -40,7 +40,7 @@ def parser_commands() -> List[str]:
 def _get_hyperparameters_internal(
     function: Callable,
     known_commands: list[str] | None = None,
-) -> Any:
+) -> Tuple[Any, Any]:
     """
     Captures the CLI parameters passed to `function` without running `function`.
     """
@@ -54,14 +54,14 @@ def _get_hyperparameters_internal(
     _restore = None
     if sys.argv[1] in known_commands:
         _restore = sys.argv.pop(1)
-        print(f"\n*** sys.argv after modification:\n{sys.argv}")
 
     parser = capture_parser(lambda: CLI(function))
+    config = parser.parse_args()
     # Restore
     if _restore is not None:
         sys.argv.insert(1, _restore)
-    print(f"\n*** sys.argv restored:\n{sys.argv}")
-    return parser
+
+    return parser, config
 
 
 def get_hyperparameters_from_parser(
@@ -73,8 +73,7 @@ def get_hyperparameters_from_parser(
     These should be stored as hyperparameters alongside a checkpoint.
 
     """
-    parser = _get_hyperparameters_internal(function, known_commands)
-    config = parser.parse_args()
+    _, config = _get_hyperparameters_internal(function, known_commands)
     return config.__dict__
 
 
@@ -88,6 +87,5 @@ def save_hyperparameters(
     latter has serious side effects!
 
     """
-    parser = _get_hyperparameters_internal(function, known_commands)
-    config = parser.parse_args()
+    parser, config = _get_hyperparameters_internal(function, known_commands)
     parser.save(config, checkpoint_dir / HYPERPARAMETERS_FILENAME, overwrite=True)
