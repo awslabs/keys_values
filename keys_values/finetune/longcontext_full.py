@@ -2256,6 +2256,7 @@ def debug_check_fabric(fabric: L.Fabric):
     from lightning.fabric.plugins import HalfPrecision, TorchCheckpointIO
     from lightning.fabric.plugins.environments import LightningEnvironment
     from lightning.fabric.strategies.launchers import _SubprocessScriptLauncher
+    from lightning.fabric.strategies.launchers.subprocess_script import _basic_subprocess_cmd
 
     strategy = fabric._strategy
     if not isinstance(strategy, DDPStrategy):
@@ -2283,5 +2284,8 @@ def debug_check_fabric(fabric: L.Fabric):
         print(f"fabric._strategy._launcher = {type(launcher)}, should be _SubprocessScriptLauncher")
     if not isinstance(launcher.cluster_environment, LightningEnvironment) or launcher.num_nodes != 1 or launcher.num_processes != 4:
         print(f"fabric._strategy._launcher: num_nodes = {launcher.num_nodes}, num_processes = {launcher.num_processes}, cluster_environment = {type(launcher.cluster_environment)}")
+
     backend = strategy._get_process_group_backend()
-    print(f"fabric._strategy._process_group_backend = {backend}, should be 'nccl'")
+    print(f"\n*** fabric._strategy._process_group_backend = '{backend}', should be 'nccl'")
+    command = _basic_subprocess_cmd()
+    print(f"*** Processes to be launched with:\n{command}")
