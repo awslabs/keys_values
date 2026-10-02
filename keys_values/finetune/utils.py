@@ -63,10 +63,6 @@ from keys_values.kvcache.gradient.annotation import NodeAnnotation
 from keys_values.kvcache.gradient.autograd_hooks import MayMatchTwiceType
 from keys_values.long_context import GPTAndHeadModel
 from keys_values.model import GPT
-from keys_values.parser_config import (
-    save_hyperparameters,
-    HYPERPARAMETERS_FILENAME,
-)
 from keys_values.utils import flush_io_streams
 
 
@@ -692,19 +688,3 @@ def fabric_log_dict(
         metrics = convert_tensors_to_scalars(metrics)
         for logger in loggers:
             logger.log_metrics(metrics=metrics, step=step)
-
-def get_hyperparameters_from_original_setup(
-    original_setup: Callable,
-    checkpoint_dir: Path,
-) -> Dict[str, Any]:
-    # Extract hyperparameters (needed for storing checkpoints)
-    _hp_path = checkpoint_dir / "__TEMP_31415927__" / HYPERPARAMETERS_FILENAME
-    _hp_path.parent.mkdir(parents=True, exist_ok=True)
-    save_hyperparameters(
-        original_setup,
-        checkpoint_dir=_hp_path.parent,
-    )
-    hyperparameters = yaml.safe_load(_hp_path.open())
-    _hp_path.unlink()
-    _hp_path.parent.rmdir()
-    return hyperparameters

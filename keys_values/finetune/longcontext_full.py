@@ -98,7 +98,6 @@ from keys_values.finetune.utils import (
     load_generation_config,
     init_module,
     fabric_log_dict,
-    get_hyperparameters_from_original_setup,
 )
 from keys_values.fused import (
     set_fused_swiglu_enabled,
@@ -135,7 +134,10 @@ from keys_values.lora import (
 from keys_values.model import GPT as GPTFull
 from keys_values.distributed.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.distributed.model_factory import BlockComponentName
-from keys_values.parser_config import HYPERPARAMETERS_FILENAME
+from keys_values.parser_config import (
+    HYPERPARAMETERS_FILENAME,
+    get_hyperparameters_from_parser,
+)
 from keys_values.pos_encoding import (
     position_encoding_factory,
     set_fused_rope_enabled,
@@ -502,10 +504,7 @@ def setup_internal(
     if isinstance(data, EncodableDataModuleMixin):
         data = data.encode()
     # Extract hyperparameters (needed for storing checkpoints)
-    hyperparameters = get_hyperparameters_from_original_setup(
-        original_setup,
-        checkpoint_dir=checkpoint_dir,
-    )
+    hyperparameters = get_hyperparameters_from_parser(original_setup)
 
     # Legacy arguments
     if verbose is None:

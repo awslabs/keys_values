@@ -11,13 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional, Callable
 from pathlib import Path
+import sys
+from typing import List, Callable, Dict, Any
 
-from litgpt.parser_config import (
-    parser_commands as parser_commands_litgpt,
-    save_hyperparameters as save_hyperparameters_litgpt,
-)
+from litgpt.parser_config import parser_commands as parser_commands_litgpt
+from litgpt.utils import CLI
 
 HYPERPARAMETERS_FILENAME = "hyperparameters.yaml"
 
@@ -34,11 +33,63 @@ def parser_commands() -> List[str]:
     ]
 
 
+# From `litgpt.parser_config`. Apart from storing the hyperparameters instead
+# of returning them, the function there has a serious side effect: It modifies
+# `sys.argv` and does not restore it, which implies that subsequent calls of
+# `Fabric.launch` fail.
+def _get_hyperparameters_internal(
+    function: Callable,
+    known_commands: list[str] | None = None,
+) -> Any:
+    """
+    Captures the CLI parameters passed to `function` without running `function`.
+    """
+    from jsonargparse import capture_parser
+
+    # TODO: Make this more robust
+    # This hack strips away the subcommands from the top-level CLI
+    # to parse the file as if it was called as a script
+    if known_commands is None:
+        known_commands = parser_commands()
+    known_commands = [(c,) for c in known_commands]
+    _restore = []
+    for known_command in known_commands:
+        unwanted = slice(1, 1 + len(known_command))
+        if tuple(sys.argv[unwanted]) == known_command:
+            _restore.append((unwanted, known_command))
+            sys.argv[unwanted] = []
+
+    parser = capture_parser(lambda: CLI(function))
+    # Restore
+    for unwanted, known_command in _restore:
+        sys.argv[unwanted] = list(known_command)
+    return parser
+
+
+def get_hyperparameters_from_parser(
+    function: Callable,
+    known_commands: list[str] | None = None,
+) -> Dict[str, Any]:
+    """
+    Captures CLI parameters passed to `function` without running `function`.
+    These should be stored as hyperparameters alongside a checkpoint.
+
+    """
+    parser = _get_hyperparameters_internal(function, known_commands)
+    config = parser.parse_args()
+    return config.__dict__
+
+
 def save_hyperparameters(
     function: Callable,
     checkpoint_dir: Path,
-    known_commands: Optional[List[str]] = None,
+    known_commands: list[str] | None = None,
 ) -> None:
-    if known_commands is None:
-        known_commands = parser_commands()
-    save_hyperparameters_litgpt(function, checkpoint_dir, known_commands)
+    """
+    Use this instead of `litgpt.parser_commands.save_hyperparameters`, the
+    latter has serious side effects!
+
+    """
+    parser = _get_hyperparameters_internal(function, known_commands)
+    config = parser.parse_args()
+    parser.save(config, checkpoint_dir / HYPERPARAMETERS_FILENAME, overwrite=True)
