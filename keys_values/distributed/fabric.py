@@ -105,6 +105,8 @@ class Fabric:
         initialized via NCCL.
 
         """
+        from lightning.fabric.strategies.launchers.subprocess_script import _basic_subprocess_cmd  # DEBUG
+
         # Wrapper ensures that process group is initialized (NCCL) at the
         # start of each process.
         cluster_environment = LightningEnvironment()
@@ -121,6 +123,7 @@ class Fabric:
             num_processes=nprocs,
             num_nodes=1,
         )
+        print(f"\n*** Processes to be launched with:\n{_basic_subprocess_cmd()}")  # DEBUG!
         return launcher.launch(wrapped_func, **kwargs)
 
 
