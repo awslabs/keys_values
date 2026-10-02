@@ -196,6 +196,7 @@ if __name__ == "__main__":
     extra_data = False
     filter_dataset = None
     filter_case = None
+    chunk_sizes = None
 
     if is_rerun:
         base_path = base_path / "rerun"
@@ -212,6 +213,7 @@ if __name__ == "__main__":
         with_short=True,
         filter_dataset=filter_dataset,
         filter_case=filter_case,
+        chunk_sizes=chunk_sizes,
     )
     result_path = base_path / f"results_{dataset_size}.tex"
     # final_table = False

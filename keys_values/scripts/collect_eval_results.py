@@ -86,6 +86,7 @@ if __name__ == "__main__":
     extra_data = False
     filter_dataset = None
     filter_case = None
+    chunk_sizes = None
 
     multiple_tasks = not is_baseline and not is_base_model
     if is_rerun:
@@ -101,6 +102,7 @@ if __name__ == "__main__":
         is_base_model,
         filter_dataset=filter_dataset,
         filter_case=filter_case,
+        chunk_sizes=chunk_sizes,
     )
 
     model_type = "lora"
