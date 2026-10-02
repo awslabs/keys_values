@@ -583,7 +583,7 @@ def setup_internal(
         optimizer=optimizer,
         kv_cache=kv_cache,
         grad=grad,
-        head_model=head_model,
+        head_model_name=head_model,
         head_model_kwargs=head_model_kwargs,
         verbose=verbose,
         attention_forward_temp_size_gb=attention_forward_temp_size_gb,
