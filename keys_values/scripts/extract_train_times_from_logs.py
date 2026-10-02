@@ -220,6 +220,16 @@ if __name__ == "__main__":
                 "h2oorig_4gpu_cs128_lr5",
             ]
         )
+    else:
+        policies.extend(
+            [
+                "lr_4gpu_cs8192_lr5",
+                "slr_4gpu_cs8192_lr5",
+                "h2o_4gpu_cs8192_lr5",
+                "h2onorm_4gpu_cs8192_lr5",
+                "h2oorig_4gpu_cs8192_lr5",
+            ]
+        )
     # Skip epoch 0 (warm-up)
     filter_epochs = lambda epoch: epoch > 0
 
