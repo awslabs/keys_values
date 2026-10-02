@@ -17,6 +17,16 @@ from typing import Literal, Tuple, List, Union, Callable, Optional
 
 from keys_values.evaluation.tasks import EvaluationTasks
 
+ALL_CASES = [
+    ("lr_4gpu_cs{}_lr5", "lr_{}"),
+    ("slr_4gpu_cs{}_lr5", "slr_{}"),
+    ("h2o_4gpu_cs{}_lr5", "h2o_{}"),
+    ("h2onorm_4gpu_cs{}_lr5", "h2onorm_{}"),
+    ("h2oorig_4gpu_cs{}_lr5", "h2oorig_{}"),
+    ("qh2o_4gpu_cs{}_lr5", "qh2o_{}"),
+    ("qh2onorm_4gpu_cs{}_lr5", "qh2onorm_{}"),
+]
+
 
 def datasets_and_cases(
     dataset_size: str,
@@ -26,6 +36,7 @@ def datasets_and_cases(
     with_short: bool = False,
     filter_dataset: Optional[Callable[[str], bool]] = None,
     filter_case: Optional[Callable[[str], bool]] = None,
+    chunk_sizes: Optional[List[int]] = None,
 ) -> Tuple[List[str], List[Union[str, Tuple[str, str]]]]:
     multiple_tasks = not is_baseline and not is_base_model
     if not extra_data:
@@ -35,65 +46,11 @@ def datasets_and_cases(
             f"helmet_hotpot_qa_{dataset_size}",
             f"helmet_pop_qa_{dataset_size}",
         ]
-        if not with_short:
-            cases = [
-                "lr_4gpu_cs2048_lr5",
-                "slr_4gpu_cs2048_lr5",
-                "h2o_4gpu_cs2048_lr5",
-                "h2onorm_4gpu_cs2048_lr5",
-                "h2oorig_4gpu_cs2048_lr5",
-                "lr_4gpu_cs1024_lr5",
-                "slr_4gpu_cs1024_lr5",
-                "h2o_4gpu_cs1024_lr5",
-                "h2onorm_4gpu_cs1024_lr5",
-                "h2oorig_4gpu_cs1024_lr5",
-            ]
-        else:
-            cases = [
-                ("lr_4gpu_cs2048_lr5", "lr_2048"),
-                ("slr_4gpu_cs2048_lr5", "slr_2048"),
-                ("h2o_4gpu_cs2048_lr5", "h2o_2048"),
-                ("h2onorm_4gpu_cs2048_lr5", "h2onorm_2048"),
-                ("h2oorig_4gpu_cs2048_lr5", "h2oorig_2048"),
-                ("lr_4gpu_cs1024_lr5", "lr_1024"),
-                ("slr_4gpu_cs1024_lr5", "slr_1024"),
-                ("h2o_4gpu_cs1024_lr5", "h2o_1024"),
-                ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
-                ("h2oorig_4gpu_cs1024_lr5", "h2oorig_1024"),
-            ]
-        if multiple_tasks:
-            if not with_short:
-                cases.extend(
-                    [
-                        "qh2o_4gpu_cs2048_lr5",
-                        "qh2onorm_4gpu_cs2048_lr5",
-                    ]
-                )
-                if dataset_size == "64k":
-                    cases.extend(
-                        [
-                            "slr_4gpu_cs128_lr5",
-                            "h2o_4gpu_cs128_lr5",
-                            "h2onorm_4gpu_cs128_lr5",
-                            "h2oorig_4gpu_cs128_lr5",
-                        ]
-                    )
-            else:
-                cases.extend(
-                    [
-                        ("qh2o_4gpu_cs2048_lr5", "qh2o_2048"),
-                        ("qh2onorm_4gpu_cs2048_lr5", "qh2onorm_2048"),
-                    ]
-                )
-                if dataset_size == "64k":
-                    cases.extend(
-                        [
-                            ("slr_4gpu_cs128_lr5", "slr_128"),
-                            ("h2o_4gpu_cs128_lr5", "h2o_128"),
-                            ("h2onorm_4gpu_cs128_lr5", "h2onorm_128"),
-                            ("h2oorig_4gpu_cs128_lr5", "h2oorig_128"),
-                        ]
-                    )
+        if chunk_sizes is None:
+            chunk_sizes = [2048, 1024]
+            if multiple_tasks and dataset_size == "64k":
+                chunk_sizes.append(128)
+        case_patterns = ALL_CASES
     else:
         datasets = [
             f"helmet_trec_coarse_{dataset_size}",
@@ -105,18 +62,22 @@ def datasets_and_cases(
             f"helmet_trec_fine_{dataset_size}",
             f"helmet_banking77_{dataset_size}",
         ]
-        if not with_short:
-            cases = [
-                "slr_4gpu_cs1024_lr5",
-                "h2onorm_4gpu_cs1024_lr5",
-                "h2oorig_4gpu_cs1024_lr5",
-            ]
-        else:
-            cases = [
-                ("slr_4gpu_cs1024_lr5", "slr_1024"),
-                ("h2onorm_4gpu_cs1024_lr5", "h2onorm_1024"),
-                ("h2oorig_4gpu_cs1024_lr5", "h2oorig_1024"),
-            ]
+        if chunk_sizes is None:
+            chunk_sizes = [1024]
+        case_patterns = [ALL_CASES[1], ALL_CASES[3], ALL_CASES[4]]
+
+    if not with_short:
+        cases = [
+            elem[0].format(cs)
+            for elem in case_patterns
+            for cs in chunk_sizes
+        ]
+    else:
+        cases = [
+            (elem[0].format(cs), elem[1].format(cs))
+            for elem in case_patterns
+            for cs in chunk_sizes
+        ]
 
     if filter_dataset is not None:
         datasets = [d for d in datasets if filter_dataset(d)]
