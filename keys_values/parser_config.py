@@ -11,9 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from jsonargparse import ArgumentParser, capture_parser, Namespace
 from pathlib import Path
 import sys
-from typing import List, Callable, Dict, Any, Tuple
+from typing import List, Callable, Tuple
 
 from litgpt.parser_config import parser_commands as parser_commands_litgpt
 from litgpt.utils import CLI
@@ -37,15 +38,14 @@ def parser_commands() -> List[str]:
 # of returning them, the function there has a serious side effect: It modifies
 # `sys.argv` and does not restore it, which implies that subsequent calls of
 # `Fabric.launch` fail.
-def _get_hyperparameters_internal(
+def capture_parser_from_script(
     function: Callable,
     known_commands: list[str] | None = None,
-) -> Tuple[Any, Any]:
+) -> Tuple[ArgumentParser, Namespace]:
     """
     Captures the CLI parameters passed to `function` without running `function`.
-    """
-    from jsonargparse import capture_parser
 
+    """
     # TODO: Make this more robust
     # This hack strips away the subcommands from the top-level CLI
     # to parse the file as if it was called as a script
@@ -64,28 +64,14 @@ def _get_hyperparameters_internal(
     return parser, config
 
 
-def get_hyperparameters_from_parser(
-    function: Callable,
-    known_commands: list[str] | None = None,
-) -> Dict[str, Any]:
-    """
-    Captures CLI parameters passed to `function` without running `function`.
-    These should be stored as hyperparameters alongside a checkpoint.
-
-    """
-    _, config = _get_hyperparameters_internal(function, known_commands)
-    return config.__dict__
-
-
 def save_hyperparameters(
-    function: Callable,
+    parser: ArgumentParser,
+    config: Namespace,
     checkpoint_dir: Path,
-    known_commands: list[str] | None = None,
 ) -> None:
     """
     Use this instead of `litgpt.parser_commands.save_hyperparameters`, the
     latter has serious side effects!
 
     """
-    parser, config = _get_hyperparameters_internal(function, known_commands)
     parser.save(config, checkpoint_dir / HYPERPARAMETERS_FILENAME, overwrite=True)

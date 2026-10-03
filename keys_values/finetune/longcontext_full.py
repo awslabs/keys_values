@@ -18,10 +18,10 @@ import gc
 
 import os
 import time
+from argparse import ArgumentParser, Namespace
 from pathlib import Path
 from pprint import pprint
 from typing import Dict, Literal, Optional, Union, Any, Tuple, List, Callable
-import yaml
 
 from lightning.fabric.loggers import Logger
 import torch
@@ -135,8 +135,8 @@ from keys_values.model import GPT as GPTFull
 from keys_values.distributed.grad_accumulate import CPUOffloadAccumulateGradients
 from keys_values.distributed.model_factory import BlockComponentName
 from keys_values.parser_config import (
-    HYPERPARAMETERS_FILENAME,
-    get_hyperparameters_from_parser,
+    capture_parser_from_script,
+    save_hyperparameters,
 )
 from keys_values.pos_encoding import (
     position_encoding_factory,
@@ -503,8 +503,8 @@ def setup_internal(
     # serialization problems when calling `Fabric.launch` below
     if isinstance(data, EncodableDataModuleMixin):
         data = data.encode()
-    # Extract hyperparameters (needed for storing checkpoints)
-    hyperparameters = get_hyperparameters_from_parser(original_setup)
+    # Capture parser and config (needed for storing checkpoints)
+    parser, parsed_args = capture_parser_from_script(original_setup)
 
     # Legacy arguments
     if verbose is None:
@@ -576,7 +576,8 @@ def setup_internal(
         config=config,
         data=data,
         checkpoint_dir=checkpoint_dir,
-        hyperparameters=hyperparameters,
+        parser=parser,
+        parsed_args=parsed_args,
         out_dir=out_dir,
         train=train,
         eval=eval,
@@ -622,7 +623,8 @@ def main(
     config: Union[ConfigFull, ConfigLoRA],
     data: Union[DataModuleEncoding, DataModule],
     checkpoint_dir: Path,
-    hyperparameters: Dict[str, Any],
+    parser: ArgumentParser,
+    parsed_args: Namespace,
     out_dir: Path,
     train: TrainArgs,
     eval: EvalArgs,
@@ -873,7 +875,8 @@ def main(
         batch_transform=batch_transform,
         devices=devices,
         checkpoint_dir=checkpoint_dir,
-        hyperparameters=hyperparameters,
+        parser=parser,
+        parsed_args=parsed_args,
         out_dir=out_dir,
         train=train,
         eval=eval,
@@ -947,8 +950,7 @@ def main(
     if Fabric.rank() == 0:
         # Copy checkpoint files from original checkpoint dir
         copy_config_files(checkpoint_dir, save_dir)
-        with (save_dir / HYPERPARAMETERS_FILENAME).open("w") as fp:
-            yaml.safe_dump(hyperparameters, fp)
+        save_hyperparameters(parser, parsed_args, save_dir)
         if hasattr(data, "prompt_style"):
             save_prompt_style(data.prompt_style, save_dir)
 
@@ -1262,7 +1264,8 @@ def fit(
     batch_transform: BatchTransform,
     devices: int,
     checkpoint_dir: Path,
-    hyperparameters: Dict[str, Any],
+    parser: ArgumentParser,
+    parsed_args: Namespace,
     out_dir: Path,
     train: TrainArgs,
     eval: EvalArgs,
@@ -1536,7 +1539,8 @@ def fit(
                 step=state["iter_num"],
                 train=train,
                 data=data,
-                hyperparameters=hyperparameters,
+                parser=parser,
+                parsed_args=parsed_args,
                 training_state=training_state,
             )
 
@@ -2103,7 +2107,8 @@ def save_checkpoint_regular(
     step: int,
     train: TrainArgs,
     data: DataModule,
-    hyperparameters: Dict[str, Any],
+    parser: ArgumentParser,
+    parsed_args: Namespace,
     training_state: Optional[TrainingStateVars],
 ):
     save_intermed = do_save(step, train, intermed=True)
@@ -2114,8 +2119,7 @@ def save_checkpoint_regular(
             training_state.save_state(interval_dir)
         if Fabric.rank() == 0:
             copy_config_files(checkpoint_dir, interval_dir)
-            with (interval_dir / HYPERPARAMETERS_FILENAME).open("w") as fp:
-                yaml.safe_dump(hyperparameters, fp)
+            save_hyperparameters(parser, parsed_args, interval_dir)
             if hasattr(data, "prompt_style"):
                 save_prompt_style(data.prompt_style, interval_dir)
     if save_intermed:
