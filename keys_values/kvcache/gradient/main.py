@@ -441,10 +441,10 @@ class LongContextGradientModel(LongContextInferenceModel):
         self.offload_device = offload_device
         if offload_device is not None:
             if offload_grad_accum is None:
-                offload_grad_accum = CPUOffloadAccumulateGradients([0])
-            elif len(offload_grad_accum.group) > 1 and debug_gpt_model is not None:
+                offload_grad_accum = CPUOffloadAccumulateGradients(use_dist=False)
+            elif offload_grad_accum.world_size() > 1 and debug_gpt_model is not None:
                 raise ValueError(
-                    "Can use debug_gpt_model only if len(offload_grad_accum.group) == 1"
+                    "Can use debug_gpt_model only if offload_grad_accum.world_size() == 1"
                 )
             self._offload_grad_accum = offload_grad_accum
         else:

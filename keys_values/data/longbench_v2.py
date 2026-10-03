@@ -77,10 +77,7 @@ LONGBENCH_NUM_CASES = 503
 LONGBENCH_BUCKET_SIZES = [(20, 1, 4)] * 9 + [(22, 1, 5)] + [(20, 1, 4)] * 10
 
 
-class LongBenchV2(
-    SequenceLengthFilteredDataModule,
-    EncodableDataModuleMixin
-):
+class LongBenchV2(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
     """LongBench-V2 data module for supervised finetuning.
 
     Depending on `head_model`, the dataset is treated as next token prediction
@@ -118,6 +115,7 @@ class LongBenchV2(
       `(max_seq_length, val_split_fraction)` pairs.
 
     """
+
     EncodedName = "LongBenchV2"
 
     def __init__(
@@ -780,6 +778,7 @@ class LongBenchV2Truncated(LongBenchV2):
       :func:`truncate_contexts_and_transform`.
 
     """
+
     EncodedName = "LongBenchV2Truncated"
 
     def __init__(

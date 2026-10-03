@@ -133,10 +133,7 @@ class HelmetDataTrainState(SequenceLengthFilteredDataTrainState):
         self.test_target_choice = None if test_choice is None else test_choice.tolist()
 
 
-class Helmet(
-    SequenceLengthFilteredDataModule,
-    EncodableDataModuleMixin
-):
+class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
     """Data module for HELMET benchmark datasets.
 
     Loads development and evaluation splits via :func:`load_helmet_dev_eval`.
@@ -155,6 +152,7 @@ class Helmet(
       "eval".
 
     """
+
     EncodedName = "Helmet"
 
     def __init__(

@@ -126,5 +126,6 @@ class EncodableDataModuleMixin:
     their `connect` method has been called.
 
     """
+
     def encode(self) -> DataModuleEncoding:
         raise NotImplementedError()

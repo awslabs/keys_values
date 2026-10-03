@@ -1147,9 +1147,7 @@ def wrap_gpt_model(
             )
         if cpu_offload_device is not None:
             common_kwargs["head_model"] = head_model.to(device=cpu_offload_device)
-            offload_grad_accum = CPUOffloadAccumulateGradients(
-                group=list(range(offload_num_devices)),
-            )
+            offload_grad_accum = CPUOffloadAccumulateGradients()
             if offload_num_devices > 1:
                 # Test connection: all-reduce with sum must work
                 offload_grad_accum.test_all_reduce()
@@ -1289,9 +1287,7 @@ def fit(
         cpu_optimizer = None
         cpu_scheduler = None
         optim_device = Fabric.device()
-        grad_reducer = CPUOffloadAccumulateGradients(
-            group=list(range(devices)),
-        )
+        grad_reducer = CPUOffloadAccumulateGradients()
     else:
         gpu_optimizer = state.get("gpu_optimizer")
         gpu_scheduler = state.get("gpu_scheduler")

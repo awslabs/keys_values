@@ -18,6 +18,7 @@ from keys_values.data.longbench_v2 import LongBenchV2, LongBenchV2Truncated
 SUPPORTED_ENCODING_DATAMODULES = (
     Helmet.EncodedName,
     LongBenchV2.EncodedName,
+    LongBenchV2Truncated.EncodedName,
 )
 
 
@@ -26,6 +27,8 @@ def data_module_from_encoding(encoding: DataModuleEncoding) -> EncodableDataModu
         return Helmet(**encoding.kwargs)
     elif encoding.name == LongBenchV2.EncodedName:
         return LongBenchV2(**encoding.kwargs)
+    elif encoding.name == LongBenchV2Truncated.EncodedName:
+        return LongBenchV2Truncated(**encoding.kwargs)
     else:
         raise NotImplementedError(
             f"encoding.name = {encoding.name} not supported, must be in "

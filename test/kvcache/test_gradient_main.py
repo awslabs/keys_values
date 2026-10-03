@@ -324,7 +324,7 @@ def run_copy_model_to_device(
         assert kv_cache.device in (device, None), (l_ix, kv_cache.device, device)
     with torch.device(cpu_offload_device):
         head_model = HeadModelFactory.create(name=head_model_name, config=config)
-    offload_grad_accum = CPUOffloadAccumulateGradients(group=[0])
+    offload_grad_accum = CPUOffloadAccumulateGradients(use_dist=False)
     model = LongContextGradientModel(
         gpt_model=gpt_model,
         head_model=head_model,

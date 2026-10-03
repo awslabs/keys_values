@@ -19,7 +19,6 @@ import json
 from pathlib import Path
 import shutil
 from typing import Optional, Tuple, Literal, Dict, Any, Union, Callable, Mapping, List
-import yaml
 
 from lightning.fabric.connector import _convert_precision_to_unified_args
 from lightning.fabric.loggers import Logger

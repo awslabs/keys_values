@@ -24,11 +24,11 @@ DebugStoreGradsNamePredicate = Callable[[str], bool]
 
 class CPUOffloadAccumulateGradients:
     """
-    Represents data distributed parallel gradient accumulation over a number
-    of ranks. If this group size is `> 1`, we use `dist.all_reduce`. In
-    general, gradients per module are flattened (one vector per dtype), and
-    the reductions are done for flat vectors. If the group size is 1, `dist`
-    is not used at all, and `group[0]` does not matter.
+    Represents data distributed parallel gradient accumulation over the default
+    process group. If this group size is `> 1` and `use_dist == True`, we
+    use `dist.all_reduce`. In general, gradients per module are flattened
+    (one vector per dtype), and the reductions are done for flat vectors.
+    If `use_dist == False` or the group size is 1, `dist` is not used at all.
 
     This class is used to implement distributed data parallel (DDP) optimization
     with CPU offloading, where the full model and optimizer state resides on the
@@ -38,30 +38,8 @@ class CPUOffloadAccumulateGradients:
     on devices, see :meth:`__call__`.
     """
 
-    def __init__(
-        self,
-        group: Optional[List[int]] = None,
-        debug_store_grads_name_predicate: Optional[DebugStoreGradsNamePredicate] = None,
-    ):
-        if group is None:
-            world_size = Fabric.world_size()
-            group = list(range(world_size))
-        elif len(group) > 1:
-            world_size = Fabric.world_size()
-            group = sorted(group)
-            if group[0] < 0 or any(x == y for x, y in zip(group[:-1], group[1:])):
-                raise ValueError(
-                    f"group = {group}, entries must be unique and non-negative"
-                )
-            if group[-1] >= world_size:
-                raise ValueError(
-                    f"group = {group}, entries must be < world_size = {world_size}"
-                )
-        else:
-            group = [0]
-        self.group = group
-        self._debug_store_grads_name_predicate = debug_store_grads_name_predicate
-        self._debug_iter_count = 0
+    def __init__(self, use_dist: bool = True):
+        self.use_dist = use_dist
 
     @staticmethod
     def _is_mean_reducible(dtype: torch.dtype) -> bool:
@@ -73,16 +51,11 @@ class CPUOffloadAccumulateGradients:
         )
 
     def _all_reduce(self, vec: torch.Tensor, mean_reduction: bool):
-        if mean_reduction and self._is_mean_reducible(vec.dtype):
-            Fabric.all_reduce_mean(
-                vec,
-                self.group,
-            )
-        else:
-            Fabric.all_reduce_sum(
-                vec,
-                self.group,
-            )
+        if self.use_dist:
+            if mean_reduction and self._is_mean_reducible(vec.dtype):
+                Fabric.all_reduce_mean(vec)
+            else:
+                Fabric.all_reduce_sum(vec)
 
     def __call__(
         self,
@@ -93,8 +66,7 @@ class CPUOffloadAccumulateGradients:
     ) -> Optional[float]:
         """
         Run gradient accumulation for module pairs `(mod_from, mod_to)`. This
-        is called by every rank from `group`, and the ranks are synchronized
-        here.
+        is called by every rank, and the ranks are synchronized here.
 
         By default, for the tuples `(mod_from, mod_to)`, `mod_from` is on the
         device, `mod_to` on the host (CPU). We also support DDP without CPU
@@ -116,7 +88,7 @@ class CPUOffloadAccumulateGradients:
             distributed.
 
         """
-        use_dist = self.is_distributed
+        _use_dist = self.is_distributed
         num_none = sum(mod_to is None for _, mod_to in module_pairs)
         do_offload = num_none == 0
         if not do_offload and num_none != len(module_pairs):
@@ -126,14 +98,14 @@ class CPUOffloadAccumulateGradients:
         if debug_modules is None:
             debug_modules = [None] * len(module_pairs)
         else:
-            if use_dist:
+            if _use_dist:
                 raise ValueError("debug_modules supported only if len(group) == 1")
             assert len(debug_modules) == len(module_pairs)
         idle_time = 0
         for (mod_from, mod_to), mod_debug in zip(module_pairs, debug_modules):
             access = AccessWeightsGradients(mod_from)
             flat_vectors = access.get_gradients()
-            if use_dist:
+            if _use_dist:
                 idle_time_now = None
                 start_time = time.perf_counter()
                 for vec in flat_vectors.values():
@@ -166,44 +138,48 @@ class CPUOffloadAccumulateGradients:
         if module_on_device is not None:
             access = AccessWeightsGradients(module_on_device)
             flat_vectors = access.get_gradients()
-            if use_dist:
+            if _use_dist:
                 for vec in flat_vectors.values():
                     self._all_reduce(vec, mean_reduction)
             AccessWeightsGradients(module_on_device).accumulate_gradients(flat_vectors)
 
-        return idle_time if use_dist else None
+        return idle_time if _use_dist else None
 
     def test_all_reduce(self):
-        device = Fabric.device()
-        my_rank = Fabric.rank()
-        vec = (
-            torch.arange(
-                1,
-                10,
-                dtype=torch.int32,
-                device=device,
+        if self.use_dist:
+            device = Fabric.device()
+            my_rank = Fabric.rank()
+            vec = (
+                torch.arange(
+                    1,
+                    10,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                * my_rank
             )
-            * my_rank
-        )
-        Fabric.all_reduce_sum(vec, self.group)
-        all_factor = sum(self.group)
-        should_be = (
-            torch.arange(
-                1,
-                10,
-                dtype=torch.int32,
-                device=device,
+            Fabric.all_reduce_sum(vec)
+            all_factor = sum(range(Fabric.world_size()))
+            should_be = (
+                torch.arange(
+                    1,
+                    10,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                * all_factor
             )
-            * all_factor
-        )
-        if not (vec == should_be).all().item():
-            raise AssertionError(
-                f"Rank {my_rank}, device {device}: Have {vec} after all_reduce, should have {should_be}"
-            )
+            if not (vec == should_be).all().item():
+                raise AssertionError(
+                    f"Rank {my_rank}, device {device}: Have {vec} after all_reduce, should have {should_be}"
+                )
 
     @property
     def is_distributed(self) -> bool:
-        return len(self.group) > 1
+        return self.use_dist and Fabric.world_size() > 1
 
     def rank(self) -> int:
-        return Fabric.rank() if self.is_distributed else 0
+        return Fabric.rank() if self.use_dist else 0
+
+    def world_size(self) -> int:
+        return Fabric.world_size() if self.use_dist else 1

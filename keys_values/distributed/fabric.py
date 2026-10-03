@@ -15,13 +15,14 @@ import atexit
 from functools import partial
 import os
 import signal
-from typing import Optional, List, Callable, Any
+from typing import Callable, Any
 
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from lightning.fabric.plugins.environments.lightning import LightningEnvironment
-from lightning.fabric.strategies.launchers.subprocess_script import _SubprocessScriptLauncher
+from lightning.fabric.strategies.launchers.subprocess_script import (
+    _SubprocessScriptLauncher,
+)
 
 
 class Fabric:
@@ -80,24 +81,18 @@ class Fabric:
             dist.barrier()
 
     @staticmethod
-    def all_reduce_sum(
-        x: torch.Tensor,
-        group: Optional[List[int]] = None,
-    ):
+    def all_reduce_sum(x: torch.Tensor):
         if Fabric.is_initialized():
             if x.device != Fabric.device():
                 raise ValueError(f"x.device = {x.device}, must be {Fabric.device()}")
-            dist.all_reduce(x, op=dist.ReduceOp.SUM, group=group)
+            dist.all_reduce(x, op=dist.ReduceOp.SUM)
 
     @staticmethod
-    def all_reduce_mean(
-        x: torch.Tensor,
-        group: Optional[List[int]] = None,
-    ):
+    def all_reduce_mean(x: torch.Tensor):
         if Fabric.is_initialized():
             if x.device != Fabric.device():
                 raise ValueError(f"x.device = {x.device}, must be {Fabric.device()}")
-            dist.all_reduce(x, op=dist.ReduceOp.AVG, group=group)
+            dist.all_reduce(x, op=dist.ReduceOp.AVG)
 
     @staticmethod
     def launch(
@@ -147,6 +142,7 @@ def wrap_init_process_group(
         init_method="env://",
         world_size=world_size,
         rank=rank,
+        device_id=torch.device("cuda", rank),
     )
     # PyTorch >= 2.4 warns about undestroyed NCCL process group, so we need to do it at program exit
     atexit.register(destroy_process_group)
