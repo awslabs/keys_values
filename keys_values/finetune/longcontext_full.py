@@ -947,7 +947,7 @@ def main(
     if Fabric.rank() == 0:
         # Copy checkpoint files from original checkpoint dir
         copy_config_files(checkpoint_dir, save_dir)
-        with (save_dir / HYPERPARAMETERS_FILENAME).open() as fp:
+        with (save_dir / HYPERPARAMETERS_FILENAME).open("w") as fp:
             yaml.safe_dump(hyperparameters, fp)
         if hasattr(data, "prompt_style"):
             save_prompt_style(data.prompt_style, save_dir)
@@ -2114,7 +2114,7 @@ def save_checkpoint_regular(
             training_state.save_state(interval_dir)
         if Fabric.rank() == 0:
             copy_config_files(checkpoint_dir, interval_dir)
-            with (interval_dir / HYPERPARAMETERS_FILENAME).open() as fp:
+            with (interval_dir / HYPERPARAMETERS_FILENAME).open("w") as fp:
                 yaml.safe_dump(hyperparameters, fp)
             if hasattr(data, "prompt_style"):
                 save_prompt_style(data.prompt_style, interval_dir)
