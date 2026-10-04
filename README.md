@@ -723,31 +723,31 @@ is not yet enabled for the CLI.
 
 As a rule of thumb, choose the cache length as large as possible, before you
 run out of memory. Run inference with the longest batch first, using
-`--data.trainloader_longest_first True`.
+`--data.trainloader_longest_first True`, in order to fail fast if your choice
+is too large.
 
-The next most important parameter is `kv_cache.chunk_size`. This is not a property of
-the cache (except see `max_chunk_size`), but of inference and gradient
-computation. We process a batch of long sequences in chunks. The first chunk
-has length close to `cache_length`, subsequent chunks are shorter,
+The next most important parameter is `kv_cache.chunk_size`. This is not a
+property of the cache (except see `max_chunk_size`), but of inference and
+gradient computation. We process a batch of long sequences in chunks. The first
+chunk has length close to `cache_length`, subsequent chunks are shorter,
 typically of length `chunk_size`. The larger the chunk size is, the faster a
-long sequence (prompt) can be processed, but there is an important catch. Once
-a KV cache is full, new KV information overwrites earlier content. This is done
-in chunks of `chunk_size`. Here, the larger the chunk size, the worse the
-approximation to exact KV caching becomes. As an extreme case, if
-`chunk_size = cache_length`, the KV cache policy is not used at all, and
-inference behaves as if the sequence was split into `cache_length`-sized
-chunks, which are processed independently from each other!
+long sequence (prompt) can be processed, but there is a catch. Once a KV cache
+is full, new KV information overwrites earlier content. This is done in chunks
+of `chunk_size`. If chunks are too large, decisions on which slots to overwrite
+are very coarse, and the approximation to exact KV caching suffers.
 
-This means that `chunk_size` is a real hyper-parameter, which determines both
-runtime, but also approximation accuracy, which can affect overall accuracy.
-Note that GPU memory requirements do not strongly depend on `chunk_size`.
+As an extreme case, if `chunk_size = cache_length`, the KV cache policy is not
+used at all, and inference behaves as if the sequence was split into
+`cache_length`-sized chunks, which are processed independently from each other!
+The cache is rolled over entirely with every chunk, and KV information cannot
+remain in the cache for long.
 
-Finally, if `--kv_cache.randomize_chunk_sizes True` is used, then chunk sizes
-after the first are picked at random from a distribution with mean
-`kv_cache.chunk_size`. The idea behind randomized chunk sizes is to ensure the
-model does not adapt to a fixed chunk size. Note that randomization can lead
-to less efficient computations with `flex_attention` SDPA, since compiled
-expressions are maintained for different chunk sizes.
+This means that `chunk_size` is a real hyper-parameter. The larger chunks are,
+the faster inference and training runs. But approximation accuracy suffers
+for too large chunks. Having said that, we obtained good results with cache
+sizes as large as `cache_length / 4`. Based on these, our tuning recommendation
+would be to choose `chunk_size` as large as possible before validation accuracy
+declines.
 
 ### Optimizer
 
@@ -1356,14 +1356,14 @@ is a separate checkpoint). For example:
   kv_cache:
     name: h2o-torch-quantized8
     cache_length: 32768
-    chunk_size: 1024
+    chunk_size: 2048
 - out_dir: /home/ubuntu/out/finetune/lora/qwen3_4b/baseline/helmet_nq_64k/slr_lr5
   model_type: full
   checkpoint_dir: /home/ubuntu/out/finetune/checkpoints/nq_64k/merged
   kv_cache:
     name: smart-lastrec-torch-quantized8
     cache_length: 32768
-    chunk_size: 1024
+    chunk_size: 2048
 ```
 
 Note how `kv_cache` overwrites the hyperparameter setup of the checkpoint, which
