@@ -1551,10 +1551,11 @@ def fit(
         print_flex_attn_report(model)
         raise ex
 
-    return {
-        key: Fabric.all_reduce_sum(token_counts[key]).item()
-        for key in token_counts.keys()
-    }
+    result = dict()
+    for k, v in token_counts.items():
+        Fabric.all_reduce_sum(v)
+        result[k] = v.item()
+    return result
 
 
 def initial_evaluation(

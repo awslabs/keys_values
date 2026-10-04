@@ -81,18 +81,20 @@ class Fabric:
             dist.barrier()
 
     @staticmethod
-    def all_reduce_sum(x: torch.Tensor):
+    def all_reduce_sum(x: torch.Tensor) -> torch.Tensor:
         if Fabric.is_initialized():
             if x.device != Fabric.device():
                 raise ValueError(f"x.device = {x.device}, must be {Fabric.device()}")
             dist.all_reduce(x, op=dist.ReduceOp.SUM)
+        return x
 
     @staticmethod
-    def all_reduce_mean(x: torch.Tensor):
+    def all_reduce_mean(x: torch.Tensor) -> torch.Tensor:
         if Fabric.is_initialized():
             if x.device != Fabric.device():
                 raise ValueError(f"x.device = {x.device}, must be {Fabric.device()}")
             dist.all_reduce(x, op=dist.ReduceOp.AVG)
+        return x
 
     @staticmethod
     def launch(
