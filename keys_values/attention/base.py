@@ -226,6 +226,7 @@ class MultiHeadSelfAttention:
         flexatt_args: Optional[FlexAttentionArgs] = None,
         sort_if_3d: bool = True,
         use_flashinfer: bool = True,
+        use_flexattn_for_prefill: bool = False,
     ) -> None:
         self.config = config
         if pos_encoding is None:
@@ -260,6 +261,7 @@ class MultiHeadSelfAttention:
         self.flexatt_args = flexatt_args
         self._sort_if_3d = sort_if_3d
         self._use_flashinfer = use_flashinfer
+        self._use_flexattn_for_prefill = use_flexattn_for_prefill
 
     @property
     def sdpa_kernels(self) -> Union[SDPBackend, List[SDPBackend]]:
@@ -400,7 +402,7 @@ class MultiHeadSelfAttention:
     ) -> int:
         """
         Decides on what SDPA implementation can be used, depending on
-        arguments.
+        arguments and what implementations are available.
 
         Args:
             return_attn_weights: Attention weights have to be returned?
@@ -415,7 +417,7 @@ class MultiHeadSelfAttention:
 
         """
         device_cuda = device.type == "cuda"
-        must_eager = return_attn_weights or self.use_eager_sdpa_always
+        must_eager = self.use_eager_sdpa_always
         sws_given = sliding_window_size is not None
         has_flashinfer = (
             can_do_flashinfer(
@@ -434,7 +436,7 @@ class MultiHeadSelfAttention:
             # Returning attention weights (return_attn_weights == True):
             # - First choice is FlashInfer
             # - Second choice is FlexAttn baseline
-            if not self.use_eager_sdpa_always:
+            if not must_eager:
                 if has_flashinfer:
                     return SDPA_IMPL_FLASHINFER
                 elif has_flexatt and self.flexatt_args.forward_return_lse:
@@ -449,8 +451,13 @@ class MultiHeadSelfAttention:
                     return SDPA_IMPL_FLEXATTENTION
                 else:
                     return SDPA_IMPL_EAGER_NO_BLOCKS
-            if is_causal and not must_eager:
-                # For prefill, native PyTorch SDPA is fastest
+            if (
+                is_causal
+                and not must_eager
+                and (not has_flexatt or not self._use_flexattn_for_prefill)
+            ):
+                # For prefill, native PyTorch SDPA is fastest. But use
+                # FlexAttn if `use_flexattn_for_prefill=True`
                 return SDPA_IMPL_PYTORCH
             if use_flex_att:
                 return SDPA_IMPL_FLEXATTENTION

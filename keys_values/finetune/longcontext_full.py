@@ -59,7 +59,11 @@ from keys_values.data.constants import (
 from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
 from keys_values.evaluation.evaluator import SampleBasedMetricsEvaluator
 from keys_values.attention.flashinfer_wrapper import get_flashinfer_sdpa
-from keys_values.attention.flex_attention import FlexAttentionArgs, choose_q_lens
+from keys_values.attention.flex_attention import (
+    FlexAttentionArgs,
+    choose_q_lens,
+    choose_kv_lens,
+)
 from keys_values.finetune.args import (
     TrainArgs,
     EvalArgs,
@@ -225,6 +229,7 @@ def setup(
         flex_attention=True,
         flex_extend_kv=False,
         flex_num_q_lens=4,
+        flex_num_kv_lens=4,
     ),
     training_state_num: Optional[int] = 3,
     record_gpu_memory_snapshots: Optional[int] = None,
@@ -1017,12 +1022,20 @@ def get_mha_and_cache_kwargs(
                 num_q_lens=sdpa.flex_num_q_lens,
             )
             if q_lens is not None:
-                print(
-                    f"Using q_lens = {q_lens} as anchor chunk lengths for FlexAttention"
-                )
+                print(f"Using q_lens = {q_lens} for FlexAttention")
+        if sdpa.flex_num_kv_lens is None:
+            kv_lens = None
+        else:
+            kv_lens = choose_kv_lens(
+                cache_length=kv_cache.cache_length,
+                num_kv_lens=sdpa.flex_num_kv_lens,
+            )
+            if kv_lens is not None:
+                print(f"Using kv_lens = {kv_lens} for FlexAttention")
         fa_kwargs = dict(
             extend_kv=sdpa.flex_extend_kv,
             q_lens=q_lens,
+            kv_lens=kv_lens,
         )
         if kv_cache.needs_attn_weights():
             if sdpa.flashinfer_attention and get_flashinfer_sdpa() is not None:

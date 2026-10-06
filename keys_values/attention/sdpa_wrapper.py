@@ -53,14 +53,25 @@ ReorderAnnotationCallback = Callable[
 ]
 
 
-def zeropad_query_on_left(query: torch.Tensor, num: int) -> torch.Tensor:
-    assert query.ndim == 4
+def zeropad_4d_tensor_on_left(x: torch.Tensor, num: int) -> torch.Tensor:
+    assert x.ndim == 4
     fill_left = torch.zeros(
         (1, 1, 1, 1),
-        dtype=query.dtype,
-        device=query.device,
-    ).expand(*query.shape[:2], num, query.shape[-1])
-    return torch.cat((fill_left, query), dim=2)
+        dtype=x.dtype,
+        device=x.device,
+    ).expand(*x.shape[:2], num, x.shape[-1])
+    return torch.cat((fill_left, x), dim=2)
+
+
+def nanpad_4d_tensor_on_left(x: torch.Tensor, num: int) -> torch.Tensor:
+    assert x.ndim == 4
+    fill_left = torch.full(
+        (1, 1, 1, 1),
+        torch.nan,
+        dtype=x.dtype,
+        device=x.device,
+    ).expand(*x.shape[:2], num, x.shape[-1])
+    return torch.cat((fill_left, x), dim=2)
 
 
 def scaled_dot_product_attention(
@@ -160,7 +171,7 @@ def scaled_dot_product_attention(
     # `query` tokens, are on the right end. Causal masking works if `query`
     # is zero-padded on the left
     if q_len < kv_len:
-        query = zeropad_query_on_left(query, kv_len - q_len)
+        query = zeropad_4d_tensor_on_left(query, kv_len - q_len)
     if annotation_callback is not None:
         annotation_callback = partial(
             annotation_callback,
