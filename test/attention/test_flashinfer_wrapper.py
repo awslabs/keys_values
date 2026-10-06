@@ -1305,3 +1305,155 @@ class TestTritonScoreSumKernel:
             atol=1e-2,
             msg="Triton causal score-sum doesn't match PyTorch reference",
         )
+
+
+def _decode_args(kv_len, max_batch_size, n_head, n_query_groups, head_size, dtype):
+    """Random single-token decode inputs: `query` is one position, the cache
+    holds `kv_len` keys/values including the current token."""
+    args = sample_random_args(
+        kv_len=kv_len,
+        max_batch_size=max_batch_size,
+        n_query_groups=n_query_groups,
+        cache_length=kv_len,
+        head_size=head_size,
+        n_head=n_head,
+        dtype=dtype,
+    )
+    query = args["query"][:, :, :1, :]
+    token_positions = (
+        torch.arange(kv_len, device=query.device)
+        .view(1, 1, -1)
+        .expand(max_batch_size, n_query_groups, -1)
+    )
+    return query, args["key"], args["value"], token_positions
+
+
+def _decode_eager_reference(
+    query, key, value, scale, input_pos, token_positions, weights
+):
+    return scaled_dot_product_attention_in_blocks(
+        query=query,
+        k_and_v=DefaultKeysAndValues(key, value),
+        scale_factor=scale,
+        return_attn_weights=weights,
+        input_pos=input_pos,
+        token_positions=token_positions,
+        sliding_window_size=None,
+    )
+
+
+@_RunIf(min_cuda_gpus=1)
+class TestDecodeKernelShortCache:
+    """Regression test for #156.
+
+    The vendored decode kernel splits the KV axis over BDZ chunks of a tile
+    (TILE_SIZE = 128 for head_size 128, 256 for head_size 64). If
+    `kv_len < TILE_SIZE`, some chunks never see a valid key, their running
+    max stays -inf, and the online-softmax rescale computed
+    exp2(-inf - -inf) = NaN, poisoning output and attention weights. This
+    hits the first decode steps after any short prompt.
+    """
+
+    @pytest.mark.parametrize(
+        "head_size, kv_len",
+        [
+            (128, 2),
+            (128, 16),
+            (128, 64),
+            (128, 127),
+            (128, 128),  # first length that worked before the fix
+            (128, 300),
+            (64, 16),
+            (64, 160),  # TILE_SIZE is 256 for head_size 64
+            (64, 256),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_decode_weights_finite_and_match_eager(self, head_size, kv_len, dtype):
+        torch.manual_seed(3141617)
+        max_batch_size, n_head, n_query_groups = 2, 8, 4
+        scale = 1.0 / (head_size**0.5)
+        input_pos = kv_len - 1
+        query, key, value, token_positions = _decode_args(
+            kv_len, max_batch_size, n_head, n_query_groups, head_size, dtype
+        )
+        output, weights = FlashInferSDPA().scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            scale,
+            return_attn_weights=True,
+            token_positions=None,
+            input_pos=input_pos,
+        )
+        assert torch.isfinite(output).all(), "decode output has NaN/inf"
+        assert (
+            weights is not None and torch.isfinite(weights).all()
+        ), "decode attention weights have NaN/inf"
+        # Summed over the single query, the weights of each (batch, group)
+        # row sum to 1 (mean over the heads in the group).
+        torch.testing.assert_close(
+            weights.sum(dim=-1),
+            torch.ones_like(weights.sum(dim=-1)),
+            rtol=1e-3,
+            atol=1e-3,
+        )
+        ref_output, ref_weights = _decode_eager_reference(
+            query, key, value, scale, input_pos, token_positions, weights=True
+        )
+        torch.testing.assert_close(
+            output.float(), ref_output.float(), rtol=1e-2, atol=1e-2
+        )
+        torch.testing.assert_close(
+            weights.float(), ref_weights.float(), rtol=1e-2, atol=1e-2
+        )
+
+
+@_RunIf(min_cuda_gpus=1)
+class TestDecodeKernelGroupSizes:
+    """FlashInfer's library decode kernel only has templates for GQA group
+    sizes 1, 2, 4 and 8, and throws a C++ exception (surfacing as a
+    RuntimeError from `SingleDecodeWithKVCacheDispatched`) for others,
+    instead of returning an error code the dispatcher could fall back on.
+    Qwen2.5-7B has 28 / 4 = 7. The decode path without attention weights
+    must fall back to the vendored tiled kernel for those group sizes.
+    """
+
+    @pytest.mark.parametrize(
+        "n_head, n_query_groups",
+        [
+            (28, 4),  # group 7, Qwen2.5-7B
+            (40, 8),  # group 5, Qwen2.5-14B / 32B
+            (12, 4),  # group 3
+            (16, 8),  # group 2, supported by the library (control)
+        ],
+    )
+    @pytest.mark.parametrize("kv_len", [64, 512])
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_decode_without_weights_matches_eager(
+        self, n_head, n_query_groups, kv_len, dtype
+    ):
+        torch.manual_seed(3141618)
+        max_batch_size, head_size = 2, 128
+        scale = 1.0 / (head_size**0.5)
+        input_pos = kv_len - 1
+        query, key, value, token_positions = _decode_args(
+            kv_len, max_batch_size, n_head, n_query_groups, head_size, dtype
+        )
+        output, weights = FlashInferSDPA().scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            scale,
+            return_attn_weights=False,
+            token_positions=None,
+            input_pos=input_pos,
+        )
+        assert weights is None
+        assert torch.isfinite(output).all()
+        ref_output, _ = _decode_eager_reference(
+            query, key, value, scale, input_pos, token_positions, weights=False
+        )
+        torch.testing.assert_close(
+            output.float(), ref_output.float(), rtol=1e-2, atol=1e-2
+        )
