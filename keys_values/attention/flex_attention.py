@@ -28,7 +28,7 @@ from keys_values.attention.sdpa_wrapper import (
     reorder_key_value,
     reorder_inverse,
     ReorderAnnotationCallback,
-    zeropad_query_on_left,
+    zeropad_4d_tensor_on_left,
 )
 from keys_values.utils import repeat_interleave
 
@@ -184,16 +184,53 @@ class FlexAttnManager:
         return "\n".join(parts)
 
 
+def transform_len(
+    orig_len: int,
+    lens: Optional[List[int]],
+    name: str,
+) -> int:
+    if lens is None:
+        return orig_len
+    else:
+        try:
+            return next(x for x in lens if x >= orig_len)
+        except StopIteration:
+            raise ValueError(f"{name}={orig_len}, must be <= {max(lens)}")
+
+
+def prepare_lens(
+    lens: Optional[List[int]],
+    name: str,
+) -> Optional[List[int]]:
+    if lens is not None:
+        lens = sorted(lens)
+        assert all(x > 0 for x in lens), f"{name} = {lens} invalid, must all be positive"
+        assert all(x < y for x, y in zip(lens[:-1], lens[1:])), f"{name} = {lens} invalid, must not have duplicates"
+    return lens
+
+
 class FlexAttnForPrefillManager(FlexAttnManager):
     """
     FlexAttention manager for prefill case (`q_len == kv_len, input_pos == 0`).
 
     Note that `flex_attention` is often not used for the prefill calls, because
     standard PyTorch SDPA is faster. It is used only with non-standard SDPA.
+
+    If `kv_lens` is provided, then for each `kv_len` argument passed, we
+    replace this with the smallest entry in `kv_lens` which is `>= kv_len`.
+    If `kv_len > max(kv_lens)`, an exception is raised. This limits the number
+    of compiled graphs, even if chunks with many different `kv_len` sizes come
+    in. Use this if running inference including token generation with sequences
+    whose prompt is frequently below the cache length.
+
     """
 
-    def __init__(self):
+    def __init__(self, kv_lens: Optional[List[int]] = None):
         super().__init__()
+        self.kv_lens = prepare_lens(kv_lens, "kv_lens")
+
+    def transform_kv_len(self, kv_len: int) -> int:
+        return transform_len(kv_len, self.kv_lens, "kv_len")
 
     def _get_args(
         self,
@@ -205,6 +242,7 @@ class FlexAttnForPrefillManager(FlexAttnManager):
         als_signature: Optional[int],
         **kwargs,
     ) -> tuple:
+        kv_len = self.transform_kv_len(kv_len)
         return kv_len, device, dtype, requires_grad, sliding_window_size, als_signature
 
     _ARGS_NAMES = dict(
@@ -288,11 +326,19 @@ class FlexAttnForChunkManager(FlexAttnManager):
     """
     FlexAttention manager for chunk case.
 
-    If `q_lens` is provided, then for each `q_len` argument passed, we
-    replace this with the smallest entry in `q_lens` which is `>= q_len`.
-    If `q_len > max(q_lens)`, an exception is raised. This limits the number
-    of compiled graphs, even if chunks with many different `q_len` sizes come
-    in.
+    If `*_lens` is provided (* == "q" or "kv"), then for each `*_len` argument
+    passed, we replace this with the smallest entry in `*_lens` which is
+    `>= *_len`. If `*_len > max(*_lens)`, an exception is raised. This limits
+    the number of compiled graphs, even if chunks with many different `*_len`
+    sizes come in.
+
+    Use `kv_lens` if inference with token generation is done for sequences which
+    can be smaller than the cache length. Not using `kv_lens` can lead to many
+    graphs being compiled. There is no harm using `kv_lens`, given its final
+    (largest) entry is equal to the (largest) cache length, since graphs are
+    created only on first use.
+
+    Using `q_lens` is generally recommended.
 
     `extend_kv` field: Hack used to get around issue with FlexAttention.
     Details: https://github.com/awslabs/keys_values/issues/34.
@@ -315,15 +361,13 @@ class FlexAttnForChunkManager(FlexAttnManager):
 
     def __init__(
         self,
+        kv_lens: Optional[List[int]] = None,
         q_lens: Optional[List[int]] = None,
         forward_return_lse: bool = False,
     ):
         super().__init__()
-        if q_lens is not None:
-            q_lens = sorted(q_lens)
-            assert all(x > 0 for x in q_lens)
-            assert all(x < y for x, y in zip(q_lens[:-1], q_lens[1:]))
-        self.q_lens = q_lens
+        self.kv_lens = prepare_lens(kv_lens, "kv_lens")
+        self.q_lens = prepare_lens(q_lens, "q_lens")
         self.forward_return_lse = forward_return_lse
 
     def _unpack_kwargs(
@@ -342,14 +386,11 @@ class FlexAttnForChunkManager(FlexAttnManager):
         unpacked_args.append(kwargs.get("reverse", False))
         return tuple(unpacked_args)
 
+    def transform_kv_len(self, kv_len: int) -> int:
+        return transform_len(kv_len, self.kv_lens, "kv_len")
+
     def transform_q_len(self, q_len: int) -> int:
-        if self.q_lens is None:
-            return q_len
-        else:
-            try:
-                return next(x for x in self.q_lens if x >= q_len)
-            except StopIteration:
-                raise ValueError(f"q_len={q_len}, must be <= {max(self.q_lens)}")
+        return transform_len(q_len, self.q_lens, "q_len")
 
     def _get_args(
         self,
@@ -361,6 +402,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
         als_signature: Optional[int],
         **kwargs,
     ) -> tuple:
+        kv_len = self.transform_kv_len(kv_len)
         q_len, batch_size, n_head, reverse = self._unpack_kwargs(**kwargs)
         if reverse:
             if sliding_window_size is not None:
@@ -468,6 +510,8 @@ class FlexAttentionArgs:
     Maintains managers (for prefill and chunk computations).
 
     Using `q_lens` is strongly recommended. You can use :func:`choose_q_lens`.
+    Using `kv_lens` is strongly recommended if token generation is done. It also
+    does not hurt. You can use :func:`choose_kv_lens`.
 
     Note: If `q_lens` is used, the expression returned by :meth:`attn_fn` for
     `input_pos > 0` must be used with `query` tensors of length
@@ -475,6 +519,9 @@ class FlexAttentionArgs:
     must be done by the caller.
 
     Args:
+        kv_lens: If given, this is a list of `kv_len` buffer lengths for which
+            graphs are created. Any `kv_len` passed to :meth:`attn_fn` with
+            is mapped to the smallest entry `>= kv_len`.
         q_lens: If given, this is a list of `q_len` chunk lengths for which
             graphs are created. Any `q_len` passed to :meth:`attn_fn` with
             `input_pos > 0` is mapped to the smallest entry `>= q_len`.
@@ -486,12 +533,14 @@ class FlexAttentionArgs:
 
     def __init__(
         self,
+        kv_lens: Optional[List[int]] = None,
         q_lens: Optional[List[int]] = None,
         extend_kv: bool = False,
         forward_return_lse: bool = False,
     ):
-        self.attn_prefill_manager = FlexAttnForPrefillManager()
+        self.attn_prefill_manager = FlexAttnForPrefillManager(kv_lens)
         self.attn_chunk_manager = FlexAttnForChunkManager(
+            kv_lens,
             q_lens,
             forward_return_lse,
         )
@@ -547,6 +596,9 @@ class FlexAttentionArgs:
                 reverse=reverse,
             )
             return _attn_fn, extend_kv or self.extend_kv
+
+    def transform_kv_len(self, kv_len: int) -> int:
+        return self.attn_chunk_manager.transform_kv_len(kv_len)
 
     def transform_q_len(self, q_len: int) -> int:
         return self.attn_chunk_manager.transform_q_len(q_len)
@@ -679,7 +731,14 @@ def scaled_dot_product_attention_flexatt(
         # The real query entries must be right-aligned with key, value,
         # otherwise our causal attention masking does not work out properly.
         # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
-        query = zeropad_query_on_left(query, q_len_tr - q_len)
+        query = zeropad_4d_tensor_on_left(query, q_len_tr - q_len)
+    kv_len_tr = flexatt_args.transform_kv_len(kv_len)
+    if kv_len_tr > kv_len:
+        # Use zero padding
+        # Importantly, zeros are appended **on the left**, not on the right.
+        num_pad = kv_len_tr - kv_len
+        key = zeropad_4d_tensor_on_left(key, num_pad)
+        value = zeropad_4d_tensor_on_left(value, num_pad)
     # Deal with non-standard `scale_factor`
     if scale_factor is not None:
         diff = scale_factor * math.sqrt(head_size)
@@ -741,6 +800,29 @@ def choose_q_lens(
     else:
         q_lens = None
     return q_lens
+
+
+def choose_kv_lens(
+    cache_length: int,
+    num_kv_lens: int,
+) -> Optional[List[int]]:
+    """
+    Chooses `kv_lens` argument for :class:`FlexAttentionArgs`. Call this
+    passing the largest cache length as `cache_length`. The list is equi-spaced,
+    containing `cache_length` as final entry.
+
+    Args:
+        cache_length: Maximum `kv_len` size, is contained in `kv_lens`
+        num_kv_lens: `len(kv_lens) = num_kv_lens`
+
+    """
+    if num_kv_lens < cache_length:
+        kv_lens = [
+            math.ceil(i * cache_length / num_kv_lens) for i in range(1, num_kv_lens + 1)
+        ]
+    else:
+        kv_lens = None
+    return kv_lens
 
 
 MIN_HEAD_DIM = 16
@@ -851,7 +933,7 @@ def sdpa_flexatt_with_attn_weights(
         # The real query entries must be right-aligned with key, value,
         # otherwise our causal attention masking does not work out properly.
         # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
-        query = zeropad_query_on_left(query, q_len_tr - q_len)
+        query = zeropad_4d_tensor_on_left(query, q_len_tr - q_len)
     # Deal with non-standard `scale_factor`
     if scale_factor is not None:
         diff = scale_factor * math.sqrt(head_size)
