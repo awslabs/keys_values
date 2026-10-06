@@ -318,6 +318,7 @@ class FlexAttnForPrefillManager(FlexAttnManager):
         sliding_window_size: Optional[int],
         **kwargs,
     ) -> BlockMask:
+        kv_len = self.transform_kv_len(kv_len)
         mask_mod = partial(
             causal_mask_for_prefill,
             sliding_window_size=sliding_window_size,
@@ -433,6 +434,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
     def transform_q_len(self, q_len: int) -> int:
         return transform_len(q_len, self.q_lens, "q_len")
 
+    # TODO: What about q_len if reverse is True?
     def _get_args(
         self,
         kv_len: int,
@@ -443,13 +445,14 @@ class FlexAttnForChunkManager(FlexAttnManager):
         als_signature: Optional[int],
         **kwargs,
     ) -> tuple:
-        kv_len = self.transform_kv_len(kv_len)
         q_len, batch_size, n_head, reverse = self._unpack_kwargs(**kwargs)
         if reverse:
             if sliding_window_size is not None:
                 raise ValueError("Cannot use reverse=True and sliding_window_size")
             kv_len = self.transform_q_len(kv_len)
+            q_len = self.transform_kv_len(q_len)
         else:
+            kv_len = self.transform_kv_len(kv_len)
             q_len = self.transform_q_len(q_len)
         return (
             q_len,
@@ -509,6 +512,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
     ) -> BlockMask:
         q_len, _, _, reverse = self._unpack_kwargs(**kwargs)
         if not reverse:
+            kv_len = self.transform_kv_len(kv_len)
             q_len = self.transform_q_len(q_len)
             if q_len > kv_len:
                 raise ValueError(
@@ -521,6 +525,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
             )
         else:
             kv_len = self.transform_q_len(kv_len)
+            q_len = self.transform_kv_len(q_len)
             if q_len < kv_len:
                 raise ValueError(
                     f"q_len={q_len}, kv_len={kv_len}: Must have q_len >= kv_len"
@@ -671,6 +676,36 @@ class FlexAttentionArgs:
         return "\n".join(parts)
 
 
+def pad_arguments(
+    flexatt_args: FlexAttentionArgs,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    is_prefill: bool,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    kv_len = key.shape[2]
+    q_len = query.shape[2]
+    pad_kv = flexatt_args.transform_kv_len(kv_len) - kv_len
+    if is_prefill:
+        pad_q = pad_kv
+    else:
+        pad_q = flexatt_args.transform_q_len(q_len) - q_len
+    if pad_q > 0:
+        # Use zero padding for query.
+        # Importantly, zeros are appended **on the left**, not on the right.
+        # The real query entries must be right-aligned with key, value,
+        # otherwise our causal attention masking does not work out properly.
+        # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
+        query = zeropad_4d_tensor_on_left(query, pad_q)
+    if pad_kv > 0:
+        # Use NaN padding for `key`, zero padding for `value`.
+        # We replace NaN -> -infty later when masking. Padding on left, not
+        # right, for same reason as for query above.
+        key = nanpad_4d_tensor_on_left(key, pad_kv)
+        value = zeropad_4d_tensor_on_left(value, pad_kv)
+    return query, key, value, pad_q
+
+
 def scaled_dot_product_attention_flexatt(
     flexatt_args: FlexAttentionArgs,
     query: torch.Tensor,
@@ -736,7 +771,8 @@ def scaled_dot_product_attention_flexatt(
         key,
         value,
     )
-    if input_pos == 0:
+    is_prefill = input_pos == 0
+    if is_prefill:
         if q_len != kv_len:
             raise ValueError(
                 f"For input_pos=0, must have q_len == kv_len, but have q_len = {q_len}, kv_len = {kv_len}"
@@ -780,22 +816,14 @@ def scaled_dot_product_attention_flexatt(
         extend_kv = True
     else:
         extend_kv = False
-    q_len_tr = flexatt_args.transform_q_len(q_len)
-    if q_len_tr > q_len:
-        # Use zero padding
-        # Importantly, zeros are appended **on the left**, not on the right.
-        # The real query entries must be right-aligned with key, value,
-        # otherwise our causal attention masking does not work out properly.
-        # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
-        query = zeropad_4d_tensor_on_left(query, q_len_tr - q_len)
-    kv_len_tr = flexatt_args.transform_kv_len(kv_len)
-    if kv_len_tr > kv_len:
-        # Use NaN padding for `key`, zero padding for `value`.
-        # We replace NaN -> -infty later when masking. Padding on left, not
-        # right, for same reason as for query above.
-        num_pad = kv_len_tr - kv_len
-        key = nanpad_4d_tensor_on_left(key, num_pad)
-        value = zeropad_4d_tensor_on_left(value, num_pad)
+    # Padding due to kv_len, q_len transformations
+    query, key, value, pad_q = pad_arguments(
+        flexatt_args,
+        query,
+        key,
+        value,
+        is_prefill=is_prefill,
+    )
     # Deal with non-standard `scale_factor`
     if scale_factor is not None:
         diff = scale_factor * math.sqrt(head_size)
@@ -824,7 +852,7 @@ def scaled_dot_product_attention_flexatt(
             flexatt_args.forward_return_lse,
             requires_grad,
         )
-    if q_len_tr > q_len:
+    if pad_q > 0:
         result = result[:, :, (-q_len):, :].clone()
     return result
 
@@ -984,22 +1012,14 @@ def sdpa_flexatt_with_attn_weights(
         extend_kv = True
     else:
         extend_kv = False
-    q_len_tr = flexatt_args.transform_q_len(q_len)
-    if q_len_tr > q_len:
-        # Use zero padding
-        # Importantly, zeros are appended **on the left**, not on the right.
-        # The real query entries must be right-aligned with key, value,
-        # otherwise our causal attention masking does not work out properly.
-        # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
-        query = zeropad_4d_tensor_on_left(query, q_len_tr - q_len)
-    kv_len_tr = flexatt_args.transform_kv_len(kv_len)
-    if kv_len_tr > kv_len:
-        # Use NaN padding for `key`, zero padding for `value`.
-        # We replace NaN -> -infty later when masking. Padding on left, not
-        # right, for same reason as for query above.
-        num_pad = kv_len_tr - kv_len
-        key = nanpad_4d_tensor_on_left(key, num_pad)
-        value = zeropad_4d_tensor_on_left(value, num_pad)
+    # Padding due to kv_len, q_len transformations
+    query, key, value, pad_q = pad_arguments(
+        flexatt_args,
+        query,
+        key,
+        value,
+        is_prefill=False,
+    )
     # Deal with non-standard `scale_factor`
     if scale_factor is not None:
         diff = scale_factor * math.sqrt(head_size)
