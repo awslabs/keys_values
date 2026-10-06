@@ -25,7 +25,7 @@ Thanks to all contributors:
 ### Documentation Updates
 * Documentation of concepts in [README.md](./README.md)
 
-<a name="v0.2.0"></a>
+<a name="v0.1.0"></a>
 ## [0.2.0] - 2026-06-01
 
 Thanks to all contributors:
@@ -67,36 +67,3 @@ Thanks to all contributors:
 * Fix bug concerning smart-lastrec ([#102](https://github.com/awslabs/keys_values/pull/102))
 * Small fixes and additions ([#74](https://github.com/awslabs/keys_values/pull/74))
 * Fix issue of changing `dtype` for score buffers in `AttnWeightsKVCache`, due to `fabric.setup` ([#38](https://github.com/awslabs/keys_values/pull/38))
-
-<a name="v0.3.0"></a>
-## [0.3.0] - 2026-10-??
-
-Thanks to all contributors:
-@mseeger, @mmjerge, @amacharla15, @Jantory, @vihangp
-
-### New Features
-* Fix issue and robustify autograd saved tensor hooks mechanism (#154)
-* Scripts for creating result tables, metric evaluation from samples, extract
-  training times from logs, computing statistics on generated samples
-* Refactoring of training script and cleanup (#153)
-* LongBenchV2 stratified sampling. Support for keeping quantizer states on disk
-  instead of CPU. Support for checkpointing to files
-* New evaluation metric `match_first_word_or_phrase`, replaces `sub_exact_match`
-  for several Helmet datasets
-* Allow to store/read train/valid split in metadata file (for Helmet)
-* Improve `SmartInitialLastRecentlyInsertedKVCache` by defining protected ranges (#134)
-* End-to-end GRPO with KeysAndValues KV cache (#128)
-* Add chunked log-prob computation for TRL GRPO integration (#126)
-
-### Bug Fixes
-* Fix issue and improve BnB quantization (#155)
-* Fix: Mediator buffers for checkpoints must be allocated late, so that device is correct
-* Default of `LastRecentlyInsertedKVCache init_grace_tokens` set to positive value (#146)
-* Fix HELMET loader reproducibility: seed dev/eval split and demo sampling (#145)
-* Fix bug in smart-lastrec: Left padding must be stripped off even if protected
-  range is prefix
-* Align the evaluation metrics with baseline method (#143)
-* Apply final norm `ln_f` and logit softcapping before head in `LongContextInference` (#141)
-* Fix FlashInfer attention weights for q_len=1 (#96) (#136)
-* Fix to enable evaluation for LongBench V2 (#129)
-* Ensure that `H2OOriginalKVCache` works
