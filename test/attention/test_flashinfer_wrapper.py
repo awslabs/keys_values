@@ -1412,7 +1412,7 @@ class TestDecodeKernelShortCache:
 @_RunIf(min_cuda_gpus=1)
 class TestDecodeKernelGroupSizes:
     """FlashInfer's library decode kernel only has templates for GQA group
-    sizes 1, 2, 4 and 8, and throws a C++ exception (surfacing as a
+    sizes 1, 2, 3, 4, 6 and 8 (DISPATCH_GQA_GROUP_SIZE), and throws a C++ exception (surfacing as a
     RuntimeError from `SingleDecodeWithKVCacheDispatched`) for others,
     instead of returning an error code the dispatcher could fall back on.
     Qwen2.5-7B has 28 / 4 = 7. The decode path without attention weights
@@ -1424,7 +1424,7 @@ class TestDecodeKernelGroupSizes:
         [
             (28, 4),  # group 7, Qwen2.5-7B
             (40, 8),  # group 5, Qwen2.5-14B / 32B
-            (12, 4),  # group 3
+            (12, 4),  # group 3, supported by the library (control)
             (16, 8),  # group 2, supported by the library (control)
         ],
     )

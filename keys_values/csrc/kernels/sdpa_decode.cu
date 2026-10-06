@@ -22,6 +22,7 @@
 #include <flashinfer/vec_dtypes.cuh>
 #include <flashinfer/math.cuh>
 #include <flashinfer/attention/state.cuh>
+#include <exception>
 
 namespace keys_values {
 namespace kernels {
@@ -760,11 +761,16 @@ __global__ void optimized_batched_decode_kernel(
         }
 
         // -- Step 3: Online softmax rescale --
-        float o_scale = ptx_exp2(m_prev - st.m);
+        // If this tz chunk has not seen a valid key yet (kv_len < TILE_SIZE,
+        // or all its rows masked), st.m is still -inf and exp2(-inf - -inf)
+        // would be NaN, poisoning the cross-BDZ merge. Keep the state empty
+        // instead; merge() handles an m == -inf partner correctly.
+        const bool chunk_empty = (st.m == -inf);
+        float o_scale = chunk_empty ? 1.f : ptx_exp2(m_prev - st.m);
         st.d *= o_scale;
         #pragma unroll
         for (uint32_t j = 0; j < TILE_PER_TZ; ++j) {
-            s[j] = ptx_exp2(s[j] - st.m);
+            s[j] = chunk_empty ? 0.f : ptx_exp2(s[j] - st.m);
             st.d += s[j];
         }
         #pragma unroll
@@ -993,14 +999,26 @@ cudaError_t launch_single_decode_attention(
     // 1. token_positions is not provided (standard causal attention)
     // 2. attention weights are not requested (FlashInfer doesn't return weights)
     // 3. head_dim is supported (64, 128, or 256)
+    // FlashInfer's DISPATCH_GQA_GROUP_SIZE (utils.cuh) only instantiates
+    // group sizes 1, 2, 3, 4, 6, 8 and THROWS for others (Qwen2.5-7B has
+    // 28 / 4 = 7) instead of returning an error code. Skip the library for
+    // those; the try/catch below covers FlashInfer versions with a
+    // different list.
+    const uint32_t fi_group_size = params.num_qo_heads / params.num_kv_heads;
+    const bool fi_group_ok = (fi_group_size == 1 || fi_group_size == 2 ||
+                              fi_group_size == 3 || fi_group_size == 4 ||
+                              fi_group_size == 6 || fi_group_size == 8);
     bool can_use_flashinfer = (params.token_positions == nullptr) &&
                                (!params.return_attn_weights) &&
-                               (params.head_dim == 64 || params.head_dim == 128 || params.head_dim == 256);
+                               (params.head_dim == 64 || params.head_dim == 128 || params.head_dim == 256) &&
+                               fi_group_ok;
 
     if (can_use_flashinfer && params.causal) {
         int32_t window_left = params.sliding_window_size > 0 ? params.sliding_window_size : -1;
 
-        cudaError_t err = dispatch_flashinfer_decode<DTypeQ, DTypeKV, DTypeO>(
+        cudaError_t err = cudaErrorUnknown;
+        try {
+        err = dispatch_flashinfer_decode<DTypeQ, DTypeKV, DTypeO>(
             const_cast<DTypeQ*>(params.q),
             const_cast<DTypeKV*>(params.k),
             const_cast<DTypeKV*>(params.v),
@@ -1013,7 +1031,9 @@ cudaError_t launch_single_decode_attention(
             window_left,
             params.sm_scale,
             stream);
-
+        } catch (const std::exception&) {
+            err = cudaErrorUnknown;
+        }
         if (err == cudaSuccess) {
             return err;
         }
@@ -1064,10 +1084,17 @@ cudaError_t launch_batch_decode_attention(
     // supported head_dim, causal). FlashInfer's SingleDecode doesn't support
     // batching, so we still loop per batch item but avoid the sync since
     // FlashInfer doesn't use input_pos.
+    // Same group-size restriction as launch_single_decode_attention. For
+    // unsupported sizes go straight to Path B (one batched launch) rather
+    // than falling back per batch item inside Path A.
+    const uint32_t fi_group_size = params.num_qo_heads / params.num_kv_heads;
+    const bool fi_group_ok = (fi_group_size == 1 || fi_group_size == 2 ||
+                              fi_group_size == 3 || fi_group_size == 4 ||
+                              fi_group_size == 6 || fi_group_size == 8);
     bool can_use_flashinfer = (params.token_positions == nullptr) &&
                                (!params.return_attn_weights) &&
                                (params.head_dim == 64 || params.head_dim == 128 || params.head_dim == 256) &&
-                               params.causal;
+                               params.causal && fi_group_ok;
 
     if (can_use_flashinfer) {
         // Path A: FlashInfer per-batch loop (no sync needed, launches are async)
