@@ -29,6 +29,7 @@ from keys_values.attention.sdpa_wrapper import (
     reorder_inverse,
     ReorderAnnotationCallback,
     zeropad_4d_tensor_on_left,
+    nanpad_4d_tensor_on_left,
 )
 from keys_values.utils import repeat_interleave
 
@@ -68,6 +69,31 @@ def logit_softcapping(
     return torch.tanh(score / thresh) * thresh
 
 
+# TODO: Maybe it is better to pass the `nan` value?
+def nan_to_minus_infty(
+    score: torch.Tensor,
+    batch: torch.Tensor,
+    head: torch.Tensor,
+    q_idx: torch.Tensor,
+    kv_idx: torch.Tensor,
+    thresh: float,
+) -> torch.Tensor:
+    return torch.nan_to_num(score, nan=torch.finfo(score.dtype).min)
+
+
+def logit_softcapping_and_nan_to_minus_infty(
+    score: torch.Tensor,
+    batch: torch.Tensor,
+    head: torch.Tensor,
+    q_idx: torch.Tensor,
+    kv_idx: torch.Tensor,
+    thresh: float,
+) -> torch.Tensor:
+    return torch.tanh(
+        torch.nan_to_num(score, nan=torch.finfo(score.dtype).min) / thresh
+    ) * thresh
+
+
 def quantize_attention_logit_softcapping(
     x: Optional[float],
 ) -> Tuple[Optional[int], Optional[float]]:
@@ -91,6 +117,9 @@ class FlexAttnManager:
     def __init__(self):
         self._entries = dict()
         self.num_hits = dict()
+
+    def _use_kv_lens(self) -> bool:
+        raise NotImplementedError
 
     def _get_args(
         self,
@@ -151,10 +180,16 @@ class FlexAttnManager:
                 sliding_window_size,
                 **kwargs,
             )
-            if attention_logit_softcapping is not None:
-                score_mod = partial(logit_softcapping, thresh=thresh)
+            if not self._use_kv_lens():
+                if attention_logit_softcapping is not None:
+                    score_mod = partial(logit_softcapping, thresh=thresh)
+                else:
+                    score_mod = None
             else:
-                score_mod = None
+                if attention_logit_softcapping is not None:
+                    score_mod = partial(logit_softcapping_and_nan_to_minus_infty, thresh=thresh)
+                else:
+                    score_mod = nan_to_minus_infty
             attn_fn = torch.compile(
                 partial(
                     flex_attention,
@@ -231,6 +266,9 @@ class FlexAttnForPrefillManager(FlexAttnManager):
 
     def transform_kv_len(self, kv_len: int) -> int:
         return transform_len(kv_len, self.kv_lens, "kv_len")
+
+    def _use_kv_lens(self) -> bool:
+        return self.kv_lens is not None
 
     def _get_args(
         self,
@@ -385,6 +423,9 @@ class FlexAttnForChunkManager(FlexAttnManager):
             unpacked_args.append(kwargs[name])
         unpacked_args.append(kwargs.get("reverse", False))
         return tuple(unpacked_args)
+
+    def _use_kv_lens(self) -> bool:
+        return self.kv_lens is not None
 
     def transform_kv_len(self, kv_len: int) -> int:
         return transform_len(kv_len, self.kv_lens, "kv_len")
@@ -597,6 +638,14 @@ class FlexAttentionArgs:
             )
             return _attn_fn, extend_kv or self.extend_kv
 
+    @property
+    def kv_lens(self) -> Optional[List[int]]:
+        return self.attn_chunk_manager.kv_lens
+
+    @property
+    def q_lens(self) -> Optional[List[int]]:
+        return self.attn_chunk_manager.q_lens
+
     def transform_kv_len(self, kv_len: int) -> int:
         return self.attn_chunk_manager.transform_kv_len(kv_len)
 
@@ -650,6 +699,13 @@ def scaled_dot_product_attention_flexatt(
     scale factor. If `scale_factor` is different, we multiply a factor into
     `query`. This avoids bogus graph re-compilations due to small numerical
     differences in `scale`.
+
+    If `flexatt_args.kv_lens` is used, there will be left-padding of `key`,
+    `value` in general. We pad `value` with zeros, but `key` with NaNs. This
+    leads to the scores being masked by NaN, which are converted to
+    -infty in the `score_mod` mapping. An alternative would be to mask `key`
+    with zeros, then map zero scores to -infty, but this affects real zeros
+    in the score matrix as well.
 
     Args:
         flexatt_args: Arguments for `flex_attention`. Most important are the
@@ -734,10 +790,11 @@ def scaled_dot_product_attention_flexatt(
         query = zeropad_4d_tensor_on_left(query, q_len_tr - q_len)
     kv_len_tr = flexatt_args.transform_kv_len(kv_len)
     if kv_len_tr > kv_len:
-        # Use zero padding
-        # Importantly, zeros are appended **on the left**, not on the right.
+        # Use NaN padding for `key`, zero padding for `value`.
+        # We replace NaN -> -infty later when masking. Padding on left, not
+        # right, for same reason as for query above.
         num_pad = kv_len_tr - kv_len
-        key = zeropad_4d_tensor_on_left(key, num_pad)
+        key = nanpad_4d_tensor_on_left(key, num_pad)
         value = zeropad_4d_tensor_on_left(value, num_pad)
     # Deal with non-standard `scale_factor`
     if scale_factor is not None:
@@ -828,6 +885,7 @@ def choose_kv_lens(
 MIN_HEAD_DIM = 16
 
 
+# TODO: kv_lens padding: What about second step??
 def sdpa_flexatt_with_attn_weights(
     flexatt_args: FlexAttentionArgs,
     query: torch.Tensor,
@@ -934,6 +992,14 @@ def sdpa_flexatt_with_attn_weights(
         # otherwise our causal attention masking does not work out properly.
         # See :func:`keys_values.sdpa_wrapper.scaled_dot_product_attention`.
         query = zeropad_4d_tensor_on_left(query, q_len_tr - q_len)
+    kv_len_tr = flexatt_args.transform_kv_len(kv_len)
+    if kv_len_tr > kv_len:
+        # Use NaN padding for `key`, zero padding for `value`.
+        # We replace NaN -> -infty later when masking. Padding on left, not
+        # right, for same reason as for query above.
+        num_pad = kv_len_tr - kv_len
+        key = nanpad_4d_tensor_on_left(key, num_pad)
+        value = zeropad_4d_tensor_on_left(value, num_pad)
     # Deal with non-standard `scale_factor`
     if scale_factor is not None:
         diff = scale_factor * math.sqrt(head_size)

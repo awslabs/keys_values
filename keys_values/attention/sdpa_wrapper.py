@@ -63,6 +63,17 @@ def zeropad_4d_tensor_on_left(x: torch.Tensor, num: int) -> torch.Tensor:
     return torch.cat((fill_left, x), dim=2)
 
 
+def nanpad_4d_tensor_on_left(x: torch.Tensor, num: int) -> torch.Tensor:
+    assert x.ndim == 4
+    fill_left = torch.full(
+        (1, 1, 1, 1),
+        torch.nan,
+        dtype=x.dtype,
+        device=x.device,
+    ).expand(*x.shape[:2], num, x.shape[-1])
+    return torch.cat((fill_left, x), dim=2)
+
+
 def scaled_dot_product_attention(
     query: torch.Tensor,
     key: torch.Tensor,
