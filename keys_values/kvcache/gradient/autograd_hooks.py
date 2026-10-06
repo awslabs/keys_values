@@ -189,6 +189,12 @@ class AnnotationUsageLog:
     unmatched_pack_args: List[UnmatchedPackHookArgument] = field(default_factory=list)
     unmatched_annotations: List[NodeAnnotationForLog] = field(default_factory=list)
     track_unmatched_annotations_for_pack_args: bool = False
+    # Peak memory retained (CPU) by parked buffer states within this cell,
+    # and the peak number of simultaneously parked states. Bounded by
+    # (num_chunks_per_cell - 1) * 2 * eff_num_layers buffers; typically far
+    # smaller, since states are freed as soon as their ID is fetched
+    parked_peak_bytes: int = 0
+    parked_peak_count: int = 0
 
     def report(self) -> str:
         lines: List[str] = [
@@ -197,6 +203,8 @@ class AnnotationUsageLog:
             f"Number of delta comparisons:             {self.num_comparisons}",
             f"Number of 4D indexes packed:             {self.num_4d_indexes}",
             f"Number of unmatched scatter annotations: {self.num_unmatched_scatter_cat}",
+            f"Parked states, peak (CPU):               {self.parked_peak_count} "
+            f"({self.parked_peak_bytes / (1 << 20):.1f} MiB)",
         ]
         if self.unmatched_annotations:
             lines.append("Remaining unmatched annotations:")
@@ -432,6 +440,16 @@ class CellComputationAutogradHooks(AutogradHooks):
     "scatter-key" annotation, which can then be done earlier (and skipped
     later).
 
+    More generally, the backward traversal may request an annotation whose
+    buffer state is more than one chunk behind the current final buffer. This
+    happens if autograd's backward for the intermediate chunks is served
+    without unpacking their "scatter-*" / "cat-*" annotations, e.g., when a
+    generated region spans three or more chunks (issue #148). In this case,
+    :meth:`_unpack_from_annotation` walks the annotation chain, applying
+    intermediate annotations early. Reconstructed intermediate states are
+    parked in `_id_to_unpacked`, so their IDs can still be served if autograd
+    asks for them later.
+
     Packing broadcast-extended indexes:
 
     A broadcast-extended index is a 4D tensor of integer dtype, obtained as
@@ -510,6 +528,15 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._packed_arg_for_id = None
         self._id_counts = None
         self._id_to_unpacked = None
+        self._orphan_annotation_ids = None
+        self._parked_states = None
+        self._ext_states = None
+        self._early_applied = None
+        self._outstanding_ext = None
+        self._parked_bytes_for_key = None
+        self._parked_bytes = 0
+        self._parked_peak_bytes = 0
+        self._parked_peak_count = 0
         # ID assigned to next pack hook argument
         self._next_id = None
         self._num_matched_annotations = None
@@ -580,6 +607,33 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._packed_arg_for_id: Dict[int, PackedArgumentType] = dict()
         self._id_counts: Dict[int, int] = dict()
         self._id_to_unpacked: Dict[int, torch.Tensor] = dict()
+        # Parked buffer states (see the "Parked buffer states" section
+        # below): by pack-argument ID, and by (layer, is_keys, chunk) for
+        # outstanding "ext-*" annotations. Kept apart from `_id_to_unpacked`,
+        # which holds already-served values for IDs matched twice.
+        self._parked_states: Dict[int, torch.Tensor] = dict()
+        self._ext_states: Dict[Tuple[int, bool, int], torch.Tensor] = dict()
+        # Lazy parking bookkeeping (see "Parked buffer states" below).
+        # `_early_applied`: (layer_idx, is_keys, chunk_idx) -> pack-argument
+        # ID of a "scatter"/"cat" annotation applied ahead of its own unpack
+        # request (chain walk). The claim is served from the live buffer if
+        # autograd asks while the buffer is still at that state; the state is
+        # only parked if the buffer moves past it first.
+        # `_outstanding_ext`: (layer_idx, is_keys, chunk_idx) of "ext-*"
+        # annotations still awaiting their unpack request; built once in
+        # :meth:`_flush_remaining_pack_arguments`.
+        self._early_applied: Dict[Tuple[int, bool, int], int] = dict()
+        self._outstanding_ext: Set[Tuple[int, bool, int]] = set()
+        # Memory accounting for parked states: key -> bytes retained.
+        # Peaks are reported in :meth:`annotation_usage_log`
+        self._parked_bytes_for_key: Dict[Tuple, int] = dict()
+        self._parked_bytes = 0
+        self._parked_peak_bytes = 0
+        self._parked_peak_count = 0
+        # IDs inserted by :meth:`_flush_remaining_pack_arguments` to keep the
+        # annotation chain complete. Nothing in the autograd graph refers to
+        # them, so states reconstructed for them need not be parked.
+        self._orphan_annotation_ids: Set[int] = set()
         self._next_id = 0
         self._num_matched_annotations = 0
         self._num_comparisons = 0
@@ -615,6 +669,21 @@ class CellComputationAutogradHooks(AutogradHooks):
             self._packed_arg_for_id = None
         self._id_counts = None
         self._id_to_unpacked = None
+        if self._orphan_annotation_ids is not None:
+            self._orphan_annotation_ids.clear()
+        if self._early_applied is not None:
+            self._early_applied.clear()
+        self._early_applied = None
+        if self._outstanding_ext is not None:
+            self._outstanding_ext.clear()
+        self._outstanding_ext = None
+        for d in (self._parked_states, self._ext_states, self._parked_bytes_for_key):
+            if d is not None:
+                d.clear()
+        self._parked_states = None
+        self._ext_states = None
+        self._parked_bytes_for_key = None
+        self._parked_bytes = 0
         self._next_id = None
         self._num_matched_annotations = None
         self._num_comparisons = None
@@ -717,6 +786,8 @@ class CellComputationAutogradHooks(AutogradHooks):
             unmatched_pack_args=self._unmatched_pack_args.copy(),
             unmatched_annotations=remaining_annotations,
             track_unmatched_annotations_for_pack_args=self._track_unmatched_annotations,
+            parked_peak_bytes=self._parked_peak_bytes,
+            parked_peak_count=self._parked_peak_count,
         )
 
     def debug_log_args(self) -> Optional[List[Tuple[torch.Tensor, NodeAnnotation]]]:
@@ -770,8 +841,21 @@ class CellComputationAutogradHooks(AutogradHooks):
         mark_cleanup = False
         if isinstance(x, int):
             idd = x
-            if idd in self._id_to_unpacked:
-                # Unpacked this one before: Just return it
+            if idd in self._parked_states:
+                # This buffer state was reconstructed ahead of this request
+                # (chain walk, see :meth:`_unpack_from_annotation`) and parked.
+                # Serve it and release it. If the ID is also matched twice,
+                # keep it for the remaining request(s).
+                remaining = self._id_counts.get(idd, 1)
+                if remaining > 1:
+                    x = self._parked_states[idd]
+                    self._id_counts[idd] = remaining - 1
+                else:
+                    x = self._parked_states.pop(idd)
+                    self._id_counts.pop(idd, None)
+                    self._release_parked_bytes(("id", idd))
+            elif idd in self._id_to_unpacked:
+                # Unpacked this one before (matched twice): Just return it
                 x = self._id_to_unpacked[idd]
                 self._id_counts[idd] -= 1
                 if self._id_counts[idd] == 0:
@@ -782,6 +866,17 @@ class CellComputationAutogradHooks(AutogradHooks):
                 if isinstance(value, PackArgumentAsAnnotation):
                     # Reconstruct buffer from annotation for successor
                     annotation = value.annot
+                    if annotation.is_ext:
+                        # The request for this ext annotation has arrived;
+                        # its state no longer needs to be parked when the
+                        # buffer moves past it.
+                        self._outstanding_ext.discard(
+                            (
+                                annotation.layer_idx,
+                                annotation.is_keys,
+                                annotation.chunk_idx,
+                            )
+                        )
                     x = self._unpack_from_annotation(annotation)
                     target_dtype = value.target_dtype
                     if target_dtype is not None and x.dtype != target_dtype:
@@ -826,32 +921,119 @@ class CellComputationAutogradHooks(AutogradHooks):
                 print(
                     f"_unpack_from_annotation: {str(annotation)}, buffer={buffer.shape}, final_idx={final_idx}"
                 )
-            # This is complex, because it happens that "ext-*" appears before
-            # "scatter-*" or "cat-*" for the same node. In this case, we need
-            # to first execute this "prior annotation", since otherwise the
-            # input to "ext-*" does not exist.
+            # This is complex, for three reasons:
+            # (1) It happens that "ext-*" appears before "scatter-*" or
+            #     "cat-*" for the same node. In this case, we need to first
+            #     execute this "prior annotation", since otherwise the input
+            #     to "ext-*" does not exist.
+            # (2) The final buffer can be more than one chunk ahead of
+            #     `annotation`. This happens when autograd's backward for the
+            #     intermediate chunks is served without unpacking their
+            #     "scatter-*" / "cat-*" annotations (observed with generated
+            #     regions spanning 3+ chunks, see issue #148). All "scatter" /
+            #     "cat" annotations are kept in `_packed_arg_for_id` (see
+            #     :meth:`_flush_remaining_pack_arguments`), so we can walk the
+            #     chain here, applying intermediate annotations early.
+            # (3) An "ext-*" request can arrive after the buffer has been
+            #     walked past its chunk (`final_idx < chunk_idx`).
+            # Early applications create open claims: autograd will still ask
+            # for the IDs of annotations applied in (1) and (2), and for the
+            # ext annotations in (3). Claims are served lazily, without any
+            # copy, as long as the buffer is still at the state a claim
+            # needs ("Skip" branch below). Only when the buffer is about to
+            # move past a state with open claims is a copy parked on CPU
+            # (see "Parked buffer states" below). This never happens in an
+            # in-order backward pass, and for the common one-step-early
+            # "ext-*" pattern of (1), all claims are served live: parking
+            # (and its GPU-CPU transfer) only occurs for the out-of-order
+            # requests of (2) and (3), which are rare (issue #152 was a
+            # performance regression from parking eagerly on every chunk).
+            # `first_needed` is the buffer state (chunk index) required
+            # before `annotation` itself can be applied:
+            first_needed = chunk_idx if annotation.is_ext else chunk_idx + 1
             annotations_todo = [annotation]
-            if annotation.is_ext:
-                if final_idx == chunk_idx + 1:
-                    # ext-* annotation comes too early, need to do another one first
-                    prior_annotation = self._find_prior_annotation(annotation)
+            if final_idx < chunk_idx:
+                if annotation.is_ext:
+                    # (3) An "ext-*" request arriving after the buffer has
+                    #     already been walked past its chunk. The state it
+                    #     needs was parked for it when it was produced (see
+                    #     `_park_for_outstanding_ext` below), because this
+                    #     ext annotation was still outstanding at that time.
+                    #     Serve from the parked copy; the live buffer and
+                    #     `final` are left where they are.
+                    parked = self._ext_states.pop(
+                        (layer_idx, annotation.is_keys, chunk_idx), None
+                    )
+                    if parked is None:
+                        raise ValueError(
+                            f"Annotation {str(annotation)}: final chunk_idx = "
+                            f"{final_idx} < {chunk_idx}, and no state was "
+                            "parked for this ext annotation"
+                        )
+                    if self.debug_print_annotations:
+                        print("--> Served from state parked for late ext request")
+                    self._release_parked_bytes(
+                        ("ext", layer_idx, annotation.is_keys, chunk_idx)
+                    )
+                    return apply_ext_annotation(
+                        parked,
+                        annotation,
+                        target_dim1=annotation.shape[1],
+                    )
+                raise ValueError(
+                    f"Annotation {str(annotation)}: final chunk_idx = {final_idx}, must be >= {chunk_idx}"
+                )
+            elif not annotation.is_ext and final_idx == chunk_idx:
+                # Has already been done (chain walk, or to support an ext-*
+                # annotation). The live buffer serves this request: no copy
+                # was made, and none is needed. Clear the pending claim, if
+                # any (the entry itself was popped by :meth:`unpack_hook`).
+                if self.debug_print_annotations:
+                    print("--> Skip (already done, serve live buffer)")
+                self._early_applied.pop(
+                    (layer_idx, annotation.is_keys, chunk_idx), None
+                )
+                annotations_todo = []
+            elif final_idx > first_needed:
+                # Walk the annotation chain from `final_idx - 1` down to
+                # `first_needed`, so that `annotation` can be applied last
+                chain = []
+                for prior_chunk_idx in range(final_idx - 1, first_needed - 1, -1):
+                    found = self._find_chain_annotation(annotation, prior_chunk_idx)
+                    if found is None:
+                        raise ValueError(
+                            f"Annotation {str(annotation)}: final chunk_idx = "
+                            f"{final_idx}: Cannot reconstruct, missing "
+                            f"'scatter'/'cat' annotation for chunk {prior_chunk_idx}"
+                        )
+                    idd, prior_annotation = found
                     if self.debug_print_annotations:
                         print(f"--> Doing {str(prior_annotation)} first")
-                    annotations_todo.insert(0, prior_annotation)
-                elif final_idx != chunk_idx:
-                    raise ValueError(
-                        f"Annotation {str(annotation)}: final chunk_idx = {final_idx}, must be in [{chunk_idx}, {chunk_idx + 1}]"
-                    )
-            else:
-                if final_idx == chunk_idx:
-                    # Has already been done to support ext-* annotation
-                    if self.debug_print_annotations:
-                        print("--> Skip (already done)")
-                    annotations_todo = []
-                elif final_idx != chunk_idx + 1:
-                    raise ValueError(
-                        f"Annotation {str(annotation)}: final chunk_idx = {final_idx}, must be in [{chunk_idx}, {chunk_idx + 1}]"
-                    )
+                    # The annotation is applied early here, ahead of
+                    # autograd's request for `idd`. No copy is made now: if
+                    # autograd asks for `idd` while the buffer is still at
+                    # this state (the common case, e.g. an "ext-*" request
+                    # arriving one step early), the live buffer serves the
+                    # request for free ("Skip" branch above). The claim is
+                    # recorded in `_early_applied`; only if the buffer moves
+                    # past this state while the claim is still open does the
+                    # state get parked (see
+                    # :meth:`_park_if_claims_outstanding`). The entry stays
+                    # in `_packed_arg_for_id` so :meth:`unpack_hook` finds
+                    # it; re-finding it in a later chain walk is impossible,
+                    # because walks only search below the final chunk index,
+                    # and early-applied entries are at or above it. Orphan
+                    # IDs (inserted by
+                    # :meth:`_flush_remaining_pack_arguments` purely to keep
+                    # the chain complete) get no claim: nothing in the
+                    # autograd graph can ask for them, and parking them would
+                    # retain full-size buffers that are never fetched.
+                    if idd not in self._orphan_annotation_ids:
+                        self._early_applied[
+                            (layer_idx, annotation.is_keys, prior_chunk_idx)
+                        ] = idd
+                    chain.append(prior_annotation)
+                annotations_todo = chain + annotations_todo
             for annot in annotations_todo:
                 if annot.is_ext:
                     # `target_dim1` is either `n_head` or `n_query_groups`,
@@ -863,6 +1045,17 @@ class CellComputationAutogradHooks(AutogradHooks):
                         target_dim1=annot.shape[1],
                     )
                 else:
+                    # Applying `annot` moves the buffer from state
+                    # `annot.chunk_idx + 1` to state `annot.chunk_idx`,
+                    # destroying the former. If open claims exist on the
+                    # state about to be destroyed (an early-applied ID whose
+                    # request has not arrived, or an outstanding "ext-*"
+                    # annotation), park a copy now: this is the last moment
+                    # it exists, and the only point where a GPU-CPU transfer
+                    # is ever made.
+                    self._park_if_claims_outstanding(
+                        layer_idx, annot.is_keys, annot.chunk_idx + 1, buffer
+                    )
                     length = annot.shape[2]
                     if annot.is_scatter:
                         # Overwrites `buffer`:
@@ -874,7 +1067,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                     self._node_annotations.set_final(
                         buffer,
                         layer_idx,
-                        chunk_idx,
+                        annot.chunk_idx,
                         kind,
                     )
                 # Sanity check
@@ -892,15 +1085,133 @@ class CellComputationAutogradHooks(AutogradHooks):
     def _get_cache_length(self, layer_idx: int) -> int:
         return self.cache_lengths[layer_idx - self.first_layer_idx]
 
-    def _find_prior_annotation(self, annotation: NodeAnnotation) -> NodeAnnotation:
-        assert annotation.is_ext
+    # --- Parked buffer states -----------------------------------------------
+    #
+    # Parking is the exception, not the rule. It only happens when autograd
+    # asks for nodes out of order: a request for a node further down the
+    # chain forces annotations for earlier chunks to be applied before
+    # autograd asks for their own IDs (chain walk in
+    # :meth:`_unpack_from_annotation`). A parked state is a copy of such an
+    # early-reconstructed cache buffer, kept because a request for it is
+    # provably still outstanding. In an in-order backward pass, nothing is
+    # ever parked. Two kinds:
+    #   ("id", idd)                      -- the scatter/cat annotation with
+    #                                       pack-argument ID `idd` was applied
+    #                                       early (chain walk);
+    #   ("ext", layer, is_keys, chunk)   -- an "ext-*" annotation for this
+    #                                       chunk is still in
+    #                                       `_packed_arg_for_id`.
+    # Copies stay on the same device as the buffer. A CPU round trip would
+    # stall the GPU on every park and restore (issue #152); since parking is
+    # rare and each copy is released on fetch, the device memory cost is a
+    # small number of buffers, and only for the duration of the walk.
+
+    def _park_buffer(
+        self,
+        buffer: torch.Tensor,
+        target_dtype: Optional[torch.dtype],
+        key: Tuple,
+    ) -> torch.Tensor:
+        # Must not alias `buffer`, which is modified in place further down
+        # the chain: `clone` copies even for same device and dtype
+        dtype = target_dtype if target_dtype is not None else buffer.dtype
+        parked = buffer.detach().clone().to(dtype=dtype)
+        num_bytes = parked.numel() * parked.element_size()
+        self._parked_bytes_for_key[key] = num_bytes
+        self._parked_bytes += num_bytes
+        self._parked_peak_bytes = max(self._parked_peak_bytes, self._parked_bytes)
+        self._parked_peak_count = max(
+            self._parked_peak_count, len(self._parked_bytes_for_key)
+        )
+        return parked
+
+    def _release_parked_bytes(self, key: Tuple):
+        self._parked_bytes -= self._parked_bytes_for_key.pop(key, 0)
+
+    def _add_packed_annotation(self, idd: int, value: PackArgumentAsAnnotation):
+        """
+        Single entry point for adding an annotation-backed entry to
+        `_packed_arg_for_id`. Keeps `_outstanding_ext` (the O(1) index of
+        "ext-*" annotations awaiting their unpack request, checked by
+        :meth:`_park_if_claims_outstanding`) in sync; entries are removed in
+        :meth:`unpack_hook` when their requests arrive.
+        """
+        self._packed_arg_for_id[idd] = value
+        if value.annot.is_ext:
+            self._outstanding_ext.add(
+                (value.annot.layer_idx, value.annot.is_keys, value.annot.chunk_idx)
+            )
+
+    def _park_if_claims_outstanding(
+        self,
+        layer_idx: int,
+        is_keys: bool,
+        state_chunk_idx: int,
+        buffer: torch.Tensor,
+    ):
+        """
+        Called just before the buffer state `state_chunk_idx` (currently in
+        `buffer`) is destroyed by applying the next annotation down the
+        chain. If open claims exist on this state, this is the last moment a
+        copy can be made, so it is parked now:
+
+        - An early-applied "scatter"/"cat" ID (`_early_applied`): autograd
+          has not asked for the ID yet. Its entry is removed from
+          `_packed_arg_for_id` here; :meth:`unpack_hook` serves the request
+          from `_parked_states` instead.
+        - An outstanding "ext-*" annotation (`_outstanding_ext`): autograd
+          may request it after the buffer has moved on (observed as
+          `ext-key (28,1494): final chunk_idx = 1493`).
+
+        In an in-order backward pass, every claim is served from the live
+        buffer before the state is destroyed, and this method parks nothing.
+        """
+        key = (layer_idx, is_keys, state_chunk_idx)
+        idd = self._early_applied.pop(key, None)
+        if idd is not None:
+            if self.debug_print_annotations:
+                print(
+                    f"--> Parking state ({layer_idx},{state_chunk_idx}) "
+                    f"for early-applied ID {idd}"
+                )
+            value = self._packed_arg_for_id.pop(idd)
+            self._parked_states[idd] = self._park_buffer(
+                buffer, value.target_dtype, ("id", idd)
+            )
+            if self._debug_test_args:
+                self._debug_log_args.append((buffer.clone(), value.annot))
+        if key in self._outstanding_ext and key not in self._ext_states:
+            if self.debug_print_annotations:
+                print(
+                    f"--> Parking state ({layer_idx},{state_chunk_idx}) "
+                    "for outstanding ext"
+                )
+            self._ext_states[key] = self._park_buffer(buffer, None, ("ext",) + key)
+
+    def _find_chain_annotation(
+        self,
+        annotation: NodeAnnotation,
+        chunk_idx: int,
+    ) -> Optional[Tuple[int, NodeAnnotation]]:
+        """
+        Searches `_packed_arg_for_id` for the "scatter-*" or "cat-*"
+        annotation on the same chain as `annotation` (i.e., same layer and
+        keys/values kind), but with chunk index `chunk_idx`.
+
+        Args:
+            annotation: Annotation determining the chain
+            chunk_idx: Chunk index to search for
+
+        Returns:
+            `(id, chain_annotation)` if found, otherwise `None`
+
+        """
         layer_idx = annotation.layer_idx
-        chunk_idx = annotation.chunk_idx
         is_keys = annotation.is_keys
-        result = next(
+        return next(
             (
-                e.annot
-                for e in self._packed_arg_for_id.values()
+                (idd, e.annot)
+                for idd, e in self._packed_arg_for_id.items()
                 if (
                     isinstance(e, PackArgumentAsAnnotation)
                     and e.annot.is_keys == is_keys
@@ -911,11 +1222,6 @@ class CellComputationAutogradHooks(AutogradHooks):
             ),
             None,
         )
-        if result is None:
-            raise IndexError(
-                f"{str(annotation)}: Don't find prior annotation for this one!"
-            )
-        return result
 
     @staticmethod
     def _unpack_scatter(
@@ -1144,7 +1450,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                                 si_shape = None if si_shape is None else si_shape.shape
                                 deb_msg += f", sort_index={si_shape}"
                             print(deb_msg)
-                        self._packed_arg_for_id[idd] = value
+                        self._add_packed_annotation(idd, value)
                     else:
                         # Annotation has been matched before, has ID already
                         if self.debug_print_annotations:
@@ -1221,6 +1527,7 @@ class CellComputationAutogradHooks(AutogradHooks):
                                 target_dtype=None,
                             )
                         )
+                        self._orphan_annotation_ids.add(self._next_id)
                         self._next_id += 1
         self._node_annotations.nodes.clear()
         # Flush all remaining pack arguments (these will not be packed)

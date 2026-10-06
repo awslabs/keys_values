@@ -13,9 +13,73 @@
 # limitations under the License.
 from itertools import product
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Tuple, List, Union, Callable, Optional
 
 from keys_values.evaluation.tasks import EvaluationTasks
+
+ALL_CASES = [
+    ("lr_4gpu_cs{}_lr5", "lr_{}"),
+    ("slr_4gpu_cs{}_lr5", "slr_{}"),
+    ("h2o_4gpu_cs{}_lr5", "h2o_{}"),
+    ("h2onorm_4gpu_cs{}_lr5", "h2onorm_{}"),
+    ("h2oorig_4gpu_cs{}_lr5", "h2oorig_{}"),
+    ("qh2o_4gpu_cs{}_lr5", "qh2o_{}"),
+    ("qh2onorm_4gpu_cs{}_lr5", "qh2onorm_{}"),
+]
+
+
+def datasets_and_cases(
+    dataset_size: str,
+    extra_data: bool,
+    is_baseline: bool,
+    is_base_model: bool,
+    with_short: bool = False,
+    filter_dataset: Optional[Callable[[str], bool]] = None,
+    filter_case: Optional[Callable[[str], bool]] = None,
+    chunk_sizes: Optional[List[int]] = None,
+) -> Tuple[List[str], List[Union[str, Tuple[str, str]]]]:
+    multiple_tasks = not is_baseline and not is_base_model
+    if not extra_data:
+        datasets = [
+            f"helmet_nq_{dataset_size}",
+            f"helmet_trivia_qa_{dataset_size}",
+            f"helmet_hotpot_qa_{dataset_size}",
+            f"helmet_pop_qa_{dataset_size}",
+        ]
+        if chunk_sizes is None:
+            chunk_sizes = [2048, 1024]
+            if multiple_tasks and dataset_size == "64k":
+                chunk_sizes.append(128)
+        case_patterns = ALL_CASES
+    else:
+        datasets = [
+            f"helmet_trec_coarse_{dataset_size}",
+            f"helmet_nlu_{dataset_size}",
+            f"helmet_clinc150_{dataset_size}",
+            f"helmet_infinite_bench_qa_{dataset_size}",
+            f"helmet_infinite_bench_mc_{dataset_size}",
+            f"helmet_json_kv_{dataset_size}",
+            f"helmet_trec_fine_{dataset_size}",
+            f"helmet_banking77_{dataset_size}",
+        ]
+        if chunk_sizes is None:
+            chunk_sizes = [1024]
+        case_patterns = [ALL_CASES[1], ALL_CASES[3], ALL_CASES[4]]
+
+    if not with_short:
+        cases = [elem[0].format(cs) for elem in case_patterns for cs in chunk_sizes]
+    else:
+        cases = [
+            (elem[0].format(cs), elem[1].format(cs))
+            for elem in case_patterns
+            for cs in chunk_sizes
+        ]
+
+    if filter_dataset is not None:
+        datasets = [d for d in datasets if filter_dataset(d)]
+    if filter_case is not None:
+        cases = [c for c in cases if filter_case(c[0] if with_short else c)]
+    return datasets, cases
 
 
 def main(
@@ -23,9 +87,15 @@ def main(
     model_type: str,
     mode: Literal["non-lock", "lock", "all"],
     multiple_tasks: bool,
+    eval_dir: str = "eval",
 ):
     total_removed = 0
-    eval_tasks = EvaluationTasks(out_dir, model_type, multiple_tasks=multiple_tasks)
+    eval_tasks = EvaluationTasks(
+        out_dir=out_dir,
+        model_type=model_type,
+        multiple_tasks=multiple_tasks,
+        eval_dir=eval_dir,
+    )
     print(f"Removing files for {out_dir}")
     for task_name, incomplete_file_paths in eval_tasks.eval_result_files(mode):
         print(f"{task_name}: Removing {len(incomplete_file_paths)} files (type {mode})")
@@ -38,56 +108,38 @@ def main(
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
+    eval_dir = "eval"
     # dataset_size = "64k"
     dataset_size = "128k"
+    # is_rerun = False
+    is_rerun = True
     is_baseline = False
     # is_baseline = True
     is_base_model = False
     # is_base_model = True
-    # extra_data = False
-    extra_data = True
+    extra_data = False
+    # extra_data = True
+    filter_dataset = None
+    filter_case = None
+    chunk_sizes = None
+
     multiple_tasks = not is_baseline and not is_base_model
-    if is_baseline:
+    if is_rerun:
+        base_path = base_path / "rerun"
+    elif is_baseline:
         base_path = base_path / "baseline"
     elif is_base_model:
         base_path = base_path / "basemod"
-    if not extra_data:
-        datasets = [
-            f"helmet_nq_{dataset_size}",
-            f"helmet_trivia_qa_{dataset_size}",
-            f"helmet_hotpot_qa_{dataset_size}",
-            f"helmet_pop_qa_{dataset_size}",
-        ]
-    else:
-        datasets = [
-            f"helmet_trec_coarse_{dataset_size}",
-            f"helmet_ms_macro_{dataset_size}",
-            f"helmet_nlu_{dataset_size}",
-            f"helmet_clinc150_{dataset_size}",
-            f"helmet_infinite_bench_qa_{dataset_size}",
-            f"helmet_infinite_bench_mc_{dataset_size}",
-            f"helmet_json_kv_{dataset_size}",
-            f"helmet_ruler_mk_uuid_{dataset_size}",
-        ]
-    cases = [
-        "lr_4gpu_cs2048_lr5",
-        "slr_4gpu_cs2048_lr5",
-        "h2o_4gpu_cs2048_lr5",
-        "h2onorm_4gpu_cs2048_lr5",
-        "h2oorig_4gpu_cs2048_lr5",
-        "lr_4gpu_cs1024_lr5",
-        "slr_4gpu_cs1024_lr5",
-        "h2o_4gpu_cs1024_lr5",
-        "h2onorm_4gpu_cs1024_lr5",
-        "h2oorig_4gpu_cs1024_lr5",
-    ]
-    if multiple_tasks and not extra_data:
-        cases.extend(
-            [
-                "qh2o_4gpu_cs2048_lr5",
-                "qh2onorm_4gpu_cs2048_lr5",
-            ]
-        )
+    datasets, cases = datasets_and_cases(
+        dataset_size,
+        extra_data,
+        is_baseline,
+        is_base_model,
+        filter_dataset=filter_dataset,
+        filter_case=filter_case,
+        chunk_sizes=chunk_sizes,
+    )
+
     # Use this to clean up lock files before restarting evaluation
     # mode = "lock"
     # Use this to remove all evaluation files
@@ -96,6 +148,6 @@ if __name__ == "__main__":
     for dataset, case in product(datasets, cases):
         out_dir = base_path / dataset / case
         if out_dir.exists():
-            main(out_dir, model_type, mode, multiple_tasks)
+            main(out_dir, model_type, mode, multiple_tasks, eval_dir)
         else:
             print(f"\nResults for {dataset}/{case} do not exist")

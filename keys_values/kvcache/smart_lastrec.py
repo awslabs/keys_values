@@ -20,6 +20,7 @@ from tokenizers import Tokenizer as HFTokenizer
 import torch
 
 from keys_values.attention import KeysAndValues
+from keys_values.constants import DEFAULT_PAD_ID
 from keys_values.kvcache.base import (
     KVCache,
     DefaultKVCacheReplayLog,
@@ -382,7 +383,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         end_initial_regex: Union[str, re.Pattern],
         max_initial_fraction: float,
         include_end_string: bool = True,
-        pad_id: int = 0,
+        pad_id: int = DEFAULT_PAD_ID,
         range_is_prefix: bool = True,
         **base_kwargs,
     ):
@@ -437,7 +438,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
         end_initial_regex: Union[str, re.Pattern],
         max_initial_fraction: float,
         include_end_string: bool = True,
-        pad_id: int = 0,
+        pad_id: int = DEFAULT_PAD_ID,
         range_is_prefix: bool = True,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
@@ -460,7 +461,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
             max_initial_fraction: Fraction of cache length initial parts can
                 occupy at most
             include_end_string: Include end of init sequence in initial part?
-            pad_id: Index of padding token (defaults to 0)
+            pad_id: Index of padding token (defaults to :const:`DEFAULT_PAD_ID`)
             range_is_prefix: If `True`, protected ranges are prefixes and may
                 contain left-padding tokens (defaults to `True`)
             device: Device for buffers. If not given, it is set with the

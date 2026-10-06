@@ -42,12 +42,13 @@ import torch
 import time
 from contextlib import contextmanager
 
-from keys_values.rl.grpo.loss import GRPOLossHeadModel
-from keys_values.rl.grpo.rollout import generate_completions_with_logprobs
+from keys_values.finetune.utils import may_match_twice_flex_attention_sdpa
 from keys_values.kvcache.gradient.main import LongContextGradientModel
-from keys_values.rl.logprobs import compute_logprobs
 from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
+from keys_values.rl.logprobs import compute_logprobs
+from keys_values.rl.grpo.loss import GRPOLossHeadModel
+from keys_values.rl.grpo.rollout import generate_completions_with_logprobs
 from keys_values.utils import VerbosityLevels
 
 
@@ -264,6 +265,14 @@ def grpo_step(
         layers_per_cell=layers_per_cell,
         chunk_size=chunk_size,
         verbose=verbose,
+        # With the new training replay cache, "ext-*" annotations match twice;
+        # without `may_match_twice`, the second save is left as an unmatched
+        # pack argument, which can stall the annotation chain in the chunked
+        # backward (issue #148). This mirrors the finetune path
+        # (`may_match_twice_factory`).
+        autograd_hooks_kwargs=dict(
+            may_match_twice=may_match_twice_flex_attention_sdpa,
+        ),
     )
     grad_model.train()
     if zero_grad:

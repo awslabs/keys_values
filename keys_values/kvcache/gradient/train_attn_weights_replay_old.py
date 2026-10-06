@@ -46,6 +46,9 @@ from keys_values.utils import (
 )
 
 
+# TODO:
+# Remove this code. It cannot be selected anymore (`use_old_cache` argument
+# has been removed).
 class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
     """
     Variant of :class:`TrainingAttnWeightsReplayCache`. Needs less GPU memory,
@@ -55,7 +58,6 @@ class TrainingAttnWeightsReplayCacheOld(DefaultKVCache):
     :class:`KVCacheCatUpdateAndSDPAFunction` operators to implement
     :meth:`forward`. This keeps GPU memory usage to the minimum and allows
     control when supporting packing.
-
     """
 
     def __init__(

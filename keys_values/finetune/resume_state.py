@@ -11,14 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Dict, Tuple, Optional, List
 
 import lightning as L
 import torch
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
 
+from keys_values.finetune.utils import print_message
 from litgpt.utils import CycleIterator
 
 from keys_values.data.dataloader import MyDataLoaderIterator
@@ -264,3 +266,31 @@ def restore_dataset_from_training_state(
     rest_state = torch.load(file_dir / TRAINSTATE_REST_FNAME)
     dataset.load_training_state(rest_state["data_state"])
     return dataset.training_state
+
+
+@dataclass(frozen=True)
+class TrainingStateVars:
+    manager: TrainingStateManager
+    files: List[Tuple[Path, ...]]
+    training_state_num: int
+    devices: int
+
+    def save_state(
+        self,
+        fabric: L.Fabric,
+        file_dir: Path,
+    ):
+        print_message(f"Storing training state to {file_dir}", fabric)
+        new_files = self.manager.save_training_state(fabric, file_dir)
+        if fabric.global_rank == 0 and self.devices > 1:
+            # Add files written by other ranks: They are removed by rank 0 only
+            new_files += tuple(
+                file_dir / TRAINSTATE_ITERATOR_FNAME.format(rank=rank)
+                for rank in range(1, self.devices)
+            )
+        self.files.append(new_files)
+        if len(self.files) > self.training_state_num and fabric.global_rank == 0:
+            # Remove oldest files
+            rem_files = self.files.pop(0)
+            for path in rem_files:
+                path.unlink()

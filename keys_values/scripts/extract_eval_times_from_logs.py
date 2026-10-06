@@ -30,17 +30,25 @@ def _task_max(tasks: list) -> str:
     return max(step_tasks) if step_tasks else "final"
 
 
-def main(log_dir: Path, base_path: str) -> None:
+def main(
+    log_dir: Path,
+    base_path: str,
+    eval_dir: str = "eval",
+) -> None:
     bp = re.escape(base_path.rstrip("/")) + "/"
     # subdir present (baseline/basemod): base_path/subdir/dataset/policy/eval/...
     store_re_subdir = re.compile(
         bp
-        + r"(baseline|basemod)/(helmet_[^/]+|longbench_[^/]+)/([^/]+)/eval/eval_metrics_\d+\.csv"
+        + r"(baseline|basemod)/(helmet_[^/]+|longbench_[^/]+)/([^/]+)/"
+        + eval_dir
+        + r"/eval_metrics_\d+\.csv"
     )
     # subdir absent, task present: base_path/dataset/policy/task/eval/...
     store_re_task = re.compile(
         bp
-        + r"(helmet_[^/]+|longbench_[^/]+)/([^/]+)/(step-\d{6}|final)/eval/eval_metrics_\d+\.csv"
+        + r"(helmet_[^/]+|longbench_[^/]+)/([^/]+)/(step-\d{6}|final)/"
+        + eval_dir
+        + r"/eval_metrics_\d+\.csv"
     )
     all_rows = []
 
@@ -164,9 +172,11 @@ def main(log_dir: Path, base_path: str) -> None:
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
     tag = "inst1_128k"
+    eval_dir = "eval"
 
     log_dir = base_path / "evaluation" / tag / "logs"
     main(
         log_dir=log_dir,
         base_path=str(base_path),
+        eval_dir=eval_dir,
     )

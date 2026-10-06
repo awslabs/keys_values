@@ -26,7 +26,6 @@ from keys_values.finetune.args import (
     SDPAArgs,
 )
 from keys_values.finetune.longcontext_full import setup_internal
-from keys_values.head_model import CrossEntropyOnLogits
 
 DEFAULT_OUT_DIR = "out/finetune/longcon_offload_full"
 
@@ -36,8 +35,8 @@ def setup(
     out_dir: Path = Path(DEFAULT_OUT_DIR),
     precision: Optional[str] = None,
     devices: Union[int, str] = 1,
-    resume: Optional[str] = None,
     data: Optional[DataModule] = None,
+    resume: Optional[str] = None,
     train: TrainArgs = TrainArgs(
         save_interval=50,
         log_interval=1,
@@ -82,10 +81,13 @@ def setup(
         layercp_qname=None,
         cachecp_qname=None,
         single_tokens_for_targets=False,
-        use_old_cache=False,
         max_match_trials_pack_arg=8,
+        layercp_pin_memory=True,
+        cachecp_pin_memory=True,
+        checkpoint_temp_dir=None,
+        checkpoint_frac_ram=0.1,
     ),
-    head_model: str = CrossEntropyOnLogits.NAME,
+    head_model: Optional[str] = None,
     head_model_kwargs: Optional[Dict[str, Any]] = None,
     verbose: Optional[str] = None,
     attention_forward_temp_size_gb: Optional[float] = None,
@@ -123,12 +125,11 @@ def setup(
             /teamspace/jobs/<job-name>/share.
         precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
         devices: How many devices/GPUs to use
+        data: Data-related arguments. Mandatory
         resume: Name of checkpoint directory from which training is to be
             resumed, such as "step-000100" or "final". Training can only be
             resumed from a checkpoint for which a training state is also
             available, see `training_state_num`.
-        data: Data-related arguments. If not provided, the default is
-            ``keys_values.data.LongBenchV2``.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
             Note: We modified the defaults from `train.lr_warmup_steps=100` to
             `train.lr_warmup_fraction=0.15`, so the linear warm-up is the first
@@ -151,7 +152,7 @@ def setup(
             `grad.layers_per_cell` and `grad.chunks_per_cell_multiplier` given
             your GPU memory (defaults are smallest sensible values).
         head_model: Name of the head model to use, see
-            :class:`HeadModelFactory`. Defaults to "next_token_prediction"
+            :class:`HeadModelFactory`. Default depends on `data`.
         head_model_kwargs: Extra keyword arguments to pass to the head model
             factory.
         verbose: Verbosity level for logging outputs.
@@ -159,8 +160,7 @@ def setup(
             in naive SDPA. At present, naive SDPA is used with KV caches which
             require attention weights (e.g., H2O).
         attention_backward_temp_size_gb: Size of GPU memory buffers (in GB) used
-            in naive SDPA during backward computations. At present, naive SDPA
-            is used in backward if `grad.use_old_cache == True`.
+            in naive SDPA during backward computations.
         oom_error_recovery: If `True`, we try to recover from device out of
             memory errors by lowering `attention_forward_temp_size_gb`,
             `attention_backward_temp_size_gb` and trying again.
@@ -215,10 +215,10 @@ def setup(
         setup,
         checkpoint_dir,
         out_dir,
+        data,
         precision,
         devices,
         resume,
-        data,
         train,
         None,
         eval,

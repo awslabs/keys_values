@@ -16,8 +16,7 @@ from pathlib import Path
 from typing import Literal, Optional, Union
 
 from keys_values.finetune.args import KVCacheArgs, SDPAArgs
-from keys_values.finetune.longcontext_eval_ext import setup_internal
-from keys_values.finetune.longcontext_full import setup_internal
+from keys_values.evaluation.longcontext_eval_ext import setup_internal
 
 
 def setup(
@@ -35,12 +34,14 @@ def setup(
     attention_forward_temp_size_gb: Optional[float] = None,
     lora_dropout: Optional[float] = None,
     use_sample_metric: bool = True,
+    eval_dir: str = "eval",
     sample_metric_max_generated_tokens: int = 20,
     sample_metric_temperature: Optional[float] = None,
     sample_metric_top_k: Optional[int] = None,
     sample_metric_top_p: Optional[float] = None,
     num_store_generated_samples: Optional[int] = None,
     skip_eval: bool = False,
+    use_old_metrics: Optional[bool] = None,
 ) -> None:
     """Evaluate a range of model checkpoints on a test set
 
@@ -72,7 +73,7 @@ def setup(
         shortest ones. We then iterate over dataset batches (inner) and tasks
         (outer).
     * We write result files for every batch, to
-        `<task-path>/eval/eval_metrics_<suffix>.csv`, see
+        `<task-path>/<eval_dir>/eval_metrics_<suffix>.csv`, see
         :class:`EvaluationWithTasksHelper`.
     * If `checkpoint_dir` is given, we run evaluation for a single task, loaded
         from there. Results are written as stated above, where `<task-path>
@@ -106,6 +107,9 @@ def setup(
         use_sample_metric: If `True` and the dataset has an associated
             sample-based metric, this is used. Otherwise, we use the same loss
             as used for training
+        eval_dir: Subdirectory to write evaluation and generated samples files
+            to. Defaults to "eval". Set this if you like to run evals under
+            different conditions for the same checkpoints.
         sample_metric_max_generated_tokens: Maximum number of tokens sampled
             for sample-based metric evaluation
         sample_metric_temperature: Parameter for token generation. Overrides
@@ -123,6 +127,9 @@ def setup(
             `use_sample_metric == True`.
         skip_eval: If `True`, we skip evaluations and only write files related
             to `num_store_generated_samples`.
+        use_old_metrics: If given, this overrides `data.use_old_metrics`. If
+            `True` for Helmet datasets, we use the old setup with
+            "sub_exact_match" for the QA datasets (deprecated).
 
     """
     entry = {
@@ -154,8 +161,10 @@ def setup(
         attention_forward_temp_size_gb,
         lora_dropout,
         use_sample_metric,
+        eval_dir,
         sample_metric_max_generated_tokens,
         sample_metric_kwargs,
         num_store_generated_samples,
         skip_eval,
+        use_old_metrics,
     )

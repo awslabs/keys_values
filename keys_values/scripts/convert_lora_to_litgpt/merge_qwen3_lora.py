@@ -36,20 +36,34 @@ def main() -> None:
     base_model = args.base_model
     adapter_dir = Path(args.adapter_dir).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
+    cache_dir = str(Path("checkpoints/" + base_model).expanduser().resolve())
 
     dtype = torch.bfloat16
 
-    print(f"Loading tokenizer from {base_model}")
-    tokenizer = AutoTokenizer.from_pretrained(
-        base_model,
-        use_fast=True,
-    )
+    tokenizer = None
+    tokenizer_from_cache = True
+    for i, _base_model in enumerate([cache_dir, base_model]):
+        try:
+            print(f"Loading tokenizer from {_base_model}")
+            tokenizer = AutoTokenizer.from_pretrained(_base_model)
+            tokenizer_from_cache = i == 0
+            break
+        except Exception as ex:
+            if i == 1:
+                raise ex
 
-    print(f"Loading base model from {base_model}")
-    model = AutoModelForCausalLM.from_pretrained(
-        base_model,
-        torch_dtype=dtype,
-    )
+    model = None
+    for i, _base_model in enumerate([cache_dir, base_model]):
+        try:
+            print(f"Loading base model from {_base_model}")
+            model = AutoModelForCausalLM.from_pretrained(
+                _base_model,
+                torch_dtype=dtype,
+            )
+            break
+        except Exception as ex:
+            if i == 1:
+                raise ex
 
     print(f"Loading LoRA adapter from {adapter_dir}")
     model = PeftModel.from_pretrained(
@@ -68,7 +82,11 @@ def main() -> None:
         output_dir,
         safe_serialization=True,
     )
-    tokenizer.save_pretrained(output_dir)
+    # If tokenizer was obtained from cache, we don't store it with the
+    # checkpoint, because it can be loaded from the base model checkpoint.
+    if not tokenizer_from_cache:
+        print("Saving tokenizer along with checkpoint")
+        tokenizer.save_pretrained(output_dir)
 
     print("Done")
 

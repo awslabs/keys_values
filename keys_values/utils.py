@@ -15,6 +15,7 @@ import csv
 from enum import unique, Enum
 from filelock import FileLock, Timeout
 from pathlib import Path
+import math
 import sys
 import time
 from typing import List, Dict, Any, Optional, Iterable, Union, Iterator, Tuple, Set
@@ -216,17 +217,29 @@ class VerbosityLevels(str, Enum):
     ALL = "all"
 
 
-def wrap_tqdm_if_verbose(
+def wrap_tqdm_conditional(
     iterator: Iterable,
-    verbose: VerbosityLevels,
+    do_wrap: bool,
     total: Optional[int] = None,
 ) -> Union[Iterable, Iterator]:
-    if verbose is VerbosityLevels.NONE:
+    if not do_wrap:
         return iterator
     if isinstance(iterator, Iterator):
         return tqdm(iterator, total=total)
     else:
         return tqdm(iterator)
+
+
+def wrap_tqdm_if_verbose(
+    iterator: Iterable,
+    verbose: VerbosityLevels,
+    total: Optional[int] = None,
+) -> Union[Iterable, Iterator]:
+    return wrap_tqdm_conditional(
+        iterator=iterator,
+        do_wrap=verbose is not VerbosityLevels.NONE,
+        total=total,
+    )
 
 
 _PRECISION_TO_DTYPE = {
@@ -324,6 +337,10 @@ def bitsize_of(x: torch.Tensor) -> int:
     return x.numel() * x.element_size() * 8
 
 
+def bytes_for_shape(shape: Tuple[int, ...], dtype: torch.dtype) -> int:
+    return math.prod(shape) * bytes_for_torch_dtype(dtype)
+
+
 def shape_to_tuple(x: torch.Tensor) -> Tuple[int, ...]:
     return tuple(int(d) for d in x.shape)
 
@@ -374,3 +391,22 @@ def encode(
     if hasattr(result, "ids"):
         result = result.ids
     return result
+
+
+def print_list_int(lst: List[int], min_collapse: int = 5) -> str:
+    if not lst:
+        return ""
+    parts = []
+    val = lst[0]
+    start = 0
+    for end, x in enumerate(lst[1:] + [lst[-1] + 1], start=1):
+        if x != val:
+            sz = end - start
+            if sz >= min_collapse:
+                parts.append(f"{val} * {sz}")
+            else:
+                parts.append(", ".join([str(val)] * sz))
+            val = x
+            start = end
+    assert start == len(lst)  # Sanity check
+    return ", ".join(parts)

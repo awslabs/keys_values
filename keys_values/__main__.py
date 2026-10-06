@@ -17,17 +17,18 @@ import os, sys
 import warnings
 
 import torch
-from jsonargparse import auto_cli, set_config_read_mode, set_docstring_parse_options
+from jsonargparse import auto_cli, set_parsing_settings
 
 from litgpt.__main__ import PARSER_DATA as PARSER_DATA_LITGPT
 
-from keys_values.finetune.longcontext_eval import setup as eval_long_fn
-from keys_values.finetune.longcontext_eval_ext import setup as eval_long_ext_fn
+from keys_values.evaluation.longcontext_eval import setup as eval_long_fn
+from keys_values.evaluation.longcontext_eval_ext import setup as eval_long_ext_fn
 from keys_values.finetune.longcontext_full import setup as finetune_long_full_fn
 from keys_values.finetune.longcontext_lora import setup as finetune_long_lora_fn
 from keys_values.finetune.longcon_offload_full import setup as finetune_offload_full_fn
 from keys_values.finetune.longcon_offload_lora import setup as finetune_offload_lora_fn
 from keys_values.parser_config import parser_commands
+from keys_values.scripts.recompute_val_losses import setup as recomp_val_losses_fn
 
 ENV_VAR_LOG_DIR = "KEYSVALS_LOG_DIR"
 
@@ -42,6 +43,7 @@ PARSER_DATA = {
     "finetune_long_lora": finetune_long_lora_fn,
     "finetune_offload_full": finetune_offload_full_fn,
     "finetune_offload_lora": finetune_offload_lora_fn,
+    "recomp_val_losses": recomp_val_losses_fn,
 }
 
 
@@ -123,8 +125,10 @@ def _setup_rank_logs(base_directory: str | None = None):
 def main() -> None:
     _check_commands()
     _setup_rank_logs()
-    set_docstring_parse_options(attribute_docstrings=True)
-    set_config_read_mode(urls_enabled=True)
+    set_parsing_settings(
+        docstring_parse_attribute_docstrings=True,
+        config_read_mode_urls_enabled=True,
+    )
 
     # PyTorch bug that raises a false-positive warning
     # More info: https://github.com/Lightning-AI/litgpt/issues/1561

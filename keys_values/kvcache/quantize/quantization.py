@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from typing import Optional, Tuple, Dict, Callable
 
 import torch
@@ -33,7 +34,10 @@ class Quantizer(torch.nn.Module):
     `(batch_size, n_query_groups, cache_length)`. If
     `blocks_over_heads == True`, we use quantization blocks of
     size `n_query_groups * head_size`, and quantization states have shape
-    `(batch_size, cache_length)`.
+    `(batch_size, cache_length)`. A quantizer whose backend restricts the
+    block size may zero-pad the values of one (batch, slot) position and split
+    them into several blocks instead (see :class:`BitsAndBytesQuantizer`), but
+    a block never contains values from different positions.
 
     Deallocating and allocating buffers:
 
@@ -59,7 +63,6 @@ class Quantizer(torch.nn.Module):
     methods called by buffers have an additional `block_idx` argument, which is
     required if the callback is used. The callback is called at the start of
     each method, passing `new_block_idx=block_idx`.
-
     """
 
     def __init__(
@@ -268,7 +271,8 @@ class Quantizer(torch.nn.Module):
 
     def create_quantizer_state(
         self,
-        device: torch.device,
+        device: Optional[torch.device] = None,
+        storage_path: Optional[str] = None,
         cache_length: Optional[int] = None,
         **kwargs,
     ) -> "QuantizerState":
@@ -293,7 +297,7 @@ class Quantizer(torch.nn.Module):
 class QuantizerState:
     """
     Allows to copy the content of a :class:`Quantizer` to a different
-    device.
+    device, or to disk.
 
     """
 
@@ -301,6 +305,7 @@ class QuantizerState:
         self,
         quantizer: Quantizer,
         device: Optional[torch.device] = None,
+        storage_path: Optional[str] = None,
         cache_length: Optional[int] = None,
     ):
         """
@@ -310,12 +315,20 @@ class QuantizerState:
         Args:
             quantizer: Associated quantizer to copy from and to restore
             device: Device for buffers here. Defaults to CPU
+            storage_path: If this is given, the :class:`Quantizer` is stored
+                to a file of this path, and loaded from there. `device` is
+                ignored then.
 
         """
         if device is None:
             device = torch.device("cpu")
+        if storage_path is not None and os.path.exists(storage_path):
+            raise ValueError(
+                f"Storage path {storage_path} for QuantizerState already exists"
+            )
         self.quantizer = quantizer
         self.device = device
+        self.storage_path = storage_path
         if cache_length is None:
             cache_length = self.quantizer.shape[2]
         self.cache_length = cache_length
@@ -343,6 +356,16 @@ class QuantizerState:
 
         """
         raise NotImplementedError
+
+    def _write_to_file(self, objs: Dict[str, torch.Tensor]):
+        if self.storage_path is None:
+            raise ValueError("Storage path is not set")
+        torch.save(objs, self.storage_path)
+
+    def _read_from_file(self) -> Dict[str, torch.Tensor]:
+        if self.storage_path is None:
+            raise ValueError("Storage path is not set")
+        return torch.load(self.storage_path)
 
     def _check_range(
         self,
