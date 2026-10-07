@@ -76,8 +76,9 @@ def nan_to_minus_infty(
     head: torch.Tensor,
     q_idx: torch.Tensor,
     kv_idx: torch.Tensor,
+    nan_arg: float,
 ) -> torch.Tensor:
-    return torch.nan_to_num(score, nan=torch.finfo(score.dtype).min)
+    return torch.nan_to_num(score, nan=nan_arg)
 
 
 def logit_softcapping_and_nan_to_minus_infty(
@@ -189,7 +190,11 @@ class FlexAttnManager:
                 if attention_logit_softcapping is not None:
                     score_mod = partial(logit_softcapping_and_nan_to_minus_infty, thresh=thresh)
                 else:
-                    score_mod = nan_to_minus_infty
+                    # score_mod = nan_to_minus_infty
+                    score_mod = partial(
+                        nan_to_minus_infty,
+                        nan_arg=torch.finfo(dtype).min,
+                    )
             attn_fn = torch.compile(
                 partial(
                     flex_attention,
