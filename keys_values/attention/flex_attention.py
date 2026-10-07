@@ -76,7 +76,6 @@ def nan_to_minus_infty(
     head: torch.Tensor,
     q_idx: torch.Tensor,
     kv_idx: torch.Tensor,
-    thresh: float,
 ) -> torch.Tensor:
     return torch.nan_to_num(score, nan=torch.finfo(score.dtype).min)
 
