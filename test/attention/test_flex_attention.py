@@ -452,10 +452,10 @@ def test_comparison_with_attn_weights(
         (12, 4, 512, torch.bfloat16, None, 0.005),  # fails: 0.00424 / 46.5 (5)
         (24, 8, 512, torch.float16, None, 0.0004),  # fails: 0.000312 / 36.75 (2)
         (9, 3, 512, torch.bfloat16, None, 0.005),  # fails: 0.00424 / 46.5 (3)
-    #    (12, 4, 512, torch.float16, 5, 0.0004),
-    #    (24, 8, 512, torch.bfloat16, 2, 0.004),
-    #    (12, 4, 512, torch.float16, 5, 0.0004),
-    #    (9, 3, 512, torch.float16, 2, 0.0004),
+        (12, 4, 512, torch.float16, 5, 0.0004),
+        (24, 8, 512, torch.bfloat16, 2, 0.005),
+        (12, 4, 512, torch.float16, 5, 0.0004),
+        (9, 3, 512, torch.float16, 2, 0.0004),
     ],
 )
 def test_padding_prefill(

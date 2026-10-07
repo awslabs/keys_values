@@ -88,9 +88,10 @@ def logit_softcapping_and_nan_to_minus_infty(
     kv_idx: torch.Tensor,
     thresh: float,
 ) -> torch.Tensor:
-    return torch.tanh(
-        torch.nan_to_num(score, nan=torch.finfo(score.dtype).min) / thresh
-    ) * thresh
+    return torch.nan_to_num(
+        torch.tanh(score / thresh) * thresh,
+        nan=torch.finfo(score.dtype).min,
+    )
 
 
 def quantize_attention_logit_softcapping(
