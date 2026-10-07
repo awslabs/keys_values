@@ -625,7 +625,7 @@ def test_padding_chunk(
         if diff > 0:
             for name in ("key", "value"):
                 data[-1][name] = torch.cat(
-                    (data[-2][name][:, :, (-diff):, :], data[-1][name]),
+                    (data[-2][name], data[-1][name]),
                     dim=2,
                 )
                 assert data[-1][name].shape[2] == kvl
