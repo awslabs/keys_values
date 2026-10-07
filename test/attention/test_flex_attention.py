@@ -440,3 +440,92 @@ def test_comparison_with_attn_weights(
         if i > 0:
             print(prefix + "no_flexatt vs flexatt: attn_weights")
             torch.testing.assert_close(attn_wgts[0], attn_wgts[1], **test_kwargs)
+
+
+@_RunIf(min_cuda_gpus=1)
+@pytest.mark.parametrize(
+    "n_head, n_query_groups, kv_len, dtype, attention_logit_softcapping, atol",
+    [
+        (4, 2, 512, torch.float16, None, 0.0002),
+        (4, 4, 256, torch.bfloat16, None, 0.0008),
+        (8, 4, 128, torch.float16, None, 0.0002),
+        (12, 4, 512, torch.bfloat16, None, 0.002),
+        (24, 8, 512, torch.float16, None, 0.0002),
+        (9, 3, 512, torch.bfloat16, None, 0.002),
+        (12, 4, 512, torch.float16, 5, 0.0004),
+        (24, 8, 512, torch.bfloat16, 2, 0.004),
+        (12, 4, 512, torch.float16, 5, 0.0004),
+        (9, 3, 512, torch.float16, 2, 0.0004),
+    ],
+)
+def test_padding_prefill(
+    n_head,
+    n_query_groups,
+    kv_len,
+    dtype,
+    attention_logit_softcapping,
+    atol,
+):
+    seed = 31415927
+    torch.manual_seed(seed)
+
+    batch_size = 2
+    head_size = 32
+    device = torch.device("cuda", 0)
+    pad_lengths = [1, 3, 16, 53]
+
+    config = Config.from_name(
+        "gemma-2-27b",
+        block_size=3 * kv_len,
+        sliding_window_size=None,
+        attention_logit_softcapping=attention_logit_softcapping,
+        n_layer=1,
+        n_query_groups=n_query_groups,
+        n_head=n_head,
+        n_embd=n_head * head_size,
+        intermediate_size=n_head * head_size * 3,
+        rotary_percentage=1.0,
+    )
+    params = KVCacheParams.from_config(
+        config=config,
+        max_batch_size=batch_size,
+        cache_length=kv_len,
+        dtype=dtype,
+    )
+    # Sample data for comparison
+    datas = [
+        random_args_cache_forward(
+            params,
+            num=kv_len - pad_length,
+            vocab_size=config.vocab_size,
+            device=device,
+        )
+        for pad_length in pad_lengths
+    ]
+
+    # For a number of lengths < `kv_len`, we compare FlexAttn with KV
+    # padding to not using FlexAttn
+    flexatt_args = FlexAttentionArgs(kv_lens=[kv_len])
+    names = ["no_flexatt", "flexatt"]
+    mhas = [
+        MultiHeadSelfAttention(config),
+        MultiHeadSelfAttention(config, flexatt_args=flexatt_args),
+    ]
+    attn_outputs = [[] for _ in range(len(pad_lengths))]
+    for mha, name in zip(mhas, names):
+        print(f"MHA: {name}")
+        for i, (pad_length, data) in enumerate(zip(pad_lengths, datas)):
+            print(f"pad_length: {pad_length}")
+            outputs, _ = mha(
+                query=data["query"],
+                k_and_v=DefaultKeysAndValues(data["key"], data["value"]),
+                block_idx=0,
+                input_pos=0,
+            )
+            attn_outputs[i].append(outputs)
+    # Comparison
+    test_kwargs = dict(atol=atol, rtol=1)
+    for outputs, pad_length in zip(attn_outputs, pad_lengths):
+        prefix = f"pad_length {pad_length}: "
+        print(prefix + "no_flexatt vs flexatt")
+        torch.testing.assert_close(outputs[0], outputs[1], **test_kwargs)

@@ -528,7 +528,7 @@ class FlexAttnForChunkManager(FlexAttnManager):
             q_len = self.transform_kv_len(q_len)
             if q_len < kv_len:
                 raise ValueError(
-                    f"q_len={q_len}, kv_len={kv_len}: Must have q_len >= kv_len"
+                    f"reverse = True, q_len={q_len}, kv_len={kv_len}: Must have q_len >= kv_len"
                 )
             mask_mod = partial(
                 causal_mask_for_chunk_reversed,
