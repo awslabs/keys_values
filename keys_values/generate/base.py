@@ -393,9 +393,9 @@ def _batched_generate_impl(
                     seq_pos = int(seq_pos > 0 and int_token == seq[0])
                 stop_progresses[batch_idx][seq_idx] = seq_pos
 
-        token_out = torch.where(
-            stopped_mask, ignore_ind_vec, tokens.flatten()
-        ).view(-1, 1)
+        token_out = torch.where(stopped_mask, ignore_ind_vec, tokens.flatten()).view(
+            -1, 1
+        )
         if return_logprobs:
             # `stopped_mask` reflects rows that stopped in a *previous* step,
             # so `~stopped_mask` marks the tokens generated at this step (the

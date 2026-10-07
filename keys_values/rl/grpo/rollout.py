@@ -60,7 +60,9 @@ def sampled_token_logprobs(
         [max(float(sa.get("temperature", 1.0)), 1e-5) for sa in sample_args_list],
         device=logits.device,
         dtype=logits.dtype,
-    ).unsqueeze(-1)  # (batch_size, 1)
+    ).unsqueeze(
+        -1
+    )  # (batch_size, 1)
     logp_all = torch.log_softmax(logits / temps, dim=-1)
     return logp_all.gather(-1, tokens.view(-1, 1)).squeeze(-1)
 

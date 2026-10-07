@@ -40,17 +40,23 @@ from __future__ import annotations
 import argparse
 import statistics
 import time
-from typing import Callable, List
+from typing import Callable
 
 import lightning as L
 import torch
-from litgpt.prompts import PromptStyle, has_prompt_style, load_prompt_style
 from litgpt.tokenizer import Tokenizer
-from litgpt.utils import auto_download_checkpoint, check_valid_checkpoint_dir, load_checkpoint
+from litgpt.utils import (
+    auto_download_checkpoint,
+    check_valid_checkpoint_dir,
+    load_checkpoint,
+)
 
 from keys_values.config import Config
 from keys_values.data.constants import LIT_MODEL_FNAME
-from keys_values.kvcache.factory import KVCacheFactory, deallocate_kv_cache_buffers_of_model
+from keys_values.kvcache.factory import (
+    KVCacheFactory,
+    deallocate_kv_cache_buffers_of_model,
+)
 from keys_values.model import GPT
 from keys_values.rl.grpo.loop import grpo_step
 
@@ -91,8 +97,19 @@ def build_model(checkpoint_dir, fabric, dtype) -> GPT:
     return gpt_model
 
 
-def run_one(gpt_model, snapshot, fabric, dtype, prompt_ids, reward_fn,
-            cache_name, cache_length, args, eos_id, pad_id):
+def run_one(
+    gpt_model,
+    snapshot,
+    fabric,
+    dtype,
+    prompt_ids,
+    reward_fn,
+    cache_name,
+    cache_length,
+    args,
+    eos_id,
+    pad_id,
+):
     """Assign the given cache and run warmup + measured GRPO steps. Returns
     a metrics dict, or {'oom': True} if the config runs out of memory."""
     is_cuda = fabric.device.type == "cuda"
@@ -103,8 +120,11 @@ def run_one(gpt_model, snapshot, fabric, dtype, prompt_ids, reward_fn,
         batch_size = args.prompts_per_step * args.group_size
         gpt_model.assign_kv_caches(
             KVCacheFactory.create(
-                gpt_model=gpt_model, name=cache_name, max_batch_size=batch_size,
-                cache_length=cache_length, dtype=dtype,
+                gpt_model=gpt_model,
+                name=cache_name,
+                max_batch_size=batch_size,
+                cache_length=cache_length,
+                dtype=dtype,
             )
         )
         opt = torch.optim.SGD(gpt_model.parameters(), lr=1e-7)
@@ -112,10 +132,18 @@ def run_one(gpt_model, snapshot, fabric, dtype, prompt_ids, reward_fn,
 
         def step():
             return grpo_step(
-                gpt_model=gpt_model, prompt_ids=pb, reward_fn=reward_fn, optimizer=opt,
-                group_size=args.group_size, max_new_tokens=args.max_new_tokens,
-                chunk_size=args.chunk_size, layers_per_cell=args.layers_per_cell,
-                temperature=1.0, eos_token_id=eos_id, pad_token_id=pad_id, profile=True,
+                gpt_model=gpt_model,
+                prompt_ids=pb,
+                reward_fn=reward_fn,
+                optimizer=opt,
+                group_size=args.group_size,
+                max_new_tokens=args.max_new_tokens,
+                chunk_size=args.chunk_size,
+                layers_per_cell=args.layers_per_cell,
+                temperature=1.0,
+                eos_token_id=eos_id,
+                pad_token_id=pad_id,
+                profile=True,
             )
 
         for _ in range(args.warmup):
@@ -135,8 +163,11 @@ def run_one(gpt_model, snapshot, fabric, dtype, prompt_ids, reward_fn,
         peak = torch.cuda.max_memory_allocated(fabric.device) / 1e9 if is_cuda else 0.0
         agg = lambda k: statistics.mean(m[k] for m in metrics)  # noqa: E731
         return {
-            "gen": agg("gen_time_ms"), "grad": agg("grad_time_ms"),
-            "total": wall / args.iters, "peak_gb": peak, "oom": False,
+            "gen": agg("gen_time_ms"),
+            "grad": agg("grad_time_ms"),
+            "total": wall / args.iters,
+            "peak_gb": peak,
+            "oom": False,
         }
     except RuntimeError as e:
         if "out of memory" in str(e).lower():
@@ -173,10 +204,15 @@ def main() -> None:
     lengths = [int(x) for x in args.context_lengths.split(",")]
     caches = [c.strip() for c in args.caches.split(",")]
     dtype = torch.float32 if args.device == "cpu" else torch.bfloat16
-    fabric = L.Fabric(devices=1, accelerator=args.device,
-                      precision="32-true" if args.device == "cpu" else "bf16-true")
+    fabric = L.Fabric(
+        devices=1,
+        accelerator=args.device,
+        precision="32-true" if args.device == "cpu" else "bf16-true",
+    )
 
-    checkpoint_dir = auto_download_checkpoint(model_name=args.model, access_token=args.access_token)
+    checkpoint_dir = auto_download_checkpoint(
+        model_name=args.model, access_token=args.access_token
+    )
     tokenizer = Tokenizer(checkpoint_dir)
     pad_id = tokenizer.processor.token_to_id("<|endoftext|>")
     if pad_id is None:
@@ -195,10 +231,13 @@ def main() -> None:
     )
     reward_fn = make_reward_len(tokenizer, args.max_new_tokens, pad_id)
 
-    print(f"\nmodel={args.model}  device={args.device}  batch={args.prompts_per_step*args.group_size}"
-          f"  h2o_cache={args.h2o_cache_length}  chunk={args.chunk_size}\n")
+    print(
+        f"\nmodel={args.model}  device={args.device}  batch={args.prompts_per_step*args.group_size}"
+        f"  h2o_cache={args.h2o_cache_length}  chunk={args.chunk_size}\n"
+    )
     hdr = f"{'ctx':>7} {'cache':>22} | {'gen':>8} {'grad':>8} {'total':>9} (ms) | {'peakGB':>7}"
-    print(hdr); print("-" * len(hdr))
+    print(hdr)
+    print("-" * len(hdr))
 
     for L_ctx in lengths:
         prompt_ids = build_long_prompt(tokenizer, L_ctx, fabric.device).unsqueeze(0)
@@ -209,18 +248,37 @@ def main() -> None:
                 cache_length = min(args.h2o_cache_length, L_ctx + args.max_new_tokens)
             else:
                 cache_length = L_ctx + args.max_new_tokens
-            r = run_one(gpt_model, snapshot, fabric, dtype, prompt_ids, reward_fn,
-                        cache_name, cache_length, args, eos_id, pad_id)
+            r = run_one(
+                gpt_model,
+                snapshot,
+                fabric,
+                dtype,
+                prompt_ids,
+                reward_fn,
+                cache_name,
+                cache_length,
+                args,
+                eos_id,
+                pad_id,
+            )
             rows[cache_name] = r
             tag = f"{cache_name}(cl={cache_length})"
             if r.get("oom"):
-                print(f"{L_ctx:>7} {tag:>22} | {'OOM':>8} {'OOM':>8} {'OOM':>9}      | {'OOM':>7}")
+                print(
+                    f"{L_ctx:>7} {tag:>22} | {'OOM':>8} {'OOM':>8} {'OOM':>9}      | {'OOM':>7}"
+                )
             else:
-                print(f"{L_ctx:>7} {tag:>22} | {r['gen']:>8.0f} {r['grad']:>8.0f} "
-                      f"{r['total']:>9.0f}      | {r['peak_gb']:>7.2f}")
+                print(
+                    f"{L_ctx:>7} {tag:>22} | {r['gen']:>8.0f} {r['grad']:>8.0f} "
+                    f"{r['total']:>9.0f}      | {r['peak_gb']:>7.2f}"
+                )
         d, h = rows.get("dense-default"), rows.get("h2o-torch-quantized8")
         if d and h and not d.get("oom") and not h.get("oom"):
-            mem = 100.0 * (d["peak_gb"] - h["peak_gb"]) / d["peak_gb"] if d["peak_gb"] else 0.0
+            mem = (
+                100.0 * (d["peak_gb"] - h["peak_gb"]) / d["peak_gb"]
+                if d["peak_gb"]
+                else 0.0
+            )
             spd = 100.0 * (d["total"] - h["total"]) / d["total"] if d["total"] else 0.0
             print(f"{'':>7} {'Δ H2O vs dense':>22} | mem {mem:+.0f}%  time {spd:+.0f}%")
     print("\nDone.")

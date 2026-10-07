@@ -27,7 +27,6 @@ won't fix it; if it holds, the dense-vs-H2O GRPO comparison is worth running.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -35,7 +34,11 @@ import lightning as L
 import torch
 from litgpt.prompts import PromptStyle, has_prompt_style, load_prompt_style
 from litgpt.tokenizer import Tokenizer
-from litgpt.utils import auto_download_checkpoint, check_valid_checkpoint_dir, load_checkpoint
+from litgpt.utils import (
+    auto_download_checkpoint,
+    check_valid_checkpoint_dir,
+    load_checkpoint,
+)
 
 sys.path.insert(0, str(Path(__file__).parent))
 from longqa_task import build_dataset, left_pad  # noqa: E402
@@ -43,7 +46,10 @@ from longqa_task import build_dataset, left_pad  # noqa: E402
 from keys_values.config import Config
 from keys_values.data.constants import LIT_MODEL_FNAME
 from keys_values.evaluation.metrics import sub_exact_match
-from keys_values.kvcache.factory import KVCacheFactory, deallocate_kv_cache_buffers_of_model
+from keys_values.kvcache.factory import (
+    KVCacheFactory,
+    deallocate_kv_cache_buffers_of_model,
+)
 from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
 from keys_values.rl.grpo.rollout import generate_completions
@@ -51,22 +57,41 @@ from keys_values.utils import VerbosityLevels
 
 
 @torch.no_grad()
-def eval_accuracy(gpt_model, examples, cache_name, cache_length, dtype,
-                  max_new, chunk_size, batch_size, tokenizer, pad_id, eos_id, fabric):
+def eval_accuracy(
+    gpt_model,
+    examples,
+    cache_name,
+    cache_length,
+    dtype,
+    max_new,
+    chunk_size,
+    batch_size,
+    tokenizer,
+    pad_id,
+    eos_id,
+    fabric,
+):
     deallocate_kv_cache_buffers_of_model(gpt_model)
     # H2O-family: protect the recently read tail (see issue #140 discussion).
-    ckw = ({"grace_period": cache_length // 16}
-           if cache_name.startswith(("h2o", "qh2o")) and "orig" not in cache_name else {})
+    ckw = (
+        {"grace_period": cache_length // 16}
+        if cache_name.startswith(("h2o", "qh2o")) and "orig" not in cache_name
+        else {}
+    )
     gpt_model.assign_kv_caches(
         KVCacheFactory.create(
-            gpt_model=gpt_model, name=cache_name, max_batch_size=batch_size,
-            cache_length=cache_length, dtype=dtype, cache_kwargs=ckw,
+            gpt_model=gpt_model,
+            name=cache_name,
+            max_batch_size=batch_size,
+            cache_length=cache_length,
+            dtype=dtype,
+            cache_kwargs=ckw,
         )
     )
     gpt_model.eval()
     correct, total, gen_lens = 0, 0, []
     for i in range(0, len(examples), batch_size):
-        batch = examples[i:i + batch_size]
+        batch = examples[i : i + batch_size]
         prompt_ids = left_pad([e.prompt_ids for e in batch], pad_id).to(fabric.device)
         gpt_model.max_seq_length = int(prompt_ids.shape[1]) + max_new
         # A processing chunk cannot exceed the cache's forward capacity. Grace
@@ -74,16 +99,30 @@ def eval_accuracy(gpt_model, examples, cache_name, cache_length, dtype,
         # cache_length - grace; max_forward_length() needs a prefilled cache).
         caps = [
             kvc.cache_length
-            - (getattr(kvc, "grace_period", 0) or getattr(kvc, "init_grace_tokens", 0) or 0)
+            - (
+                getattr(kvc, "grace_period", 0)
+                or getattr(kvc, "init_grace_tokens", 0)
+                or 0
+            )
             for kvc in gpt_model.get_kv_caches()
             if kvc is not None
         ]
         eff_chunk = max(min([chunk_size] + caps), 1)
-        inf = LongContextInferenceModel(gpt_model, head_model=None,
-                                        chunk_size=eff_chunk, verbose=VerbosityLevels.NONE)
+        inf = LongContextInferenceModel(
+            gpt_model,
+            head_model=None,
+            chunk_size=eff_chunk,
+            verbose=VerbosityLevels.NONE,
+        )
         completions = generate_completions(
-            model=inf, prompt_ids=prompt_ids, max_new_tokens=max_new,
-            temperature=1.0, top_k=1, top_p=1.0, eos_token_id=eos_id, pad_token_id=pad_id,
+            model=inf,
+            prompt_ids=prompt_ids,
+            max_new_tokens=max_new,
+            temperature=1.0,
+            top_k=1,
+            top_p=1.0,
+            eos_token_id=eos_id,
+            pad_token_id=pad_id,
         )
         for row, ex in zip(completions, batch):
             toks = row[row != pad_id]
@@ -118,14 +157,20 @@ def main() -> None:
     task_modes = [t.strip() for t in args.tasks.split(",")]
     sparse_caches = [c.strip() for c in args.caches.split(",")]
     dtype = torch.float32 if args.device == "cpu" else torch.bfloat16
-    fabric = L.Fabric(devices=1, accelerator=args.device,
-                      precision="32-true" if args.device == "cpu" else "bf16-true")
+    fabric = L.Fabric(
+        devices=1,
+        accelerator=args.device,
+        precision="32-true" if args.device == "cpu" else "bf16-true",
+    )
 
-    checkpoint_dir = auto_download_checkpoint(model_name=args.model, access_token=args.access_token)
+    checkpoint_dir = auto_download_checkpoint(
+        model_name=args.model, access_token=args.access_token
+    )
     tokenizer = Tokenizer(checkpoint_dir)
     config = Config.from_file(checkpoint_dir / "model_config.yaml")
     prompt_style = (
-        load_prompt_style(checkpoint_dir) if has_prompt_style(checkpoint_dir)
+        load_prompt_style(checkpoint_dir)
+        if has_prompt_style(checkpoint_dir)
         else PromptStyle.from_config(config)
     )
     pad_id = tokenizer.processor.token_to_id("<|endoftext|>")
@@ -139,31 +184,56 @@ def main() -> None:
     load_checkpoint(fabric, gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
     gpt_model.to(fabric.device)
 
-    print(f"\nmodel={args.model}  device={args.device}  target_ctx={args.context_len}  "
-          f"n={args.n_examples}  budgets={budgets}")
+    print(
+        f"\nmodel={args.model}  device={args.device}  target_ctx={args.context_len}  "
+        f"n={args.n_examples}  budgets={budgets}"
+    )
     print("accuracy = substring exact-match of the retrieved value\n")
 
     def run(examples, cache, cl):
-        return eval_accuracy(gpt_model, examples, cache, cl, dtype, args.max_new_tokens,
-                             args.chunk_size, args.batch_size, tokenizer, pad_id, eos_id, fabric)
+        return eval_accuracy(
+            gpt_model,
+            examples,
+            cache,
+            cl,
+            dtype,
+            args.max_new_tokens,
+            args.chunk_size,
+            args.batch_size,
+            tokenizer,
+            pad_id,
+            eos_id,
+            fabric,
+        )
 
     for mode in task_modes:
-        examples = build_dataset(tokenizer, prompt_style.apply, args.context_len,
-                                 args.n_examples, seed=args.seed, device=fabric.device,
-                                 mode=mode)
+        examples = build_dataset(
+            tokenizer,
+            prompt_style.apply,
+            args.context_len,
+            args.n_examples,
+            seed=args.seed,
+            device=fabric.device,
+            mode=mode,
+        )
         lens = [int(e.prompt_ids.size(0)) for e in examples]
         max_len = max(lens)
         dense_cl = max_len + args.max_new_tokens + 8
         print(f"### task={mode}  (actual_ctx max={max_len})")
         hdr = f"{'policy':>28} {'budget':>7} | {'accuracy':>8}"
-        print(hdr); print("-" * len(hdr))
+        print(hdr)
+        print("-" * len(hdr))
         dense_acc = run(examples, "dense-default", dense_cl)
-        print(f"{'dense (full attention)':>28} {'full':>7} | {dense_acc:>8.3f}  <- baseline")
+        print(
+            f"{'dense (full attention)':>28} {'full':>7} | {dense_acc:>8.3f}  <- baseline"
+        )
         for cache in sparse_caches:
             for b in budgets:
                 acc = run(examples, cache, b)
                 short = cache.split("-torch")[0].split("-default")[0]
-                print(f"{short:>28} {b:>7} | {acc:>8.3f}  ({acc - dense_acc:+.3f} vs dense)")
+                print(
+                    f"{short:>28} {b:>7} | {acc:>8.3f}  ({acc - dense_acc:+.3f} vs dense)"
+                )
         print()
     print("Done.")
 

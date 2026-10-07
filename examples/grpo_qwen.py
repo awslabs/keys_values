@@ -120,7 +120,7 @@ def left_pad(sequences: List[torch.Tensor], pad_id: int) -> torch.Tensor:
     max_len = max(int(s.size(0)) for s in sequences)
     out = torch.full((len(sequences), max_len), pad_id, dtype=torch.long)
     for i, seq in enumerate(sequences):
-        out[i, max_len - seq.size(0):] = seq
+        out[i, max_len - seq.size(0) :] = seq
     return out
 
 
@@ -270,9 +270,9 @@ def main() -> None:
             max_new_tokens=args.max_new_tokens,
             chunk_size=args.chunk_size,
             temperature=1.0,
-            eos_token_id=int(tokenizer.eos_id)
-            if tokenizer.eos_id is not None
-            else None,
+            eos_token_id=(
+                int(tokenizer.eos_id) if tokenizer.eos_id is not None else None
+            ),
             pad_token_id=pad_id,
             rescore_old_logps=args.rescore_old_logps,
             profile=args.profile,

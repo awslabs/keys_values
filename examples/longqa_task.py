@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List
 
 import torch
 from litgpt.tokenizer import Tokenizer
@@ -104,8 +104,10 @@ def build_example(
     question_key = _rand_key(rng)
     target = _rand_value(rng)
     needle_line = f"The value for key '{question_key}' is {target}."
-    question = (f"Question: what is the value for key '{question_key}'? "
-                "Reply with only the value.")
+    question = (
+        f"Question: what is the value for key '{question_key}'? "
+        "Reply with only the value."
+    )
 
     if mode == "recency":
         needle_frac = 1.0
@@ -125,8 +127,9 @@ def build_example(
     body = head + records + tail
 
     ids = tokenizer.encode(apply_prompt_style(body), device=device)
-    return QAExample(prompt_ids=ids, target=target, key=question_key,
-                     needle_frac=needle_frac)
+    return QAExample(
+        prompt_ids=ids, target=target, key=question_key, needle_frac=needle_frac
+    )
 
 
 def build_dataset(
@@ -140,8 +143,9 @@ def build_dataset(
 ) -> List[QAExample]:
     rng = random.Random(seed)
     return [
-        build_example(tokenizer, apply_prompt_style, context_len, rng,
-                      device=device, mode=mode)
+        build_example(
+            tokenizer, apply_prompt_style, context_len, rng, device=device, mode=mode
+        )
         for _ in range(n_examples)
     ]
 
@@ -150,5 +154,5 @@ def left_pad(sequences: List[torch.Tensor], pad_id: int) -> torch.Tensor:
     max_len = max(int(s.size(0)) for s in sequences)
     out = torch.full((len(sequences), max_len), pad_id, dtype=torch.long)
     for i, seq in enumerate(sequences):
-        out[i, max_len - seq.size(0):] = seq
+        out[i, max_len - seq.size(0) :] = seq
     return out

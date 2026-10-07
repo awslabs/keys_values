@@ -46,13 +46,17 @@ import lightning as L
 import torch
 from litgpt.prompts import PromptStyle, has_prompt_style, load_prompt_style
 from litgpt.tokenizer import Tokenizer
-from litgpt.utils import auto_download_checkpoint, check_valid_checkpoint_dir, load_checkpoint
+from litgpt.utils import (
+    auto_download_checkpoint,
+    check_valid_checkpoint_dir,
+    load_checkpoint,
+)
 
 from keys_values.config import Config
 from keys_values.data.constants import LIT_MODEL_FNAME
 from keys_values.data.load_helmet_dev_eval import load_helmet_dev_eval
 from keys_values.evaluation.metrics import rouge_n_f1, sub_exact_match
-from keys_values.kvcache.factory import KVCacheFactory, deallocate_kv_cache_buffers_of_model
+from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
 from keys_values.rl.grpo.loop import grpo_step
@@ -92,8 +96,17 @@ def decode_row(tokenizer, row: torch.Tensor, pad_id: int) -> str:
 
 
 @torch.no_grad()
-def evaluate(gpt_model, records, tokenizer, prompt_style, pad_id, eos_id,
-             max_new, chunk_size, fabric) -> float:
+def evaluate(
+    gpt_model,
+    records,
+    tokenizer,
+    prompt_style,
+    pad_id,
+    eos_id,
+    max_new,
+    chunk_size,
+    fabric,
+) -> float:
     """Greedy generation + sub_exact_match over held-out records."""
     gpt_model.eval()
     correct = 0
@@ -101,20 +114,35 @@ def evaluate(gpt_model, records, tokenizer, prompt_style, pad_id, eos_id,
         ids = tokenizer.encode(prompt_style.apply(rec["input"]), device=fabric.device)
         prompt = ids.unsqueeze(0)
         gpt_model.max_seq_length = int(prompt.shape[1]) + max_new
-        caps = [kvc.cache_length - (getattr(kvc, "grace_period", 0)
-                or getattr(kvc, "init_grace_tokens", 0) or 0)
-                for kvc in gpt_model.get_kv_caches() if kvc is not None]
+        caps = [
+            kvc.cache_length
+            - (
+                getattr(kvc, "grace_period", 0)
+                or getattr(kvc, "init_grace_tokens", 0)
+                or 0
+            )
+            for kvc in gpt_model.get_kv_caches()
+            if kvc is not None
+        ]
         inf = LongContextInferenceModel(
-            gpt_model, head_model=None,
+            gpt_model,
+            head_model=None,
             chunk_size=max(min([chunk_size] + caps), 1),
-            verbose=VerbosityLevels.NONE)
+            verbose=VerbosityLevels.NONE,
+        )
         comp = generate_completions(
-            model=inf, prompt_ids=prompt, max_new_tokens=max_new,
-            temperature=1.0, top_k=1, top_p=1.0,
-            eos_token_id=eos_id, pad_token_id=pad_id,
+            model=inf,
+            prompt_ids=prompt,
+            max_new_tokens=max_new,
+            temperature=1.0,
+            top_k=1,
+            top_p=1.0,
+            eos_token_id=eos_id,
+            pad_token_id=pad_id,
             # The cache buffers are shared with the training rollout/backward,
             # which updates them in place: inference_mode would taint them.
-            no_inference_mode=True)
+            no_inference_mode=True,
+        )
         text = decode_row(tokenizer, comp[0], pad_id)
         correct += int(any(sub_exact_match(text, t) for t in targets_of(rec)))
     return correct / max(len(records), 1)
@@ -128,15 +156,27 @@ def main() -> None:
     p.add_argument("--max-length", default="8k")
     p.add_argument("--dataset-parent-dir", default=None)
     p.add_argument("--kv-cache-name", default="h2o-torch-quantized8")
-    p.add_argument("--cache-length", type=int, default=4096,
-                   help="KV cache budget; 0 = size to the longest prompt (dense).")
+    p.add_argument(
+        "--cache-length",
+        type=int,
+        default=4096,
+        help="KV cache budget; 0 = size to the longest prompt (dense).",
+    )
     p.add_argument("--group-size", type=int, default=8)
-    p.add_argument("--prompts-per-update", type=int, default=1,
-                   help="Gradient accumulation: prompts (each with group-size "
-                        "rollouts) folded into one optimizer update.")
-    p.add_argument("--reward", choices=["em", "f1", "em_f1"], default="em_f1",
-                   help="'em_f1' = EM + 0.2*token-F1 (EM-anchored, dense signal); "
-                        "'f1' = max(EM, F1); 'em' = binary exact match.")
+    p.add_argument(
+        "--prompts-per-update",
+        type=int,
+        default=1,
+        help="Gradient accumulation: prompts (each with group-size "
+        "rollouts) folded into one optimizer update.",
+    )
+    p.add_argument(
+        "--reward",
+        choices=["em", "f1", "em_f1"],
+        default="em_f1",
+        help="'em_f1' = EM + 0.2*token-F1 (EM-anchored, dense signal); "
+        "'f1' = max(EM, F1); 'em' = binary exact match.",
+    )
     p.add_argument("--max-new-tokens", type=int, default=32)
     p.add_argument("--steps", type=int, default=150)
     p.add_argument("--lr", type=float, default=1e-6)
@@ -145,11 +185,19 @@ def main() -> None:
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--eval-every", type=int, default=50)
     p.add_argument("--n-eval", type=int, default=24)
-    p.add_argument("--n-train", type=int, default=512, help="Training prompts drawn from the dev split.")
+    p.add_argument(
+        "--n-train",
+        type=int,
+        default=512,
+        help="Training prompts drawn from the dev split.",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-dir", default="runs/grpo_helmet")
-    p.add_argument("--disable-flashinfer", action="store_true",
-                   help="Force eager SDPA (needed for GQA group sizes FlashInfer rejects, e.g. Qwen-0.5B).")
+    p.add_argument(
+        "--disable-flashinfer",
+        action="store_true",
+        help="Force eager SDPA (needed for GQA group sizes FlashInfer rejects, e.g. Qwen-0.5B).",
+    )
     p.add_argument("--access-token", default=None)
     args = p.parse_args()
 
@@ -157,19 +205,29 @@ def main() -> None:
         # Example-script escape hatch: FlashInfer's decode kernel rejects some
         # GQA group sizes (e.g. 7 for Qwen2.5-0.5B); fall back to eager SDPA.
         from keys_values.attention import flashinfer_ops
+
         flashinfer_ops._available = False
 
-    out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = out_dir / "metrics.jsonl"
     dtype = torch.float32 if args.device == "cpu" else torch.bfloat16
-    fabric = L.Fabric(devices=1, accelerator=args.device,
-                      precision="32-true" if args.device == "cpu" else "bf16-true")
+    fabric = L.Fabric(
+        devices=1,
+        accelerator=args.device,
+        precision="32-true" if args.device == "cpu" else "bf16-true",
+    )
 
-    checkpoint_dir = auto_download_checkpoint(model_name=args.model, access_token=args.access_token)
+    checkpoint_dir = auto_download_checkpoint(
+        model_name=args.model, access_token=args.access_token
+    )
     tokenizer = Tokenizer(checkpoint_dir)
     config = Config.from_file(checkpoint_dir / "model_config.yaml")
-    prompt_style = (load_prompt_style(checkpoint_dir) if has_prompt_style(checkpoint_dir)
-                    else PromptStyle.from_config(config))
+    prompt_style = (
+        load_prompt_style(checkpoint_dir)
+        if has_prompt_style(checkpoint_dir)
+        else PromptStyle.from_config(config)
+    )
     pad_id = tokenizer.processor.token_to_id("<|endoftext|>")
     if pad_id is None:
         pad_id = int(tokenizer.eos_id) if tokenizer.eos_id is not None else 0
@@ -183,17 +241,21 @@ def main() -> None:
     rng = random.Random(args.seed)
     train_records = list(dev_data)[: args.n_train]
     eval_records = list(eval_data)[: args.n_eval]
-    print(f"HELMET {args.dataset_key}/{args.max_length}: {len(train_records)} train, "
-          f"{len(eval_records)} eval records")
+    print(
+        f"HELMET {args.dataset_key}/{args.max_length}: {len(train_records)} train, "
+        f"{len(eval_records)} eval records"
+    )
 
     # Tokenized prompt lengths (needed for cache sizing).
     enc = [tokenizer.encode(prompt_style.apply(r["input"])) for r in train_records]
     lens = [int(e.size(0)) for e in enc]
     max_len = max(lens)
     cache_length = args.cache_length or (max_len + args.max_new_tokens + 8)
-    print(f"prompt tokens: min={min(lens)} avg={sum(lens)//len(lens)} max={max_len}; "
-          f"cache={args.kv_cache_name}@{cache_length} "
-          f"({'EVICTING' if cache_length < max_len else 'no eviction'})")
+    print(
+        f"prompt tokens: min={min(lens)} avg={sum(lens)//len(lens)} max={max_len}; "
+        f"cache={args.kv_cache_name}@{cache_length} "
+        f"({'EVICTING' if cache_length < max_len else 'no eviction'})"
+    )
 
     # Model + caches + optimizer.
     check_valid_checkpoint_dir(checkpoint_dir)
@@ -205,23 +267,46 @@ def main() -> None:
     # for H2O-family caches, protect the recently read tail -- question-at-the-
     # end prompts under tight budgets lose it otherwise (issue #140 discussion).
     cache_kwargs = {}
-    if args.kv_cache_name.startswith(("h2o", "qh2o")) and "orig" not in args.kv_cache_name:
+    if (
+        args.kv_cache_name.startswith(("h2o", "qh2o"))
+        and "orig" not in args.kv_cache_name
+    ):
         cache_kwargs["grace_period"] = cache_length // 16
-    gpt_model.assign_kv_caches(KVCacheFactory.create(
-        gpt_model=gpt_model, name=args.kv_cache_name, max_batch_size=args.group_size,
-        cache_length=cache_length, dtype=dtype, cache_kwargs=cache_kwargs))
+    gpt_model.assign_kv_caches(
+        KVCacheFactory.create(
+            gpt_model=gpt_model,
+            name=args.kv_cache_name,
+            max_batch_size=args.group_size,
+            cache_length=cache_length,
+            dtype=dtype,
+            cache_kwargs=cache_kwargs,
+        )
+    )
     optimizer = torch.optim.AdamW(gpt_model.parameters(), lr=args.lr)
 
-    def reward_fn(prompt_ids: torch.Tensor, completion_ids: torch.Tensor) -> torch.Tensor:
+    def reward_fn(
+        prompt_ids: torch.Tensor, completion_ids: torch.Tensor
+    ) -> torch.Tensor:
         rec = reward_fn.current_record
         tgts = targets_of(rec)
-        vals = [shaped_reward(decode_row(tokenizer, row, pad_id), tgts, args.reward)
-                for row in completion_ids]
+        vals = [
+            shaped_reward(decode_row(tokenizer, row, pad_id), tgts, args.reward)
+            for row in completion_ids
+        ]
         return torch.tensor(vals, dtype=torch.float32)
 
     # Initial eval.
-    acc0 = evaluate(gpt_model, eval_records, tokenizer, prompt_style, pad_id, eos_id,
-                    args.max_new_tokens, args.chunk_size, fabric)
+    acc0 = evaluate(
+        gpt_model,
+        eval_records,
+        tokenizer,
+        prompt_style,
+        pad_id,
+        eos_id,
+        args.max_new_tokens,
+        args.chunk_size,
+        fabric,
+    )
     print(f"step 0 | eval_acc {acc0:.3f}")
     with metrics_path.open("a") as f:
         f.write(json.dumps({"step": 0, "eval_acc": acc0}) + "\n")
@@ -237,14 +322,24 @@ def main() -> None:
             i = rng.randrange(len(train_records))
             reward_fn.current_record = train_records[i]
             prompt_ids = enc[i].unsqueeze(0).to(fabric.device)
-            micro.append(grpo_step(
-                gpt_model=gpt_model, prompt_ids=prompt_ids, reward_fn=reward_fn,
-                optimizer=optimizer, group_size=args.group_size,
-                max_new_tokens=args.max_new_tokens, chunk_size=args.chunk_size,
-                layers_per_cell=args.layers_per_cell, temperature=args.temperature,
-                eos_token_id=eos_id, pad_token_id=pad_id,
-                zero_grad=(k == 0), optimizer_step=(k == K - 1),
-                grad_scale=1.0 / K))
+            micro.append(
+                grpo_step(
+                    gpt_model=gpt_model,
+                    prompt_ids=prompt_ids,
+                    reward_fn=reward_fn,
+                    optimizer=optimizer,
+                    group_size=args.group_size,
+                    max_new_tokens=args.max_new_tokens,
+                    chunk_size=args.chunk_size,
+                    layers_per_cell=args.layers_per_cell,
+                    temperature=args.temperature,
+                    eos_token_id=eos_id,
+                    pad_token_id=pad_id,
+                    zero_grad=(k == 0),
+                    optimizer_step=(k == K - 1),
+                    grad_scale=1.0 / K,
+                )
+            )
             micro[-1]["prompt_len"] = int(prompt_ids.shape[1])
         m = {
             "step": step,
@@ -260,14 +355,24 @@ def main() -> None:
         n_signal += m["has_signal"]
         m["signal_rate"] = round(n_signal / step, 3)
         if step % args.eval_every == 0 or step == args.steps:
-            m["eval_acc"] = evaluate(gpt_model, eval_records, tokenizer, prompt_style,
-                                     pad_id, eos_id, args.max_new_tokens,
-                                     args.chunk_size, fabric)
+            m["eval_acc"] = evaluate(
+                gpt_model,
+                eval_records,
+                tokenizer,
+                prompt_style,
+                pad_id,
+                eos_id,
+                args.max_new_tokens,
+                args.chunk_size,
+                fabric,
+            )
         with metrics_path.open("a") as f:
             f.write(json.dumps(m) + "\n")
-        line = (f"step {step:4d} | reward {m['mean_reward']:.3f} "
-                f"| adv_std {m['advantage_std']:.3f} | signal {m['signal_rate']:.2f} "
-                f"| ctx {m['prompt_len']} | {m['step_time_s']}s")
+        line = (
+            f"step {step:4d} | reward {m['mean_reward']:.3f} "
+            f"| adv_std {m['advantage_std']:.3f} | signal {m['signal_rate']:.2f} "
+            f"| ctx {m['prompt_len']} | {m['step_time_s']}s"
+        )
         if "eval_acc" in m:
             line += f" | eval_acc {m['eval_acc']:.3f}"
         print(line, flush=True)

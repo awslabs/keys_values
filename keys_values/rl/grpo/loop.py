@@ -298,7 +298,9 @@ def grpo_step(
         # Quantify the rollout (decode) vs. training-forward log-prob skew over
         # real completion tokens -- a measure of the train/inference gap.
         with torch.no_grad():
-            skew = ((gen_logps - old_logps).abs() * mask).sum() / mask.sum().clamp_min(1.0)
+            skew = ((gen_logps - old_logps).abs() * mask).sum() / mask.sum().clamp_min(
+                1.0
+            )
         metrics["logp_skew_decode_vs_forward"] = float(skew.item())
     if profile:
         metrics.update(times)
