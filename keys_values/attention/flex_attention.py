@@ -77,13 +77,7 @@ def nan_to_minus_infty(
     q_idx: torch.Tensor,
     kv_idx: torch.Tensor,
 ) -> torch.Tensor:
-    # return torch.nan_to_num(score, nan=torch.finfo(score.dtype).min)
-    # DEBUG:
-    return torch.where(
-        score == 0,
-        torch.finfo(score.dtype).min,
-        score,
-    )
+    return torch.nan_to_num(score, nan=torch.finfo(score.dtype).min)
 
 
 def logit_softcapping_and_nan_to_minus_infty(
@@ -707,8 +701,7 @@ def pad_arguments(
         # Use NaN padding for `key`, zero padding for `value`.
         # We replace NaN -> -infty later when masking. Padding on left, not
         # right, for same reason as for query above.
-        # key = nanpad_4d_tensor_on_left(key, pad_kv)
-        key = zeropad_4d_tensor_on_left(key, pad_kv)  # DEBUG!
+        key = nanpad_4d_tensor_on_left(key, pad_kv)
         value = zeropad_4d_tensor_on_left(value, pad_kv)
     return query, key, value, pad_q
 
