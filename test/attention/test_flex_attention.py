@@ -14,7 +14,6 @@
 # limitations under the License.
 from itertools import product
 import math
-import time
 
 import pytest
 import torch
@@ -30,7 +29,7 @@ from keys_values.attention.flex_attention import (
 from keys_values.config import Config
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.test_utils import random_args_cache_forward
-from keys_values.utils import index_to_3d
+from keys_values.utils import index_to_3d, randint_torch
 
 
 @_RunIf(min_cuda_gpus=1)
@@ -576,7 +575,7 @@ def test_padding_chunk(
     device = torch.device("cuda", 0)
     qstep = max(q_len // 5, 1)
     q_kv_lens = [
-        (kv_len - 5, kv_len - 5),
+        (kv_len - 5, kv_len - 5),  # prefill
         (1, kv_len - 4),
         (2, kv_len - 2),
         (1, kv_len - 1),
@@ -637,6 +636,11 @@ def test_padding_chunk(
                 )
             )
         else:
+            for name in ("key", "value"):
+                pos = randint_torch(0, kvl - ql)
+                new_part = data[-1][name]
+                data[-1][name] = data[-2][name]
+                data[-1][name][:, :, pos:(pos + ql), :] = new_part
             if tp_ndim == 1:
                 _ind = sample_token_positions(
                     batch_size=1,
