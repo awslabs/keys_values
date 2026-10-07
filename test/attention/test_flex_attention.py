@@ -509,7 +509,11 @@ def test_padding_prefill(
     names = ["no_flexatt", "flexatt"]
     mhas = [
         MultiHeadSelfAttention(config),
-        MultiHeadSelfAttention(config, flexatt_args=flexatt_args),
+        MultiHeadSelfAttention(
+            config,
+            flexatt_args=flexatt_args,
+            use_flexattn_for_prefill=True,
+        ),
     ]
     attn_outputs = [[] for _ in range(len(pad_lengths))]
     for mha, name in zip(mhas, names):
