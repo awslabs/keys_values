@@ -14,7 +14,9 @@
 # limitations under the License.
 from itertools import product
 import math
+import time
 
+import numpy as np
 import pytest
 import torch
 
@@ -446,12 +448,12 @@ def test_comparison_with_attn_weights(
 @pytest.mark.parametrize(
     "n_head, n_query_groups, kv_len, dtype, attention_logit_softcapping, atol",
     [
-        (4, 2, 512, torch.float16, None, 0.0004),  # ok
-        (4, 4, 256, torch.bfloat16, None, 0.005),  # fails: 0.00238 / 183.0 (8)
-        (8, 4, 128, torch.float16, None, 0.0002),  # ok
-        (12, 4, 512, torch.bfloat16, None, 0.005),  # fails: 0.00424 / 46.5 (5)
-        (24, 8, 512, torch.float16, None, 0.0004),  # fails: 0.000312 / 36.75 (2)
-        (9, 3, 512, torch.bfloat16, None, 0.005),  # fails: 0.00424 / 46.5 (3)
+        (4, 2, 512, torch.float16, None, 0.0004),
+        (4, 4, 256, torch.bfloat16, None, 0.005),
+        (8, 4, 128, torch.float16, None, 0.0002),
+        (12, 4, 512, torch.bfloat16, None, 0.005),
+        (24, 8, 512, torch.float16, None, 0.0004),
+        (9, 3, 512, torch.bfloat16, None, 0.005),
         (12, 4, 512, torch.float16, 5, 0.0004),
         (24, 8, 512, torch.bfloat16, 2, 0.005),
         (12, 4, 512, torch.float16, 5, 0.0004),
@@ -533,3 +535,94 @@ def test_padding_prefill(
         prefix = f"pad_length {pad_length}: "
         print(prefix + "no_flexatt vs flexatt")
         torch.testing.assert_close(outputs[0], outputs[1], **test_kwargs)
+
+
+@_RunIf(min_cuda_gpus=1)
+@pytest.mark.parametrize(
+    "n_head, n_query_groups, kv_len, dtype, attention_logit_softcapping, atol",
+    [
+    #    (4, 2, 512, torch.float16, None, 0.0004),
+    #    (4, 4, 256, torch.bfloat16, None, 0.005),
+    #    (8, 4, 128, torch.float16, None, 0.0002),
+        (12, 4, 512, torch.bfloat16, None, 0.005),
+    #    (24, 8, 512, torch.float16, None, 0.0004),
+    #    (9, 3, 512, torch.bfloat16, None, 0.005),
+    #    (12, 4, 512, torch.float16, 5, 0.0004),
+    #    (24, 8, 512, torch.bfloat16, 2, 0.005),
+    #    (12, 4, 512, torch.float16, 5, 0.0004),
+    #    (9, 3, 512, torch.float16, 2, 0.0004),
+    ],
+)
+def test_profile_padding_prefill(
+    n_head,
+    n_query_groups,
+    kv_len,
+    dtype,
+    attention_logit_softcapping,
+    atol,
+):
+    seed = 31415927
+    torch.manual_seed(seed)
+
+    batch_size = 2
+    head_size = 32
+    device = torch.device("cuda", 0)
+    pad_lengths = [1, 3, 8, 16, 32, 53]
+
+    config = Config.from_name(
+        "gemma-2-27b",
+        block_size=3 * kv_len,
+        sliding_window_size=None,
+        attention_logit_softcapping=attention_logit_softcapping,
+        n_layer=1,
+        n_query_groups=n_query_groups,
+        n_head=n_head,
+        n_embd=n_head * head_size,
+        intermediate_size=n_head * head_size * 3,
+        rotary_percentage=1.0,
+    )
+    params = KVCacheParams.from_config(
+        config=config,
+        max_batch_size=batch_size,
+        cache_length=kv_len,
+        dtype=dtype,
+    )
+    # Sample data for comparison
+    datas = [
+        random_args_cache_forward(
+            params,
+            num=kv_len - pad_length,
+            vocab_size=config.vocab_size,
+            device=device,
+        )
+        for pad_length in pad_lengths
+    ]
+
+    times = []
+    for repeat in range(10):
+        print(f"\n*** Repeat {repeat}")
+        flexatt_args = FlexAttentionArgs(kv_lens=[kv_len])
+        names = ["flexatt"]
+        mhas = [
+            MultiHeadSelfAttention(
+                config,
+                flexatt_args=flexatt_args,
+                use_flexattn_for_prefill=True,
+            ),
+        ]
+        attn_outputs = [[] for _ in range(len(pad_lengths))]
+        timer = time.perf_counter()
+        for mha, name in zip(mhas, names):
+            print(f"MHA: {name}")
+            for i, (pad_length, data) in enumerate(zip(pad_lengths, datas)):
+                print(f"pad_length: {pad_length}")
+                outputs, _ = mha(
+                    query=data["query"],
+                    k_and_v=DefaultKeysAndValues(data["key"], data["value"]),
+                    block_idx=0,
+                    input_pos=0,
+                )
+                attn_outputs[i].append(outputs)
+        times.append(time.perf_counter() - timer)
+    print(f"Time: {np.mean(times)} (+- {np.std(times)})")
+    assert 1 == 0

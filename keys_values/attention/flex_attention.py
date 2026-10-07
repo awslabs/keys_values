@@ -703,7 +703,6 @@ def pad_arguments(
         # right, for same reason as for query above.
         key = nanpad_4d_tensor_on_left(key, pad_kv)
         value = zeropad_4d_tensor_on_left(value, pad_kv)
-        print(f"KV padding: pad_kv={pad_kv}")  # DEBUG
     return query, key, value, pad_q
 
 
