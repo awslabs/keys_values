@@ -629,7 +629,13 @@ def test_padding_chunk(
                     dim=2,
                 )
                 assert data[-1][name].shape[2] == kvl
-            token_positions.append(None)
+            token_positions.append(
+                index_to_3d(
+                    torch.arange(kvl, device=device),
+                    batch_size,
+                    n_query_groups,
+                )
+            )
         else:
             if tp_ndim == 1:
                 _ind = sample_token_positions(
