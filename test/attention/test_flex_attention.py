@@ -629,27 +629,29 @@ def test_padding_chunk(
                     dim=2,
                 )
                 assert data[-1][name].shape[2] == kvl
-        if tp_ndim == 1:
-            _ind = sample_token_positions(
-                batch_size=1,
-                n_query_groups=1,
-                q_len=ql,
-                kv_len=kvl,
-                input_pos=input_pos,
-                device=device,
-            ).flatten()
-            token_positions.append(index_to_3d(_ind, batch_size, n_query_groups))
+            token_positions.append(None)
         else:
-            token_positions.append(
-                sample_token_positions(
-                    batch_size,
-                    n_query_groups,
-                    ql,
-                    kvl,
+            if tp_ndim == 1:
+                _ind = sample_token_positions(
+                    batch_size=1,
+                    n_query_groups=1,
+                    q_len=ql,
+                    kv_len=kvl,
                     input_pos=input_pos,
                     device=device,
+                ).flatten()
+                token_positions.append(index_to_3d(_ind, batch_size, n_query_groups))
+            else:
+                token_positions.append(
+                    sample_token_positions(
+                        batch_size,
+                        n_query_groups,
+                        ql,
+                        kvl,
+                        input_pos=input_pos,
+                        device=device,
+                    )
                 )
-            )
         input_pos += ql
 
     # For a number of lengths < `kv_len`, we compare FlexAttn with KV
