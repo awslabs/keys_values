@@ -16,7 +16,6 @@ from itertools import product
 import math
 import time
 
-import numpy as np
 import pytest
 import torch
 
@@ -599,7 +598,8 @@ def test_profile_padding_prefill(
     ]
 
     times = []
-    for repeat in range(10):
+    num_repeats = 10
+    for repeat in range(num_repeats):
         print(f"\n*** Repeat {repeat}")
         flexatt_args = FlexAttentionArgs(kv_lens=[kv_len])
         names = ["flexatt"]
@@ -624,5 +624,5 @@ def test_profile_padding_prefill(
                 )
                 attn_outputs[i].append(outputs)
         times.append(time.perf_counter() - timer)
-    print(f"Time: {np.mean(times)} (+- {np.std(times)})")
+    print(f"Time for {num_repeats} repeats: {sum(times):.2f} secs")
     assert 1 == 0
