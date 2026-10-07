@@ -131,9 +131,7 @@ def test_async_cpu_transfer_gradients(cache_name, cachecp_qname):
         num_output_tokens = randint_torch(4, int(seq_length * 0.75))
         all_input_ids.append(token_ids[:, :-1])
         all_targets.append(token_ids[:, (-num_output_tokens):])
-    head_model = HeadModelFactory.create(
-        name=CrossEntropyOnLogits.NAME, config=config
-    )
+    head_model = HeadModelFactory.create(name=CrossEntropyOnLogits.NAME, config=config)
 
     # Main loop: First with async_cpu_transfer=False (single stream), then
     # with async_cpu_transfer=True (multiple streams)
@@ -212,9 +210,7 @@ def test_async_cpu_transfer_requires_pinned_memory():
             for i in range(config.n_layer)
         ]
     )
-    head_model = HeadModelFactory.create(
-        name=CrossEntropyOnLogits.NAME, config=config
-    )
+    head_model = HeadModelFactory.create(name=CrossEntropyOnLogits.NAME, config=config)
     for layercp_pin, cachecp_pin in [(False, True), (True, False), (False, False)]:
         with pytest.raises(ValueError, match="async_cpu_transfer"):
             LongContextGradientModel(
