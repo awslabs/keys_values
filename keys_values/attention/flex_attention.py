@@ -680,9 +680,9 @@ def pad_arguments(
     flexatt_args: FlexAttentionArgs,
     query: torch.Tensor,
     key: torch.Tensor,
-    value: torch.Tensor,
+    value: Optional[torch.Tensor],
     is_prefill: bool,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], int, int]:
     kv_len = key.shape[2]
     q_len = query.shape[2]
     pad_kv = flexatt_args.transform_kv_len(kv_len) - kv_len
@@ -702,8 +702,9 @@ def pad_arguments(
         # We replace NaN -> -infty later when masking. Padding on left, not
         # right, for same reason as for query above.
         key = nanpad_4d_tensor_on_left(key, pad_kv)
-        value = zeropad_4d_tensor_on_left(value, pad_kv)
-    return query, key, value, pad_q
+        if value is not None:
+            value = zeropad_4d_tensor_on_left(value, pad_kv)
+    return query, key, value, pad_q, pad_kv
 
 
 def scaled_dot_product_attention_flexatt(
@@ -817,7 +818,7 @@ def scaled_dot_product_attention_flexatt(
     else:
         extend_kv = False
     # Padding due to kv_len, q_len transformations
-    query, key, value, pad_q = pad_arguments(
+    query, key, value, pad_q, _ = pad_arguments(
         flexatt_args,
         query,
         key,
@@ -1013,7 +1014,7 @@ def sdpa_flexatt_with_attn_weights(
     else:
         extend_kv = False
     # Padding due to kv_len, q_len transformations
-    query, key, value, pad_q = pad_arguments(
+    query_pd, key_pd, value_pd, pad_q, pad_kv = pad_arguments(
         flexatt_args,
         query,
         key,
@@ -1026,13 +1027,13 @@ def sdpa_flexatt_with_attn_weights(
         if not (0.999 < diff < 1.001):
             query = query * diff
     attn_output, aux = attn_fn(
-        query=query,
-        key=key,
-        value=value,
+        query=query_pd,
+        key=key_pd,
+        value=value_pd,
         scale=None,
         enable_gqa=enable_gqa,
     )
-    if q_len_tr > q_len:
+    if pad_q > 0:
         attn_output = attn_output[:, :, (-q_len):, :].clone()
 
     # (2) Second call: SDPA_rev(K, Q, V_tilde)
@@ -1046,11 +1047,18 @@ def sdpa_flexatt_with_attn_weights(
         reverse=True,
         **attn_kwargs,
     )
+    key_pd, query_pd, _, _ = pad_arguments(
+        flexatt_args,
+        key,
+        query,
+        value=None,
+        is_prefill=False,
+    )
     # Multiply by a factor `exp(mean_lse)` here, divide by the same below
     mean_lse = aux.lse.mean(dim=-1, keepdim=True)
     vtil_vec = torch.exp(-(aux.lse - mean_lse))
-    if q_len_tr > q_len:
-        vtil_vec[:, :, : (q_len_tr - q_len)] = 0.0
+    if pad_q > 0:
+        vtil_vec[:, :, : pad_q] = 0.0
     value_tilde = torch.cat(
         (
             vtil_vec.unsqueeze(-1),
@@ -1058,21 +1066,23 @@ def sdpa_flexatt_with_attn_weights(
                 (1, 1, 1, 1),
                 dtype=torch.float32,
                 device=query.device,
-            ).expand(batch_size, n_head, q_len_tr, MIN_HEAD_DIM - 1),
+            ).expand(*vtil_vec.shape, MIN_HEAD_DIM - 1),
         ),
         dim=-1,
     )
     # Cast for better accuracy
-    query = query.to(dtype=torch.float32)
-    key = key.to(dtype=torch.float32)
+    query_pd = query_pd.to(dtype=torch.float32)
+    key_pd = key_pd.to(dtype=torch.float32)
     output2, aux = attn_fn(
-        query=key,
-        key=query,
+        query=key_pd,
+        key=query_pd,
         value=value_tilde,
         scale=None,
         enable_gqa=False,
     )
     attn_weights = output2[:, :, :, 0] * torch.exp(aux.lse - mean_lse)
+    if pad_kv > 0:
+        attn_weights = attn_weights[:, :, (-kv_len):]
     if n_query_groups < n_head:
         # Undo `repeat_interleave`
         attn_weights = torch.mean(
