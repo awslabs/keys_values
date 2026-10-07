@@ -538,27 +538,35 @@ def test_padding_prefill(
 
 @_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
-    "n_head, n_query_groups, kv_len, dtype, attention_logit_softcapping, atol",
+    "n_head, n_query_groups, q_len, kv_len, dtype, attention_logit_softcapping, atol, tp_ndim",
     [
-    #    (4, 2, 512, torch.float16, None, 0.0004),
-    #    (4, 4, 256, torch.bfloat16, None, 0.005),
-    #    (8, 4, 128, torch.float16, None, 0.0002),
-        (12, 4, 512, torch.bfloat16, None, 0.005),
-    #    (24, 8, 512, torch.float16, None, 0.0004),
-    #    (9, 3, 512, torch.bfloat16, None, 0.005),
-    #    (12, 4, 512, torch.float16, 5, 0.0004),
-    #    (24, 8, 512, torch.bfloat16, 2, 0.005),
-    #    (12, 4, 512, torch.float16, 5, 0.0004),
-    #    (9, 3, 512, torch.float16, 2, 0.0004),
+        a + (b,)
+        for a, b in product(
+            [
+                (4, 2, 128, 512, torch.float16, None, 0.0004),
+                (4, 4, 8, 256, torch.bfloat16, None, 0.005),
+                (8, 4, 32, 128, torch.float16, None, 0.0002),
+                (12, 4, 16, 512, torch.bfloat16, None, 0.005),
+                (24, 8, 2, 512, torch.float16, None, 0.0004),
+                (9, 9, 128, 512, torch.bfloat16, None, 0.005),
+                (12, 4, 16, 512, torch.float16, 5, 0.0004),
+                (24, 8, 2, 512, torch.bfloat16, 2, 0.005),
+                (12, 4, 16, 512, torch.float16, 5, 0.0004),
+                (9, 9, 128, 512, torch.float16, 2, 0.0004),
+            ],
+            [1, 3],
+        )
     ],
 )
-def test_profile_padding_prefill(
+def test_padding_chunk(
     n_head,
     n_query_groups,
+    q_len,
     kv_len,
     dtype,
     attention_logit_softcapping,
     atol,
+    tp_ndim,
 ):
     seed = 31415927
     torch.manual_seed(seed)
@@ -566,7 +574,13 @@ def test_profile_padding_prefill(
     batch_size = 2
     head_size = 32
     device = torch.device("cuda", 0)
-    pad_lengths = [1, 3, 8, 16, 32, 53]
+    qstep = max(q_len // 5, 1)
+    q_kv_lens = [
+        (kv_len - 5, kv_len - 5),
+        (1, kv_len - 4),
+        (2, kv_len - 2),
+        (1, kv_len - 1),
+    ] + [(ql, kv_len) for ql in range(1, q_len + 1, qstep)]
 
     config = Config.from_name(
         "gemma-2-27b",
@@ -587,42 +601,90 @@ def test_profile_padding_prefill(
         dtype=dtype,
     )
     # Sample data for comparison
-    datas = [
+    data = [
         random_args_cache_forward(
             params,
-            num=kv_len - pad_length,
+            num=q_kv_lens[0][1],
             vocab_size=config.vocab_size,
             device=device,
         )
-        for pad_length in pad_lengths
     ]
-
-    times = []
-    num_repeats = 10
-    for repeat in range(num_repeats):
-        print(f"\n*** Repeat {repeat}")
-        flexatt_args = FlexAttentionArgs(kv_lens=[kv_len])
-        names = ["flexatt"]
-        mhas = [
-            MultiHeadSelfAttention(
-                config,
-                flexatt_args=flexatt_args,
-                use_flexattn_for_prefill=True,
-            ),
-        ]
-        attn_outputs = [[] for _ in range(len(pad_lengths))]
-        timer = time.perf_counter()
-        for mha, name in zip(mhas, names):
-            print(f"MHA: {name}")
-            for i, (pad_length, data) in enumerate(zip(pad_lengths, datas)):
-                print(f"pad_length: {pad_length}")
-                outputs, _ = mha(
-                    query=data["query"],
-                    k_and_v=DefaultKeysAndValues(data["key"], data["value"]),
-                    block_idx=0,
-                    input_pos=0,
+    token_positions = []
+    input_pos = kvl_prev = q_kv_lens[0][1]
+    for ql, kvl in q_kv_lens[1:]:
+        diff = kvl - kvl_prev
+        kvl_prev = kvl
+        data.append(
+            random_args_cache_forward(
+                params,
+                num=ql,
+                vocab_size=config.vocab_size,
+                device=device,
+            )
+        )
+        if diff > 0:
+            for name in ("key", "value"):
+                data[-1][name] = torch.cat(
+                    (data[-2][name][:, :, (-diff):, :], data[-1][name]),
+                    dim=2,
                 )
-                attn_outputs[i].append(outputs)
-        times.append(time.perf_counter() - timer)
-    print(f"Time for {num_repeats} repeats: {sum(times):.2f} secs")
-    assert 1 == 0
+                assert data[-1][name].shape[2] == kvl
+        if tp_ndim == 1:
+            _ind = sample_token_positions(
+                batch_size=1,
+                n_query_groups=1,
+                q_len=ql,
+                kv_len=kvl,
+                input_pos=input_pos,
+                device=device,
+            ).flatten()
+            token_positions.append(index_to_3d(_ind, batch_size, n_query_groups))
+        else:
+            token_positions.append(
+                sample_token_positions(
+                    batch_size,
+                    n_query_groups,
+                    ql,
+                    kvl,
+                    input_pos=input_pos,
+                    device=device,
+                )
+            )
+        input_pos += ql
+
+    # For a number of lengths < `kv_len`, we compare FlexAttn with KV
+    # padding to not using FlexAttn. We also use Q padding
+    flexatt_args = FlexAttentionArgs(
+        kv_lens=[kv_len],
+        q_lens=[1, q_len],
+    )
+    names = ["no_flexatt", "flexatt"]
+    mhas = [
+        MultiHeadSelfAttention(config),
+        MultiHeadSelfAttention(
+            config,
+            flexatt_args=flexatt_args,
+            use_flexattn_for_prefill=True,
+        ),
+    ]
+    attn_outputs = [[] for _ in range(len(q_kv_lens))]
+    for mha, name in zip(mhas, names):
+        print(f"MHA: {name}")
+        input_pos = 0
+        for i, (chunk, (ql, kvl)) in enumerate(zip(data, q_kv_lens)):
+            print(f"Chunk ql={ql}, kvl={kvl}")
+            tp = None if i == 0 else token_positions[i - 1]
+            outputs, _ = mha(
+                query=chunk["query"],
+                k_and_v=DefaultKeysAndValues(chunk["key"], chunk["value"]),
+                block_idx=0,
+                input_pos=input_pos,
+                token_positions=tp,
+            )
+            attn_outputs[i].append(outputs)
+            input_pos += ql
+    # Comparison
+    test_kwargs = dict(atol=atol, rtol=1)
+    for outputs, (ql, kvl) in zip(attn_outputs, q_kv_lens):
+        print(f"Chunk ql={ql}, kvl={kvl}: no_flexatt vs flexatt")
+        torch.testing.assert_close(outputs[0], outputs[1], **test_kwargs)
