@@ -446,16 +446,16 @@ def test_comparison_with_attn_weights(
 @pytest.mark.parametrize(
     "n_head, n_query_groups, kv_len, dtype, attention_logit_softcapping, atol",
     [
-        (4, 2, 512, torch.float16, None, 0.0002),
-    #    (4, 4, 256, torch.bfloat16, None, 0.0008),
-    #    (8, 4, 128, torch.float16, None, 0.0002),
-    #    (12, 4, 512, torch.bfloat16, None, 0.002),
-    #    (24, 8, 512, torch.float16, None, 0.0002),
-    #    (9, 3, 512, torch.bfloat16, None, 0.002),
-    #    (12, 4, 512, torch.float16, 5, 0.0004),
-    #    (24, 8, 512, torch.bfloat16, 2, 0.004),
-    #    (12, 4, 512, torch.float16, 5, 0.0004),
-    #    (9, 3, 512, torch.float16, 2, 0.0004),
+        (4, 2, 512, torch.float16, None, 0.0004),
+        (4, 4, 256, torch.bfloat16, None, 0.0008),
+        (8, 4, 128, torch.float16, None, 0.0002),
+        (12, 4, 512, torch.bfloat16, None, 0.002),
+        (24, 8, 512, torch.float16, None, 0.0002),
+        (9, 3, 512, torch.bfloat16, None, 0.002),
+        (12, 4, 512, torch.float16, 5, 0.0004),
+        (24, 8, 512, torch.bfloat16, 2, 0.004),
+        (12, 4, 512, torch.float16, 5, 0.0004),
+        (9, 3, 512, torch.float16, 2, 0.0004),
     ],
 )
 def test_padding_prefill(
