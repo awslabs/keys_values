@@ -707,6 +707,65 @@ def pad_arguments(
     return query, key, value, pad_q, pad_kv
 
 
+def _reorder_key_value(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    token_positions: Optional[torch.Tensor],
+    q_len: int,
+    input_pos: int,
+    sort_if_3d: bool,
+) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any], bool]:
+    do_reorder = token_positions is not None and q_len > 1
+    if do_reorder:
+        key, value, extra_info = reorder_key_value(
+            key,
+            value,
+            token_positions.detach(),
+            input_pos,
+            q_len,
+            sort_if_3d=sort_if_3d,
+        )
+    else:
+        extra_info = dict()
+    return key, value, extra_info, do_reorder
+
+
+def _sdpa_flexatt_helper(
+    flexatt_args: FlexAttentionArgs,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    scale_factor: Optional[float],
+    extend_kv: bool,
+    enable_gqa: bool,
+    n_head: int,
+    head_size: int,
+    is_prefill: bool,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, bool, bool, int, int]:
+    if enable_gqa and extend_kv:
+        key = repeat_interleave(key, n_head)
+        value = repeat_interleave(value, n_head)
+        enable_gqa = False
+        extend_kv = True
+    else:
+        extend_kv = False
+    # Padding due to kv_len, q_len transformations
+    query, key, value, pad_q, pad_kv = pad_arguments(
+        flexatt_args,
+        query,
+        key,
+        value,
+        is_prefill=is_prefill,
+    )
+    # Deal with non-standard `scale_factor`
+    if scale_factor is not None:
+        diff = scale_factor * math.sqrt(head_size)
+        if not (0.999 < diff < 1.001):
+            query = query * diff
+
+    return query, key, value, extend_kv, enable_gqa, pad_q, pad_kv
+
+
 def scaled_dot_product_attention_flexatt(
     flexatt_args: FlexAttentionArgs,
     query: torch.Tensor,
@@ -785,18 +844,16 @@ def scaled_dot_product_attention_flexatt(
             raise ValueError(
                 f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
             )
-    if token_positions is not None and q_len > 1:
-        key, value, extra_info = reorder_key_value(
-            key,
-            value,
-            token_positions.detach(),
-            input_pos,
-            q_len,
-            sort_if_3d,
-        )
-    else:
-        extra_info = dict()
     enable_gqa = n_query_groups < n_head
+    key, value, extra_info, _ = _reorder_key_value(
+        key=key,
+        value=value,
+        token_positions=token_positions,
+        input_pos=input_pos,
+        q_len=q_len,
+        sort_if_3d=sort_if_3d,
+    )
+
     requires_grad = query.requires_grad or key.requires_grad or value.requires_grad
     attn_fn, extend_kv = flexatt_args.attn_fn(
         q_len=q_len,
@@ -810,26 +867,19 @@ def scaled_dot_product_attention_flexatt(
         attention_logit_softcapping=attention_logit_softcapping,
         input_pos=input_pos,
     )
-    if enable_gqa and extend_kv:
-        key = repeat_interleave(key, n_head)
-        value = repeat_interleave(value, n_head)
-        enable_gqa = False
-        extend_kv = True
-    else:
-        extend_kv = False
-    # Padding due to kv_len, q_len transformations
-    query, key, value, pad_q, _ = pad_arguments(
-        flexatt_args,
-        query,
-        key,
-        value,
+    # KV extension, padding, deal with `scale_factor`
+    query, key, value, extend_kv, enable_gqa, pad_q, _ = _sdpa_flexatt_helper(
+        flexatt_args=flexatt_args,
+        query=query,
+        key=key,
+        value=value,
+        scale_factor=scale_factor,
+        extend_kv=extend_kv,
+        enable_gqa=enable_gqa,
+        n_head=n_head,
+        head_size=head_size,
         is_prefill=is_prefill,
     )
-    # Deal with non-standard `scale_factor`
-    if scale_factor is not None:
-        diff = scale_factor * math.sqrt(head_size)
-        if not (0.999 < diff < 1.001):
-            query = query * diff
     if annotation_callback is not None:
         annotation_callback(key, value, extra_info, extend_kv)
 
@@ -975,19 +1025,15 @@ def sdpa_flexatt_with_attn_weights(
         raise ValueError(
             f"token_positions.shape = {token_positions.shape}, key.shape = {key.shape}: Not compatible"
         )
-    do_reorder = token_positions is not None and q_len > 1
-    if do_reorder:
-        key, value, extra_info = reorder_key_value(
-            key,
-            value,
-            token_positions.detach(),
-            input_pos,
-            q_len,
-            sort_if_3d=True,
-        )
-    else:
-        extra_info = dict()
     enable_gqa = n_query_groups < n_head
+    key, value, extra_info, do_reorder = _reorder_key_value(
+        key=key,
+        value=value,
+        token_positions=token_positions,
+        input_pos=input_pos,
+        q_len=q_len,
+        sort_if_3d=True,
+    )
 
     # (1) First call: SDPA(Q, K, V)
     attn_kwargs = dict(
@@ -1006,26 +1052,20 @@ def sdpa_flexatt_with_attn_weights(
         reverse=False,
         **attn_kwargs,
     )
-    if enable_gqa and extend_kv:
-        key = repeat_interleave(key, n_head)
-        value = repeat_interleave(value, n_head)
-        enable_gqa = False
-        extend_kv = True
-    else:
-        extend_kv = False
-    # Padding due to kv_len, q_len transformations
-    query_pd, key_pd, value_pd, pad_q, pad_kv = pad_arguments(
-        flexatt_args,
-        query,
-        key,
-        value,
+    # KV extension, padding, deal with `scale_factor`
+    query_pd, key_pd, value_pd, extend_kv, enable_gqa, pad_q, pad_kv = _sdpa_flexatt_helper(
+        flexatt_args=flexatt_args,
+        query=query,
+        key=key,
+        value=value,
+        scale_factor=scale_factor,
+        extend_kv=extend_kv,
+        enable_gqa=enable_gqa,
+        n_head=n_head,
+        head_size=head_size,
         is_prefill=False,
     )
-    # Deal with non-standard `scale_factor`
-    if scale_factor is not None:
-        diff = scale_factor * math.sqrt(head_size)
-        if not (0.999 < diff < 1.001):
-            query = query * diff
+
     attn_output, aux = attn_fn(
         query=query_pd,
         key=key_pd,
