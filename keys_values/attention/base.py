@@ -402,7 +402,7 @@ class MultiHeadSelfAttention:
     ) -> int:
         """
         Decides on what SDPA implementation can be used, depending on
-        arguments.
+        arguments and what implementations are available.
 
         Args:
             return_attn_weights: Attention weights have to be returned?
@@ -417,7 +417,7 @@ class MultiHeadSelfAttention:
 
         """
         device_cuda = device.type == "cuda"
-        must_eager = return_attn_weights or self.use_eager_sdpa_always
+        must_eager = self.use_eager_sdpa_always
         sws_given = sliding_window_size is not None
         has_flashinfer = (
             can_do_flashinfer(
@@ -436,7 +436,7 @@ class MultiHeadSelfAttention:
             # Returning attention weights (return_attn_weights == True):
             # - First choice is FlashInfer
             # - Second choice is FlexAttn baseline
-            if not self.use_eager_sdpa_always:
+            if not must_eager:
                 if has_flashinfer:
                     return SDPA_IMPL_FLASHINFER
                 elif has_flexatt and self.flexatt_args.forward_return_lse:
