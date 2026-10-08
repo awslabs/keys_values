@@ -877,10 +877,17 @@ Relevant arguments are:
   final chunks in batches may all have different lengths. We limit the number of
   graphs to at most `sdpa.flex_num_q_lens + 1`, namely `sdpa.flex_num_q_lens`
   at equal spacing (the last one being `kv_cache.chunk_size`), and one for
-  length 1 (used to generate single tokens). We use zero-padding to the next
-  supported chunk length.
+  length 1 (used to generate single tokens). We use zero-padding of queries to
+  the next supported chunk length.
   If this is set to `None`, the limiting mechanism is not used. This may lead
   to `torch._dynamo.exc.FailOnRecompileLimitHit` errors.
+* `sdpa.flex_num_kv_lens`: Does the same as `sdpa.flex_num_q_lens`, but padding
+  keys and values instead of queries. This is particularly important when SDPA
+  is called with many different KV lenghts, for example when tokens are
+  generated during inference on prompts shorter than the cache length.
+  If this is set to `None`, the limiting mechanism is not used. This may lead
+  to `torch._dynamo.exc.FailOnRecompileLimitHit` errors. There is no downside
+  to using this mechanism, since graphs are compiled only when really needed.
 * `attention_forward_temp_size_gb`: Size limit (in GB) for temporary buffers
   in naive SDPA, used in `forward` pass.
 * `attention_backward_temp_size_gb`: Same size limit, but for SDPA computations
