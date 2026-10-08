@@ -965,7 +965,6 @@ def choose_kv_lens(
 MIN_HEAD_DIM = 16
 
 
-# TODO: kv_lens padding: What about second step??
 def sdpa_flexatt_with_attn_weights(
     flexatt_args: FlexAttentionArgs,
     query: torch.Tensor,
@@ -1088,7 +1087,7 @@ def sdpa_flexatt_with_attn_weights(
         reverse=True,
         **attn_kwargs,
     )
-    key_pd, query_pd, _, _ = pad_arguments(
+    key_pd, query_pd, _, _, _ = pad_arguments(
         flexatt_args,
         key,
         query,
