@@ -23,6 +23,7 @@ from lightning.fabric.plugins.environments.lightning import LightningEnvironment
 from lightning.fabric.strategies.launchers.subprocess_script import (
     _SubprocessScriptLauncher,
 )
+from lightning.fabric.utilities.distributed import _sync_ddp
 
 
 class Fabric:
@@ -85,7 +86,7 @@ class Fabric:
         if Fabric.is_initialized():
             if x.device != Fabric.device():
                 raise ValueError(f"x.device = {x.device}, must be {Fabric.device()}")
-            dist.all_reduce(x, op=dist.ReduceOp.SUM)
+            _sync_ddp(x, reduce_op=dist.ReduceOp.SUM)
         return x
 
     @staticmethod
@@ -93,7 +94,7 @@ class Fabric:
         if Fabric.is_initialized():
             if x.device != Fabric.device():
                 raise ValueError(f"x.device = {x.device}, must be {Fabric.device()}")
-            dist.all_reduce(x, op=dist.ReduceOp.AVG)
+            _sync_ddp(x, reduce_op=dist.ReduceOp.AVG)
         return x
 
     @staticmethod
