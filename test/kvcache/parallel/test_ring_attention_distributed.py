@@ -26,6 +26,7 @@ from keys_values.attention.flex_attention import (
     FlexAttentionArgs,
 )
 from keys_values.config import Config
+from keys_values.distributed.fabric import Fabric
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.parallel.flex_for_ring import (
     RingOffdiagFlexAttentionArgs,
@@ -61,12 +62,11 @@ def test_sdpa_distributed_vs_single_on_chunk(
     do_q_lens,
     is_1d,
 ):
-    os.environ.setdefault("MASTER_ADDR", "localhost")
-    os.environ.setdefault("MASTER_PORT", "29500")
     seed = 31415927
     torch.manual_seed(seed)
     atol = 0.0005 if dtype == torch.float16 else 0.005
     rtol = 0.1
+    use_fabric = False
 
     batch_size = 2
     head_size = 32
@@ -111,14 +111,33 @@ def test_sdpa_distributed_vs_single_on_chunk(
     else:
         data_all["token_pos"] = token_pos.expand(batch_size, n_query_groups, -1)
 
-    mp.spawn(
-        run_sdpa_distributed_vs_single_on_chunk,
-        args=(num_devices, config, q_len, input_pos, do_q_lens, data_all, atol, rtol),
-        nprocs=num_devices,
-        join=True,
-    )
+    if not use_fabric:
+        os.environ.setdefault("MASTER_ADDR", "localhost")
+        os.environ.setdefault("MASTER_PORT", "29500")
+        mp.spawn(
+            run_sdpa_distributed_vs_single_on_chunk,
+            args=(num_devices, config, q_len, input_pos, do_q_lens, data_all, atol, rtol),
+            nprocs=num_devices,
+            join=True,
+        )
+    else:
+        Fabric.launch(
+            run_sdpa_distributed_vs_single_on_chunk,
+            nprocs=num_devices,
+            rank=-1,
+            num_devices=num_devices,
+            config=config,
+            q_len=q_len,
+            input_pos=input_pos,
+            do_q_lens=do_q_lens,
+            data_all=data_all,
+            atol=atol,
+            rtol=rtol,
+        )
 
 
+# If `rank < 0`, we use `Fabric`. Otherwise, we use `mp.spawn` directly, and
+# have to initialize a process group.
 def run_sdpa_distributed_vs_single_on_chunk(
     rank: int,
     num_devices: int,
@@ -130,16 +149,22 @@ def run_sdpa_distributed_vs_single_on_chunk(
     atol: float,
     rtol: float,
 ):
-    # Set the device BEFORE init_process_group so NCCL registers its
-    # communicator under the correct device for this rank.
-    torch.cuda.set_device(rank)
-    device = torch.device("cuda", rank)
-    dist.init_process_group(
-        backend="nccl",
-        init_method="env://",
-        world_size=num_devices,
-        rank=rank,
-    )
+    use_fabric = rank < 0
+    if use_fabric:
+        # We use `Fabric`
+        rank = Fabric.rank()
+        device = Fabric.device()
+    else:
+        # Set the device BEFORE init_process_group so NCCL registers its
+        # communicator under the correct device for this rank.
+        torch.cuda.set_device(rank)
+        device = torch.device("cuda", rank)
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            world_size=num_devices,
+            rank=rank,
+        )
     prefix = f"[Rank {rank}]: "
     data_for_rank, q_inds = distribute_and_reorder_data(
         data_all,
@@ -215,7 +240,7 @@ def run_sdpa_distributed_vs_single_on_chunk(
 
     if rank == 0:
         # Single computation — done after destroy_process_group so that ranks
-        # 1/2 are not blocked in the destroy barrier while rank 0 compiles and
+        # 1, 2 are not blocked in the destroy barrier while rank 0 compiles and
         # runs the reference attention (which can take significant time).
         print(prefix + "Compute outputs on single node")
         flexatt_args = FlexAttentionArgs()
