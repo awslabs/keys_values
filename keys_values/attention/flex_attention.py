@@ -69,7 +69,6 @@ def logit_softcapping(
     return torch.tanh(score / thresh) * thresh
 
 
-# TODO: Maybe it is better to pass the `nan` value?
 def nan_to_minus_infty(
     score: torch.Tensor,
     batch: torch.Tensor,
@@ -88,6 +87,8 @@ def logit_softcapping_and_nan_to_minus_infty(
     kv_idx: torch.Tensor,
     thresh: float,
 ) -> torch.Tensor:
+    # Note: Order matters here! `torch.tanh` would map -infty to 0.
+    # It does map NaN to NaN.
     return torch.nan_to_num(
         torch.tanh(score / thresh) * thresh,
         nan=torch.finfo(score.dtype).min,
