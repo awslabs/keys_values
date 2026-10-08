@@ -53,7 +53,7 @@ class CPUOffloadAccumulateGradients:
     def _all_reduce(self, vec: torch.Tensor, mean_reduction: bool):
         if self.use_dist:
             if mean_reduction and self._is_mean_reducible(vec.dtype):
-                Fabric.all_reduce_mean(vec)
+                Fabric.all_reduce_avg(vec)
             else:
                 Fabric.all_reduce_sum(vec)
 

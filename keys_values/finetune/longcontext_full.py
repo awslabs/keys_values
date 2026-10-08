@@ -1402,7 +1402,7 @@ def fit(
                     avg_tokens_tensor = num_tokens_batch.to(
                         device=Fabric.device()
                     ).clone()
-                    Fabric.all_reduce_mean(avg_tokens_tensor)
+                    Fabric.all_reduce_avg(avg_tokens_tensor)
                     loss_weight = num_tokens_batch.item() / avg_tokens_tensor.item()
 
             gpu_memory_snapshot_start_recording(
@@ -1443,7 +1443,7 @@ def fit(
                     module_pairs=module_pairs,
                     mean_reduction=True,
                 )
-                Fabric.all_reduce_mean(loss)
+                Fabric.all_reduce_avg(loss)
 
             running_loss.update(loss.detach().to(device=optim_device))
             flush_io_streams()
@@ -1980,7 +1980,7 @@ def validate_and_all_reduce(
         device=Fabric.device(),
         dtype=torch.float32,
     )
-    Fabric.all_reduce_mean(val_time_tensor)
+    Fabric.all_reduce_avg(val_time_tensor)
     val_time = val_time_tensor.item()
 
     metrics = {
