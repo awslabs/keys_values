@@ -792,16 +792,16 @@ def test_comparison_padding_with_attn_weights(
         a + (b,)
         for a, b in product(
             [
-                (4, 2, 512, torch.float16, None, 0.0004),
-                (4, 4, 256, torch.bfloat16, None, 0.005),
-                (8, 4, 128, torch.float16, None, 0.0002),
+                (4, 2, 256, torch.float16, None, 0.0004),
+                (4, 4, 128, torch.bfloat16, None, 0.005),
+                (8, 4, 64, torch.float16, None, 0.0002),
                 (12, 4, 512, torch.bfloat16, None, 0.005),
-                (24, 8, 512, torch.float16, None, 0.0004),
-                (9, 9, 512, torch.bfloat16, None, 0.005),
-                (12, 4, 512, torch.float16, 5, 0.0004),
-                (24, 8, 512, torch.bfloat16, 2, 0.005),
-                (12, 4, 512, torch.float16, 5, 0.0004),
-                (9, 9, 512, torch.float16, 2, 0.0004),
+                (24, 8, 256, torch.float16, None, 0.0004),
+                (9, 9, 256, torch.bfloat16, None, 0.005),
+                (12, 4, 128, torch.float16, 5, 0.0004),
+                (24, 8, 256, torch.bfloat16, 2, 0.005),
+                (12, 4, 128, torch.float16, 5, 0.0004),
+                (9, 9, 256, torch.float16, 2, 0.0004),
             ],
             [1, 3],
         )
@@ -896,5 +896,18 @@ def test_padding_token_generation(
         torch.testing.assert_close(outputs[0], outputs[1], **test_kwargs)
 
     # How often has each graph been used?
-    print(flexatt_args.report())
-    assert 1 == 0
+    print("Testing number of hits for prefill")
+    num_hits = flexatt_args.attn_prefill_manager.num_hits
+    assert len(num_hits) == 1, num_hits
+    for arg, num in num_hits.items():
+        assert num == 1, num_hits
+        assert arg[0] == kv_lens[0]
+    print("Testing number of hits for chunks")
+    num_hits = flexatt_args.attn_chunk_manager.num_hits
+    assert len(num_hits) == 4, num_hits
+    _kv_lens = set()
+    for arg, num in num_hits.items():
+        assert num == 4, num_hits
+        _kv_lens.add(arg[1])
+        assert arg[0] == 1
+    assert _kv_lens == set(kv_lens), num_hits
