@@ -664,9 +664,17 @@ class SDPAArgs:
             `key, value` to avoid the GQA case. This may be needed to get
             around bugs in `flex_attention`.
         flex_num_q_lens: If given, this is the number of `q_len` values for
-            which different graphs are compiled. Zero-padding of the `query`
+            which different graphs may be compiled. Zero-padding of the `query`
             argument is used then. If not given, each different `q_len` value
-            gets its own graph (not recommended).
+            gets its own graph (not recommended). There is no downside, because
+            graphs are created only when needed.
+            Defaults to 4.
+        flex_num_kv_lens: If given, this is the number of `kv_len` values for
+            which different graphs may be compiled. Padding of the `key` and
+            `value` arguments are used then. If not given, each different
+            `kv_len` value gets its own graph (not recommended). There is no
+            downside, because graphs are created only when needed.
+            Defaults to 4.
         reorder_sort_if_3d: For both SDPA variants, we (currently) reorder
             `key, value` tensors so that standard causal masking applies.
             If `token_positions` is inherently 3D (in that
@@ -709,6 +717,7 @@ class SDPAArgs:
     flex_attention: bool = True
     flex_extend_kv: bool = True
     flex_num_q_lens: Optional[int] = 4
+    flex_num_kv_lens: Optional[int] = 4
     reorder_sort_if_3d: bool = True
     use_flex_for_attn_weights: bool = True
     dynamo_cache_size_limit: int = 32
@@ -718,5 +727,9 @@ class SDPAArgs:
     flashinfer_attention: bool = True
 
     def __post_init__(self):
-        if self.flex_num_q_lens is not None and self.flex_num_q_lens <= 0:
-            raise ValueError("flex_num_q_lens must be positive")
+        for val, name in (
+            (self.flex_num_q_lens, "flex_num_q_lens"),
+            (self.flex_num_kv_lens, "flex_num_kv_lens"),
+        ):
+            if val is not None and val <= 0:
+                raise ValueError(f"{name} must be positive")

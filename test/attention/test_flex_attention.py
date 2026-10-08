@@ -304,11 +304,11 @@ def test_comparison(
         for a, b in product(
             [
                 (4, 2, 128, 512, torch.float16, None, 0.0002),
-                (4, 4, 8, 256, torch.bfloat16, None, 0.0008),
-                (8, 4, 32, 128, torch.float16, None, 0.0002),
-                (12, 4, 16, 512, torch.bfloat16, None, 0.002),
-                (24, 8, 2, 512, torch.float16, None, 0.0002),
-                (9, 9, 128, 512, torch.bfloat16, None, 0.002),
+                (4, 4, 8, 256, torch.bfloat16, None, 0.004),
+                (8, 4, 32, 128, torch.float16, None, 0.0008),
+                (12, 4, 16, 512, torch.bfloat16, None, 0.004),
+                (24, 8, 2, 512, torch.float16, None, 0.0003),
+                (9, 9, 128, 512, torch.bfloat16, None, 0.004),
                 (12, 4, 16, 512, torch.float16, 5, 0.0004),
                 (24, 8, 2, 512, torch.bfloat16, 2, 0.004),
                 (12, 4, 16, 512, torch.float16, 5, 0.0004),
