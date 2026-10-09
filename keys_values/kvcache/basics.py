@@ -508,6 +508,11 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     Xiao etal.
     Efficient Streaming Language Models with Attention Sinks
     https://arxiv.org/abs/2309.17453
+
+    Pass `grow_buffers=True` to :meth:`from_config` to allocate the default
+    buffers small and double them until `cache_length`, while the cache is
+    still filling. `token_pos` stays `cache_length` sized. The default is
+    `False`, which allocates the full buffers up front.
     """
 
     def __init__(
@@ -548,6 +553,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         init_grace_tokens: Optional[int] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
+        grow_buffers: bool = False,
         **base_kwargs,
     ) -> "LastRecentlyInsertedKVCache":
         """
@@ -564,6 +570,10 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 first :meth:`forward` call, based on the input arguments.
             dtype: Data type for buffers. If not given, it is set with the
                 first :meth:`forward` call, based on the input arguments.
+            grow_buffers: If `True`, default buffers start at
+                `DEFAULT_GROW_BUFFERS_INITIAL_SLOTS` and double until
+                `cache_length`. If `False` (default), they are allocated at
+                `cache_length` immediately.
             base_kwargs: Extra keyword arguments for cache and default buffer
 
         """
@@ -574,6 +584,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             cache_length=cache_length,
             device=device,
             dtype=dtype,
+            grow_buffers=grow_buffers,
             **buffers_kwargs,
         )
         return LastRecentlyInsertedKVCache(
