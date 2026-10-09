@@ -41,14 +41,14 @@ from keys_values.kvcache.parallel.test_utils import (
 from keys_values.kvcache.test_utils import random_args_cache_forward
 
 
-@_RunIf(min_cuda_gpus=3)
+@_RunIf(min_cuda_gpus=4)
 @pytest.mark.parametrize(
     "n_head, n_query_groups, q_len, kv_len_per_rank, dtype, input_pos, num_devices, do_q_lens, is_1d",
     [
         (4, 4, 8, 256, torch.bfloat16, 256 * 2 + 11, 2, False, False),
-        (8, 4, 64, 128, torch.float16, 128 * 3 + 5, 3, True, True),
+        (8, 4, 64, 128, torch.float16, 128 * 4 + 5, 4, True, True),
         (12, 4, 16, 512, torch.bfloat16, 512 * 2 + 127, 2, False, True),
-        (24, 8, 8, 256, torch.float16, 256 * 3 + 15, 3, True, False),
+        (24, 8, 8, 256, torch.float16, 256 * 4 + 15, 4, True, False),
     ],
 )
 def test_sdpa_distributed_vs_single_on_chunk(
@@ -264,13 +264,13 @@ def run_sdpa_distributed_vs_single_on_chunk(
             torch.testing.assert_close(d_output, s_output, atol=atol, rtol=rtol)
 
 
-@_RunIf(min_cuda_gpus=3)
+@_RunIf(min_cuda_gpus=4)
 @pytest.mark.parametrize(
     "n_head, n_query_groups, kv_len_per_rank, dtype, num_devices",
     [
-        (4, 2, 512, torch.float16, 3),
-        (4, 4, 256, torch.bfloat16, 2),
-        (8, 4, 128, torch.float16, 3),
+        (4, 2, 512, torch.float16, 2),
+        (4, 4, 256, torch.bfloat16, 4),
+        (8, 4, 128, torch.float16, 4),
         (12, 4, 512, torch.bfloat16, 2),
     ],
 )
