@@ -18,6 +18,7 @@ import pytest
 
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.basics import DEFAULT_INIT_GRACE_TOKENS
+from keys_values.kvcache.buffers import DEFAULT_GROW_BUFFERS_INITIAL_SLOTS
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     tensor_is_simple,
@@ -189,3 +190,150 @@ def test_index_to_3d():
         index = torch.arange(size * 2)[:size]
         result = index_to_3d(index, *shape[:-1])
         assert is_index_1d(result), ("type 2", shape, result.shape, result.stride())
+
+
+def _physical_slots(cache) -> int:
+    return cache.kv_buffers.k.shape[2]
+
+
+def _assert_same_keys_values(growing, fixed):
+    grown = growing.get_keys_values()
+    full = fixed.get_keys_values()
+    torch.testing.assert_close(grown.keys(), full.keys())
+    torch.testing.assert_close(grown.values(), full.values())
+
+
+def _grow_buffers_params(cache_length: int) -> KVCacheParams:
+    return KVCacheParams(
+        max_batch_size=3,
+        n_query_groups=2,
+        cache_length=cache_length,
+        head_size=4,
+        n_head=2,
+        dtype=torch.float32,
+    )
+
+
+@pytest.mark.parametrize("device", available_backends())
+def test_grow_buffers_doubles_until_cache_length(device):
+    torch.manual_seed(0)
+    initial = DEFAULT_GROW_BUFFERS_INITIAL_SLOTS
+    cache_length = initial * 4
+    params = _grow_buffers_params(cache_length)
+    growing = create_kv_cache(
+        "lastrec-default", params, grow_buffers=True, init_grace_tokens=0
+    )
+    fixed = create_kv_cache(
+        "lastrec-default", params, grow_buffers=False, init_grace_tokens=0
+    )
+    num_insert = cache_length + 4
+    data = random_args_cache_forward(params, num_insert, vocab_size=32, device=device)
+
+    prefill = range_from_args(data, 0, 1)
+    growing(**prefill)
+    fixed(**prefill)
+    assert _physical_slots(growing) == initial
+    assert _physical_slots(fixed) == cache_length
+    assert growing.token_pos.shape == (cache_length,)
+    assert fixed.token_pos.shape == (cache_length,)
+    _assert_same_keys_values(growing, fixed)
+
+    seen = [initial]
+    for pos in range(1, num_insert):
+        step = range_from_args(data, pos, pos + 1)
+        growing(**step)
+        fixed(**step)
+        slots = _physical_slots(growing)
+        if slots != seen[-1]:
+            seen.append(slots)
+        assert _physical_slots(fixed) == cache_length
+        _assert_same_keys_values(growing, fixed)
+    assert seen == [initial, initial * 2, cache_length]
+    assert _physical_slots(growing) == cache_length
+
+
+@pytest.mark.parametrize("device", available_backends())
+def test_grow_buffers_prefill_longer_than_initial(device):
+    torch.manual_seed(1)
+    initial = DEFAULT_GROW_BUFFERS_INITIAL_SLOTS
+    cache_length = initial * 4
+    prefill_length = initial + 4
+    params = _grow_buffers_params(cache_length)
+    growing = create_kv_cache("lastrec-default", params, grow_buffers=True)
+    fixed = create_kv_cache("lastrec-default", params, grow_buffers=False)
+    data = random_args_cache_forward(
+        params, prefill_length + 1, vocab_size=32, device=device
+    )
+    prefill = range_from_args(data, 0, prefill_length)
+    growing(**prefill)
+    fixed(**prefill)
+    assert _physical_slots(growing) == initial * 2
+    assert _physical_slots(fixed) == cache_length
+    _assert_same_keys_values(growing, fixed)
+    step = range_from_args(data, prefill_length, prefill_length + 1)
+    growing(**step)
+    fixed(**step)
+    assert _physical_slots(growing) == initial * 2
+    _assert_same_keys_values(growing, fixed)
+
+
+@pytest.mark.parametrize("device", available_backends())
+def test_grow_buffers_off_allocates_full_length(device):
+    cache_length = DEFAULT_GROW_BUFFERS_INITIAL_SLOTS * 4
+    params = _grow_buffers_params(cache_length)
+    cache = create_kv_cache("lastrec-default", params, init_grace_tokens=0)
+    data = random_args_cache_forward(params, 2, vocab_size=32, device=device)
+    cache(**range_from_args(data, 0, 1))
+    assert not cache.kv_buffers.grow_buffers
+    assert _physical_slots(cache) == cache_length
+    cache(**range_from_args(data, 1, 2))
+    assert _physical_slots(cache) == cache_length
+    assert cache.token_pos.shape == (cache_length,)
+
+
+@pytest.mark.parametrize("device", available_backends())
+def test_grow_buffers_batch_size_change(device):
+    torch.manual_seed(2)
+    initial = DEFAULT_GROW_BUFFERS_INITIAL_SLOTS
+    cache_length = initial * 4
+    params = _grow_buffers_params(cache_length)
+    growing = create_kv_cache(
+        "lastrec-default", params, grow_buffers=True, init_grace_tokens=0
+    )
+    fixed = create_kv_cache(
+        "lastrec-default", params, grow_buffers=False, init_grace_tokens=0
+    )
+
+    first = random_args_cache_forward(params, 8, vocab_size=32, device=device)
+    first = {name: tensor[:1] for name, tensor in first.items()}
+    growing(**range_from_args(first, 0, 4))
+    fixed(**range_from_args(first, 0, 4))
+    for pos in range(4, 8):
+        step = range_from_args(first, pos, pos + 1)
+        growing(**step)
+        fixed(**step)
+    assert growing.kv_buffers.k.shape[0] == 1
+    assert _physical_slots(growing) == initial
+    _assert_same_keys_values(growing, fixed)
+
+    growing.reset()
+    fixed.reset()
+    second_len = initial + 4
+    second = random_args_cache_forward(
+        params, second_len + 3, vocab_size=32, device=device
+    )
+    second = {name: tensor[:2] for name, tensor in second.items()}
+    growing(**range_from_args(second, 0, second_len))
+    fixed(**range_from_args(second, 0, second_len))
+    assert growing.kv_buffers.k.shape[0] == 2
+    assert fixed.kv_buffers.k.shape[0] == 2
+    assert _physical_slots(growing) == initial * 2
+    assert _physical_slots(fixed) == cache_length
+    _assert_same_keys_values(growing, fixed)
+    for pos in range(second_len, second_len + 3):
+        step = range_from_args(second, pos, pos + 1)
+        growing(**step)
+        fixed(**step)
+        _assert_same_keys_values(growing, fixed)
+    assert growing.kv_buffers.k.shape[0] == 2
+    assert growing.token_pos.shape == (cache_length,)
