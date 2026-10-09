@@ -281,12 +281,11 @@ def test_sdpa_distributed_vs_single_on_prefill(
     dtype,
     num_devices,
 ):
-    os.environ.setdefault("MASTER_ADDR", "localhost")
-    os.environ.setdefault("MASTER_PORT", "29500")
     seed = 31415927
     torch.manual_seed(seed)
     atol = 0.0005 if dtype == torch.float16 else 0.005
     rtol = 0.1
+    use_fabric = False
 
     batch_size = 2
     head_size = 32
@@ -317,12 +316,26 @@ def test_sdpa_distributed_vs_single_on_prefill(
         vocab_size=config.vocab_size,
     )
 
-    mp.spawn(
-        run_sdpa_distributed_vs_single_on_prefill,
-        args=(num_devices, config, data_all, atol, rtol),
-        nprocs=num_devices,
-        join=True,
-    )
+    if not use_fabric:
+        os.environ.setdefault("MASTER_ADDR", "localhost")
+        os.environ.setdefault("MASTER_PORT", "29500")
+        mp.spawn(
+            run_sdpa_distributed_vs_single_on_prefill,
+            args=(num_devices, config, data_all, atol, rtol),
+            nprocs=num_devices,
+            join=True,
+        )
+    else:
+        Fabric.launch(
+            run_sdpa_distributed_vs_single_on_prefill,
+            nprocs=num_devices,
+            rank=-1,
+            num_devices=num_devices,
+            config=config,
+            data_all=data_all,
+            atol=atol,
+            rtol=rtol,
+        )
 
 
 def run_sdpa_distributed_vs_single_on_prefill(
@@ -333,16 +346,22 @@ def run_sdpa_distributed_vs_single_on_prefill(
     atol: float,
     rtol: float,
 ):
-    # Set the device BEFORE init_process_group so NCCL registers its
-    # communicator under the correct device for this rank.
-    torch.cuda.set_device(rank)
-    device = torch.device("cuda", rank)
-    dist.init_process_group(
-        backend="nccl",
-        init_method="env://",
-        world_size=num_devices,
-        rank=rank,
-    )
+    use_fabric = rank < 0
+    if use_fabric:
+        # We use `Fabric`
+        rank = Fabric.rank()
+        device = Fabric.device()
+    else:
+        # Set the device BEFORE init_process_group so NCCL registers its
+        # communicator under the correct device for this rank.
+        torch.cuda.set_device(rank)
+        device = torch.device("cuda", rank)
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            world_size=num_devices,
+            rank=rank,
+        )
     prefix = f"[Rank {rank}]: "
     input_pos = 0
     data_for_rank, q_inds = distribute_and_reorder_data(
