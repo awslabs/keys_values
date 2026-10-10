@@ -47,8 +47,7 @@ class H2OKVCache(AttnWeightsKVCache):
       attention weights, see :meth:`_instantaneous_score`.
 
     The original H2O method as published is provided in
-    :class:`H2OOriginalKVCache` (for comparison only; not recommended).
-
+    :class:`H2OOriginalKVCache`.
     """
 
     def __init__(
@@ -283,9 +282,6 @@ class VLengthInstantScoreMixin:
     def get_name_v_norm(cls) -> str:
         raise NotImplementedError()
 
-    def get_kv_buffers(self) -> KVCacheBuffers:
-        raise NotImplementedError()
-
     @property
     def batch_size(self) -> int:
         raise NotImplementedError()
@@ -480,9 +476,6 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
     def get_v_norm(self) -> torch.Tensor:
         return self.v_norm[: self.batch_size, :, : self.current_length]
 
-    def get_kv_buffers(self) -> KVCacheBuffers:
-        return self.kv_buffers
-
     def clone(self) -> KVCache:
         return VLengthH2OKVCache(**self._base_kwargs_for_clone())
 
@@ -612,7 +605,7 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
 
     @classmethod
     def _parameter_names(cls) -> List[str]:
-        return super()._parameter_names() + ["scores"]
+        return super()._parameter_names() + cls._score_buffer_names()
 
     def clone(self) -> KVCache:
         return H2OOriginalKVCache(**self._base_kwargs_for_clone())

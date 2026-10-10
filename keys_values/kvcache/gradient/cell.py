@@ -22,12 +22,19 @@ from keys_values.config import Config
 
 from keys_values.attention import DefaultKeysAndValues
 from keys_values.tools.debug_utils import for_debug
-from keys_values.kvcache.base import KVCacheReplayLog, DefaultKVCache
+from keys_values.kvcache.base import DefaultKVCache
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.train_attn_weights_replay import (
     TrainingAttnWeightsReplayCache,
 )
+from keys_values.kvcache.new.driver import DefaultKVCacheDriver
 from keys_values.kvcache.stack_layers import CellBlocks
+from keys_values.kvcache.test_shadow import (
+    use_new_kvcache_code,
+    use_new_replay_log,
+    get_chunks_from_log,
+    KVCacheReplayLog_oldornew,
+)
 
 GetInputSlice = Callable[[int, int], torch.Tensor]
 
@@ -105,7 +112,7 @@ class CellComputation(nn.Module):
         self,
         model_part: CellBlocks,
         autograd_hooks: Optional[CellComputationAutogradHooks],
-        replay_logs: List[KVCacheReplayLog],
+        replay_logs: List[KVCacheReplayLog_oldornew],
         batch_size: int,
         debug_tensors: Optional[Dict[str, torch.Tensor]] = None,
         **cache_kwargs,
@@ -132,6 +139,14 @@ class CellComputation(nn.Module):
             raise ValueError(
                 f"model_part.num_layers = {model_part.num_layers} != {len(replay_logs)} = len(replay_logs)"
             )
+        # Only while old and new code co-exist:
+        use_new_code = use_new_kvcache_code(model_part.get_kv_caches()[0][1])
+        _use_new_code = use_new_replay_log(replay_logs[0])
+        if use_new_code != _use_new_code:
+            raise ValueError(
+                "Mismatch using old and new KVCache code: "
+                f"use_new_code = {use_new_code}, _use_new_code = {_use_new_code}"
+            )
         self.model_part = model_part
         self.config = model_part.config
         self.autograd_hooks = autograd_hooks
@@ -155,7 +170,11 @@ class CellComputation(nn.Module):
         for block_idx, kv_cache in model_part.get_kv_caches():
             # Use the same MHA object as in primary cache. Ensures that
             # position encoding is the same
-            mha = kv_cache.mha if isinstance(kv_cache, DefaultKVCache) else None
+            mha = None
+            if use_new_code and isinstance(kv_cache.driver, DefaultKVCacheDriver):
+                mha = kv_cache.driver.mha
+            elif not use_new_code and isinstance(kv_cache, DefaultKVCache):
+                mha = kv_cache.mha
             if self._debug_intermediates is not None:
                 extra_kwargs = dict(
                     debug_intermediates=(
@@ -181,7 +200,7 @@ class CellComputation(nn.Module):
     def check_args(
         config: Config,
         autograd_hooks: Optional[CellComputationAutogradHooks],
-        replay_logs: List[KVCacheReplayLog],
+        replay_logs: List[KVCacheReplayLog_oldornew],
         batch_size: int,
     ):
         if autograd_hooks is not None:
@@ -198,12 +217,14 @@ class CellComputation(nn.Module):
         def chunks_equal(a: List[torch.Tensor], b: List[torch.Tensor]) -> bool:
             return len(a) == len(b) and all(xa.equal(xb) for xa, xb in zip(a, b))
 
+        chunks_0 = get_chunks_from_log(replay_logs[0])
         for i, log in enumerate(replay_logs):
-            if not chunks_equal(log.token_chunks, replay_logs[0].token_chunks):
+            chunks_i = get_chunks_from_log(log)
+            if not chunks_equal(chunks_i, chunks_0):
                 raise ValueError(
                     "All replay_logs must have the same chunk sequence:\n"
-                    f"0: {replay_logs[0].token_chunks}\n"
-                    f"{i}: {log.token_chunks}"
+                    f"0: {chunks_0}\n"
+                    f"{i}: {chunks_i}"
                 )
 
     def _create_train_replay_caches(
@@ -231,7 +252,8 @@ class CellComputation(nn.Module):
 
     def get_input_pos(self, first_chunk_idx: int) -> int:
         return sum(
-            idx.shape[-1] for idx in self.replay_logs[0].token_chunks[:first_chunk_idx]
+            idx.shape[-1]
+            for idx in get_chunks_from_log(self.replay_logs[0])[:first_chunk_idx]
         )
 
     def forward(
@@ -265,7 +287,7 @@ class CellComputation(nn.Module):
             (outputs, k_buffers, v_buffers)
 
         """
-        token_idxs = self.replay_logs[0].token_chunks[
+        token_idxs = get_chunks_from_log(self.replay_logs[0])[
             first_chunk_idx : (first_chunk_idx + num_chunks)
         ]
         num_layers = self.model_part.num_layers

@@ -22,11 +22,10 @@ from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.buffers import (
     KVCacheBuffers,
     KVCacheBuffersParams,
-    PositionsType,
 )
 from keys_values.kvcache.consts import SUPPORTED_QUANTIZERS
 from keys_values.kvcache.quantize.quantization import Quantizer
-from keys_values.kvcache.utils import smallest_covering_ranges
+from keys_values.kvcache.utils import smallest_covering_ranges, PositionsType
 from keys_values.utils import expand_index, bits_for_torch_dtype, bitsize_of
 
 

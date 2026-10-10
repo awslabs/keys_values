@@ -18,7 +18,6 @@ import torch
 from keys_values.config import Config
 
 from keys_values.kvcache.basics import KVCache
-from keys_values.kvcache.buffers import KVCacheBuffers
 from keys_values.kvcache.h2o import H2OKVCache, VLengthInstantScoreMixin
 from keys_values.kvcache.quant_buffers import QuantizedKVCacheBuffers
 
@@ -302,9 +301,6 @@ class QuantizedVLengthH2OKVCache(QuantizedH2OKVCache, VLengthInstantScoreMixin):
 
     def get_v_norm(self) -> torch.Tensor:
         return self.v_norm[: self.batch_size, :, : self.current_length]
-
-    def get_kv_buffers(self) -> KVCacheBuffers:
-        return self.kv_buffers
 
     def clone(self) -> KVCache:
         return QuantizedVLengthH2OKVCache(**self._base_kwargs_for_clone())

@@ -53,8 +53,10 @@ from keys_values.kvcache.gradient.cleanup import (
     ArraysForCleanup,
     protect_named_params_buffers_of_model,
 )
+from keys_values.kvcache.new import GenericKVCache
 from keys_values.kvcache.offloading import KVCacheOffloader
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
+from keys_values.kvcache.test_shadow import use_new_kvcache_code
 from keys_values.long_context import (
     LongContextInferenceModel,
     GPTAndHeadModel,
@@ -491,6 +493,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         self._debug_profile_forward = debug_profile_forward
         self._debug_profile_backward = debug_profile_backward
+        self._use_new_code = use_new_kvcache_code(gpt_model.get_kv_caches()[0])
 
     @property
     def status(self) -> str:
@@ -1014,7 +1017,8 @@ class LongContextGradientModel(LongContextInferenceModel):
             self.gpt_model = gpt_model
             # Ensure that all KV caches record replay logs
             for kv_cache in self.gpt_model.get_kv_caches():
-                kv_cache.switch_replay_logging(True)
+                if not isinstance(kv_cache, GenericKVCache):
+                    kv_cache.switch_replay_logging(True)
             # Run inference forward pass. Layer inputs are checkpointed.
             # Mean reduction over batch dimension.
             loss_full = self._forward_internal(
@@ -1029,9 +1033,10 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         # Replay logs from KV caches are required in
         # :meth:`_backward_accumulate_gradients`.
-        self._replay_logs = []
+        self._replay_logs = None if self._use_new_code else []
         for kv_cache in gpt_model.get_kv_caches():
-            self._replay_logs.append(kv_cache.get_replay_log())
+            if not self._use_new_code:
+                self._replay_logs.append(kv_cache.get_replay_log())
             kv_cache.switch_replay_logging(False)
 
         deallocate_kv_cache_buffers_of_model(gpt_model)
@@ -1075,7 +1080,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             self._timer_start = time.perf_counter()
         else:
             prof_record = None
-        if self._replay_logs is None:
+        if not self._use_new_code and self._replay_logs is None:
             raise IndexError(
                 "No KV cache replay logs: Must call `forward` before `backward`"
             )

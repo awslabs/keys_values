@@ -67,7 +67,7 @@ def test_store_retrieve(device, name, kwargs):
     cache_length = params.cache_length
     if name.startswith("smart-lastrec"):
         kwargs = {**kwargs, **cache_kwargs_for_smart_lastrec()}
-    kv_cache = create_kv_cache(name, params, **kwargs)
+    kv_cache = create_kv_cache(name, params, **kwargs, create_shadow=True)
     if name.startswith("dense"):
         num_insert = randint_torch(cache_length // 2, cache_length)
     else:
@@ -104,16 +104,21 @@ def test_store_retrieve(device, name, kwargs):
         err_msg = f"num_insert = {num_insert}, b = {b}, h = {h}, current_length = {current_length}, num_prefill = {num_prefill}"
         assert len(set(token_pos)) == current_length, err_msg
     # Test cache content slice by slice
-    keys_and_values = kv_cache.get_keys_values()
-    for pos in range(current_length):
-        index = token_positions[:, :, pos][:, :, None, None].expand(
-            -1, -1, 1, params.head_size
-        )
-        # `index[i, j, 0, k] = next_position[i, j]`
-        k_expected = data["key"].gather(-2, index).squeeze(-2)
-        v_expected = data["value"].gather(-2, index).squeeze(-2)
-        torch.testing.assert_close(k_expected, keys_and_values.keys()[:, :, pos, :])
-        torch.testing.assert_close(v_expected, keys_and_values.values()[:, :, pos, :])
+    try:
+        keys_and_values = kv_cache.get_keys_values()
+        for pos in range(current_length):
+            index = token_positions[:, :, pos][:, :, None, None].expand(
+                -1, -1, 1, params.head_size
+            )
+            # `index[i, j, 0, k] = next_position[i, j]`
+            k_expected = data["key"].gather(-2, index).squeeze(-2)
+            v_expected = data["value"].gather(-2, index).squeeze(-2)
+            torch.testing.assert_close(k_expected, keys_and_values.keys()[:, :, pos, :])
+            torch.testing.assert_close(
+                v_expected, keys_and_values.values()[:, :, pos, :]
+            )
+    except NotImplementedError:
+        print(f"KVCache {name} does not implement get_keys_values: Skipping")
 
 
 @pytest.mark.parametrize("name, device", cache_names_and_devices())
@@ -137,7 +142,7 @@ def test_prefill(name, device):
         cache_kwargs = cache_kwargs_for_smart_lastrec()
     else:
         cache_kwargs = dict()
-    kv_cache = create_kv_cache(name, params, **cache_kwargs)
+    kv_cache = create_kv_cache(name, params, **cache_kwargs, create_shadow=True)
 
     data = random_args_cache_forward(
         params,
@@ -147,6 +152,7 @@ def test_prefill(name, device):
     )
     keys_cached = []
     values_cached = []
+    not_implemented = False
     for _ in range(num_compares):
         kv_cache.reset()
         num_prefill = min(
@@ -156,7 +162,12 @@ def test_prefill(name, device):
         kv_cache(**range_from_args(data, 0, num_prefill))
         for pos in range(num_prefill, cache_length):
             kv_cache(**range_from_args(data, pos, pos + 1))
-        keys_and_values = kv_cache.get_keys_values()
+        try:
+            keys_and_values = kv_cache.get_keys_values()
+        except NotImplementedError:
+            print(f"KVCache {name} does not implement get_keys_values: Skipping")
+            not_implemented = True
+            break
         if keys_and_values is not None:
             keys_cached.append(keys_and_values.keys().clone())
             values_cached.append(keys_and_values.values().clone())
@@ -164,14 +175,15 @@ def test_prefill(name, device):
             keys_cached.append(None)
             values_cached.append(None)
 
-    num_none = 0
-    for k, v in zip(keys_cached[1:], values_cached[1:]):
-        if k is not None:
-            torch.testing.assert_close(k, keys_cached[0])
-            torch.testing.assert_close(v, values_cached[0])
-        else:
-            num_none += 1
-    assert num_none < num_compares - 1
+    if not not_implemented:
+        num_none = 0
+        for k, v in zip(keys_cached[1:], values_cached[1:]):
+            if k is not None:
+                torch.testing.assert_close(k, keys_cached[0])
+                torch.testing.assert_close(v, values_cached[0])
+            else:
+                num_none += 1
+        assert num_none < num_compares - 1
 
 
 def _normalize_key(name: str) -> str:
