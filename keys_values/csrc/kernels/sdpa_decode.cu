@@ -760,11 +760,16 @@ __global__ void optimized_batched_decode_kernel(
         }
 
         // -- Step 3: Online softmax rescale --
-        float o_scale = ptx_exp2(m_prev - st.m);
+        // If this tz chunk has not seen a valid key yet (kv_len < TILE_SIZE,
+        // or all its rows masked), st.m is still -inf and exp2(-inf - -inf)
+        // would be NaN, poisoning the cross-BDZ merge. Keep the state empty
+        // instead; merge() handles an m == -inf partner correctly.
+        const bool chunk_empty = (st.m == -inf);
+        float o_scale = chunk_empty ? 1.f : ptx_exp2(m_prev - st.m);
         st.d *= o_scale;
         #pragma unroll
         for (uint32_t j = 0; j < TILE_PER_TZ; ++j) {
-            s[j] = ptx_exp2(s[j] - st.m);
+            s[j] = chunk_empty ? 0.f : ptx_exp2(s[j] - st.m);
             st.d += s[j];
         }
         #pragma unroll
