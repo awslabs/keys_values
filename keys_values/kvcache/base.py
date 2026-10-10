@@ -248,6 +248,9 @@ class KVCache(torch.nn.Module):
 
     def get_keys_values(self) -> Optional[KeysAndValues]:
         """
+        Note: This method is not implemented in all subclasses (will raise
+        `NotImplementedError` in such cases). Use for testing only.
+
         Returns:
             :class:`KeysAndValues` object, providing access to currently stored
             keys and values tensors. If the cache is empty or has not been
@@ -808,6 +811,7 @@ class KVCacheReplayLog:
         raise NotImplementedError
 
 
+# TODO: Remove max_prefill_length: Always equal to cache_length!
 class DefaultKVCacheReplayLog(KVCacheReplayLog):
     def __init__(
         self,

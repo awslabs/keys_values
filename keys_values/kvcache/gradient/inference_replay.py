@@ -32,7 +32,8 @@ from keys_values.kvcache.basics import (
     LastRecentlyInsertedKVCacheReplayLog,
     KVCacheWithBuffers,
 )
-from keys_values.kvcache.buffers import KVCacheBuffers, PositionsType
+from keys_values.kvcache.buffers import KVCacheBuffers
+from keys_values.kvcache.utils import PositionsType
 from keys_values.kvcache.smart_lastrec import (
     SmartInitialLastRecentlyInsertedKVCache,
     SmartInitialLastRecentlyInsertedKVCacheReplayLog,
