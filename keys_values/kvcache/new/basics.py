@@ -11,10 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Union, List, Tuple, Optional
+from typing import Union, List, Tuple, Optional, Dict
 
 import torch
 
+from keys_values.attention import KeysAndValues
 from keys_values.config import Config
 from keys_values.kvcache.base import KVCache, KVCacheParams
 
@@ -35,6 +36,14 @@ class KVCachePolicy:
     summed attention weights from scaled dot product attention (SDPA).
 
     """
+
+    def __init__(self):
+        self._device = None  # Unassigned so far
+
+    @property
+    def device(self) -> Optional[torch.device]:
+        return self._device
+
     @property
     def cache_length(self) -> int:
         """
@@ -85,13 +94,13 @@ class KVCachePolicy:
     def prefill(self, token_idx: torch.Tensor):
         """
         Called during prefill. Can be used to initiate replay log and token
-        positions.
+        positions. Will also reset score buffers, if any.
 
         """
         raise NotImplementedError
 
     @staticmethod
-    def requires_attn_weights(self) -> bool:
+    def requires_attn_weights() -> bool:
         """
         Returns:
             Do we require attention weights? If `True`, `update` needs to
@@ -121,18 +130,27 @@ class KVCachePolicy:
         """
         raise NotImplementedError
 
-    def reset(self, batch_size: Optional[int] = None) -> None:
+    def set_or_check_device(self, new_device: torch.device):
         """
-        Called before the cache is used for a new sequence batch. All
-        score buffers (if any) are reset. If the new batch has a different
-        size than before, pass its `batch_size`.
-
-        Args:
-            batch_size: Size of the new batch. If not given, the previous
-                batch size is used.
+        Called by :meth:`KVCache.forward` with `new_device=query.device`.
+        Must be equal to `_device` unless latter is not yet set.
 
         """
-        raise NotImplementedError()
+        if self._device is None:
+            self._convert_device(new_device)
+            self._device = new_device
+        elif new_device != self._device:
+            raise ValueError(
+                f"Arguments on device {new_device}, must be on {self._device}"
+            )
+
+    def _convert_device(self, new_device: torch.device):
+        """
+        There may be parameters which have been allocated on a default device
+        before `_device` was set. If so, they need to be moved here.
+
+        """
+        raise NotImplementedError
 
 
 class KVCacheDriver:
@@ -150,9 +168,13 @@ class KVCacheDriver:
     together.
 
     """
+    def __init__(self, config: Config):
+        self._config = config
+        self._device = None  # Unassigned so far
+
     @property
     def config(self) -> Config:
-        raise NotImplementedError
+        return self._config
 
     @property
     def max_batch_size(self) -> int:
@@ -172,7 +194,7 @@ class KVCacheDriver:
             device is not fixed (upon first :meth:`forward` call).
 
         """
-        raise NotImplementedError
+        return self._device
 
     @property
     def dtype(self) -> Optional[torch.dtype]:
@@ -210,7 +232,7 @@ class KVCacheDriver:
 
     @property
     def n_query_groups(self) -> Optional[int]:
-        raise NotImplementedError
+        return self._config.n_query_groups
 
     @property
     def head_size(self) -> Optional[int]:
@@ -248,6 +270,7 @@ class KVCacheDriver:
         token_idx: torch.Tensor,
         positions: PositionsNewEntriesType,
         token_positions: torch.Tensor,
+        input_pos: int,
         return_attn_weights: bool,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
@@ -273,6 +296,8 @@ class KVCacheDriver:
                 of :meth:`KVCachePolicy.positions_new_entries`.
             token_positions: Token positions for KV buffer after update,
                 obtained from :meth:`KVCachePolicy.token_positions`.
+            input_pos: Input positions for the new entries. This is the number
+                of tokens processed before the current update
             return_attn_weights: If `True`, the attention weights summed over
                 the query axis are returned as well.
 
@@ -286,20 +311,50 @@ class KVCacheDriver:
         """
         raise NotImplementedError
 
-    def reset(self, batch_size: Optional[int] = None) -> None:
+    def reset(self) -> None:
         """
         Resets the cache buffers so that `input_pos == 0` and
         `current_length == 0` afterwards. Needs to be called before the
         cache can be used for a new sequence. Has to be followed by a
         :meth:`prefill` call, before any :meth:`forward` call.
 
-        Args:
-            batch_size: If given, this is the new batch size. Must be
-                `<= max_batch_size`. If not given, the current batch size
-                will be used.
+        """
+        raise NotImplementedError
+
+    def get_keys_values(self) -> Optional[KeysAndValues]:
+        """
+        Note: This method is not implemented in all subclasses (will raise
+        `NotImplementedError` in such cases). Use for testing only.
+
+        Returns:
+            :class:`KeysAndValues` object, providing access to currently stored
+            keys and values tensors. If the cache is empty or has not been
+            initialized, `None` is returned.
 
         """
-        raise NotImplementedError()
+        raise NotImplementedError
+
+    def set_or_check_device(self, new_device: torch.device):
+        """
+        Called by :meth:`KVCache.forward` with `new_device=query.device`.
+        Must be equal to `_device` unless latter is not yet set.
+
+        """
+        if self._device is None:
+            self._convert_device(new_device)
+            self._device = new_device
+        elif new_device != self._device:
+            raise ValueError(
+                f"Arguments on device {new_device}, must be on {self._device}"
+            )
+
+    def _convert_device(self, new_device: torch.device):
+        """
+        There may be parameters which have been allocated on a default device
+        before `_device` was set. If so, they need to be moved here.
+
+        """
+        raise NotImplementedError
 
 
 class GenericKVCache(KVCache):
@@ -326,3 +381,175 @@ class GenericKVCache(KVCache):
         )
         self.policy = policy
         self.driver = driver
+        self._input_pos = 0
+
+    @staticmethod
+    def _check_compatible(policy: KVCachePolicy, driver: KVCacheDriver):
+        for name in ("cache_length", "n_query_groups"):
+            val_p = getattr(policy, name)
+            val_d = getattr(driver, name)
+            if val_p != val_d:
+                raise ValueError(
+                    f"policy.{name} = {val_p} != {val_d} = driver.{name}"
+                )
+
+    def _check_batch_size(self):
+        val_p = self.policy.cache_length
+        val_d = self.driver.cache_length
+        if val_p != val_d:
+            raise ValueError(
+                f"policy.batch_size = {val_p} != {val_d} = driver.batch_size"
+            )
+
+    @property
+    def device(self) -> Optional[torch.device]:
+        return self.driver.device
+
+    @property
+    def input_pos(self) -> int:
+        return self._input_pos
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        self._forward_check_args(query, key, value, token_idx)
+        for_prefill = self.input_pos == 0
+        num = query.shape[2]
+
+        if for_prefill:
+            # Prefill: `input_pos == 0`
+            self.policy.prefill(token_idx)
+            attn_outputs = self.driver.prefill(query, key, value, token_idx)
+            attn_weights = None
+        else:
+            # Forward: `input_pos > 0`
+            positions = self.policy.positions_new_entries(
+                query, key, value, token_idx,
+            )
+            attn_outputs, attn_weights = self.driver.forward(
+                query,
+                key,
+                value,
+                token_idx,
+                positions,
+                token_positions=self.policy.token_positions(),
+                input_pos=self.input_pos,
+                return_attn_weights=self.policy.requires_attn_weights(),
+            )
+        # Cache has been extended:
+        self._input_pos += num
+        if not for_prefill and self.policy.requires_attn_weights():
+            # Pass summed attention weights to policy
+            self.policy.pass_attn_weights(
+                attn_weights=attn_weights,
+                query_length=query.shape[2],
+            )
+
+        return attn_outputs
+
+    def get_keys_values(self) -> Optional[KeysAndValues]:
+        return self.driver.get_keys_values()
+
+    def max_forward_length(self) -> int:
+        raise NotImplementedError  # TODO!
+
+    # TODO: Is this ever != cache_length ??
+    @property
+    def max_prefill_length(self) -> int:
+        raise NotImplementedError  # TODO!
+
+    def token_positions(self) -> torch.Tensor:
+        return self.policy.token_positions()
+
+    def size_estimate(self) -> Tuple[int, Dict[str, int]]:
+        raise NotImplementedError  # TODO!
+
+    @classmethod
+    def size_estimate_apriori(
+            cls, params: KVCacheParams, **kwargs
+    ) -> Tuple[int, Dict[str, int]]:
+        raise NotImplementedError  # TODO!
+
+    # TODO: Is this enough? Look at DefaultKVCache
+    def reset(self) -> None:
+        self.driver.reset()
+
+    def set_seq_length(self, seq_length: int) -> None:
+        raise NotImplementedError  # TODO!
+
+    def clone(self) -> "KVCache":
+        raise NotImplementedError  # TODO!
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)  # TODO!
+
+    def _forward_check_args(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+    ):
+        """
+        Apart from checking shapes of arguments, we also deal with `device`,
+        calling `set_or_check_device(query.device)` for `driver` and `policy`.
+        As long as `policy.device`, `driver.device` were not set, they become
+        `query.device` (and respective parameters moved). Otherwise,
+        `query.device` must be equal to their device. Arguments are not moved
+        if on the wrong device.
+
+        """
+        for_prefill = self.input_pos == 0
+        if query.ndim != 4:
+            raise ValueError("query, key, value must be 4D tensors")
+        batch_size, _, num, _ = query.shape
+        if for_prefill:
+            if not (1 <= batch_size <= self.max_batch_size):
+                raise ValueError(
+                    f"query.shape[0] = {batch_size}, must be in [1, {self.max_batch_size}]"
+                )
+            if not (1 <= num <= self.max_prefill_length):
+                raise ValueError(
+                    f"query.shape[2] = {num}, must be in [1, {self.max_prefill_length}]"
+                )
+        else:
+            if batch_size != self.batch_size:
+                raise ValueError(
+                    f"query.shape[0] = {batch_size} != batch_size = {self.batch_size}"
+                )
+            if not (1 <= num <= self.max_forward_length()):
+                raise ValueError(
+                    f"query.shape[2] = {num}, must be in [1, {self.max_forward_length()}]"
+                )
+        q_shape = (batch_size, self.n_head, num, self.head_size)
+        if query.shape != q_shape:
+            raise ValueError(f"query.shape = {query.shape}, must be {q_shape}")
+        k_shape = (batch_size, self.n_query_groups, num, self.head_size)
+        if key.shape != k_shape:
+            raise ValueError(f"key.shape = {key.shape}, must be {k_shape}")
+        if value.shape != k_shape:
+            raise ValueError(f"value.shape = {value.shape}, must be {k_shape}")
+        t_shape = (batch_size, num)
+        if token_idx.shape != t_shape:
+            raise ValueError(f"token_idx.shape = {token_idx.shape}, must be {t_shape}")
+        # Deal with dtype
+        if self._dtype is None:
+            self._dtype = query.dtype
+        elif self._dtype != query.dtype:
+            raise ValueError(
+                f"query.dtype = {query.dtype}, must be {self._dtype}"
+            )
+        for x in (key, value):
+            if x.dtype != query.dtype:
+                raise ValueError("query, key, value must have same dtype")
+        # Deal with device
+        new_device = query.device
+        for x in (key, value, token_idx):
+            if x.device != new_device:
+                raise ValueError("query, key, value, token_idx must be on same device")
+        self.driver.set_or_check_device(new_device)
+        self.policy.set_or_check_device(new_device)
