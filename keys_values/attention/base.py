@@ -424,6 +424,7 @@ class MultiHeadSelfAttention:
                 head_size=self.config.head_size,
                 dtype=dtype,
                 return_attn_weights=return_attn_weights,
+                config=self.config,
             )
             and self._use_flashinfer
             and _get_flashinfer_sdpa() is not None
