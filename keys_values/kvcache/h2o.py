@@ -282,9 +282,6 @@ class VLengthInstantScoreMixin:
     def get_name_v_norm(cls) -> str:
         raise NotImplementedError()
 
-    def get_kv_buffers(self) -> KVCacheBuffers:
-        raise NotImplementedError()
-
     @property
     def batch_size(self) -> int:
         raise NotImplementedError()
@@ -478,9 +475,6 @@ class VLengthH2OKVCache(H2OKVCache, VLengthInstantScoreMixin):
 
     def get_v_norm(self) -> torch.Tensor:
         return self.v_norm[: self.batch_size, :, : self.current_length]
-
-    def get_kv_buffers(self) -> KVCacheBuffers:
-        return self.kv_buffers
 
     def clone(self) -> KVCache:
         return VLengthH2OKVCache(**self._base_kwargs_for_clone())
