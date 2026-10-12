@@ -17,13 +17,13 @@ import torch
 
 from keys_values.attention import KeysAndValues
 from keys_values.config import Config
-from keys_values.kvcache.base import KVCache, KVCacheParams
+from keys_values.kvcache.base import KVCache, KVCacheParams, KVCacheReplayLog
 
 
 PositionsNewEntriesType = Union[torch.Tensor, List[Tuple[torch.Tensor, int, int]]]
 
 
-class KVCachePolicy:
+class KVCachePolicy(torch.nn.Module):
     """
     Base class for KV cache policies.
 
@@ -33,10 +33,10 @@ class KVCachePolicy:
 
     It also maintains `token_positions` for the cache. Some policies receive
     summed attention weights from scaled dot product attention (SDPA).
-
     """
 
     def __init__(self):
+        super().__init__()
         self._device = None  # Unassigned so far
 
     @property
@@ -139,10 +139,10 @@ class KVCachePolicy:
             query_length: Size of query axis
 
         """
-        raise NotImplementedError
+        pass
 
     def set_seq_length(self, seq_length: int) -> None:
-        raise NotImplementedError
+        pass
 
     def set_or_check_device(self, new_device: torch.device):
         """
@@ -207,8 +207,36 @@ class KVCachePolicy:
         """
         pass
 
+    def switch_replay_logging(self, status: bool):
+        """
+        By default, replay logging is switched off.
 
-class KVCacheDriver:
+        Args:
+            status: Do replay logging?
+
+        """
+        raise NotImplementedError
+
+    @property
+    def do_replay_logging(self) -> bool:
+        """
+        Returns:
+            Is replay logging enabled?
+
+        """
+        raise NotImplementedError
+
+    def get_replay_log(self) -> Optional[KVCacheReplayLog]:
+        """
+        Returns:
+            Cache replay log which is required for gradient computations. If
+            `do_replay_logging == False`, `None` is returned.
+
+        """
+        raise NotImplementedError
+
+
+class KVCacheDriver(torch.nn.Module):
     """
     Base class for KV cache drivers.
 
@@ -224,6 +252,7 @@ class KVCacheDriver:
 
     """
     def __init__(self, config: Config):
+        super().__init__()
         self._config = config
         self._device = None  # Unassigned so far
 
@@ -421,7 +450,6 @@ class KVCacheDriver:
     def clone(self) -> "KVCacheDriver":
         raise NotImplementedError
 
-    # TODO: Does this need args?
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         raise NotImplementedError
 

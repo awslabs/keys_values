@@ -29,9 +29,8 @@ from keys_values.kvcache.buffers import (
     DefaultKVCacheBuffers,
     KVCacheBuffers,
     KVCacheBuffersParams,
-    positions_wrap_around,
-    PositionsType,
 )
+from keys_values.kvcache.utils import PositionsType, positions_wrap_around
 from keys_values.utils import (
     index_to_3d,
     bits_for_torch_dtype,

@@ -28,8 +28,8 @@ from keys_values.kvcache.buffers import (
     DefaultKVCacheBuffers,
     KVCacheBuffers,
     KVCacheBuffersParams,
-    positions_wrap_around,
 )
+from keys_values.kvcache.utils import positions_wrap_around
 from keys_values.config import Config
 from keys_values.utils import index_to_3d, bits_for_torch_dtype, bitsize_of
 
@@ -666,12 +666,11 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             )
 
     def token_positions(self) -> torch.Tensor:
-        result = index_to_3d(
+        return index_to_3d(
             self.token_pos[: self.current_length],
             self.batch_size,
             self.n_query_groups,
         )
-        return result
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         tk_p = bitsize_of(self.token_pos)

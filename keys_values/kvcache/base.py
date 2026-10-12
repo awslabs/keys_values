@@ -811,6 +811,7 @@ class KVCacheReplayLog:
         raise NotImplementedError
 
 
+# TODO: Remove max_prefill_length: Always equal to cache_length!
 class DefaultKVCacheReplayLog(KVCacheReplayLog):
     def __init__(
         self,
