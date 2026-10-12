@@ -153,7 +153,13 @@ class DenseKVCachePolicy(DefaultKVCachePolicy):
             np, np + num, device=self._device_internal(), dtype=torch.int,
         )
 
-    def prefill(self, token_idx: torch.Tensor):
+    def prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+    ):
         # There is no `reset`, this is done here
         self._batch_size = token_idx.shape[0]
         self._input_pos = token_idx.shape[-1]
@@ -276,7 +282,13 @@ class LastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
         self._current_length = min(self._input_pos, self.cache_length)
         return positions
 
-    def prefill(self, token_idx: torch.Tensor):
+    def prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+    ):
         init_length = token_idx.shape[-1]
         if init_length < self.cache_length:
             self.next_position = init_length

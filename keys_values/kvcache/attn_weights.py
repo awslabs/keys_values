@@ -924,9 +924,6 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             cache_length=params.cache_length,
             **kwargs,
         )
-        dtype = params.dtype
-        if dtype is None:
-            raise ValueError("params.dtype must be provided")
         sz_tp = (
             params.max_batch_size
             * params.n_query_groups

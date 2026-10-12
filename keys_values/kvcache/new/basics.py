@@ -90,7 +90,13 @@ class KVCachePolicy(torch.nn.Module):
         """
         raise NotImplementedError
 
-    def prefill(self, token_idx: torch.Tensor):
+    def prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+    ):
         """
         Called during prefill. Can be used to initiate replay log and token
         positions. Will also reset score buffers, if any.
@@ -524,7 +530,7 @@ class GenericKVCache(KVCache):
 
         if for_prefill:
             # Prefill: `input_pos == 0`
-            self.policy.prefill(token_idx)
+            self.policy.prefill(query, key, value, token_idx)
             attn_outputs = self.driver.prefill(query, key, value, token_idx)
             attn_weights = None
         else:
