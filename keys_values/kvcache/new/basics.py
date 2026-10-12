@@ -23,7 +23,6 @@ from keys_values.kvcache.base import KVCache, KVCacheParams
 PositionsNewEntriesType = Union[torch.Tensor, List[Tuple[torch.Tensor, int, int]]]
 
 
-# TODO: size_estimate, size_estimate_apriori: Which arguments?
 class KVCachePolicy:
     """
     Base class for KV cache policies.
@@ -99,6 +98,18 @@ class KVCachePolicy:
         """
         raise NotImplementedError
 
+    def max_forward_length(self) -> int:
+        """
+        Note: For some policies, this function returns different values
+        depending on the state.
+
+        Returns:
+            Largest length of arguments for which next recent :meth:`forward`
+            may be called. Does not restrict a prefill call.
+
+        """
+        raise NotImplementedError
+
     @staticmethod
     def requires_attn_weights() -> bool:
         """
@@ -130,6 +141,9 @@ class KVCachePolicy:
         """
         raise NotImplementedError
 
+    def set_seq_length(self, seq_length: int) -> None:
+        raise NotImplementedError
+
     def set_or_check_device(self, new_device: torch.device):
         """
         Called by :meth:`KVCache.forward` with `new_device=query.device`.
@@ -150,7 +164,48 @@ class KVCachePolicy:
         before `_device` was set. If so, they need to be moved here.
 
         """
+        for name in self._parameter_names():
+            x = getattr(self, name, None)
+            if x is not None:
+                if not isinstance(x, torch.Tensor):
+                    raise AssertionError(
+                        f"Internal error in _convert_or_check_device: {name} must be of type torch.Tensor"
+                    )
+                if x.device != new_device:
+                    setattr(self, name, x.to(new_device))
+
+    @classmethod
+    def _parameter_names(cls) -> List[str]:
+        """
+        Returns:
+            Names of `torch.Tensor` parameters which need to be checked for
+            device or converted.
+
+        """
+        return []
+
+    def clone(self) -> "KVCachePolicy":
         raise NotImplementedError
+
+    # TODO: Does this need args?
+    def size_estimate(self) -> Tuple[int, Dict[str, int]]:
+        raise NotImplementedError
+
+    @classmethod
+    def size_estimate_apriori(
+        cls, params: KVCacheParams, **kwargs
+    ) -> Tuple[int, Dict[str, int]]:
+        raise NotImplementedError
+
+    def validate_token_idx(self, token_idx: torch.Tensor):
+        """
+        Called at the start of :meth:`forward` and :meth:`prefill`.
+
+        Args:
+            token_idx: Argument to :meth:`forward`
+
+        """
+        pass
 
 
 class KVCacheDriver:
@@ -238,6 +293,10 @@ class KVCacheDriver:
     def head_size(self) -> Optional[int]:
         raise NotImplementedError
 
+    @property
+    def block_idx(self) -> int:
+        raise NotImplementedError
+
     def prefill(
         self,
         query: torch.Tensor,
@@ -321,6 +380,9 @@ class KVCacheDriver:
         """
         raise NotImplementedError
 
+    def set_seq_length(self, seq_length: int) -> None:
+        raise NotImplementedError
+
     def get_keys_values(self) -> Optional[KeysAndValues]:
         """
         Note: This method is not implemented in all subclasses (will raise
@@ -354,6 +416,19 @@ class KVCacheDriver:
         before `_device` was set. If so, they need to be moved here.
 
         """
+        pass
+
+    def clone(self) -> "KVCacheDriver":
+        raise NotImplementedError
+
+    # TODO: Does this need args?
+    def size_estimate(self) -> Tuple[int, Dict[str, int]]:
+        raise NotImplementedError
+
+    @classmethod
+    def size_estimate_apriori(
+        cls, params: KVCacheParams, **kwargs
+    ) -> Tuple[int, Dict[str, int]]:
         raise NotImplementedError
 
 
@@ -368,14 +443,13 @@ class GenericKVCache(KVCache):
         self,
         policy: KVCachePolicy,
         driver: KVCacheDriver,
-        block_idx: int,
     ):
         self._check_compatible(policy, driver)
         super().__init__(
             driver.config,
             driver.max_batch_size,
             driver.cache_length,
-            block_idx,
+            driver.block_idx,
             driver.dtype,
             driver.head_size,
         )
@@ -455,37 +529,39 @@ class GenericKVCache(KVCache):
         return self.driver.get_keys_values()
 
     def max_forward_length(self) -> int:
-        raise NotImplementedError  # TODO!
+        return self.policy.max_forward_length()
 
-    # TODO: Is this ever != cache_length ??
+    # TODO: Remove: Always equal to cache_length!
     @property
     def max_prefill_length(self) -> int:
-        raise NotImplementedError  # TODO!
+        return self.cache_length
 
     def token_positions(self) -> torch.Tensor:
         return self.policy.token_positions()
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
-        raise NotImplementedError  # TODO!
+        estim_p_total, estim_p_dct = self.policy.size_estimate()
+        estim_d_total, estim_d_dct = self.driver.size_estimate()
+        return (
+            estim_p_total + estim_d_total,
+            {**estim_p_dct, **estim_d_dct},
+        )
 
-    @classmethod
-    def size_estimate_apriori(
-            cls, params: KVCacheParams, **kwargs
-    ) -> Tuple[int, Dict[str, int]]:
-        raise NotImplementedError  # TODO!
-
-    # TODO: Is this enough? Look at DefaultKVCache
     def reset(self) -> None:
+        # Note: `self.policy` does not need to be reset. This is done when
+        # `self.policy.prefill` is called
         self.driver.reset()
+        self._input_pos = 0
 
     def set_seq_length(self, seq_length: int) -> None:
-        raise NotImplementedError  # TODO!
+        self.policy.set_seq_length(seq_length)
+        self.driver.set_seq_length(seq_length)
 
     def clone(self) -> "KVCache":
-        raise NotImplementedError  # TODO!
-
-    def to(self, *args, **kwargs):
-        super().to(*args, **kwargs)  # TODO!
+        return GenericKVCache(
+            self.policy.clone(),
+            self.driver.clone(),
+        )
 
     def _forward_check_args(
         self,
@@ -536,6 +612,7 @@ class GenericKVCache(KVCache):
         t_shape = (batch_size, num)
         if token_idx.shape != t_shape:
             raise ValueError(f"token_idx.shape = {token_idx.shape}, must be {t_shape}")
+        self.policy.validate_token_idx(token_idx)
         # Deal with dtype
         if self._dtype is None:
             self._dtype = query.dtype
