@@ -46,6 +46,18 @@ class DefaultKVCachePolicy(KVCachePolicy):
         use_replay_logging: bool = True,
         replay_log: Optional[KVCacheReplayLog] = None,
     ):
+        """
+        Args:
+            config: Configuration object
+            cache_length: Cache length
+            use_replay_logging: Whether to use replay logging (so
+                `replay_log_status != "none"`)
+            replay_log: If given, we start with
+                `replay_log_status = "play"`, replaying from this log.
+                Otherwise, we start with `replay_log_status = "record"`
+                and an empty log.
+
+        """
         super().__init__()
         self._config = config
         self._cache_length = cache_length
@@ -54,7 +66,6 @@ class DefaultKVCachePolicy(KVCachePolicy):
         self._input_pos = 0
         self._replay_log: Optional[KVCacheReplayLog] = None
         self._replay_log_status: KVCacheReplayLogStatus = "none"
-        self._use_replay_logging = use_replay_logging
         self._replay_log_nextpos = None
         if use_replay_logging:
             if replay_log is None:
@@ -93,7 +104,7 @@ class DefaultKVCachePolicy(KVCachePolicy):
         return dict(
             config=self._config,
             cache_length=self._cache_length,
-            use_replay_logging=self._use_replay_logging,
+            use_replay_logging=self._replay_log_status != "none",
         )
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
@@ -110,7 +121,7 @@ class DefaultKVCachePolicy(KVCachePolicy):
 
     def reset(self, replay_log_status: KVCacheReplayLogStatus):
         if replay_log_status != self.replay_log_status and (self.replay_log_status == "none" or replay_log_status == "none"):
-            raise ValueError(f"Cannot switch replay_log_status from {self.replay_log_status} to {replay_log_status}")
+            raise ValueError(f"Cannot switch replay_log_status from '{self.replay_log_status}' to '{replay_log_status}'")
         if replay_log_status == "play":
             self._replay_log_nextpos = 0
         elif replay_log_status == "record":

@@ -379,21 +379,26 @@ class KVCacheDriverWithBuffers(DefaultKVCacheDriver):
                 raise IndexError("Chunk index not initialized. Call 'prefill' first.")
             self._chunk_idx += 1
             self._checkpoint_hook(self.kv_buffers, self._chunk_idx)
-        if isinstance(positions, list):
-            k_and_v = None
-            for _positions, off, num in positions:
-                k_and_v = self.kv_buffers.forward(
-                    positions=_positions,
-                    key=key[:, :, off: (off + num), :],
-                    value=value[:, :, off: (off + num), :],
-                )
-            return k_and_v
-        else:
-            return self.kv_buffers.forward(
-                positions=positions,
-                key=key,
-                value=value,
+        if not isinstance(positions, list):
+            assert isinstance(positions, torch.Tensor)
+            positions = [(positions, 0, key.shape[2])]
+        k_and_v = None
+        for index, off, num in positions:
+            _key = key[:, :, off:(off + num), :]
+            _value = value[:, :, off:(off + num), :]
+            index_sz = index.shape[-1]
+            if index_sz < num:
+                raise ValueError(f"index.shape = {index.shape}, num = {num}: Index is too short")
+            if index_sz > num:
+                key_cp, value_cp = self.kv_buffers.get_slots(index[:, :, num:])
+                _key = torch.cat((key_cp, _key), dim=-2)
+                _value = torch.cat((value_cp, _value), dim=-2)
+            k_and_v = self.kv_buffers.forward(
+                positions=index,
+                key=_key,
+                value=_value,
             )
+        return k_and_v
 
     def reset(self) -> None:
         self.kv_buffers.reset()

@@ -190,8 +190,6 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
             raise IndexError("Cache is not initialized, call 'prefill' first")
         return self.token_pos[: self.batch_size, :, : self._current_length]
 
-    # HIER: This is wrong! In `update_result is not None` branch, we need
-    # to copy. How does this fit in?
     # We initialize score buffers here even if `replay_log_status == "play"`,
     # so that scores are not updated down the line.
     def _forward(
@@ -246,66 +244,82 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
             # Positions (from last recent `update`) where new content is to be
             # written to:
             index = self.next_positions(num)
-            if self.debug_next_positions is not None:
-                self.debug_next_positions.append(index.detach().clone().cpu())
-            # Update `token_pos`
-            update_result = update_token_positions(
-                token_positions=self.token_pos,
-                input_pos=self._input_pos,
-                num=num,
-                batch_size=self.batch_size,
-                index=index,
-                grace_period=self.grace_period,
-                next_grace_pos=self.next_grace_pos,
-            )
-            if update_result is not None:
-                # Grace period, and the cache buffer is already full:
-                # - Copy buffer part in grace area to `index`
-                # - Copy new content into grace area `positions`
-                # This is done in a single operation, by fusing `index` and
-                # `positions`.
-                # New KV content:
-                # [ num1 | num2 ], where num = num1 + num2, num2 <= grace_period
-                # Copied to initial `num` of `next_positions`:
-                # [ old(grace_period) | new[:num1] ]
-                num1 = update_result.num1
-                prefix = update_result.prefix
-                _positions = update_result.positions
-                assert isinstance(_positions, torch.Tensor)  # Sanity check
-                fused_index = torch.cat((index, _positions), dim=-1)
-                # Update score buffers
-                self._update_score_buffers_in_forward(
-                    grace_period_case=True,
-                    positions=_positions,
-                    index=index,
-                    init_score_values=init_score_values,
-                    num1=num1,
-                )
-                if num1 == 0:
-                    # Increment in round-robin fashion (only if num <= grace_period)
-                    self.next_grace_pos = (
-                        self.next_grace_pos - prefix + num
-                    ) % self.grace_period + prefix
-                positions = fused_index
-            else:
-                # No grace period, or buffer net yet full
-                # Update score buffers
-                self._update_score_buffers_in_forward(
-                    grace_period_case=False,
-                    positions=None,
-                    index=index,
-                    init_score_values=init_score_values,
-                    num1=None,
-                )
-                positions = index
         else:
             # `positions` is given. Update `token_pos`, etc.
-            # TODO!
+            if isinstance(positions, list) or positions.ndim != 3:
+                raise ValueError(f"positions = {positions} invalid (must not 3D index, not a list)")
+            if positions.shape[-1] < num:
+                raise ValueError(f"positions.shape = {positions.shape}, num = {num}: too short")
+            index = positions[:, :, :num]
+        if self.debug_next_positions is not None:
+            self.debug_next_positions.append(index.detach().clone().cpu())
 
+        # Update `token_pos`
+        update_result = update_token_positions(
+            token_positions=self.token_pos,
+            input_pos=self._input_pos,
+            num=num,
+            batch_size=self.batch_size,
+            index=index,
+            grace_period=self.grace_period,
+            next_grace_pos=self.next_grace_pos,
+        )
+        if update_result is not None:
+            # Grace period, and the cache buffer is already full:
+            # - Copy buffer part in grace area to `index`
+            # - Copy new content into grace area `positions`
+            # This is done in a single operation, by fusing `index` and
+            # `positions`.
+            # New KV content:
+            # [ num1 | num2 ], where num = num1 + num2, num2 <= grace_period
+            # Copied to initial `num` of `next_positions`:
+            # [ old(grace_period) | new[:num1] ]
+            num1 = update_result.num1
+            prefix = update_result.prefix
+            extra_pos = update_result.positions
+            assert isinstance(extra_pos, torch.Tensor) and extra_pos.ndim == 3  # Sanity check
+            if positions is None:
+                # Special case: `positions.shape[-1] > num`. This means
+                # that buffer entries at `extra_pos` are to be copied to
+                # different slots as part of the update.
+                positions = torch.cat((index, extra_pos), dim=-1)
+            else:
+                # Just validate
+                should_be = positions[:, :, num:].to(device=extra_pos.device)
+                if not extra_pos.equal(should_be):
+                    raise ValueError(
+                        f"extra_pos:\n{extra_pos} -- {extra_pos.shape}\nshould_be:\n{should_be} -- {should_be.shape}\nShould be the same!"
+                    )
+            # Update score buffers
+            self._update_score_buffers_in_forward(
+                grace_period_case=True,
+                positions=extra_pos,
+                index=index,
+                init_score_values=init_score_values,
+                num1=num1,
+            )
+            if num1 == 0:
+                # Increment in round-robin fashion (only if num <= grace_period)
+                self.next_grace_pos = (
+                    self.next_grace_pos - prefix + num
+                ) % self.grace_period + prefix
+        else:
+            # No grace period, or buffer net yet full
+            if positions is None:
+                positions = index
+            elif positions.shape[-1] != num:
+                raise ValueError(f"positions.shape = {positions.shape}, num = {num}: must be same length")
+            # Update score buffers
+            self._update_score_buffers_in_forward(
+                grace_period_case=False,
+                positions=None,
+                index=index,
+                init_score_values=init_score_values,
+                num1=None,
+            )
 
         self._next_positions = None  # Set by next :meth:`update` call
-        self._input_pos += num
-        self._current_length = min(self._input_pos, self.cache_length)
+        self._current_length = min(self._input_pos + num, self.cache_length)
         return positions
 
     def _update_score_buffers_in_forward(

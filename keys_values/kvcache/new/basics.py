@@ -90,12 +90,11 @@ class KVCachePolicy(torch.nn.Module):
         """
         Given new information `key`, `value`, `query`, `token_idx`, returns
         slot positions where new `key`, `value` is to be stored. This can be
-        an index of shape `key.shape[:-1]`, with values in
-        `range(cache_length)`, or a list with entries `(positions, off, num)`,
-        where `positions.shape = (*key.shape[:-2], num)`, and the sum of `num`
-        is equal to `key.shape[-2]`. In the latter case, the ranges
-        `key[:, :, off:(off + num), :]`, `value[:, :, off:(off + num), :]`
-        are to be written to `positions` sequentially.
+        an index with values in `range(cache_length)`, or a list with entries
+        `(positions, off, num)`, where `positions` is an index, and the sum of
+        `num` is equal to `key.shape[-2]`. See header comment of
+        :class:`KVCacheDriver` for the semantics of slot positions, and how
+        they are used to update the KV cache buffers.
 
         The arguments are the same as in
         :meth:`keys_values.kvcache.base.KVCache.forward`.
@@ -225,7 +224,11 @@ class KVCachePolicy(torch.nn.Module):
         """
         Call this to switch replay log status between "record" and "play".
         This also resets everything, like :meth:`prefill`. This is done
-        even if the replay log status stays the same.
+        even if the replay log status stays the same. The replay log is
+        reset to empty if `replay_log_status == "record"`, but is left
+        unchanged if `replay_log_status == "play"`. This means we can use
+        the same KV cache policy object to first record, then replay what
+        was recorded.
 
         Note: In order to reuse a cache with the same replay log status,
         this method need not be called. :meth:`prefill` automatically resets.
@@ -261,6 +264,24 @@ class KVCacheDriver(torch.nn.Module):
 
     Note that KV buffers and SDPA are not separated here, but are dealt with
     together.
+
+    Update of KV buffers based on `positions` in :meth:`forward`:
+
+    We either have `positions == index` (single 3D index), or a list of
+    entries `(index, off, num)`. In the latter case, we do the following
+    for every entry in order, using `key[:, :, off:(off + num), :],
+    `value[:, :, off:(off + num), :]` instead of `key, value` in each
+    step.
+
+    If `index.shape[-1] == num` (where `num = key.shape[2]` in the single
+    entry case), then `key, value` are written to positions `index` (with
+    `scatter_`) of the respective buffers. A special case arises if
+    `index.shape[-1] > num`. Let `extra_pos = index[:, :, num:]`, and
+    `key_cp, value_cp = kv_buffers.get_slots(extra_pos)` (extract by
+    `gather`). Then, `torch.cat((key_cp, key), dim=-2)` and
+    `torch.cat((value_cp, value), dim=-2)` are written to positions
+    `index`. See :class:`AttnWeightsKVCachePolicy` for an example where
+    this special case is needed.
 
     """
     def __init__(self, config: Config):
@@ -377,11 +398,12 @@ class KVCacheDriver(torch.nn.Module):
         Forward computation if `input_pos > 0`.
         First, the K and V buffers are updated for the new entries `key`,
         `value`, using overwrite positions `positions`, as determined by
-        :meth:`KVCachePolicy.positions_new_entries` called with the same
-        arguments. Second, run SDPA with `query` and the extended K, V
-        buffers, and `token_positions`. Here, `token_positions` has already
-        been updated in the last recent
-        :meth:`KVCachePolicy.positions_new_entries` call. Returns the
+        :meth:`KVCachePolicy.forward` called with the same arguments. See
+        header comment on how this is to be done.
+
+        Second, run SDPA with `query` and the extended K, V buffers, and
+        `token_positions`. Here, `token_positions` has already been updated
+        in the last recent :meth:`KVCachePolicy.forward` call. Returns the
         attention outputs.
 
         If `return_attn_weights == True`, the attention weights summed
@@ -393,7 +415,7 @@ class KVCacheDriver(torch.nn.Module):
             value: Values for the new entries.
             token_idx: Token indices for the new entries.
             positions: Positions for the new entries, coming from a call
-                of :meth:`KVCachePolicy.positions_new_entries`.
+                of :meth:`KVCachePolicy.forward`.
             token_positions: Token positions for KV buffer after update,
                 obtained from :meth:`KVCachePolicy.token_positions`.
             input_pos: Input positions for the new entries. This is the number

@@ -24,6 +24,7 @@ from keys_values.kvcache.new.basics import (
     PositionsNewEntriesType,
     KVCachePolicy,
     KVCacheReplayLog,
+    KVCacheReplayLogStatus,
 )
 from keys_values.kvcache.new.policy import DefaultKVCachePolicy
 from keys_values.kvcache.smart_lastrec import (
@@ -361,3 +362,10 @@ class SmartInitialLastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
             * bits_for_torch_dtype(torch.int)
         )
         return tk_p, {"token_pos": tk_p}
+
+    # Note: We refrain from doing more than setting `current_length = 0`.
+    # The next valid call must be :meth:`prefill`, which does a proper
+    # reset (this may need its args).
+    def reset(self, replay_log_status: KVCacheReplayLogStatus):
+        super().reset(replay_log_status)
+        self._current_length = 0
