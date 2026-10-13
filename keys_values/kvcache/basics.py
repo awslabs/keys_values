@@ -509,10 +509,11 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     Efficient Streaming Language Models with Attention Sinks
     https://arxiv.org/abs/2309.17453
 
-    Pass `grow_buffers=True` to :meth:`from_config` to allocate the default
-    buffers small and double them until `cache_length`, while the cache is
-    still filling. `token_pos` stays `cache_length` sized. The default is
-    `False`, which allocates the full buffers up front.
+    `grow_buffers_init_length` is passed at construction (`__init__` or
+    :meth:`from_config`). `None` (the default) allocates default buffers at
+    `cache_length`. A positive int starts them at that many slots, capped at
+    `cache_length`, and doubles that length until a write fits or
+    `cache_length` is reached. `token_pos` stays `cache_length` sized.
     """
 
     def __init__(
@@ -521,9 +522,22 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         buffers: KVCacheBuffers,
         block_idx: int,
         init_grace_tokens: Optional[int] = None,
+        grow_buffers_init_length: Optional[int] = None,
         **base_kwargs,
     ):
         super().__init__(config, buffers, block_idx, **base_kwargs)
+        if (
+            isinstance(buffers, DefaultKVCacheBuffers)
+            and grow_buffers_init_length is not None
+        ):
+            buffers.grow_buffers_init_length = buffers._clip_grow_init_length(
+                grow_buffers_init_length
+            )
+        self.grow_buffers_init_length = (
+            buffers.grow_buffers_init_length
+            if isinstance(buffers, DefaultKVCacheBuffers)
+            else grow_buffers_init_length
+        )
         if init_grace_tokens is None:
             init_grace_tokens = min(
                 DEFAULT_INIT_GRACE_TOKENS,
@@ -553,7 +567,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         init_grace_tokens: Optional[int] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
-        grow_buffers: bool = False,
+        grow_buffers_init_length: Optional[int] = None,
         **base_kwargs,
     ) -> "LastRecentlyInsertedKVCache":
         """
@@ -570,10 +584,10 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 first :meth:`forward` call, based on the input arguments.
             dtype: Data type for buffers. If not given, it is set with the
                 first :meth:`forward` call, based on the input arguments.
-            grow_buffers: If `True`, default buffers start at
-                `DEFAULT_GROW_BUFFERS_INITIAL_SLOTS` and double until
-                `cache_length`. If `False` (default), they are allocated at
-                `cache_length` immediately.
+            grow_buffers_init_length: If `None` (default), buffers are
+                allocated at `cache_length`. If a positive int, they start
+                with that many slots (at most `cache_length`) and double
+                until a write fits or `cache_length` is reached.
             base_kwargs: Extra keyword arguments for cache and default buffer
 
         """
@@ -584,7 +598,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             cache_length=cache_length,
             device=device,
             dtype=dtype,
-            grow_buffers=grow_buffers,
+            grow_buffers_init_length=grow_buffers_init_length,
             **buffers_kwargs,
         )
         return LastRecentlyInsertedKVCache(
@@ -592,6 +606,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             buffers,
             block_idx,
             init_grace_tokens=init_grace_tokens,
+            grow_buffers_init_length=grow_buffers_init_length,
             **base_kwargs,
         )
 
@@ -725,6 +740,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     def _base_kwargs_for_clone(self) -> Dict[str, Any]:
         result = super()._base_kwargs_for_clone()
         result["init_grace_tokens"] = self.init_grace_tokens
+        result["grow_buffers_init_length"] = self.grow_buffers_init_length
         return result
 
     def clone(self) -> KVCache:
