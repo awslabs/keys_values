@@ -95,10 +95,12 @@ def _forward(cache, data, sizes):
 
 @pytest.mark.parametrize(
     "device, case, tentative_sizes",
-    product(
-        available_backends(),
-        CACHE_CASES,
-        ((1, 1, 3, 2), (2, 1, 2, 2)),
+    list(
+        product(
+            available_backends(),
+            CACHE_CASES,
+            ((1, 1, 3, 2), (2, 1, 2, 2)),
+        )
     ),
 )
 def test_switch_buffers_restores_state_and_outputs(device, case, tentative_sizes):
