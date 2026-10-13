@@ -229,7 +229,10 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
             )
             self._next_positions = index_to_3d(
                 torch.arange(
-                    num_keep, num_keep + num, dtype=torch.int64, device=device,
+                    num_keep,
+                    num_keep + num,
+                    dtype=torch.int64,
+                    device=device,
                 ),
                 self.batch_size,
                 self.n_query_groups,
@@ -247,9 +250,13 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
         else:
             # `positions` is given. Update `token_pos`, etc.
             if isinstance(positions, list) or positions.ndim != 3:
-                raise ValueError(f"positions = {positions} invalid (must not 3D index, not a list)")
+                raise ValueError(
+                    f"positions = {positions} invalid (must not 3D index, not a list)"
+                )
             if positions.shape[-1] < num:
-                raise ValueError(f"positions.shape = {positions.shape}, num = {num}: too short")
+                raise ValueError(
+                    f"positions.shape = {positions.shape}, num = {num}: too short"
+                )
             index = positions[:, :, :num]
         if self.debug_next_positions is not None:
             self.debug_next_positions.append(index.detach().clone().cpu())
@@ -277,7 +284,9 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
             num1 = update_result.num1
             prefix = update_result.prefix
             extra_pos = update_result.positions
-            assert isinstance(extra_pos, torch.Tensor) and extra_pos.ndim == 3  # Sanity check
+            assert (
+                isinstance(extra_pos, torch.Tensor) and extra_pos.ndim == 3
+            )  # Sanity check
             if positions is None:
                 # Special case: `positions.shape[-1] > num`. This means
                 # that buffer entries at `extra_pos` are to be copied to
@@ -308,7 +317,9 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
             if positions is None:
                 positions = index
             elif positions.shape[-1] != num:
-                raise ValueError(f"positions.shape = {positions.shape}, num = {num}: must be same length")
+                raise ValueError(
+                    f"positions.shape = {positions.shape}, num = {num}: must be same length"
+                )
             # Update score buffers
             self._update_score_buffers_in_forward(
                 grace_period_case=False,
@@ -479,7 +490,9 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
         init_length = token_idx.shape[-1]
         _batch_size = token_idx.shape[0]
         if _batch_size > self.token_pos.shape[0]:
-            raise ValueError(f"token_idx.shape = {token_idx.shape}: Batch size {_batch_size} > {self.token_pos.shape[0]} = max_batch_size")
+            raise ValueError(
+                f"token_idx.shape = {token_idx.shape}: Batch size {_batch_size} > {self.token_pos.shape[0]} = max_batch_size"
+            )
         self._batch_size = _batch_size
         # Update `token_pos`
         update_token_positions(

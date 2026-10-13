@@ -120,8 +120,12 @@ class DefaultKVCachePolicy(KVCachePolicy):
         return self._replay_log_status
 
     def reset(self, replay_log_status: KVCacheReplayLogStatus):
-        if replay_log_status != self.replay_log_status and (self.replay_log_status == "none" or replay_log_status == "none"):
-            raise ValueError(f"Cannot switch replay_log_status from '{self.replay_log_status}' to '{replay_log_status}'")
+        if replay_log_status != self.replay_log_status and (
+            self.replay_log_status == "none" or replay_log_status == "none"
+        ):
+            raise ValueError(
+                f"Cannot switch replay_log_status from '{self.replay_log_status}' to '{replay_log_status}'"
+            )
         if replay_log_status == "play":
             self._replay_log_nextpos = 0
         elif replay_log_status == "record":
@@ -135,12 +139,16 @@ class DefaultKVCachePolicy(KVCachePolicy):
     def _get_next_replay_entry(self) -> Optional[KVCacheReplayLogEntry]:
         if self._replay_log_status == "play":
             if self._replay_log_nextpos >= len(self._replay_log):
-                raise IndexError(f"replay_log_nextpos = {self._replay_log_nextpos}, len(replay_log) = {len(self._replay_log)}: Not enough entries to replay!")
+                raise IndexError(
+                    f"replay_log_nextpos = {self._replay_log_nextpos}, len(replay_log) = {len(self._replay_log)}: Not enough entries to replay!"
+                )
             return self._replay_log[self._replay_log_nextpos]
         else:
             return None
 
-    def _validate_token_idx(self, token_idx: torch.Tensor) -> Optional[KVCacheReplayLogEntry]:
+    def _validate_token_idx(
+        self, token_idx: torch.Tensor
+    ) -> Optional[KVCacheReplayLogEntry]:
         next_entry = self._get_next_replay_entry()
         if next_entry is not None:
             other = next_entry.token_idx.to(device=token_idx.device)
@@ -257,7 +265,10 @@ class DenseKVCachePolicy(DefaultKVCachePolicy):
             np = self._input_pos
             num = key.shape[2]
             positions = torch.arange(
-                np, np + num, device=query.device, dtype=torch.int,
+                np,
+                np + num,
+                device=query.device,
+                dtype=torch.int,
             )
         return positions
 
@@ -367,12 +378,16 @@ class LastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
         diff = num - num1
         ntp = self._input_pos
         self.token_pos[np : (np + num1)] = torch.arange(
-            ntp, ntp + num1, **ind_kwargs,
+            ntp,
+            ntp + num1,
+            **ind_kwargs,
         )
         np += num1
         if diff > 0 or np == self.cache_length:
             self.token_pos[start : (start + diff)] = torch.arange(
-                ntp + num1, ntp + num, **ind_kwargs,
+                ntp + num1,
+                ntp + num,
+                **ind_kwargs,
             )
             np = start + diff
         self.next_position = np

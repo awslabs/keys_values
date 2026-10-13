@@ -20,7 +20,6 @@ from keys_values.attention import KeysAndValues
 from keys_values.config import Config
 from keys_values.kvcache.base import KVCache, KVCacheParams
 
-
 PositionsNewEntriesType = Union[torch.Tensor, List[Tuple[torch.Tensor, int, int]]]
 
 
@@ -298,6 +297,7 @@ class KVCacheDriver(torch.nn.Module):
     this special case is needed.
 
     """
+
     def __init__(self, config: Config):
         super().__init__()
         self._config = config
@@ -515,6 +515,7 @@ class GenericKVCache(KVCache):
     :class:`KVCacheDriver` object.
 
     """
+
     def __init__(
         self,
         policy: KVCachePolicy,
@@ -539,9 +540,7 @@ class GenericKVCache(KVCache):
             val_p = getattr(policy, name)
             val_d = getattr(driver, name)
             if val_p != val_d:
-                raise ValueError(
-                    f"policy.{name} = {val_p} != {val_d} = driver.{name}"
-                )
+                raise ValueError(f"policy.{name} = {val_p} != {val_d} = driver.{name}")
 
     def _check_batch_size(self):
         val_p = self.policy.cache_length
@@ -693,9 +692,7 @@ class GenericKVCache(KVCache):
         if self._dtype is None:
             self._dtype = query.dtype
         elif self._dtype != query.dtype:
-            raise ValueError(
-                f"query.dtype = {query.dtype}, must be {self._dtype}"
-            )
+            raise ValueError(f"query.dtype = {query.dtype}, must be {self._dtype}")
         for x in (key, value):
             if x.dtype != query.dtype:
                 raise ValueError("query, key, value must have same dtype")

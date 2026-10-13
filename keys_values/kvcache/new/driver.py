@@ -128,7 +128,7 @@ class DefaultKVCacheDriver(KVCacheDriver):
         input_pos: int,
         return_attn_weights: bool,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        assert input_pos > 0   # Sanity check
+        assert input_pos > 0  # Sanity check
         return self._prefill_or_forward_mha(
             query=query,
             key=key,
@@ -384,11 +384,13 @@ class KVCacheDriverWithBuffers(DefaultKVCacheDriver):
             positions = [(positions, 0, key.shape[2])]
         k_and_v = None
         for index, off, num in positions:
-            _key = key[:, :, off:(off + num), :]
-            _value = value[:, :, off:(off + num), :]
+            _key = key[:, :, off : (off + num), :]
+            _value = value[:, :, off : (off + num), :]
             index_sz = index.shape[-1]
             if index_sz < num:
-                raise ValueError(f"index.shape = {index.shape}, num = {num}: Index is too short")
+                raise ValueError(
+                    f"index.shape = {index.shape}, num = {num}: Index is too short"
+                )
             if index_sz > num:
                 key_cp, value_cp = self.kv_buffers.get_slots(index[:, :, num:])
                 _key = torch.cat((key_cp, _key), dim=-2)

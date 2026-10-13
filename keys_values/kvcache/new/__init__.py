@@ -27,7 +27,9 @@ from keys_values.kvcache.new.qh2o import (
     QuantizedH2OKVCachePolicy,
     QuantizedVLengthH2OKVCachePolicy,
 )
-from keys_values.kvcache.new.smart_lastrec import SmartInitialLastRecentlyInsertedKVCachePolicy
+from keys_values.kvcache.new.smart_lastrec import (
+    SmartInitialLastRecentlyInsertedKVCachePolicy,
+)
 
 __all__ = [
     "AttnWeightsKVCachePolicy",

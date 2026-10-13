@@ -114,7 +114,9 @@ def test_store_retrieve(device, name, kwargs):
             k_expected = data["key"].gather(-2, index).squeeze(-2)
             v_expected = data["value"].gather(-2, index).squeeze(-2)
             torch.testing.assert_close(k_expected, keys_and_values.keys()[:, :, pos, :])
-            torch.testing.assert_close(v_expected, keys_and_values.values()[:, :, pos, :])
+            torch.testing.assert_close(
+                v_expected, keys_and_values.values()[:, :, pos, :]
+            )
     except NotImplementedError:
         print(f"KVCache {name} does not implement get_keys_values: Skipping")
 

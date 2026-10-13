@@ -90,7 +90,11 @@ class QuantizedH2OKVCachePolicy(H2OKVCachePolicy):
         scratch_blocksize = min(scratch_blocksize, kv_buffers.cache_length)
         self._scratch_blocksize = scratch_blocksize
         self.combination_constant = combination_constant
-        shape = (kv_buffers.max_batch_size, self.n_query_groups, kv_buffers.cache_length)
+        shape = (
+            kv_buffers.max_batch_size,
+            self.n_query_groups,
+            kv_buffers.cache_length,
+        )
         device = self._device_internal()
         self.register_buffer(
             "q_errors",
@@ -244,7 +248,11 @@ class QuantizedVLengthH2OKVCachePolicy(
             combination_constant,
             scratch_blocksize,
         )
-        shape = (kv_buffers.max_batch_size, self.n_query_groups, kv_buffers.cache_length)
+        shape = (
+            kv_buffers.max_batch_size,
+            self.n_query_groups,
+            kv_buffers.cache_length,
+        )
         device = self._device_internal()
         self.register_buffer(
             self.get_name_v_norm(),

@@ -306,7 +306,9 @@ class SmartInitialLastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
         init_length = token_idx.shape[-1]
         _batch_size = token_idx.shape[0]
         if _batch_size > self.token_pos.shape[0]:
-            raise ValueError(f"token_idx.shape = {token_idx.shape}: Batch size {_batch_size} > {self.token_pos.shape[0]} = max_batch_size")
+            raise ValueError(
+                f"token_idx.shape = {token_idx.shape}: Batch size {_batch_size} > {self.token_pos.shape[0]} = max_batch_size"
+            )
         self._batch_size = _batch_size
         if init_length < self.cache_length:
             self.next_position = [init_length] * self.batch_size
@@ -346,7 +348,9 @@ class SmartInitialLastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
         )
 
     def clone(self) -> KVCachePolicy:
-        return SmartInitialLastRecentlyInsertedKVCachePolicy(**self._base_kwargs_for_clone())
+        return SmartInitialLastRecentlyInsertedKVCachePolicy(
+            **self._base_kwargs_for_clone()
+        )
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         tk_p = bitsize_of(self.token_pos)
