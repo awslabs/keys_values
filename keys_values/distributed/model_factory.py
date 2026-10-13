@@ -28,7 +28,7 @@ from keys_values.lora import (
     Config as ConfigLoRA,
 )
 from keys_values.model import GPT as GPTFull, Block as BlockFull
-from keys_values.optimize.module_wrapper import (
+from keys_values.distributed.module_wrapper import (
     AccessWeightsGradients,
     FlatVectors,
 )

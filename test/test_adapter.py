@@ -33,8 +33,9 @@ from litgpt.scripts.convert_lit_checkpoint import qkv_reassemble as make_qkv_int
 from litgpt.utils import _RunIf
 
 import keys_values.adapter as gpt_adapter
-import keys_values.model as gpt
 from keys_values.adapter import GPT, CausalSelfAttention
+import keys_values.model as gpt
+from keys_values.finetune.utils import save_checkpoint
 
 
 def test_config_identical():
@@ -52,10 +53,9 @@ def test_config_identical():
 
 
 def test_adapter_filter(tmp_path):
-    fabric = Fabric(devices=1)
     model = GPT.from_name("pythia-14m", n_layer=4)
     save_path = tmp_path / "model.pth"
-    fabric.save(save_path, {"model": model}, filter={"model": adapter_filter})
+    save_checkpoint(save_path, {"model": model}, filter={"model": adapter_filter})
     saved = torch.load(save_path)["model"]
 
     expected = {

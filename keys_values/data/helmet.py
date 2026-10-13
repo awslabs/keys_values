@@ -19,6 +19,8 @@ from tokenizers import Tokenizer as HFTokenizer
 import torch
 from tqdm import tqdm
 
+from keys_values.constants import DEFAULT_IGNORE_INDEX
+from keys_values.data.base import EncodableDataModuleMixin, DataModuleEncoding
 from keys_values.data.constants import (
     METADATA_SEQ_LENGTHS_KEY,
     METADATA_KEYS,
@@ -29,7 +31,6 @@ from keys_values.data.constants import (
     METADATA_TRAIN_VAL_SPLIT_KEY,
     Collator,
 )
-from keys_values.constants import DEFAULT_IGNORE_INDEX
 from keys_values.data.load_helmet_dev_eval import (
     load_helmet_dev_eval,
     DATASET_PARENT_DIR,
@@ -132,7 +133,7 @@ class HelmetDataTrainState(SequenceLengthFilteredDataTrainState):
         self.test_target_choice = None if test_choice is None else test_choice.tolist()
 
 
-class Helmet(SequenceLengthFilteredDataModule):
+class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
     """Data module for HELMET benchmark datasets.
 
     Loads development and evaluation splits via :func:`load_helmet_dev_eval`.
@@ -149,7 +150,10 @@ class Helmet(SequenceLengthFilteredDataModule):
       List of sequence lengths (in tokens) for each record. Here, `model_name`
       because the tokenizer depends on the model, and `split` is "dev" or
       "eval".
+
     """
+
+    EncodedName = "Helmet"
 
     def __init__(
         self,
@@ -571,3 +575,24 @@ class Helmet(SequenceLengthFilteredDataModule):
         if self.training_state is None:
             self.training_state = HelmetDataTrainState()
         self.training_state.load_state_dict(state_dict)
+
+    def encode(self) -> DataModuleEncoding:
+        if self.tokenizer is not None:
+            raise RuntimeError("Cannot call encode after connect")
+        kwargs = dict(
+            dataset_key=self.dataset_key,
+            max_length=self.max_length,
+            dataset_parent_dir=self.dataset_parent_dir,
+            mask_prompt=self.mask_prompt,
+            val_split_fraction=self.val_split_fraction,
+            ignore_index=self.ignore_index,
+            max_seq_length=self.max_seq_length,
+            seed=self.seed,
+            metadata_dir=self.metadata_dir,
+            store_split_in_metadata=self.store_split_in_metadata,
+            trainloader_longest_first=self._trainloader_longest_first,
+            trainloader_shortest_first=self._trainloader_shortest_first,
+            recompute_lengths=self._recompute_lengths,
+            use_old_metrics=self.use_old_metrics,
+        )
+        return DataModuleEncoding(name=self.EncodedName, kwargs=kwargs)

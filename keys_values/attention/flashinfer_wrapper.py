@@ -23,6 +23,7 @@ from keys_values.attention.sdpa_wrapper import (
     reorder_key_value,
     reorder_inverse,
 )
+from keys_values.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -308,14 +309,26 @@ def pad_head_size(
     return query, key, value, diff
 
 
+_SUPPORTED_GROUP_SIZES = (1, 2, 3, 4, 6, 8)
+
+
+# https://github.com/awslabs/keys_values/issues/159
+# FlashInfer decode (no attention weights) crashes for GQA group sizes
+# outside {1,2,3,4,6,8}.
+# TODO: Once this is fixed, remove this condition.
 def can_do_flashinfer(
-    head_size: int, dtype: torch.dtype, return_attn_weights: bool
+    head_size: int,
+    dtype: torch.dtype,
+    return_attn_weights: bool,
+    config: Optional[Config] = None,
 ) -> bool:
+    group_size = 1 if config is None else config.n_head // config.n_query_groups
     return (
         torch.cuda.is_available()
         and dtype in (torch.float16, torch.bfloat16)
         and head_size <= ALLOWED_HEAD_SIZES[-1]
         and (not return_attn_weights or _triton_available)
+        and group_size in _SUPPORTED_GROUP_SIZES
     )
 
 

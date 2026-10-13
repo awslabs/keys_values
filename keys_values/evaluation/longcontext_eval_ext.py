@@ -19,9 +19,7 @@ from pprint import pprint
 from typing import Dict, Optional, Union, Any, List, Tuple
 import yaml
 
-import lightning as L
 import torch
-from lightning.fabric.strategies import DDPStrategy
 
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
@@ -30,11 +28,11 @@ from litgpt.utils import (
     check_valid_checkpoint_dir,
     get_default_supported_precision,
     parse_devices,
-    load_checkpoint,
 )
 
 from keys_values.attention.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.config import Config as ConfigFull
+from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
 from keys_values.data import LongBenchV2, Helmet, INPUT_IDS_NAME
 from keys_values.data.evaluation import EvaluationDataLoader
 from keys_values.data.constants import (
@@ -46,7 +44,7 @@ from keys_values.data.constants import (
     LORA_WEIGHTS_FNAME,
     LORA_WEIGHTS_FNAME_OLD,
 )
-from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
+from keys_values.distributed.fabric import Fabric
 from keys_values.evaluation.evaluator import (
     SampleBasedMetricsEvaluator,
     TargetType,
@@ -69,6 +67,8 @@ from keys_values.finetune.utils import (
     print_with_rank_and_timestamp,
     adjust_cache_kwargs,
     load_generation_config,
+    load_checkpoint,
+    init_module,
 )
 from keys_values.fused import (
     set_fused_swiglu_enabled,
@@ -83,6 +83,7 @@ from keys_values.utils import (
     VerbosityLevels,
     fabric_precision_to_dtype,
     remove_keys,
+    seed_everything,
 )
 
 GENERATED_SAMPLES_FILENAME = "generated_samples_{}.yaml"
@@ -195,11 +196,10 @@ def setup(
 
     """
     devices = parse_devices(devices)
-    if torch.cuda.is_available():
-        if not (1 <= devices <= torch.cuda.device_count()):
-            raise ValueError(
-                f"devices = {devices}, must be in [1, {torch.cuda.device_count()}]"
-            )
+    if Fabric.cuda_is_available():
+        device_count = Fabric.device_count()
+        if not (1 <= devices <= device_count):
+            raise ValueError(f"devices = {devices}, must be in [1, {device_count}]")
     elif devices != 1:
         raise ValueError("CUDA is not available, can only do devices = 1")
     sample_metric_kwargs = dict()
@@ -292,23 +292,13 @@ def setup_internal(
         model_type=model_type,
     )
     precision = hyp_pars["precision"] or get_default_supported_precision(training=True)
-    if devices > 1:
-        strategy = DDPStrategy(static_graph=True, broadcast_buffers=False)
-    else:
-        strategy = "auto"
-    fabric = L.Fabric(
-        devices=devices,
-        num_nodes=1,
-        strategy=strategy,
-        precision=precision,
-    )
 
-    fabric.launch(
-        main,
+    kwargs = dict(
         seed=seed,
         setups=setups,
         batch_size=batch_size,
         devices=devices,
+        precision=precision,
         verbose=verbose,
         attention_forward_temp_size_gb=attention_forward_temp_size_gb,
         use_sample_metric=use_sample_metric,
@@ -322,13 +312,22 @@ def setup_internal(
         use_old_metrics=use_old_metrics,
     )
 
+    if Fabric.cuda_is_available():
+        Fabric.launch(
+            main,
+            nprocs=devices,
+            **kwargs,
+        )
+    else:
+        main(**kwargs)
+
 
 def main(
-    fabric: L.Fabric,
     seed: int,
     setups: List[Dict[str, Any]],
     batch_size: int,
     devices: int,
+    precision: str,
     verbose: Optional[str],
     attention_forward_temp_size_gb: Optional[float],
     use_sample_metric: bool,
@@ -341,7 +340,7 @@ def main(
     skip_eval: bool,
     use_old_metrics: Optional[bool],
 ) -> None:
-    fabric.seed_everything(seed)
+    seed_everything(seed)
 
     # Loop over setups
     _batch_size = batch_size
@@ -512,7 +511,7 @@ def main(
 
         # Create model
         if torch.cuda.is_available():
-            device = torch.device("cuda", fabric.local_rank)
+            device = Fabric.device()
         else:
             device = torch.device("cpu")
         try:
@@ -527,7 +526,10 @@ def main(
                 tokenizer = Tokenizer(base_checkpoint_dir)
             else:
                 raise ex
-        with fabric.init_module(empty_init=(fabric.world_size > 1)):
+        with init_module(
+            empty_init=(Fabric.world_size() > 1),
+            precision=precision,
+        ):
             # Updates `kv_cache.cache_kwargs` from other args:
             kv_cache = kv_cache.update_cache_kwargs()
             # Set `mha_kwargs`, update kv_cache.cache_kwargs` with that as well:
@@ -537,13 +539,12 @@ def main(
                 kv_cache,
                 sdpa,
                 yarn_rope,
-                fabric,
                 devices,
             )
             # Depending on the cache type `kv_cache.name`, the arguments
             # `kv_cache.cache_kwargs` are adjusted
             adjust_cache_kwargs(kv_cache, data, tokenizer)
-            dtype = fabric_precision_to_dtype(fabric._precision.precision)
+            dtype = fabric_precision_to_dtype(precision)
             torch.set_default_dtype(dtype)
             with torch.device(device):
                 gpt_model = create_gpt_model(model_config.config, **mha_kwargs)
@@ -569,16 +570,15 @@ def main(
                 max_batch_size=batch_size,
                 dtype=dtype,
                 average_loss_per_batch=False,
-                fabric=fabric,
             )
         # Load base model
         file_path = base_checkpoint_dir / LIT_MODEL_FNAME
-        load_checkpoint(fabric, model.gpt_model, file_path, strict=False)
+        load_checkpoint(model.gpt_model, file_path, strict=False)
         # If there are head model weights, load them as well. Otherwise, we use
         # random initialization (or the head model may not have weights)
         file_path = base_checkpoint_dir / HEAD_MODEL_FNAME
         if file_path.exists():
-            load_checkpoint(fabric, model.head_model, file_path, strict=True)
+            load_checkpoint(model.head_model, file_path, strict=True)
 
         # Evaluation over tasks and batches
         # `num_store_generated_batches` is the number of batches for which
@@ -591,12 +591,11 @@ def main(
             if devices > 1:
                 num_store_generated_batches = (
                     num_store_generated_batches // devices
-                    + int(fabric.local_rank < num_store_generated_batches % devices)
+                    + int(Fabric.rank() < num_store_generated_batches % devices)
                 )
         else:
             num_store_generated_batches = None
         eval_for_setup(
-            fabric,
             model,
             data,
             tokenizer,
@@ -619,7 +618,6 @@ def main(
 
 
 def eval_for_setup(
-    fabric: L.Fabric,
     model: LongContextInferenceModel,
     data: DataModule,
     tokenizer: Tokenizer,
@@ -648,7 +646,6 @@ def eval_for_setup(
         head_model=model_config.head_model_name,
         batch_size=batch_size,
         devices=devices,
-        fabric=fabric,
         model_name=model_name,
     )
     ignore_index = getattr(data, "ignore_index", DEFAULT_IGNORE_INDEX)
@@ -674,7 +671,6 @@ def eval_for_setup(
 
     # Loop over test set batches
     eval_for_setup_internal(
-        fabric,
         model,
         data,
         test_dataloader,
@@ -693,7 +689,6 @@ def eval_for_setup(
 
 
 def eval_for_setup_internal(
-    fabric: L.Fabric,
     model: LongContextInferenceModel,
     data: DataModule,
     test_dataloader: EvaluationDataLoader,
@@ -742,7 +737,7 @@ def eval_for_setup_internal(
     if devices > 1:
         # Ensure that lock for first batch is not checked at exactly the same
         # time by all devices
-        time.sleep(0.05 * fabric.global_rank)
+        time.sleep(0.05 * Fabric.rank())
     batch_idx = 0  # Batch counter per task
     skip_until_next_task = False
     for batch in test_dataiter:
@@ -773,7 +768,7 @@ def eval_for_setup_internal(
         try:
             print_with_rank_and_timestamp(
                 f"Running inference for batch {batch_name}",
-                fabric.global_rank,
+                Fabric.rank(),
             )
             if getattr(test_dataloader, "delay_tokenization", False):
                 # Tokenization only happens here
@@ -791,7 +786,6 @@ def eval_for_setup_internal(
                     model=model,
                     task_path=task_path,
                     model_type=model_type,
-                    fabric=fabric,
                 )
                 current_task = task
                 batch_idx = 0  # Reset
@@ -821,7 +815,7 @@ def eval_for_setup_internal(
             eval_time = time.perf_counter() - t0
             print_with_rank_and_timestamp(
                 f"Batch {batch_name}: {metric_name} = {metric_values.mean().item():.3f}, eval_time = {eval_time * 1000:.2f} ms",
-                fabric.global_rank,
+                Fabric.rank(),
             )
             flush_io_streams()
             if not skip_eval:
@@ -872,7 +866,6 @@ def get_dataloader(
     head_model: str,
     batch_size: int,
     devices: int,
-    fabric: Optional[L.Fabric],
     model_name: Optional[str] = None,
 ) -> EvaluationDataLoader:
     """
@@ -891,27 +884,29 @@ def get_dataloader(
         head_model: Head model name
         batch_size: Size of test batches
         devices: Number of devices to use
-        fabric: Fabric
         model_name: Sent to `data.connect`
 
     Returns:
         Data loader for cross product of test dataset with evaluation tasks
 
     """
-    num_devices = 1 if fabric is None else fabric.world_size
+    num_devices = Fabric.world_size() if Fabric.cuda_is_available() else 1
     data.connect(
         tokenizer=tokenizer,
         batch_size=batch_size,
         num_devices=num_devices,
-        rank=None if fabric is None else fabric.local_rank,
+        rank=Fabric.rank() if Fabric.cuda_is_available() else None,
         head_model=head_model,
         test_batch_size=batch_size,
         eval_tasks=eval_tasks,
         model_name=model_name,
     )
-    if fabric is not None:
-        with fabric.rank_zero_first():
-            data.prepare_data()
+
+    # Everybody needs to wait until `data.prepare_data()` finished on rank 0
+    if Fabric.rank() == 0:
+        data.prepare_data()
+    Fabric.barrier()
+
     data.setup()
     test_dataloader = data.test_dataloader(num_devices=devices)
     return test_dataloader
@@ -975,7 +970,6 @@ def load_model_checkpoint(
     model: LongContextInferenceModel,
     task_path: Path,
     model_type: str,
-    fabric: L.Fabric,
 ):
     if model_type == "full":
         file_path = task_path / LIT_MODEL_FNAME
@@ -987,12 +981,12 @@ def load_model_checkpoint(
         if not file_path.exists():
             file_path = task_path / LORA_WEIGHTS_FNAME_OLD
         strict = False
-    load_checkpoint(fabric, model.gpt_model, file_path, strict=strict)
+    load_checkpoint(model.gpt_model, file_path, strict=strict)
     # If there are head model weights, load them as well. Otherwise, we use
     # random initialization (or the head model may not have weights)
     file_path = task_path / HEAD_MODEL_FNAME
     if file_path.exists():
-        load_checkpoint(fabric, model.head_model, file_path, strict=True)
+        load_checkpoint(model.head_model, file_path, strict=True)
 
 
 def store_eval_metrics(

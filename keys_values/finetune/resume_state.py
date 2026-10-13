@@ -15,18 +15,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional, List
 
-import lightning as L
 import torch
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
 
-from keys_values.finetune.utils import print_message
 from litgpt.utils import CycleIterator
 
 from keys_values.data.dataloader import MyDataLoaderIterator
 from keys_values.data.iterators import SimilarSequenceLengthIterator
 from keys_values.data.module import SequenceLengthFilteredDataModule
 from keys_values.data.trainstate import DataTrainState
+from keys_values.distributed.fabric import Fabric
+from keys_values.finetune.utils import save_checkpoint
 
 TRAINSTATE_OPTIMIZER_FNAME = "training_state_optimizer.pth"
 
@@ -162,7 +162,6 @@ class TrainingStateManager:
 
     def save_training_state(
         self,
-        fabric: L.Fabric,
         file_dir: Path,
     ) -> Tuple[Path, ...]:
         if self.train_iterator is None:
@@ -172,11 +171,11 @@ class TrainingStateManager:
         train_state = self._extract_training_state()
         optim_state = {k: train_state[k] for k in self._optimizer_names}
         optim_path = file_dir / TRAINSTATE_OPTIMIZER_FNAME
-        fabric.save(optim_path, state=optim_state)
+        save_checkpoint(optim_path, state=optim_state)
         filter_names = self._optimizer_names
         # This part depends on the rank
         name = "train_iterator"
-        rank = fabric.local_rank
+        rank = Fabric.rank()
         iter_state = {name: train_state[name]}
         iter_path = file_dir / TRAINSTATE_ITERATOR_FNAME.format(rank=rank)
         # Runs for all ranks, not just 0:
@@ -184,7 +183,7 @@ class TrainingStateManager:
         filter_names += (name,)
         rest_state = {k: v for k, v in train_state.items() if k not in filter_names}
         rest_path = file_dir / TRAINSTATE_REST_FNAME
-        fabric.save(rest_path, state=rest_state)
+        save_checkpoint(rest_path, state=rest_state)
         return optim_path, iter_path, rest_path
 
 
@@ -277,19 +276,18 @@ class TrainingStateVars:
 
     def save_state(
         self,
-        fabric: L.Fabric,
         file_dir: Path,
     ):
-        print_message(f"Storing training state to {file_dir}", fabric)
-        new_files = self.manager.save_training_state(fabric, file_dir)
-        if fabric.global_rank == 0 and self.devices > 1:
+        Fabric.print(f"Storing training state to {file_dir}")
+        new_files = self.manager.save_training_state(file_dir)
+        if Fabric.rank() == 0 and self.devices > 1:
             # Add files written by other ranks: They are removed by rank 0 only
             new_files += tuple(
                 file_dir / TRAINSTATE_ITERATOR_FNAME.format(rank=rank)
                 for rank in range(1, self.devices)
             )
         self.files.append(new_files)
-        if len(self.files) > self.training_state_num and fabric.global_rank == 0:
+        if len(self.files) > self.training_state_num and Fabric.rank() == 0:
             # Remove oldest files
             rem_files = self.files.pop(0)
             for path in rem_files:
