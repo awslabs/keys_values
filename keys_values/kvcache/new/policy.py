@@ -36,7 +36,7 @@ from keys_values.utils import (
 class DefaultKVCachePolicy(KVCachePolicy):
     """
     Abstract implementation of :class:`KVCachePolicy`, contains common
-    code.
+    code. In particular, replay logging is implemented generically.
     """
 
     def __init__(
