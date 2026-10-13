@@ -16,16 +16,14 @@ from typing import Tuple, Dict, Any, List, Optional
 import torch
 
 from keys_values.config import Config
-from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.h2o import VLengthInstantScoreMixin
 from keys_values.kvcache.qh2o import (
     DEFAULT_COMBINATION_CONSTANT,
     DEFAULT_SCRATCH_BLOCKSIZE,
 )
 from keys_values.kvcache.quant_buffers import QuantizedKVCacheBuffers
-from keys_values.kvcache.new.basics import KVCachePolicy
+from keys_values.kvcache.new.basics import KVCachePolicy, KVCacheReplayLog
 from keys_values.kvcache.new.h2o import H2OKVCachePolicy
-from keys_values.utils import bits_for_torch_dtype, bitsize_of
 
 
 class QuantizedH2OKVCachePolicy(H2OKVCachePolicy):
@@ -60,8 +58,9 @@ class QuantizedH2OKVCachePolicy(H2OKVCachePolicy):
         self,
         config: Config,
         kv_buffers: QuantizedKVCacheBuffers,
+        use_replay_logging: bool = True,
+        replay_log: Optional[KVCacheReplayLog] = None,
         grace_period: int = 0,
-        replay_log_blocksize: Optional[int] = None,
         detach_attn_weights: bool = False,
         keep_initial_fraction: Optional[float] = None,
         max_chunk_size: Optional[int] = None,
@@ -73,8 +72,9 @@ class QuantizedH2OKVCachePolicy(H2OKVCachePolicy):
             config,
             kv_buffers.cache_length,
             kv_buffers.max_batch_size,
+            use_replay_logging,
+            replay_log,
             grace_period,
-            replay_log_blocksize,
             detach_attn_weights,
             keep_initial_fraction,
             max_chunk_size,
@@ -221,8 +221,9 @@ class QuantizedVLengthH2OKVCachePolicy(
         self,
         config: Config,
         kv_buffers: QuantizedKVCacheBuffers,
+        use_replay_logging: bool = True,
+        replay_log: Optional[KVCacheReplayLog] = None,
         grace_period: int = 0,
-        replay_log_blocksize: Optional[int] = None,
         detach_attn_weights: bool = False,
         keep_initial_fraction: Optional[float] = None,
         max_chunk_size: Optional[int] = None,
@@ -233,8 +234,9 @@ class QuantizedVLengthH2OKVCachePolicy(
         super().__init__(
             config,
             kv_buffers,
+            use_replay_logging,
+            replay_log,
             grace_period,
-            replay_log_blocksize,
             detach_attn_weights,
             keep_initial_fraction,
             max_chunk_size,

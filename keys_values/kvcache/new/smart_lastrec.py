@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import Tuple, Dict, Any, List, Union
+from typing import Tuple, Dict, Any, List, Union, Optional
 
 from tokenizers import Tokenizer as HFTokenizer
 import torch
@@ -20,12 +20,15 @@ import torch
 from keys_values.config import Config
 from keys_values.constants import DEFAULT_PAD_ID
 from keys_values.kvcache.base import KVCacheParams
-from keys_values.kvcache.new.basics import PositionsNewEntriesType, KVCachePolicy
+from keys_values.kvcache.new.basics import (
+    PositionsNewEntriesType,
+    KVCachePolicy,
+    KVCacheReplayLog,
+)
 from keys_values.kvcache.new.policy import DefaultKVCachePolicy
 from keys_values.kvcache.smart_lastrec import (
     update_next_position,
     extract_index,
-    SmartInitialLastRecentlyInsertedKVCacheReplayLog,
 )
 from keys_values.utils import (
     bits_for_torch_dtype,
@@ -90,11 +93,13 @@ class SmartInitialLastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
         end_initial_regex: Union[str, re.Pattern],
         max_initial_fraction: float,
         max_batch_size: int,
+        use_replay_logging: bool = True,
+        replay_log: Optional[KVCacheReplayLog] = None,
         include_end_string: bool = True,
         pad_id: int = DEFAULT_PAD_ID,
         range_is_prefix: bool = True,
     ):
-        super().__init__(config, cache_length)
+        super().__init__(config, cache_length, use_replay_logging, replay_log)
         self.tokenizer = tokenizer
         if not isinstance(end_initial_regex, re.Pattern):
             end_initial_regex = re.compile(end_initial_regex)
@@ -146,48 +151,35 @@ class SmartInitialLastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
             .expand(-1, self.n_query_groups, -1)
         )
 
-    def positions_new_entries(
+    def _forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
+        positions: Optional[PositionsNewEntriesType] = None,
     ) -> PositionsNewEntriesType:
-        use_range = self._update_protected_ranges(token_idx)
-        if self._replay_log is not None:
-            if not isinstance(
-                self._replay_log, SmartInitialLastRecentlyInsertedKVCacheReplayLog
-            ):
-                raise IndexError(
-                    "Cannot switch on replay logging in the middle of inference run. Call 'prefill'."
-                )
-            self._replay_log.update(
-                protected_start=self.protected_start,
-                protected_end=self.protected_end,
-                input_pos=self._input_pos,
-                next_position=self.next_position,
-            )
-            self._replay_log.append_token_chunk(token_idx)
-
-        # If a protected range has just been set in `_update_protected_ranges`,
-        # it must not be used in `extract_index`
-        pstart_copy = [
-            ps if ur else None for ps, ur in zip(self.protected_start, use_range)
-        ]
-        pend_copy = [
-            pe if ur else None for pe, ur in zip(self.protected_end, use_range)
-        ]
         total_num = key.shape[2]
         index_kwargs = dict(device=self.device, dtype=torch.int)
-        positions = extract_index(
-            num=total_num,
-            cache_length=self.cache_length,
-            protected_start=pstart_copy,
-            protected_end=pend_copy,
-            next_position=self.next_position,
-            n_query_groups=self.n_query_groups,
-            **index_kwargs,
-        )
+        use_range = self._update_protected_ranges(token_idx)
+        if positions is None:
+            # If a protected range has just been set in `_update_protected_ranges`,
+            # it must not be used in `extract_index`
+            pstart_copy = [
+                ps if ur else None for ps, ur in zip(self.protected_start, use_range)
+            ]
+            pend_copy = [
+                pe if ur else None for pe, ur in zip(self.protected_end, use_range)
+            ]
+            positions = extract_index(
+                num=total_num,
+                cache_length=self.cache_length,
+                protected_start=pstart_copy,
+                protected_end=pend_copy,
+                next_position=self.next_position,
+                n_query_groups=self.n_query_groups,
+                **index_kwargs,
+            )
         ntp = self._input_pos
         for _positions, off, num in positions:
             positions_2d = _positions[:, 0, :]
@@ -204,8 +196,7 @@ class SmartInitialLastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
                 next_position=self.next_position,
             )
             ntp += num
-        self._input_pos += total_num
-        self._current_length = min(self._input_pos, self.cache_length)
+        self._current_length = min(self._input_pos + total_num, self.cache_length)
         return positions
 
     def _update_protected_ranges(
@@ -301,7 +292,13 @@ class SmartInitialLastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
                 self.protected_end[bpos] = pend
         return use_range
 
-    def prefill(self, token_idx: torch.Tensor):
+    def _prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+    ):
         self.protected_start = None
         self.protected_end = None
         self._update_protected_ranges(token_idx)
@@ -330,22 +327,7 @@ class SmartInitialLastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
             .unsqueeze(0)
             .expand(self.batch_size, -1)
         )
-        if self._replay_log is not None:
-            self._replay_log = SmartInitialLastRecentlyInsertedKVCacheReplayLog(
-                token_chunks=[token_idx],
-                cache_length=self.cache_length,
-                n_query_groups=self.n_query_groups,
-                tokenizer=self.tokenizer,
-                end_initial_regex=self.end_initial_regex,
-                max_initial_fraction=self.max_initial_fraction,
-                include_end_string=self.include_end_string,
-                pad_id=self._pad_id,
-                range_is_prefix=self.range_is_prefix,
-                protected_start=self.protected_start,
-                protected_end=self.protected_end,
-            )
         self._current_length = init_length
-        self._input_pos = init_length
 
     def max_forward_length(self) -> int:
         return self.cache_length

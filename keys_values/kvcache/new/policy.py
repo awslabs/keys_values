@@ -17,14 +17,12 @@ from typing import Optional, Tuple, Dict, Any, List
 import torch
 
 from keys_values.config import Config
-from keys_values.kvcache.base import (
-    KVCacheParams,
-    KVCacheReplayLog,
-    DefaultKVCacheReplayLog,
-)
-from keys_values.kvcache.basics import LastRecentlyInsertedKVCacheReplayLog
+from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.new.basics import (
     KVCachePolicy,
+    KVCacheReplayLog,
+    KVCacheReplayLogEntry,
+    KVCacheReplayLogStatus,
     PositionsNewEntriesType,
 )
 from keys_values.kvcache.utils import positions_wrap_around
@@ -45,6 +43,8 @@ class DefaultKVCachePolicy(KVCachePolicy):
         self,
         config: Config,
         cache_length: int,
+        use_replay_logging: bool = True,
+        replay_log: Optional[KVCacheReplayLog] = None,
     ):
         super().__init__()
         self._config = config
@@ -52,7 +52,18 @@ class DefaultKVCachePolicy(KVCachePolicy):
         self._batch_size = None
         # Need to track this here as well:
         self._input_pos = 0
-        self._replay_log = None
+        self._replay_log: Optional[KVCacheReplayLog] = None
+        self._replay_log_status: KVCacheReplayLogStatus = "none"
+        self._use_replay_logging = use_replay_logging
+        self._replay_log_nextpos = None
+        if use_replay_logging:
+            if replay_log is None:
+                self._replay_log = []
+                self._replay_log_status = "record"
+            else:
+                self._replay_log = replay_log
+                self._replay_log_status = "play"
+                self._replay_log_nextpos = 0
 
     @property
     def cache_length(self) -> int:
@@ -82,6 +93,7 @@ class DefaultKVCachePolicy(KVCachePolicy):
         return dict(
             config=self._config,
             cache_length=self._cache_length,
+            use_replay_logging=self._use_replay_logging,
         )
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
@@ -93,19 +105,107 @@ class DefaultKVCachePolicy(KVCachePolicy):
     ) -> Tuple[int, Dict[str, int]]:
         return 0, dict()
 
-    def switch_replay_logging(self, status: bool):
-        if status:
-            if self._replay_log is None:
-                self._replay_log = []  # Dummy, created later
-        else:
-            self._replay_log = None
+    def replay_log_status(self) -> KVCacheReplayLogStatus:
+        return self._replay_log_status
 
-    @property
-    def do_replay_logging(self) -> bool:
-        return self._replay_log is not None
+    def reset(self, replay_log_status: KVCacheReplayLogStatus):
+        if replay_log_status != self.replay_log_status and (self.replay_log_status == "none" or replay_log_status == "none"):
+            raise ValueError(f"Cannot switch replay_log_status from {self.replay_log_status} to {replay_log_status}")
+        if replay_log_status == "play":
+            self._replay_log_nextpos = 0
+        elif replay_log_status == "record":
+            self._replay_log_nextpos = None
+            self._replay_log = []
+        self._input_pos = 0
 
     def get_replay_log(self) -> Optional[KVCacheReplayLog]:
         return copy.copy(self._replay_log)
+
+    def _get_next_replay_entry(self) -> Optional[KVCacheReplayLogEntry]:
+        if self._replay_log_status == "play":
+            if self._replay_log_nextpos >= len(self._replay_log):
+                raise IndexError(f"replay_log_nextpos = {self._replay_log_nextpos}, len(replay_log) = {len(self._replay_log)}: Not enough entries to replay!")
+            return self._replay_log[self._replay_log_nextpos]
+        else:
+            return None
+
+    def _validate_token_idx(self, token_idx: torch.Tensor) -> Optional[KVCacheReplayLogEntry]:
+        next_entry = self._get_next_replay_entry()
+        if next_entry is not None:
+            other = next_entry.token_idx.to(device=token_idx.device)
+            if not token_idx.equal(other):
+                raise ValueError(
+                    f"token_idx:\n{token_idx} -- {token_idx.shape}\nreplay_log.token_chunks[{self.token_chunk_pos}]:\n{other} -- {other.shape}\nShould be the same!"
+                )
+            self._replay_log_nextpos += 1
+        return next_entry
+
+    def prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+    ):
+        self._validate_token_idx(token_idx)
+        self._batch_size = token_idx.shape[0]
+        self._input_pos = 0
+        self._prefill(query, key, value, token_idx)
+        self._input_pos = token_idx.shape[-1]
+
+    def _prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+    ):
+        raise NotImplementedError
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+    ) -> PositionsNewEntriesType:
+        if self._replay_log_status == "play":
+            entry = self._validate_token_idx(token_idx)
+            positions = entry.positions.to(device=query.device)
+        else:
+            positions = None
+        positions = self._forward(
+            query,
+            key,
+            value,
+            token_idx,
+            positions=positions,
+        )
+        if self._replay_log_status == "record":
+            self._replay_log.append(
+                KVCacheReplayLogEntry(
+                    token_idx=token_idx.to(device=query.device),
+                    positions=positions,
+                )
+            )
+        self._input_pos += token_idx.shape[-1]
+        return positions
+
+    def _forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+        positions: Optional[PositionsNewEntriesType] = None,
+    ) -> PositionsNewEntriesType:
+        """
+        If `positions is None`, this does the work of :meth:`forward`.
+        Otherwise, `positions` are passed in and returned as is, and the
+        state changes *other* than determining `positions` is done.
+
+        """
+        raise NotImplementedError
 
 
 class DenseKVCachePolicy(DefaultKVCachePolicy):
@@ -120,8 +220,10 @@ class DenseKVCachePolicy(DefaultKVCachePolicy):
         self,
         config: Config,
         cache_length: int,
+        use_replay_logging: bool = True,
+        replay_log: Optional[KVCacheReplayLog] = None,
     ):
-        super().__init__(config, cache_length)
+        super().__init__(config, cache_length, use_replay_logging, replay_log)
 
     def token_positions(self) -> torch.Tensor:
         if self.batch_size is None:
@@ -132,43 +234,30 @@ class DenseKVCachePolicy(DefaultKVCachePolicy):
             self.n_query_groups,
         )
 
-    def positions_new_entries(
+    def _forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
+        positions: Optional[PositionsNewEntriesType] = None,
     ) -> PositionsNewEntriesType:
-        if self._replay_log is not None:
-            if not isinstance(self._replay_log, DefaultKVCacheReplayLog):
-                raise IndexError(
-                    "Cannot switch on replay logging in the middle of inference run. Call 'prefill'."
-                )
-            self._replay_log.append_token_chunk(token_idx)
-        np = self._input_pos
-        num = key.shape[2]
-        # Update here: Affects :meth:`token_positions`:
-        self._input_pos += num
-        return torch.arange(
-            np, np + num, device=self._device_internal(), dtype=torch.int,
-        )
+        if positions is None:
+            np = self._input_pos
+            num = key.shape[2]
+            positions = torch.arange(
+                np, np + num, device=query.device, dtype=torch.int,
+            )
+        return positions
 
-    def prefill(
+    def _prefill(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ):
-        # There is no `reset`, this is done here
-        self._batch_size = token_idx.shape[0]
-        self._input_pos = token_idx.shape[-1]
-        if self._replay_log is not None:
-            self._replay_log = DefaultKVCacheReplayLog(
-                token_chunks=[token_idx],
-                cache_length=self.cache_length,
-                max_prefill_length=self.cache_length,
-            )
+        pass
 
     def max_forward_length(self) -> int:
         return self.cache_length - self._input_pos
@@ -199,9 +288,11 @@ class LastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
         self,
         config: Config,
         cache_length: int,
+        use_replay_logging: bool = True,
+        replay_log: Optional[KVCacheReplayLog] = None,
         init_grace_tokens: Optional[int] = None,
     ):
-        super().__init__(config, cache_length)
+        super().__init__(config, cache_length, use_replay_logging, replay_log)
         if init_grace_tokens is None:
             init_grace_tokens = min(
                 DEFAULT_INIT_GRACE_TOKENS,
@@ -236,28 +327,30 @@ class LastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
             self.n_query_groups,
         )
 
-    def positions_new_entries(
+    def _forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
+        positions: Optional[PositionsNewEntriesType] = None,
     ) -> PositionsNewEntriesType:
         num = key.shape[2]
         start = self.init_grace_tokens
         device = self._device_internal()
-        positions = positions_wrap_around(
-            num=num,
-            current=self.next_position,
-            start=start,
-            end=self.cache_length,
-            batch_size=self.batch_size,
-            n_query_groups=self.n_query_groups,
-            device=device,
-        )
         ind_kwargs = dict(device=device, dtype=torch.int)
-        if isinstance(positions, tuple):
-            positions = torch.arange(positions[0], positions[1], **ind_kwargs)
+        if positions is None:
+            positions = positions_wrap_around(
+                num=num,
+                current=self.next_position,
+                start=start,
+                end=self.cache_length,
+                batch_size=self.batch_size,
+                n_query_groups=self.n_query_groups,
+                device=device,
+            )
+            if isinstance(positions, tuple):
+                positions = torch.arange(positions[0], positions[1], **ind_kwargs)
         np = self.next_position
         num1 = min(num, self.cache_length - np)
         diff = num - num1
@@ -272,17 +365,10 @@ class LastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
             )
             np = start + diff
         self.next_position = np
-        if self._replay_log is not None:
-            if not isinstance(self._replay_log, LastRecentlyInsertedKVCacheReplayLog):
-                raise IndexError(
-                    "Cannot switch on replay logging in the middle of inference run. Call 'prefill'."
-                )
-            self._replay_log.append_token_chunk(token_idx)
-        self._input_pos += num
-        self._current_length = min(self._input_pos, self.cache_length)
+        self._current_length = min(self._input_pos + num, self.cache_length)
         return positions
 
-    def prefill(
+    def _prefill(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
@@ -304,16 +390,7 @@ class LastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
             device=self._device_internal(),
         )
         self._batch_size = token_idx.shape[0]
-        if self._replay_log is not None:
-            self._replay_log = LastRecentlyInsertedKVCacheReplayLog(
-                token_chunks=[token_idx],
-                cache_length=self.cache_length,
-                batch_size=self.batch_size,
-                n_query_groups=self.n_query_groups,
-                init_grace_tokens=self.init_grace_tokens,
-            )
         self._current_length = init_length
-        self._input_pos = init_length
 
     def max_forward_length(self) -> int:
         return self.cache_length - self.init_grace_tokens
@@ -337,3 +414,7 @@ class LastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
     ) -> Tuple[int, Dict[str, int]]:
         tk_p = params.cache_length * bits_for_torch_dtype(torch.int)
         return tk_p, {"token_pos": tk_p}
+
+    def reset(self, replay_log_status: KVCacheReplayLogStatus):
+        super().reset(replay_log_status)
+        self._current_length = 0

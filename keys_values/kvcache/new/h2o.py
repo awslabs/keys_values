@@ -19,7 +19,7 @@ from keys_values.config import Config
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.h2o import VLengthInstantScoreMixin, REMOVE_ARG_NAMES
 from keys_values.kvcache.new.attn_weights import AttnWeightsKVCachePolicy
-from keys_values.kvcache.new.basics import KVCachePolicy
+from keys_values.kvcache.new.basics import KVCachePolicy, KVCacheReplayLog
 from keys_values.utils import bits_for_torch_dtype, bitsize_of
 
 
@@ -53,8 +53,9 @@ class H2OKVCachePolicy(AttnWeightsKVCachePolicy):
         config: Config,
         cache_length: int,
         max_batch_size: int,
+        use_replay_logging: bool = True,
+        replay_log: Optional[KVCacheReplayLog] = None,
         grace_period: int = 0,
-        replay_log_blocksize: Optional[int] = None,
         detach_attn_weights: bool = False,
         keep_initial_fraction: Optional[float] = None,
         max_chunk_size: Optional[int] = None,
@@ -64,8 +65,9 @@ class H2OKVCachePolicy(AttnWeightsKVCachePolicy):
             config,
             cache_length,
             max_batch_size,
+            use_replay_logging,
+            replay_log,
             grace_period,
-            replay_log_blocksize,
             detach_attn_weights,
             keep_initial_fraction,
             max_chunk_size,
@@ -226,8 +228,9 @@ class VLengthH2OKVCachePolicy(H2OKVCachePolicy, VLengthInstantScoreMixin):
         config: Config,
         cache_length: int,
         max_batch_size: int,
+        use_replay_logging: bool = True,
+        replay_log: Optional[KVCacheReplayLog] = None,
         grace_period: int = 0,
-        replay_log_blocksize: Optional[int] = None,
         detach_attn_weights: bool = False,
         keep_initial_fraction: Optional[float] = None,
         max_chunk_size: Optional[int] = None,
@@ -237,8 +240,9 @@ class VLengthH2OKVCachePolicy(H2OKVCachePolicy, VLengthInstantScoreMixin):
             config,
             cache_length,
             max_batch_size,
+            use_replay_logging,
+            replay_log,
             grace_period,
-            replay_log_blocksize,
             detach_attn_weights,
             keep_initial_fraction,
             max_chunk_size,
@@ -330,12 +334,15 @@ class H2OOriginalKVCachePolicy(AttnWeightsKVCachePolicy):
         config: Config,
         cache_length: int,
         max_batch_size: int,
-        **base_kwargs,
+        use_replay_logging: bool = True,
+        replay_log: Optional[KVCacheReplayLog] = None,
     ):
         super().__init__(
             config,
             cache_length,
             max_batch_size,
+            use_replay_logging,
+            replay_log,
         )
         # Note: `scores` has a batch dimension, even though it is not used.
         # This is because all score buffers in :class:`AttnWeightsKVCache` have
@@ -347,16 +354,6 @@ class H2OOriginalKVCachePolicy(AttnWeightsKVCachePolicy):
             torch.zeros(shape, device=device, dtype=torch.float32),
             persistent=False,
         )
-
-    def prefill(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        token_idx: torch.Tensor,
-    ):
-        super().prefill(query, key, value, token_idx)
-        self.scores.fill_(0.0)
 
     def _compute_scores(
         self,

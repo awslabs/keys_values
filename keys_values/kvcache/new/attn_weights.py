@@ -16,13 +16,16 @@ from typing import Tuple, Dict, Any, List, Optional
 import torch
 
 from keys_values.config import Config
-from keys_values.kvcache.base import KVCacheParams, KVCacheReplayLog
-from keys_values.kvcache.new.basics import PositionsNewEntriesType, KVCachePolicy
+from keys_values.kvcache.base import KVCacheParams
+from keys_values.kvcache.new.basics import (
+    KVCachePolicy,
+    KVCacheReplayLog,
+    KVCacheReplayLogStatus,
+    PositionsNewEntriesType,
+)
 from keys_values.kvcache.new.policy import DefaultKVCachePolicy
 from keys_values.kvcache.attn_weights import (
-    AttnWeightsReplayLog,
     update_token_positions,
-    DEFAULT_REPLAY_LOG_BLOCKSIZE,
     DEFAULT_KEEP_INITIAL_FRACTION,
 )
 from keys_values.kvcache.utils import PositionsType
@@ -113,22 +116,17 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
         config: Config,
         cache_length: int,
         max_batch_size: int,
+        use_replay_logging: bool = True,
+        replay_log: Optional[KVCacheReplayLog] = None,
         grace_period: int = 0,
-        replay_log_blocksize: Optional[int] = None,
         detach_attn_weights: bool = False,
         keep_initial_fraction: Optional[float] = None,
         max_chunk_size: Optional[int] = None,
     ):
-        super().__init__(config, cache_length)
+        super().__init__(config, cache_length, use_replay_logging, replay_log)
         if not (0 <= grace_period < cache_length):
             raise ValueError(
                 f"Must have 0 <= grace_period < {cache_length}, but grace_period = {grace_period}"
-            )
-        if replay_log_blocksize is None:
-            replay_log_blocksize = DEFAULT_REPLAY_LOG_BLOCKSIZE
-        elif replay_log_blocksize <= 0:
-            raise ValueError(
-                f"replay_log_blocksize must be positive, but got {replay_log_blocksize}"
             )
         if keep_initial_fraction is None:
             keep_initial_fraction = DEFAULT_KEEP_INITIAL_FRACTION
@@ -138,7 +136,6 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
             )
         self._keep_initial_fraction = keep_initial_fraction
         self.grace_period = grace_period
-        self.replay_log_blocksize = replay_log_blocksize
         self._detach_attn_weights = detach_attn_weights
         if max_chunk_size is not None:
             if not (0 < max_chunk_size <= cache_length):
@@ -193,12 +190,17 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
             raise IndexError("Cache is not initialized, call 'prefill' first")
         return self.token_pos[: self.batch_size, :, : self._current_length]
 
-    def positions_new_entries(
+    # HIER: This is wrong! In `update_result is not None` branch, we need
+    # to copy. How does this fit in?
+    # We initialize score buffers here even if `replay_log_status == "play"`,
+    # so that scores are not updated down the line.
+    def _forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
+        positions: Optional[PositionsNewEntriesType] = None,
     ) -> PositionsNewEntriesType:
         num = key.shape[2]
         device = self._device_internal()
@@ -240,76 +242,67 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
         # default, they are filled with 0. But other initial values for scores
         # can be passed via `_initial_scores_in_forward`.
         init_score_values = self._initial_scores_in_forward(key, value)
-        # Positions (from last recent `update`) where new content is to be
-        # written to:
-        index = self.next_positions(num)
-        if self.debug_next_positions is not None:
-            self.debug_next_positions.append(index.detach().clone().cpu())
-        # Update `token_pos`
-        update_result = update_token_positions(
-            token_positions=self.token_pos,
-            input_pos=self._input_pos,
-            num=num,
-            batch_size=self.batch_size,
-            index=index,
-            grace_period=self.grace_period,
-            next_grace_pos=self.next_grace_pos,
-        )
-        if update_result is not None:
-            # Grace period, and the cache buffer is already full:
-            # - Copy buffer part in grace area to `index`
-            # - Copy new content into grace area `positions`
-            # This is done in a single operation, by fusing `index` and
-            # `positions`.
-            # New KV content:
-            # [ num1 | num2 ], where num = num1 + num2, num2 <= grace_period
-            # Copied to initial `num` of `next_positions`:
-            # [ old(grace_period) | new[:num1] ]
-            num1 = update_result.num1
-            prefix = update_result.prefix
-            _positions = update_result.positions
-            assert isinstance(_positions, torch.Tensor)  # Sanity check
-            key_cp, value_cp = self.kv_buffers.get_slots(_positions)
-            key_cp = torch.cat((key_cp, key), dim=-2)
-            value_cp = torch.cat((value_cp, value), dim=-2)
-            fused_index = torch.cat((index, _positions), dim=-1)
-            # Update score buffers
-            self._update_score_buffers_in_forward(
-                grace_period_case=True,
-                positions=_positions,
+        if positions is None:
+            # Positions (from last recent `update`) where new content is to be
+            # written to:
+            index = self.next_positions(num)
+            if self.debug_next_positions is not None:
+                self.debug_next_positions.append(index.detach().clone().cpu())
+            # Update `token_pos`
+            update_result = update_token_positions(
+                token_positions=self.token_pos,
+                input_pos=self._input_pos,
+                num=num,
+                batch_size=self.batch_size,
                 index=index,
-                init_score_values=init_score_values,
-                num1=num1,
+                grace_period=self.grace_period,
+                next_grace_pos=self.next_grace_pos,
             )
-            if num1 == 0:
-                # Increment in round-robin fashion (only if num <= grace_period)
-                self.next_grace_pos = (
-                    self.next_grace_pos - prefix + num
-                ) % self.grace_period + prefix
-            positions = fused_index
-        else:
-            # No grace period, or buffer net yet full
-            # Update score buffers
-            self._update_score_buffers_in_forward(
-                grace_period_case=False,
-                positions=None,
-                index=index,
-                init_score_values=init_score_values,
-                num1=None,
-            )
-            positions = index
-
-        if self._replay_log is not None:
-            if not isinstance(self._replay_log, AttnWeightsReplayLog):
-                raise IndexError(
-                    "Cannot switch on replay logging in the middle of inference run. Call 'prefill'."
-                )
-            self._append_token_idx(token_idx)
-            if self.input_pos >= self.cache_length:
-                self._replay_log.append_position_index(
+            if update_result is not None:
+                # Grace period, and the cache buffer is already full:
+                # - Copy buffer part in grace area to `index`
+                # - Copy new content into grace area `positions`
+                # This is done in a single operation, by fusing `index` and
+                # `positions`.
+                # New KV content:
+                # [ num1 | num2 ], where num = num1 + num2, num2 <= grace_period
+                # Copied to initial `num` of `next_positions`:
+                # [ old(grace_period) | new[:num1] ]
+                num1 = update_result.num1
+                prefix = update_result.prefix
+                _positions = update_result.positions
+                assert isinstance(_positions, torch.Tensor)  # Sanity check
+                fused_index = torch.cat((index, _positions), dim=-1)
+                # Update score buffers
+                self._update_score_buffers_in_forward(
+                    grace_period_case=True,
+                    positions=_positions,
                     index=index,
-                    input_pos=self._input_pos,
+                    init_score_values=init_score_values,
+                    num1=num1,
                 )
+                if num1 == 0:
+                    # Increment in round-robin fashion (only if num <= grace_period)
+                    self.next_grace_pos = (
+                        self.next_grace_pos - prefix + num
+                    ) % self.grace_period + prefix
+                positions = fused_index
+            else:
+                # No grace period, or buffer net yet full
+                # Update score buffers
+                self._update_score_buffers_in_forward(
+                    grace_period_case=False,
+                    positions=None,
+                    index=index,
+                    init_score_values=init_score_values,
+                    num1=None,
+                )
+                positions = index
+        else:
+            # `positions` is given. Update `token_pos`, etc.
+            # TODO!
+
+
         self._next_positions = None  # Set by next :meth:`update` call
         self._input_pos += num
         self._current_length = min(self._input_pos, self.cache_length)
@@ -361,18 +354,6 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
                 init_vals = init_score_values.get(name, 0.0)
                 scores[: self.batch_size, ...].scatter_(-1, index, init_vals)
 
-    def _append_token_idx(self, token_idx: torch.Tensor):
-        if self._replay_log is None:
-            self._replay_log = AttnWeightsReplayLog(
-                token_chunks=[],
-                slot_positions=[],
-                cache_length=self.cache_length,
-                max_prefill_length=self.cache_length,
-                blocksize=self.replay_log_blocksize,
-                grace_period=self.grace_period,
-            )
-        self._replay_log.append_token_chunk(token_idx)
-
     def _initial_scores_in_forward(
         self,
         key: torch.Tensor,
@@ -396,9 +377,8 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
         """
         return dict()
 
-    @staticmethod
-    def requires_attn_weights() -> bool:
-        return True
+    def requires_attn_weights(self) -> bool:
+        return self.replay_log_status() != "play"
 
     def pass_attn_weights(
         self,
@@ -469,7 +449,7 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
         """
         raise NotImplementedError
 
-    def prefill(
+    def _prefill(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
@@ -497,7 +477,6 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
             grace_period=self.grace_period,
         )
         self._current_length = init_length
-        self._input_pos = init_length
         self._use_initial_rule = init_length == self.cache_length
         if not self._use_initial_rule:
             self._set_next_positions_to_free_slots()
@@ -505,10 +484,6 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
             # First slot to move out once the cache is full
             self.next_grace_pos = self.cache_length - self.grace_period
         self.prefill_length = init_length
-        if self._replay_log is not None:
-            # Reset and log `token_idx`
-            self._replay_log = None
-            self._append_token_idx(token_idx)
         self._initial_scores_in_prefill(key, value)
 
     def _initial_scores_in_prefill(
@@ -549,7 +524,6 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
             super()._base_kwargs_for_clone(),
             max_batch_size=self.token_pos.shape[0],
             grace_period=self.grace_period,
-            replay_log_blocksize=self.replay_log_blocksize,
             detach_attn_weights=self._detach_attn_weights,
             keep_initial_fraction=self._keep_initial_fraction,
             max_chunk_size=self.max_chunk_size,
@@ -573,24 +547,6 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
             * bits_for_torch_dtype(torch.int)
         )
         return sz_tp, {"token_pos": sz_tp}
-
-    def get_replay_log(self) -> Optional[KVCacheReplayLog]:
-        """
-        Returns list of slot position tensors.
-        If we applied `torch.cat(..., dim=-1)` to this, we would get a tensor `res`
-        of shape `(batch_size, n_query_groups, T)`, where
-        `T = input_pos - cache_length`, so the content for any token
-        position `t + cache_length` was written to slots `res[:, :, t]`.
-
-        Returns:
-            Replay log object for this cache, which contains all token chunks
-            and the slot positions
-
-        """
-        if self._replay_log is None:
-            return None
-        else:
-            return self._replay_log.finalize(self._input_pos)
 
     def _score_buffers(self) -> List[Tuple[torch.Tensor, str]]:
         """
@@ -642,3 +598,10 @@ class AttnWeightsKVCachePolicy(DefaultKVCachePolicy):
                 self.batch_size,
                 self.n_query_groups,
             )
+
+    # Note: We refrain from doing more than setting `current_length = 0`.
+    # The next valid call must be :meth:`prefill`, which does a proper
+    # reset (this may need its args).
+    def reset(self, replay_log_status: KVCacheReplayLogStatus):
+        super().reset(replay_log_status)
+        self._current_length = 0

@@ -11,16 +11,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Union, List, Tuple, Optional, Dict
+from dataclasses import dataclass
+from typing import Union, List, Tuple, Optional, Dict, Literal
 
 import torch
 
 from keys_values.attention import KeysAndValues
 from keys_values.config import Config
-from keys_values.kvcache.base import KVCache, KVCacheParams, KVCacheReplayLog
+from keys_values.kvcache.base import KVCache, KVCacheParams
 
 
 PositionsNewEntriesType = Union[torch.Tensor, List[Tuple[torch.Tensor, int, int]]]
+
+
+@dataclass(frozen=True)
+class KVCacheReplayLogEntry:
+    token_idx: torch.Tensor
+    positions: PositionsNewEntriesType
+
+
+KVCacheReplayLog = List[KVCacheReplayLogEntry]
+
+
+KVCacheReplayLogStatus = Literal["none", "record", "play"]
 
 
 class KVCachePolicy(torch.nn.Module):
@@ -67,7 +80,7 @@ class KVCachePolicy(torch.nn.Module):
         """
         raise NotImplementedError
 
-    def positions_new_entries(
+    def forward(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
@@ -116,12 +129,14 @@ class KVCachePolicy(torch.nn.Module):
         """
         raise NotImplementedError
 
-    @staticmethod
-    def requires_attn_weights() -> bool:
+    def requires_attn_weights(self) -> bool:
         """
+        Note: Returned value may depend on inner state. For example,
+        if `replay_log_status == "play"`, we usually return `False`.
+
         Returns:
-            Do we require attention weights? If `True`, `update` needs to
-            be called passing the attention weights.
+            Do we require attention weights? If `True`, `pass_attn_weights`
+            needs to be called passing the attention weights.
 
         """
         return False
@@ -203,31 +218,22 @@ class KVCachePolicy(torch.nn.Module):
     ) -> Tuple[int, Dict[str, int]]:
         raise NotImplementedError
 
-    def validate_token_idx(self, token_idx: torch.Tensor):
-        """
-        Called at the start of :meth:`forward` and :meth:`prefill`.
-
-        Args:
-            token_idx: Argument to :meth:`forward`
-
-        """
-        pass
-
-    def switch_replay_logging(self, status: bool):
-        """
-        By default, replay logging is switched off.
-
-        Args:
-            status: Do replay logging?
-
-        """
+    def replay_log_status(self) -> KVCacheReplayLogStatus:
         raise NotImplementedError
 
-    @property
-    def do_replay_logging(self) -> bool:
+    def reset(self, replay_log_status: KVCacheReplayLogStatus):
         """
-        Returns:
-            Is replay logging enabled?
+        Call this to switch replay log status between "record" and "play".
+        This also resets everything, like :meth:`prefill`. This is done
+        even if the replay log status stays the same.
+
+        Note: In order to reuse a cache with the same replay log status,
+        this method need not be called. :meth:`prefill` automatically resets.
+
+        Args:
+            replay_log_status: New replay log status. You can flip
+                "record" to "play" and back, but "none" cannot be changed.
+                Also, cannot change non-"none" to "none".
 
         """
         raise NotImplementedError
@@ -235,8 +241,8 @@ class KVCachePolicy(torch.nn.Module):
     def get_replay_log(self) -> Optional[KVCacheReplayLog]:
         """
         Returns:
-            Cache replay log which is required for gradient computations. If
-            `do_replay_logging == False`, `None` is returned.
+            Cache replay log which is required for gradient computations.
+            If `replay_log_status == "none"`, `None` is returned.
 
         """
         raise NotImplementedError
@@ -533,11 +539,11 @@ class GenericKVCache(KVCache):
             self.policy.prefill(query, key, value, token_idx)
             attn_outputs = self.driver.prefill(query, key, value, token_idx)
             attn_weights = None
+            requires_attn_weights = False
         else:
             # Forward: `input_pos > 0`
-            positions = self.policy.positions_new_entries(
-                query, key, value, token_idx,
-            )
+            positions = self.policy.forward(query, key, value, token_idx)
+            requires_attn_weights = self.policy.requires_attn_weights()
             attn_outputs, attn_weights = self.driver.forward(
                 query,
                 key,
@@ -546,11 +552,11 @@ class GenericKVCache(KVCache):
                 positions,
                 token_positions=self.policy.token_positions(),
                 input_pos=self.input_pos,
-                return_attn_weights=self.policy.requires_attn_weights(),
+                return_attn_weights=requires_attn_weights,
             )
         # Cache has been extended:
         self._input_pos += num
-        if not for_prefill and self.policy.requires_attn_weights():
+        if requires_attn_weights:
             # Pass summed attention weights to policy
             self.policy.pass_attn_weights(
                 attn_weights=attn_weights,
