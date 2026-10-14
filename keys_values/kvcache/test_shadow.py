@@ -17,7 +17,29 @@ from typing import List, Any, Dict, Optional, Tuple, Union
 import torch
 
 from keys_values.attention import KeysAndValues
+from keys_values.config import Config
 from keys_values.kvcache.base import KVCache, KVCacheParams
+from keys_values.kvcache.consts import split_name
+from keys_values.kvcache.factory import (
+    KVCacheFactory,
+    SUPPORTED_CACHES,
+    create_single_quantized_buffer,
+    create_multiple_quantized_buffers,
+)
+from keys_values.kvcache.new import (
+    GenericKVCache,
+    KVCacheDriverWithBuffers,
+    DenseKVCachePolicy,
+    LastRecentlyInsertedKVCachePolicy,
+    SmartInitialLastRecentlyInsertedKVCachePolicy,
+    H2OKVCachePolicy,
+    VLengthH2OKVCachePolicy,
+    QuantizedH2OKVCachePolicy,
+    QuantizedVLengthH2OKVCachePolicy,
+    H2OOriginalKVCachePolicy,
+)
+from keys_values.kvcache.new.driver import DefaultKVCacheDriver
+from keys_values.model import GPT
 
 
 def _error_message(prefix: str, msg: str) -> str:
@@ -94,16 +116,28 @@ def run_and_compare(
 def compare_attribute(
     old_cache: KVCache,
     new_cache: KVCache,
-    name: Union[str, Tuple[str, str]],
+    name: str,
     prefix: Optional[str] = None,
 ) -> Any:
-    if isinstance(name, str):
-        name = (name, name)
-    old_v = getattr(old_cache, name[0])
-    new_v = getattr(new_cache, name[1])
-    _prefix = f"obj.{name[0]}"
-    if prefix:
-        _prefix = prefix + ": " + _prefix
+    old_v = getattr(old_cache, name)
+    new_objs = [new_cache]
+    if isinstance(new_cache, GenericKVCache):
+        new_objs.extend([new_cache.policy, new_cache.driver])
+    _done = False
+    new_v = None
+    for obj in new_objs:
+        try:
+            new_v = getattr(obj, name)
+            _done = True
+            break
+        except AttributeError:
+            pass
+    prefix = "" if prefix is None else prefix + ": "
+    _prefix = prefix + f"obj.{name}"
+    if not _done:
+        raise AttributeError(
+            f"{_prefix} does not exist in new_cache or its components"
+        )
     compare(old_v, new_v, _prefix)
     return old_v
 
@@ -125,7 +159,7 @@ class TestShadowKVCache(KVCache):
         self,
         old_cache: KVCache,
         new_cache: KVCache,
-        state_names: List[Tuple[str, str]],
+        state_names: List[str],
     ):
         super().__init__(
             config=old_cache.config,
@@ -289,3 +323,250 @@ class TestShadowKVCache(KVCache):
         )
         self._compare_state(f"After {name}")
         return result
+
+
+_GENERAL_STATE_NAMES = [
+    "device",
+    "dtype",
+    "max_batch_size",
+    "cache_length",
+    "n_query_groups",
+    "input_pos",
+    "max_prefill_length",
+    "batch_size",
+    "current_length",
+]
+
+_ATTN_WEIGHTS_STATE_NAMES = _GENERAL_STATE_NAMES + [
+    "token_pos",
+    "_keep_initial_fraction",
+    "grace_period",
+    "_detach_attn_weights",
+    "max_chunk_size",
+    "_next_positions",
+    "next_grace_positions",
+    "prefill_length",
+    "_use_initial_rule",
+]
+
+_H2O_STATE_NAMES = _ATTN_WEIGHTS_STATE_NAMES + [
+    "scores",
+    "normalize_scores",
+]
+
+_QH2O_STATE_NAMES = _H2O_STATE_NAMES + [
+    "_scratch_blocksize",
+    "combination_constant",
+    "q_errors",
+]
+
+_STATE_NAMES = {
+    "dense": _GENERAL_STATE_NAMES,
+    "lastrec": _GENERAL_STATE_NAMES + ["token_pos", "init_grace_tokens", "next_position"],
+    "smart-lastrec": _GENERAL_STATE_NAMES + ["token_pos", "max_initial_fraction", "include_end_string", "range_is_prefix", "protected_start", "protected_end", "next_position", "_pad_id"],
+    "h2o": _H2O_STATE_NAMES,
+    "h2o-vlen": _H2O_STATE_NAMES + ["v_norm"],
+    "qh2o": _QH2O_STATE_NAMES
+    "qh2o-vlen": _QH2O_STATE_NAMES + ["v_norm"],
+    "h2o-orig": _ATTN_WEIGHTS_STATE_NAMES + ["scores"],
+}
+
+_SUPPORTED_POLICIES = {
+    "dense": DenseKVCachePolicy,
+    "lastrec": LastRecentlyInsertedKVCachePolicy,
+    "smart-lastrec": SmartInitialLastRecentlyInsertedKVCachePolicy,
+    "h2o": H2OKVCachePolicy,
+    "h2o-vlen": VLengthH2OKVCachePolicy,
+    "qh2o": QuantizedH2OKVCachePolicy,
+    "qh2o-vlen": QuantizedVLengthH2OKVCachePolicy,
+    "h2o-orig": H2OOriginalKVCachePolicy,
+}
+
+
+class ShadowKVCacheFactory:
+    """
+    Same as :class:`KVCacheFactory`, but we also create KV cache objects from
+    `keys_values.kvcache.new`, and return :class:`TestShadowKVCache` objects.
+    """
+
+    @staticmethod
+    def create_single(
+        name: str,
+        config: Config,
+        max_batch_size: int,
+        cache_length: int,
+        block_idx: int,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> TestShadowKVCache:
+        old_cache = KVCacheFactory.create_single(
+            name,
+            config,
+            max_batch_size,
+            cache_length,
+            block_idx,
+            device,
+            dtype,
+            None if cache_kwargs is None else cache_kwargs.copy(),
+        )
+
+        params = KVCacheParams(
+            max_batch_size=max_batch_size,
+            n_query_groups=config.n_query_groups,
+            cache_length=cache_length,
+            head_size=config.head_size,
+            n_head=config.n_head,
+            dtype=dtype,
+        )
+        if cache_kwargs is None:
+            cache_kwargs = dict()
+        max_num_ranges = cache_kwargs.get("max_num_ranges")
+        if max_num_ranges is not None:
+            cache_kwargs.pop("max_num_ranges")
+        cname, qname = split_name(name)
+        if qname == "default":
+            # HIER: Create default `buffers`
+            from_config_kwargs = dict(
+                config=config,
+                max_batch_size=max_batch_size,
+                cache_length=cache_length,
+                block_idx=block_idx,
+                device=device,
+                dtype=dtype,
+                **cache_kwargs,
+            )
+        else:
+            buffers, cache_kwargs = create_single_quantized_buffer(
+                params,
+                cache_length,
+                max_num_ranges,
+                block_idx,
+                qname,
+                device,
+                dtype,
+                cache_kwargs,
+            )
+        # HIER: Policy creation kwargs
+        policy = _SUPPORTED_POLICIES[cname](...)
+        driver = KVCacheDriverWithBuffers(
+            config=config,
+            buffers=buffers,
+            block_idx=block_idx,
+        )
+        new_cache = GenericKVCache(policy=policy, driver=driver)
+
+        return TestShadowKVCache(
+            old_cache=old_cache,
+            new_cache=new_cache,
+            state_names=_STATE_NAMES[cname],
+        )
+
+    @staticmethod
+    def create(
+        gpt_model: GPT,
+        name: str,
+        max_batch_size: int,
+        cache_length: Union[int, List[int]],
+        start: int = 0,
+        end: Optional[int] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> List[KVCache]:
+        """
+        By default, caches are created for all layers of the model. A subrange
+        `range(start, end)` can be chosen, for example if not all layers should
+        use the same `name`.
+
+        Args:
+            gpt_model: GPT model for which KV caches are to be created
+            name: Determines cache and buffers type, must be in
+                :const:`SUPPORTED_CACHES`
+            max_batch_size: Maximum batch size for caches
+            cache_length: Number of slots in caches. Can be different for
+                different caches
+            start: Caches are created for layers in `range(start, end)`
+            end: Caches are created for layers in `range(start, end)`
+            device: Device for cache objects. If not given, this is determined
+                with first usage
+            dtype: Data type for cache buffers (de-quantized). If not given,
+                this is determined with first usage
+            cache_kwargs: Additional keyword arguments for cache creation
+
+        Returns:
+            KV cache objects
+
+        """
+        config = gpt_model.config
+        if end is None:
+            end = config.n_layer
+        if not (0 <= start < end <= config.n_layer):
+            raise ValueError(
+                f"start={start}, end={end}, must be 0 <= start < end <= {config.n_layer}"
+            )
+        num_layers = end - start
+        if cache_kwargs is None:
+            cache_kwargs = dict()
+        if not isinstance(cache_length, list):
+            cache_length = [cache_length] * num_layers
+        elif len(cache_length) == 1:
+            cache_length = [cache_length[0]] * num_layers
+        elif len(cache_length) != num_layers:
+            raise ValueError(
+                f"len(cache_length) = {len(cache_length)}, must be 1 or {num_layers}"
+            )
+        if not all(x > 0 for x in cache_length):
+            raise ValueError(
+                f"cache_length = {cache_length}, must contain only positive integers"
+            )
+
+        cache_type = SUPPORTED_CACHES.get(name)
+        if cache_type is not None:
+            max_num_ranges = cache_kwargs.get("max_num_ranges")
+            if max_num_ranges is not None:
+                cache_kwargs.pop("max_num_ranges")
+            cname, qname = split_name(name)
+            if qname == "default":
+                from_config_kwargs = dict(
+                    config=config,
+                    max_batch_size=max_batch_size,
+                    dtype=dtype,
+                    device=device,
+                    **cache_kwargs,
+                )
+                kv_caches = [
+                    cache_type.from_config(
+                        **from_config_kwargs,
+                        cache_length=c_len,
+                        block_idx=i + start,
+                    )
+                    for i, c_len in enumerate(cache_length)
+                ]
+            else:
+                quant_buffers, cache_kwargs = create_multiple_quantized_buffers(
+                    config,
+                    qname,
+                    max_batch_size,
+                    cache_length,
+                    max_num_ranges,
+                    start,
+                    device,
+                    dtype,
+                    cache_kwargs,
+                )
+                kv_caches = [
+                    cache_type(
+                        config=config,
+                        buffers=buffers,
+                        block_idx=i + start,
+                        **cache_kwargs,
+                    )
+                    for i, buffers in enumerate(quant_buffers)
+                ]
+            return kv_caches
+        else:
+            if name in ("qh2o-default", "qh2o-vlen-default"):
+                raise ValueError(f"{name[:-8]} can only be used with quantized buffers")
+            else:
+                raise ValueError(f"name = {name} not supported")
