@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from functools import partial
-from typing import List, Any, Dict, Optional, Tuple
+from typing import List, Any, Dict, Optional, Tuple, Union
 
 import torch
 
@@ -94,12 +94,14 @@ def run_and_compare(
 def compare_attribute(
     old_cache: KVCache,
     new_cache: KVCache,
-    name: str,
+    name: Union[str, Tuple[str, str]],
     prefix: Optional[str] = None,
 ) -> Any:
-    old_v = getattr(old_cache, name)
-    new_v = getattr(new_cache, name)
-    _prefix = f"obj.{name}"
+    if isinstance(name, str):
+        name = (name, name)
+    old_v = getattr(old_cache, name[0])
+    new_v = getattr(new_cache, name[1])
+    _prefix = f"obj.{name[0]}"
     if prefix:
         _prefix = prefix + ": " + _prefix
     compare(old_v, new_v, _prefix)
@@ -118,16 +120,12 @@ class TestShadowKVCache(KVCache):
     replicas, not sharing underlying concepts. Otherwise, the comparison will
     not work.
 
-    Note: We provide more than the base class methods and attributes here,
-    so that comparisons become more fine-grained. But only methods present in
-    both old and new cache types can be represented.
-
     """
     def __init__(
         self,
         old_cache: KVCache,
         new_cache: KVCache,
-        state_names: List[str],
+        state_names: List[Tuple[str, str]],
     ):
         super().__init__(
             config=old_cache.config,
@@ -271,7 +269,7 @@ class TestShadowKVCache(KVCache):
         self._compare_state(f"After {name}")
         return result
 
-    # DefaultKVCache
+    # kvcache.DefaultKVCache, kvcache.new.GenericKVCache
 
     @property
     def batch_size(self) -> Optional[int]:
@@ -288,71 +286,6 @@ class TestShadowKVCache(KVCache):
         name = "_forward_check_args"
         result = run_and_compare(
             self.old_cache, self.new_cache, name, args, kwargs
-        )
-        self._compare_state(f"After {name}")
-        return result
-
-    def _convert_or_check_device(
-        self, *args, **kwargs,
-    ):
-        name = "_convert_or_check_device"
-        result = run_and_compare(
-            self.old_cache, self.new_cache, name, args, kwargs
-        )
-        self._compare_state(f"After {name}")
-        return result
-
-    # TODO: ???
-    @classmethod
-    def _parameter_names(cls) -> List[str]:
-        """
-        Returns:
-            Names of `torch.Tensor` parameters which need to be checked for
-            device or converted.
-
-        """
-        return []
-
-    def _prefill(
-        self, *args, **kwargs,
-    ):
-        name = "_prefill"
-        result = run_and_compare(
-            self.old_cache, self.new_cache, name, args, kwargs
-        )
-        self._compare_state(f"After {name}")
-        return result
-
-    def _forward(
-        self, *args, **kwargs,
-    ) -> KeysAndValues:
-        name = "_forward"
-        result = run_and_compare(
-            self.old_cache, self.new_cache, name, args, kwargs
-        )
-        self._compare_state(f"After {name}")
-        return result
-
-    def _update(self, *args, **kwargs):
-        name = "_update"
-        result = run_and_compare(
-            self.old_cache, self.new_cache, name, args, kwargs
-        )
-        self._compare_state(f"After {name}")
-        return result
-
-    def update_requires_attn_weights(self) -> bool:
-        name = "update_requires_attn_weights"
-        result = run_and_compare(
-            self.old_cache, self.new_cache, name,
-        )
-        self._compare_state(f"After {name}")
-        return result
-
-    def _reset(self):
-        name = "_reset"
-        result = run_and_compare(
-            self.old_cache, self.new_cache, name,
         )
         self._compare_state(f"After {name}")
         return result

@@ -558,6 +558,10 @@ class GenericKVCache(KVCache):
     def input_pos(self) -> int:
         return self._input_pos
 
+    @property
+    def batch_size(self) -> Optional[int]:
+        return self.driver.batch_size
+
     def forward(
         self,
         query: torch.Tensor,
