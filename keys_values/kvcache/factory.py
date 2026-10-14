@@ -78,9 +78,7 @@ def create_single_quantized_buffer(
 ) -> Tuple[QuantizedKVCacheBuffers, Dict[str, Any]]:
     cache_params = KVCacheBuffersParams.from_params(params)
     if dtype is None:
-        raise ValueError(
-            f"dtype must be given for quantized cache buffers ({qname})"
-        )
+        raise ValueError(f"dtype must be given for quantized cache buffers ({qname})")
     if device is not None:
         cache_params = replace(cache_params, device=device)
     allocate_buffers = cache_kwargs.get("allocate_buffers")
@@ -121,9 +119,7 @@ def create_multiple_quantized_buffers(
     cache_kwargs: Dict[str, Any],
 ) -> Tuple[List[QuantizedKVCacheBuffers], Dict[str, Any]]:
     if dtype is None:
-        raise ValueError(
-            f"dtype must be given for quantized cache buffers ({qname})"
-        )
+        raise ValueError(f"dtype must be given for quantized cache buffers ({qname})")
     cache_params = KVCacheParams(
         max_batch_size=max_batch_size,
         n_query_groups=config.n_query_groups,
@@ -138,16 +134,19 @@ def create_multiple_quantized_buffers(
     else:
         allocate_buffers = False
     dequant_kwargs = dict(max_num_ranges=max_num_ranges)
-    return create_quantized_kv_buffers(
-        qname=qname,
-        cache_lengths=cache_length,
-        cache_params=cache_params,
-        cache_kwargs=cache_kwargs,
-        dequant_kwargs=dequant_kwargs,
-        allocate_buffers=allocate_buffers,
-        device=device,
-        first_block_idx=start,
-    ), cache_kwargs
+    return (
+        create_quantized_kv_buffers(
+            qname=qname,
+            cache_lengths=cache_length,
+            cache_params=cache_params,
+            cache_kwargs=cache_kwargs,
+            dequant_kwargs=dequant_kwargs,
+            allocate_buffers=allocate_buffers,
+            device=device,
+            first_block_idx=start,
+        ),
+        cache_kwargs,
+    )
 
 
 class KVCacheFactory:

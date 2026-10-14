@@ -54,25 +54,25 @@ def compare(
     new_v: Any,
     prefix: str,
 ):
-    assert type(old_v) == type(new_v), (
-        f"{prefix}: type(old_v) = {type(old_v)} != {type(new_v)} = type(new_v)"
-    )
+    assert type(old_v) == type(
+        new_v
+    ), f"{prefix}: type(old_v) = {type(old_v)} != {type(new_v)} = type(new_v)"
     if isinstance(old_v, torch.Tensor):
-        assert old_v.shape == new_v.shape, (
-            f"{prefix}: old_v.shape = {old_v.shape}, new_v.shape = {new_v.shape}"
-        )
-        assert old_v.dtype == new_v.dtype, (
-            f"{prefix}: old_v.dtype = {old_v.dtype}, new_v.dtype = {new_v.dtype}"
-        )
+        assert (
+            old_v.shape == new_v.shape
+        ), f"{prefix}: old_v.shape = {old_v.shape}, new_v.shape = {new_v.shape}"
+        assert (
+            old_v.dtype == new_v.dtype
+        ), f"{prefix}: old_v.dtype = {old_v.dtype}, new_v.dtype = {new_v.dtype}"
         torch.testing.assert_close(
             old_v,
             new_v,
             msg=partial(_error_message, prefix=prefix + ": Tensor"),
         )
     elif isinstance(old_v, list) or isinstance(old_v, tuple):
-        assert len(old_v) == len(new_v), (
-            f"{prefix}: len(old_v) = {len(old_v)} != {len(new_v)} = len(new_v)"
-        )
+        assert len(old_v) == len(
+            new_v
+        ), f"{prefix}: len(old_v) = {len(old_v)} != {len(new_v)} = len(new_v)"
         for pos, (ov, nv) in enumerate(zip(old_v, new_v)):
             compare(ov, nv, f"{prefix}[{pos}]")
     elif isinstance(old_v, dict):
@@ -107,9 +107,9 @@ def run_and_compare(
         old_result = (old_result,)
     if not isinstance(new_result, tuple):
         new_result = (new_result,)
-    assert len(old_result) == len(new_result), (
-        f"obj.{name}(...): len(old_result) = {len(old_result)} != {len(new_result)} = len(new_result)"
-    )
+    assert len(old_result) == len(
+        new_result
+    ), f"obj.{name}(...): len(old_result) = {len(old_result)} != {len(new_result)} = len(new_result)"
     for pos, (old_v, new_v) in enumerate(zip(old_result, new_result)):
         compare(old_v, new_v, f"obj.{name}(...)[{pos}]")
     return old_result[0] if no_tuple else new_result
@@ -137,9 +137,7 @@ def compare_attribute(
     prefix = "" if prefix is None else prefix + ": "
     _prefix = prefix + f"obj.{name}"
     if not _done:
-        raise AttributeError(
-            f"{_prefix} does not exist in new_cache or its components"
-        )
+        raise AttributeError(f"{_prefix} does not exist in new_cache or its components")
     compare(old_v, new_v, _prefix)
     return old_v
 
@@ -155,8 +153,8 @@ class TestShadowKVCache(KVCache):
     Important: Make sure that `old_cache` and `new_cache` work with complete
     replicas, not sharing underlying concepts. Otherwise, the comparison will
     not work.
-
     """
+
     def __init__(
         self,
         old_cache: KVCache,
@@ -215,16 +213,16 @@ class TestShadowKVCache(KVCache):
         **kwargs,
     ) -> torch.Tensor:
         name = "forward"
-        result = run_and_compare(
-            self.old_cache, self.new_cache, name, args, kwargs
-        )
+        result = run_and_compare(self.old_cache, self.new_cache, name, args, kwargs)
         self._compare_state(f"After {name}")
         return result
 
     def get_keys_values(self) -> Optional[KeysAndValues]:
         name = "get_keys_values"
         result = run_and_compare(
-            self.old_cache, self.new_cache, name,
+            self.old_cache,
+            self.new_cache,
+            name,
         )
         self._compare_state(f"After {name}")
         return result
@@ -232,7 +230,9 @@ class TestShadowKVCache(KVCache):
     def max_forward_length(self) -> int:
         name = "max_forward_length"
         result = run_and_compare(
-            self.old_cache, self.new_cache, name,
+            self.old_cache,
+            self.new_cache,
+            name,
         )
         self._compare_state(f"After {name}")
         return result
@@ -245,7 +245,9 @@ class TestShadowKVCache(KVCache):
     def get_params(self) -> KVCacheParams:
         name = "get_params"
         result = run_and_compare(
-            self.old_cache, self.new_cache, name,
+            self.old_cache,
+            self.new_cache,
+            name,
         )
         self._compare_state(f"After {name}")
         return result
@@ -253,7 +255,9 @@ class TestShadowKVCache(KVCache):
     def token_positions(self) -> torch.Tensor:
         name = "token_positions"
         result = run_and_compare(
-            self.old_cache, self.new_cache, name,
+            self.old_cache,
+            self.new_cache,
+            name,
         )
         self._compare_state(f"After {name}")
         return result
@@ -261,7 +265,9 @@ class TestShadowKVCache(KVCache):
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         name = "size_estimate"
         result = run_and_compare(
-            self.old_cache, self.new_cache, name,
+            self.old_cache,
+            self.new_cache,
+            name,
         )
         self._compare_state(f"After {name}")
         return result
@@ -276,23 +282,25 @@ class TestShadowKVCache(KVCache):
     def reset(self) -> None:
         name = "reset"
         result = run_and_compare(
-            self.old_cache, self.new_cache, name,
+            self.old_cache,
+            self.new_cache,
+            name,
         )
         self._compare_state(f"After {name}")
         return result
 
     def set_seq_length(self, *args, **kwargs) -> None:
         name = "set_seq_length"
-        result = run_and_compare(
-            self.old_cache, self.new_cache, name, args, kwargs
-        )
+        result = run_and_compare(self.old_cache, self.new_cache, name, args, kwargs)
         self._compare_state(f"After {name}")
         return result
 
     def clone(self) -> "KVCache":
         name = "clone"
         result = run_and_compare(
-            self.old_cache, self.new_cache, name,
+            self.old_cache,
+            self.new_cache,
+            name,
         )
         self._compare_state(f"After {name}")
         return result
@@ -300,7 +308,9 @@ class TestShadowKVCache(KVCache):
     def _base_kwargs_for_clone(self) -> Dict[str, Any]:
         name = "_base_kwargs_for_clone"
         result = run_and_compare(
-            self.old_cache, self.new_cache, name,
+            self.old_cache,
+            self.new_cache,
+            name,
         )
         self._compare_state(f"After {name}")
         return result
@@ -311,18 +321,20 @@ class TestShadowKVCache(KVCache):
     def batch_size(self) -> Optional[int]:
         name = "batch_size"
         result = run_and_compare(
-            self.old_cache, self.new_cache, name,
+            self.old_cache,
+            self.new_cache,
+            name,
         )
         self._compare_state(f"After {name}")
         return result
 
     def _forward_check_args(
-        self, *args, **kwargs,
+        self,
+        *args,
+        **kwargs,
     ):
         name = "_forward_check_args"
-        result = run_and_compare(
-            self.old_cache, self.new_cache, name, args, kwargs
-        )
+        result = run_and_compare(self.old_cache, self.new_cache, name, args, kwargs)
         self._compare_state(f"After {name}")
         return result
 
@@ -337,6 +349,17 @@ _GENERAL_STATE_NAMES = [
     "max_prefill_length",
     "batch_size",
     "current_length",
+]
+
+_SLR_STATE_NAMES = _GENERAL_STATE_NAMES + [
+    "token_pos",
+    "max_initial_fraction",
+    "include_end_string",
+    "range_is_prefix",
+    "protected_start",
+    "protected_end",
+    "next_position",
+    "_pad_id",
 ]
 
 _ATTN_WEIGHTS_STATE_NAMES = _GENERAL_STATE_NAMES + [
@@ -364,8 +387,9 @@ _QH2O_STATE_NAMES = _H2O_STATE_NAMES + [
 
 _STATE_NAMES = {
     "dense": _GENERAL_STATE_NAMES,
-    "lastrec": _GENERAL_STATE_NAMES + ["token_pos", "init_grace_tokens", "next_position"],
-    "smart-lastrec": _GENERAL_STATE_NAMES + ["token_pos", "max_initial_fraction", "include_end_string", "range_is_prefix", "protected_start", "protected_end", "next_position", "_pad_id"],
+    "lastrec": _GENERAL_STATE_NAMES
+    + ["token_pos", "init_grace_tokens", "next_position"],
+    "smart-lastrec": _SLR_STATE_NAMES,
     "h2o": _H2O_STATE_NAMES,
     "h2o-vlen": _H2O_STATE_NAMES + ["v_norm"],
     "qh2o": _QH2O_STATE_NAMES,
@@ -431,7 +455,9 @@ def extract_policy_kwargs(
         if name in cache_kwargs:
             result[name] = cache_kwargs[name]
         elif mandatory:
-            raise ValueError(f"Policy parameter {name} is mandatory, but not in cache_kwargs")
+            raise ValueError(
+                f"Policy parameter {name} is mandatory, but not in cache_kwargs"
+            )
         else:
             result[name] = defval
     return result
@@ -480,7 +506,9 @@ class ShadowKVCacheFactory:
             cache_kwargs.pop("max_num_ranges")
         cname, qname = split_name(name)
         if qname == "default":
-            buffers_kwargs = KVCacheDriverWithBuffers.extract_default_buffers_kwargs(cache_kwargs)
+            buffers_kwargs = KVCacheDriverWithBuffers.extract_default_buffers_kwargs(
+                cache_kwargs
+            )
             buffers = KVCacheDriverWithBuffers.create_default_buffers(
                 config=config,
                 max_batch_size=max_batch_size,
@@ -503,7 +531,7 @@ class ShadowKVCacheFactory:
         policy = _SUPPORTED_POLICIES[cname](
             config=config,
             cache_length=cache_length,
-            **extract_policy_kwargs(cname, cache_kwargs)
+            **extract_policy_kwargs(cname, cache_kwargs),
         )
         driver = KVCacheDriverWithBuffers(
             config=config,
@@ -569,7 +597,9 @@ class ShadowKVCacheFactory:
             cache_kwargs.pop("max_num_ranges")
         cname, qname = split_name(name)
         if qname == "default":
-            buffers_kwargs = KVCacheDriverWithBuffers.extract_default_buffers_kwargs(cache_kwargs)
+            buffers_kwargs = KVCacheDriverWithBuffers.extract_default_buffers_kwargs(
+                cache_kwargs
+            )
             buffers_list = [
                 KVCacheDriverWithBuffers.create_default_buffers(
                     config=config,
