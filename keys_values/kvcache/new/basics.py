@@ -706,3 +706,26 @@ class GenericKVCache(KVCache):
                 raise ValueError("query, key, value, token_idx must be on same device")
         self.driver.set_or_check_device(new_device)
         self.policy.set_or_check_device(new_device)
+
+    # Temporary attributes to run comparison testing
+    # TODO: Remove them once comparison testing is done and old code
+    # is removed.
+
+    from keys_values.attention.base import MultiHeadSelfAttention
+    from keys_values.kvcache.buffers import KVCacheBuffers
+
+    @property
+    def mha(self) -> MultiHeadSelfAttention:
+        return self.driver.mha
+
+    @property
+    def init_grace_tokens(self) -> int:
+        return self.policy.init_grace_tokens
+
+    @property
+    def scores(self) -> Optional[torch.Tensor]:
+        return self.policy.scores
+
+    @property
+    def kv_buffers(self) -> KVCacheBuffers:
+        return self.driver.kv_buffers
