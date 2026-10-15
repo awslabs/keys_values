@@ -67,7 +67,7 @@ def test_store_retrieve(device, name, kwargs):
     cache_length = params.cache_length
     if name.startswith("smart-lastrec"):
         kwargs = {**kwargs, **cache_kwargs_for_smart_lastrec()}
-    kv_cache = create_kv_cache(name, params, **kwargs)
+    kv_cache = create_kv_cache(name, params, **kwargs, create_shadow=True)
     if name.startswith("dense"):
         num_insert = randint_torch(cache_length // 2, cache_length)
     else:
@@ -142,7 +142,7 @@ def test_prefill(name, device):
         cache_kwargs = cache_kwargs_for_smart_lastrec()
     else:
         cache_kwargs = dict()
-    kv_cache = create_kv_cache(name, params, **cache_kwargs)
+    kv_cache = create_kv_cache(name, params, **cache_kwargs, create_shadow=True)
 
     data = random_args_cache_forward(
         params,

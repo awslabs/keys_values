@@ -27,6 +27,7 @@ from keys_values.attention.base import (
 from keys_values.attention.attention_utils import build_mask_cache
 from keys_values.kvcache.base import KVCacheParams, KVCache
 from keys_values.kvcache.factory import KVCacheFactory
+from keys_values.kvcache.test_shadow import ShadowKVCacheFactory
 
 # Tests run quite slowly for "mps". If this changes, switch this to True
 RUN_TESTS_FOR_MPS = False
@@ -38,6 +39,7 @@ def create_kv_cache(
     name: str,
     params: KVCacheParams,
     block_idx: int = 0,
+    create_shadow: bool = False,
     **kwargs,
 ) -> KVCache:
     config = Config(
@@ -46,7 +48,7 @@ def create_kv_cache(
         n_query_groups=params.n_query_groups,
         n_layer=1,
     )
-    return KVCacheFactory.create_single(
+    create_kwargs = dict(
         name=name,
         config=config,
         max_batch_size=params.max_batch_size,
@@ -55,7 +57,10 @@ def create_kv_cache(
         dtype=params.dtype,
         cache_kwargs=kwargs,
     )
-
+    if not create_shadow:
+        return KVCacheFactory.create_single(**create_kwargs)
+    else:
+        return ShadowKVCacheFactory.create_single(**create_kwargs)
 
 def tensor_is_simple(x: torch.Tensor) -> bool:
     assert x.ndim > 1
