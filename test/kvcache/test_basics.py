@@ -26,6 +26,7 @@ from keys_values.kvcache.test_utils import (
     available_backends,
     product_with_devices,
 )
+from keys_values.kvcache.test_utils_advanced import cache_kwargs_for_smart_lastrec
 from keys_values.utils import randint_torch, index_to_3d, is_index_1d
 
 
@@ -189,3 +190,158 @@ def test_index_to_3d():
         index = torch.arange(size * 2)[:size]
         result = index_to_3d(index, *shape[:-1])
         assert is_index_1d(result), ("type 2", shape, result.shape, result.stride())
+
+
+# Default-buffer caches. Quantized buffers do not grow.
+_DEFAULT_GROW_CACHE_NAMES = (
+    "dense-default",
+    "lastrec-default",
+    "smart-lastrec-default",
+    "h2o-default",
+    "h2o-vlen-default",
+    "h2o-orig-default",
+)
+
+
+def _physical_slots(cache) -> int:
+    return cache.kv_buffers.k.shape[2]
+
+
+def _assert_same_keys_values(growing, fixed):
+    grown = growing.get_keys_values()
+    full = fixed.get_keys_values()
+    assert torch.equal(grown.keys(), full.keys())
+    assert torch.equal(grown.values(), full.values())
+
+
+def _grow_buffers_params(cache_length: int) -> KVCacheParams:
+    return KVCacheParams(
+        max_batch_size=3,
+        n_query_groups=2,
+        cache_length=cache_length,
+        head_size=4,
+        n_head=2,
+        dtype=torch.float32,
+    )
+
+
+def _grow_cache_kwargs(name: str, grow_buffers_init_length=None, include_grow=True):
+    kwargs = {}
+    if include_grow:
+        kwargs["grow_buffers_init_length"] = grow_buffers_init_length
+    if name.startswith("lastrec-"):
+        kwargs["init_grace_tokens"] = 0
+    elif name.startswith("smart-lastrec"):
+        kwargs.update(cache_kwargs_for_smart_lastrec())
+    return kwargs
+
+
+@pytest.mark.parametrize("name", _DEFAULT_GROW_CACHE_NAMES)
+@pytest.mark.parametrize("device", available_backends())
+def test_grow_buffers_init_length_none_allocates_full_length(device, name):
+    cache_length = 16
+    params = _grow_buffers_params(cache_length)
+    omitted = create_kv_cache(
+        name, params, **_grow_cache_kwargs(name, include_grow=False)
+    )
+    explicit = create_kv_cache(
+        name,
+        params,
+        **_grow_cache_kwargs(name, grow_buffers_init_length=None),
+    )
+    data = random_args_cache_forward(params, 2, vocab_size=32, device=device)
+    for cache in (omitted, explicit):
+        assert cache.kv_buffers.grow_buffers_init_length is None
+        cache(**range_from_args(data, 0, 1))
+        cache(**range_from_args(data, 1, 2))
+        assert _physical_slots(cache) == cache_length
+        if name.startswith("lastrec-"):
+            assert cache.token_pos.shape == (cache_length,)
+
+
+@pytest.mark.parametrize("name", _DEFAULT_GROW_CACHE_NAMES)
+@pytest.mark.parametrize("device", available_backends())
+def test_grow_buffers_doubles_and_matches_full_cache(device, name):
+    torch.manual_seed(0)
+    init_length = 4
+    cache_length = init_length * 4
+    params = _grow_buffers_params(cache_length)
+    growing = create_kv_cache(
+        name,
+        params,
+        **_grow_cache_kwargs(name, grow_buffers_init_length=init_length),
+    )
+    fixed = create_kv_cache(
+        name,
+        params,
+        **_grow_cache_kwargs(name, grow_buffers_init_length=None),
+    )
+    # Dense raises once `input_pos` reaches `cache_length`. The others keep
+    # accepting tokens and must still match the full-size cache.
+    num_insert = cache_length if name.startswith("dense") else cache_length + 4
+    data = random_args_cache_forward(params, num_insert, vocab_size=32, device=device)
+
+    # Prefill the initial slot count so a protected range (smart-lastrec)
+    # lies inside the first chunk, and the first write still fits.
+    prefill = range_from_args(data, 0, init_length)
+    growing(**prefill)
+    fixed(**prefill)
+    assert _physical_slots(growing) == init_length
+    assert _physical_slots(fixed) == cache_length
+    if name.startswith("lastrec-"):
+        assert growing.token_pos.shape == (cache_length,)
+    _assert_same_keys_values(growing, fixed)
+
+    seen = [init_length]
+    for pos in range(init_length, num_insert):
+        step = range_from_args(data, pos, pos + 1)
+        growing(**step)
+        fixed(**step)
+        slots = _physical_slots(growing)
+        if slots != seen[-1]:
+            seen.append(slots)
+        assert _physical_slots(fixed) == cache_length
+        _assert_same_keys_values(growing, fixed)
+    assert seen == [init_length, init_length * 2, cache_length]
+    assert _physical_slots(growing) == cache_length
+
+
+def test_grow_buffers_init_length_rejected_for_quantized_buffers():
+    params = _grow_buffers_params(16)
+    with pytest.raises(ValueError, match="default buffers only"):
+        create_kv_cache(
+            "lastrec-torch-quantized8",
+            params,
+            grow_buffers_init_length=4,
+            init_grace_tokens=0,
+        )
+
+
+@pytest.mark.parametrize("device", available_backends())
+def test_set_slots_doubles_when_write_does_not_fit(device):
+    torch.manual_seed(1)
+    init_length = 4
+    cache_length = 32
+    params = _grow_buffers_params(cache_length)
+    cache = create_kv_cache(
+        "lastrec-default",
+        params,
+        grow_buffers_init_length=init_length,
+        init_grace_tokens=0,
+    )
+    # 4 -> 8 is still short of this write, so set_slots doubles twice.
+    span = 8
+    data = random_args_cache_forward(
+        params, init_length + span, vocab_size=32, device=device
+    )
+    cache(**range_from_args(data, 0, init_length))
+    assert _physical_slots(cache) == init_length
+    prefix = cache.kv_buffers.k[:, :, :init_length, :].clone()
+    step = range_from_args(data, init_length, init_length + span)
+    cache.kv_buffers.forward(
+        (init_length, init_length + span),
+        step["key"],
+        step["value"],
+    )
+    assert _physical_slots(cache) == init_length * 4
+    assert torch.equal(cache.kv_buffers.k[:, :, :init_length, :], prefix)

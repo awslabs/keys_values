@@ -406,6 +406,11 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
     Default implementation, where KV cache buffers are simply allocated as
     such (no compression or clever storage).
 
+    `grow_buffers_init_length`: If `None` (default), buffers are allocated at
+    `cache_length`. If a positive int, they start with that many slots (at
+    most `cache_length`). When a write does not fit, the length is doubled
+    until it does, and never grows past `cache_length`.
+
     """
 
     def __init__(
@@ -414,17 +419,56 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         cache_length: int,
         allocate_buffers: bool = False,
         debug_device_warning: bool = False,
+        grow_buffers_init_length: Optional[int] = None,
     ):
         super().__init__(params, cache_length)
         self.k = None
         self.v = None
+        self.grow_buffers_init_length = self._clip_grow_init_length(
+            grow_buffers_init_length
+        )
         if allocate_buffers:
             self._allocate_buffers(params.device)
         self._debug_device_warning = debug_device_warning
 
+    def _clip_grow_init_length(self, length: Optional[int]) -> Optional[int]:
+        if length is None:
+            return None
+        if length <= 0:
+            raise ValueError(f"grow_buffers_init_length={length}, must be positive")
+        return min(length, self.cache_length)
+
     @property
     def device(self) -> Optional[torch.device]:
         return None if self.k is None else self.k.device
+
+    def _expand_slots(self, num_slots: int):
+        """
+        Extends `k` and `v` to `num_slots` along the cache axis. The new
+        region is zeros; the existing region is kept. Batch size and device
+        stay the same.
+
+        """
+        n = self.k.shape[2]
+        extra = num_slots - n
+        k_extra = torch.zeros_like(self.k[:, :, :extra, :])
+        v_extra = torch.zeros_like(self.v[:, :, :extra, :])
+        self.k = torch.cat((self.k, k_extra), dim=2)
+        self.v = torch.cat((self.v, v_extra), dim=2)
+
+    def _grow_to_fit(self, limit: int):
+        """
+        If growth is enabled and `k` is shorter than `limit`, double its
+        length until `limit` fits or `cache_length` is reached.
+
+        """
+        if self.grow_buffers_init_length is None or not self.buffers_are_allocated:
+            return
+        while self.k.shape[2] < limit and self.k.shape[2] < self.cache_length:
+            new_length = min(self.cache_length, self.k.shape[2] * 2)
+            if new_length == self.k.shape[2]:
+                break
+            self._expand_slots(new_length)
 
     def _allocate_buffers(
         self,
@@ -459,7 +503,12 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
                     f"Batch size increased from {self.k.shape[0]} to {batch_size}: Re-allocating buffers"
                 )
         if batch_size is not None:
-            shape = (batch_size, self.n_query_groups, self.cache_length, self.head_size)
+            slots = (
+                self.grow_buffers_init_length
+                if self.grow_buffers_init_length is not None
+                else self.cache_length
+            )
+            shape = (batch_size, self.n_query_groups, slots, self.head_size)
             self.k = torch.zeros(shape, device=device, dtype=self.dtype)
             self.v = torch.zeros(shape, device=device, dtype=self.dtype)
 
@@ -509,6 +558,9 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         key = key.to(device=self.device, dtype=self.dtype)
         value = value.to(device=self.device, dtype=self.dtype)
         positions = self._check_positions(positions)
+        # `forward` has already advanced `current_length` to cover this write.
+        if self.grow_buffers_init_length is not None and self.current_length:
+            self._grow_to_fit(self.current_length)
         if isinstance(positions, torch.Tensor):
             index = expand_index(positions, self.head_size)
             self.k[: self.batch_size, ...].scatter_(-2, index, key)
@@ -544,9 +596,10 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         if self.buffers_are_allocated and key.device != self.device:
             raise ValueError(f"key.device = {key.device}, must be {self.device}")
         # Note: `self.batch_size` already set here
-        self._allocate_buffers(device=key.device, dtype=key.dtype)
-        # Initialize cache buffers
         init_length = key.shape[2]
+        self._allocate_buffers(device=key.device, dtype=key.dtype)
+        self._grow_to_fit(init_length)
+        # Initialize cache buffers
         self.k[: self.batch_size, :, :init_length, :] = key.to(dtype=self.dtype)
         self.v[: self.batch_size, :, :init_length, :] = value.to(dtype=self.dtype)
 
@@ -567,6 +620,7 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         self.batch_size, init_length = self._check_prefill(keys, None)
         init_length = min(init_length, self.cache_length)
         self._allocate_buffers(device=keys.device, dtype=keys.dtype)
+        self._grow_to_fit(init_length)
         self.current_length = init_length
         keys = keys[:, :, :init_length, :].to(dtype=self.dtype)
         self.k[: self.batch_size, :, :init_length, :] = keys
