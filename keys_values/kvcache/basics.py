@@ -65,6 +65,17 @@ class KVCacheWithBuffers(DefaultKVCache):
     for training and validation), without having to allocate buffers
     for `max_batch_size`.
 
+    Optional growth of default buffers:
+
+    Pass `grow_buffers_init_length` to :meth:`from_config` (any subclass that
+    builds default buffers). `None`, the default, allocates those buffers at
+    `cache_length`. A positive int starts them at that many slots, capped at
+    `cache_length`, and doubles that length until a write fits or
+    `cache_length` is reached. While `current_length < cache_length` every
+    cache type only appends, so the same rule covers dense, last-recent,
+    smart-lastrec, and H2O caches. Quantized buffers do not support this
+    option.
+
     """
 
     def __init__(
@@ -114,10 +125,22 @@ class KVCacheWithBuffers(DefaultKVCache):
     def extract_default_buffers_kwargs(
         kwargs: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """
+        Pulls keyword arguments for :class:`DefaultKVCacheBuffers` out of
+        `kwargs`.
+
+        `allocate_buffers`: If given, forwarded to the buffer constructor.
+
+        `grow_buffers_init_length`: If `None` or omitted, buffers are allocated
+        at `cache_length`. If a positive int, they start with that many slots
+        (at most `cache_length`) and double until a write fits or
+        `cache_length` is reached.
+
+        """
         result = dict()
-        name = "allocate_buffers"
-        if name in kwargs:
-            result[name] = kwargs.pop(name)
+        for name in ("allocate_buffers", "grow_buffers_init_length"):
+            if name in kwargs:
+                result[name] = kwargs.pop(name)
         return result
 
     @staticmethod
@@ -298,8 +321,11 @@ class DenseKVCache(KVCacheWithBuffers):
     as its cache length. It requires a lot of memory, so can only be used for
     moderate cache lengths.
 
-    Note: If the cache is full, :meth:`forward` raises an exception. The cache
-    buffers are allocated up front and are not enlarged later on.
+    Note: If the cache is full, :meth:`forward` raises an exception. By
+    default the buffers are allocated at `cache_length` and are not enlarged
+    later on. `grow_buffers_init_length` passed to :meth:`from_config` starts
+    them smaller and doubles until `cache_length`, see
+    :class:`KVCacheWithBuffers`.
 
     """
 

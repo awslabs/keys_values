@@ -157,6 +157,14 @@ class KVCacheFactory:
                 )
                 result = cache_type.from_config(**from_config_kwargs)
             else:
+                grow_buffers_init_length = cache_kwargs.pop(
+                    "grow_buffers_init_length", None
+                )
+                if grow_buffers_init_length is not None:
+                    raise ValueError(
+                        "grow_buffers_init_length is supported for default "
+                        f"buffers only, not for {name}"
+                    )
                 cache_params = KVCacheBuffersParams.from_params(params)
                 if dtype is None:
                     raise ValueError(
