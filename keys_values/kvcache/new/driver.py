@@ -32,6 +32,7 @@ from keys_values.kvcache.new.basics import (
     KVCacheDriver,
     PositionsNewEntriesType,
 )
+from keys_values.utils import index_to_3d
 
 
 class DefaultKVCacheDriver(KVCacheDriver):
@@ -384,6 +385,8 @@ class KVCacheDriverWithBuffers(DefaultKVCacheDriver):
             positions = [(positions, 0, key.shape[2])]
         k_and_v = None
         for index, off, num in positions:
+            if index.ndim == 1:
+                index = index_to_3d(index, self.batch_size, self.n_query_groups)
             _key = key[:, :, off : (off + num), :]
             _value = value[:, :, off : (off + num), :]
             index_sz = index.shape[-1]

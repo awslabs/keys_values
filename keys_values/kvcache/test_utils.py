@@ -40,6 +40,7 @@ def create_kv_cache(
     params: KVCacheParams,
     block_idx: int = 0,
     create_shadow: bool = False,
+    return_from_old: bool = True,
     **kwargs,
 ) -> KVCache:
     config = Config(
@@ -60,7 +61,11 @@ def create_kv_cache(
     if not create_shadow:
         return KVCacheFactory.create_single(**create_kwargs)
     else:
-        return ShadowKVCacheFactory.create_single(**create_kwargs)
+        return ShadowKVCacheFactory.create_single(
+            **create_kwargs,
+            return_from_old=return_from_old,
+        )
+
 
 def tensor_is_simple(x: torch.Tensor) -> bool:
     assert x.ndim > 1

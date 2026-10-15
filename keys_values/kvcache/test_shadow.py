@@ -100,6 +100,7 @@ def run_and_compare(
     name: str,
     args: Optional[Tuple[Any]] = None,
     kwargs: Optional[Dict[str, Any]] = None,
+    return_from_old: bool = True,
 ) -> Any:
     if args is None:
         args = ()
@@ -107,17 +108,21 @@ def run_and_compare(
         kwargs = dict()
     old_result = getattr(old_cache, name)(*args, **kwargs)
     new_result = getattr(new_cache, name)(*args, **kwargs)
-    no_tuple = not isinstance(old_result, tuple)
-    if no_tuple:
+    old_no_tuple = not isinstance(old_result, tuple)
+    if old_no_tuple:
         old_result = (old_result,)
-    if not isinstance(new_result, tuple):
+    new_no_tuple = not isinstance(new_result, tuple)
+    if new_no_tuple:
         new_result = (new_result,)
     assert len(old_result) == len(
         new_result
     ), f"obj.{name}(...): len(old_result) = {len(old_result)} != {len(new_result)} = len(new_result)"
     for pos, (old_v, new_v) in enumerate(zip(old_result, new_result)):
         compare(old_v, new_v, f"obj.{name}(...)[{pos}]")
-    return old_result[0] if no_tuple else new_result
+    if return_from_old:
+        return old_result[0] if old_no_tuple else old_result
+    else:
+        return new_result[0] if new_no_tuple else new_result
 
 
 def compare_attribute(
@@ -125,6 +130,7 @@ def compare_attribute(
     new_cache: KVCache,
     name: str,
     prefix: Optional[str] = None,
+    return_from_old: bool = True,
 ) -> Any:
     old_v = getattr(old_cache, name)
     new_objs: List[Any] = [new_cache]
@@ -144,7 +150,7 @@ def compare_attribute(
     if not _done:
         raise AttributeError(f"{_prefix} does not exist in new_cache or its components")
     compare(old_v, new_v, _prefix)
-    return old_v
+    return old_v if return_from_old else new_v
 
 
 class TestShadowKVCache(KVCache):
@@ -165,6 +171,7 @@ class TestShadowKVCache(KVCache):
         old_cache: KVCache,
         new_cache: KVCache,
         state_names: List[str],
+        return_from_old: bool = True,
     ):
         super().__init__(
             config=old_cache.config,
@@ -177,6 +184,7 @@ class TestShadowKVCache(KVCache):
         self.old_cache = old_cache
         self.new_cache = new_cache
         self._state_names = state_names.copy()
+        self._return_from_old = return_from_old
 
     def _compare_state(self, prefix: str):
         for name in self._state_names:
@@ -185,32 +193,58 @@ class TestShadowKVCache(KVCache):
                 self.new_cache,
                 name,
                 prefix,
+                return_from_old=self._return_from_old,
             )
 
     @property
     def device(self) -> Optional[torch.device]:
         name = "device"
-        return compare_attribute(self.old_cache, self.new_cache, name)
+        return compare_attribute(
+            self.old_cache,
+            self.new_cache,
+            name,
+            return_from_old=self._return_from_old,
+        )
 
     @property
     def dtype(self) -> Optional[torch.dtype]:
         name = "dtype"
-        return compare_attribute(self.old_cache, self.new_cache, name)
+        return compare_attribute(
+            self.old_cache,
+            self.new_cache,
+            name,
+            return_from_old=self._return_from_old,
+        )
 
     @property
     def cache_length(self) -> int:
         name = "cache_length"
-        return compare_attribute(self.old_cache, self.new_cache, name)
+        return compare_attribute(
+            self.old_cache,
+            self.new_cache,
+            name,
+            return_from_old=self._return_from_old,
+        )
 
     @property
     def n_query_groups(self) -> int:
         name = "n_query_groups"
-        return compare_attribute(self.old_cache, self.new_cache, name)
+        return compare_attribute(
+            self.old_cache,
+            self.new_cache,
+            name,
+            return_from_old=self._return_from_old,
+        )
 
     @property
     def input_pos(self) -> int:
         name = "input_pos"
-        return compare_attribute(self.old_cache, self.new_cache, name)
+        return compare_attribute(
+            self.old_cache,
+            self.new_cache,
+            name,
+            return_from_old=self._return_from_old,
+        )
 
     def forward(
         self,
@@ -218,7 +252,14 @@ class TestShadowKVCache(KVCache):
         **kwargs,
     ) -> torch.Tensor:
         name = "forward"
-        result = run_and_compare(self.old_cache, self.new_cache, name, args, kwargs)
+        result = run_and_compare(
+            self.old_cache,
+            self.new_cache,
+            name,
+            args,
+            kwargs,
+            return_from_old=self._return_from_old,
+        )
         self._compare_state(f"After '{name}'")
         return result
 
@@ -228,6 +269,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
+            return_from_old=self._return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -238,6 +280,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
+            return_from_old=self._return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -245,7 +288,12 @@ class TestShadowKVCache(KVCache):
     @property
     def max_prefill_length(self) -> int:
         name = "max_prefill_length"
-        return compare_attribute(self.old_cache, self.new_cache, name)
+        return compare_attribute(
+            self.old_cache,
+            self.new_cache,
+            name,
+            return_from_old=self._return_from_old,
+        )
 
     def get_params(self) -> KVCacheParams:
         name = "get_params"
@@ -253,6 +301,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
+            return_from_old=self._return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -263,6 +312,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
+            return_from_old=self._return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -273,6 +323,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
+            return_from_old=self._return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -290,13 +341,23 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
+            return_from_old=self._return_from_old,
         )
-        self._compare_state(f"After '{name}'")
+        # Skip comparison: For new implementation, `reset` is not called for
+        # the policy
+        # self._compare_state(f"After '{name}'")
         return result
 
     def set_seq_length(self, *args, **kwargs) -> None:
         name = "set_seq_length"
-        result = run_and_compare(self.old_cache, self.new_cache, name, args, kwargs)
+        result = run_and_compare(
+            self.old_cache,
+            self.new_cache,
+            name,
+            args,
+            kwargs,
+            return_from_old=self._return_from_old,
+        )
         self._compare_state(f"After '{name}'")
         return result
 
@@ -306,6 +367,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
+            return_from_old=self._return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -316,6 +378,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
+            return_from_old=self._return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -323,14 +386,24 @@ class TestShadowKVCache(KVCache):
     @property
     def current_length(self) -> int:
         name = "current_length"
-        return compare_attribute(self.old_cache, self.new_cache, name)
+        return compare_attribute(
+            self.old_cache,
+            self.new_cache,
+            name,
+            return_from_old=self._return_from_old,
+        )
 
     # kvcache.DefaultKVCache, kvcache.new.GenericKVCache
 
     @property
     def batch_size(self) -> Optional[int]:
         name = "batch_size"
-        return compare_attribute(self.old_cache, self.new_cache, name)
+        return compare_attribute(
+            self.old_cache,
+            self.new_cache,
+            name,
+            return_from_old=self._return_from_old,
+        )
 
     def _forward_check_args(
         self,
@@ -338,7 +411,14 @@ class TestShadowKVCache(KVCache):
         **kwargs,
     ):
         name = "_forward_check_args"
-        result = run_and_compare(self.old_cache, self.new_cache, name, args, kwargs)
+        result = run_and_compare(
+            self.old_cache,
+            self.new_cache,
+            name,
+            args,
+            kwargs,
+            return_from_old=self._return_from_old,
+        )
         self._compare_state(f"After '{name}'")
         return result
 
@@ -487,6 +567,7 @@ class ShadowKVCacheFactory:
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
+        return_from_old: bool = True,
     ) -> TestShadowKVCache:
         old_cache = KVCacheFactory.create_single(
             name,
@@ -545,7 +626,9 @@ class ShadowKVCacheFactory:
             )
         else:
             if qname == "default":
-                raise ValueError(f"name = {name} invalid. Policy {cname} needs quantized buffer")
+                raise ValueError(
+                    f"name = {name} invalid. Policy {cname} needs quantized buffer"
+                )
             policy = _SUPPORTED_POLICIES[cname](
                 config=config,
                 kv_buffers=buffers,
@@ -563,6 +646,7 @@ class ShadowKVCacheFactory:
             old_cache=old_cache,
             new_cache=new_cache,
             state_names=_STATE_NAMES[cname],
+            return_from_old=return_from_old,
         )
 
     @staticmethod
@@ -576,6 +660,7 @@ class ShadowKVCacheFactory:
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None,
+        return_from_old: bool = True,
     ) -> List[TestShadowKVCache]:
         old_caches = KVCacheFactory.create(
             gpt_model,
@@ -663,6 +748,7 @@ class ShadowKVCacheFactory:
                 old_cache=old_cache,
                 new_cache=new_cache,
                 state_names=state_names,
+                return_from_old=return_from_old,
             )
             for old_cache, new_cache in zip(old_caches, new_caches)
         ]
