@@ -57,6 +57,8 @@ def compare(
     assert type(old_v) == type(
         new_v
     ), f"{prefix}: type(old_v) = {type(old_v)} != {type(new_v)} = type(new_v)"
+    # May need to specialize to further types which (1) occur, and (2) for
+    # which `==` comparison does not work
     if isinstance(old_v, torch.Tensor):
         assert (
             old_v.shape == new_v.shape
@@ -85,6 +87,9 @@ def compare(
         for key, ov in old_v.items():
             nv = new_v[key]
             compare(ov, nv, f"{prefix}[{key}]")
+    elif isinstance(old_v, KeysAndValues):
+        compare(old_v.keys(), new_v.keys(), f"{prefix}.keys()")
+        compare(old_v.values(), new_v.values(), f"{prefix}.values()")
     else:
         assert old_v == new_v, f"{prefix}:\nold_v = {old_v}\nnew_v = {new_v}"
 
@@ -214,7 +219,7 @@ class TestShadowKVCache(KVCache):
     ) -> torch.Tensor:
         name = "forward"
         result = run_and_compare(self.old_cache, self.new_cache, name, args, kwargs)
-        self._compare_state(f"After {name}")
+        self._compare_state(f"After '{name}'")
         return result
 
     def get_keys_values(self) -> Optional[KeysAndValues]:
@@ -224,7 +229,7 @@ class TestShadowKVCache(KVCache):
             self.new_cache,
             name,
         )
-        self._compare_state(f"After {name}")
+        self._compare_state(f"After '{name}'")
         return result
 
     def max_forward_length(self) -> int:
@@ -234,7 +239,7 @@ class TestShadowKVCache(KVCache):
             self.new_cache,
             name,
         )
-        self._compare_state(f"After {name}")
+        self._compare_state(f"After '{name}'")
         return result
 
     @property
@@ -249,7 +254,7 @@ class TestShadowKVCache(KVCache):
             self.new_cache,
             name,
         )
-        self._compare_state(f"After {name}")
+        self._compare_state(f"After '{name}'")
         return result
 
     def token_positions(self) -> torch.Tensor:
@@ -259,7 +264,7 @@ class TestShadowKVCache(KVCache):
             self.new_cache,
             name,
         )
-        self._compare_state(f"After {name}")
+        self._compare_state(f"After '{name}'")
         return result
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
@@ -269,7 +274,7 @@ class TestShadowKVCache(KVCache):
             self.new_cache,
             name,
         )
-        self._compare_state(f"After {name}")
+        self._compare_state(f"After '{name}'")
         return result
 
     # TODO
@@ -286,13 +291,13 @@ class TestShadowKVCache(KVCache):
             self.new_cache,
             name,
         )
-        self._compare_state(f"After {name}")
+        self._compare_state(f"After '{name}'")
         return result
 
     def set_seq_length(self, *args, **kwargs) -> None:
         name = "set_seq_length"
         result = run_and_compare(self.old_cache, self.new_cache, name, args, kwargs)
-        self._compare_state(f"After {name}")
+        self._compare_state(f"After '{name}'")
         return result
 
     def clone(self) -> "KVCache":
@@ -302,7 +307,7 @@ class TestShadowKVCache(KVCache):
             self.new_cache,
             name,
         )
-        self._compare_state(f"After {name}")
+        self._compare_state(f"After '{name}'")
         return result
 
     def _base_kwargs_for_clone(self) -> Dict[str, Any]:
@@ -312,21 +317,20 @@ class TestShadowKVCache(KVCache):
             self.new_cache,
             name,
         )
-        self._compare_state(f"After {name}")
+        self._compare_state(f"After '{name}'")
         return result
+
+    @property
+    def current_length(self) -> int:
+        name = "current_length"
+        return compare_attribute(self.old_cache, self.new_cache, name)
 
     # kvcache.DefaultKVCache, kvcache.new.GenericKVCache
 
     @property
     def batch_size(self) -> Optional[int]:
         name = "batch_size"
-        result = run_and_compare(
-            self.old_cache,
-            self.new_cache,
-            name,
-        )
-        self._compare_state(f"After {name}")
-        return result
+        return compare_attribute(self.old_cache, self.new_cache, name)
 
     def _forward_check_args(
         self,
@@ -335,7 +339,7 @@ class TestShadowKVCache(KVCache):
     ):
         name = "_forward_check_args"
         result = run_and_compare(self.old_cache, self.new_cache, name, args, kwargs)
-        self._compare_state(f"After {name}")
+        self._compare_state(f"After '{name}'")
         return result
 
 
@@ -369,7 +373,7 @@ _ATTN_WEIGHTS_STATE_NAMES = _GENERAL_STATE_NAMES + [
     "_detach_attn_weights",
     "max_chunk_size",
     "_next_positions",
-    "next_grace_positions",
+    "next_grace_pos",
     "prefill_length",
     "_use_initial_rule",
 ]
@@ -430,18 +434,17 @@ def extract_policy_kwargs(
                 ("range_is_prefix", True, False),
             ]
         )
-    else:
-        names_and_defaults.extend(
-            [
-                ("max_batch_size", None, True),
-                ("grace_period", 0, False),
-                ("detach_attn_weights", False, False),
-                ("keep_initial_fraction", None, False),
-                ("max_chunk_size", None, False),
-            ]
-        )
+    elif cname != "dense":
         if cname != "h2o-orig":
-            names_and_defaults.append(("normalize_scores", False, False))
+            names_and_defaults.extend(
+                [
+                    ("grace_period", 0, False),
+                    ("detach_attn_weights", False, False),
+                    ("keep_initial_fraction", None, False),
+                    ("max_chunk_size", None, False),
+                    ("normalize_scores", False, False),
+                ]
+            )
             if cname.startswith("qh2o"):
                 names_and_defaults.extend(
                     [
@@ -450,13 +453,18 @@ def extract_policy_kwargs(
                         ("scratch_blocksize", DEFAULT_SCRATCH_BLOCKSIZE, False),
                     ]
                 )
+            else:
+                names_and_defaults.append(("max_batch_size", None, True))
+        else:
+            names_and_defaults.append(("max_batch_size", None, True))
+
     result = dict()
     for name, defval, mandatory in names_and_defaults:
         if name in cache_kwargs:
             result[name] = cache_kwargs[name]
         elif mandatory:
             raise ValueError(
-                f"Policy parameter {name} is mandatory, but not in cache_kwargs"
+                f"Policy parameter '{name}' is mandatory, but not in cache_kwargs"
             )
         else:
             result[name] = defval
@@ -528,11 +536,22 @@ class ShadowKVCacheFactory:
                 dtype,
                 cache_kwargs,
             )
-        policy = _SUPPORTED_POLICIES[cname](
-            config=config,
-            cache_length=cache_length,
-            **extract_policy_kwargs(cname, cache_kwargs),
-        )
+        cache_kwargs["max_batch_size"] = max_batch_size
+        if not cname.startswith("qh2o"):
+            policy = _SUPPORTED_POLICIES[cname](
+                config=config,
+                cache_length=cache_length,
+                **extract_policy_kwargs(cname, cache_kwargs),
+            )
+        else:
+            if qname == "default":
+                raise ValueError(f"name = {name} invalid. Policy {cname} needs quantized buffer")
+            policy = _SUPPORTED_POLICIES[cname](
+                config=config,
+                kv_buffers=buffers,
+                **extract_policy_kwargs(cname, cache_kwargs),
+            )
+
         driver = KVCacheDriverWithBuffers(
             config=config,
             buffers=buffers,

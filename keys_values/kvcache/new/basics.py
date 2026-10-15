@@ -691,7 +691,6 @@ class GenericKVCache(KVCache):
         t_shape = (batch_size, num)
         if token_idx.shape != t_shape:
             raise ValueError(f"token_idx.shape = {token_idx.shape}, must be {t_shape}")
-        self.policy.validate_token_idx(token_idx)
         # Deal with dtype
         if self._dtype is None:
             self._dtype = query.dtype
