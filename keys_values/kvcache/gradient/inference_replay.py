@@ -22,6 +22,7 @@ from keys_values.kvcache.attn_weights import (
     AttnWeightsReplayLog,
 )
 from keys_values.kvcache.base import (
+    KVCache,
     DefaultKVCacheReplayLog,
     KVCacheReplayLog,
     DefaultKVCache,
@@ -452,7 +453,7 @@ class InferenceSmartInitialLastRecentlyInsertedReplayCache(
 
 
 def inference_replay_cache_factory(
-    kv_cache: KVCacheWithBuffers,
+    kv_cache: KVCache,
     config: Config,
     buffers: KVCacheBuffers,
     block_idx: int,

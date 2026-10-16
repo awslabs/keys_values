@@ -197,7 +197,7 @@ class TestShadowKVCache(KVCache):
         self.old_cache = old_cache
         self.new_cache = new_cache
         self._state_names = state_names.copy()
-        self._return_from_old = return_from_old
+        self.return_from_old = return_from_old
 
     def _compare_state(self, prefix: str):
         for name in self._state_names:
@@ -206,7 +206,7 @@ class TestShadowKVCache(KVCache):
                 self.new_cache,
                 name,
                 prefix,
-                return_from_old=self._return_from_old,
+                return_from_old=self.return_from_old,
             )
 
     @property
@@ -216,7 +216,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
 
     @property
@@ -226,7 +226,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
 
     @property
@@ -236,7 +236,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
 
     @property
@@ -246,7 +246,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
 
     @property
@@ -256,7 +256,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
 
     def forward(
@@ -271,7 +271,7 @@ class TestShadowKVCache(KVCache):
             name,
             args,
             kwargs,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -282,7 +282,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -293,7 +293,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -305,7 +305,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
 
     def get_params(self) -> KVCacheParams:
@@ -314,7 +314,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -325,7 +325,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -336,7 +336,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -354,7 +354,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
         # Skip comparison: For new implementation, `reset` is not called for
         # the policy
@@ -369,7 +369,7 @@ class TestShadowKVCache(KVCache):
             name,
             args,
             kwargs,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -381,7 +381,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
             do_compare=False,
         )
         self._compare_state(f"After '{name}'")
@@ -393,7 +393,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -405,7 +405,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
 
     # kvcache.DefaultKVCache, kvcache.new.GenericKVCache
@@ -417,7 +417,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
 
     def _forward_check_args(
@@ -432,7 +432,7 @@ class TestShadowKVCache(KVCache):
             name,
             args,
             kwargs,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
         self._compare_state(f"After '{name}'")
         return result
@@ -450,7 +450,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
             do_compare=False,
         )
 
@@ -461,7 +461,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
 
     @property
@@ -471,7 +471,7 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
         )
 
     @property
@@ -481,9 +481,21 @@ class TestShadowKVCache(KVCache):
             self.old_cache,
             self.new_cache,
             name,
-            return_from_old=self._return_from_old,
+            return_from_old=self.return_from_old,
             do_compare=False,
         )
+
+
+def use_new_kvcache_code(cache: KVCache) -> bool:
+    """
+    Use this in code meant to work with new and old implementation of
+    :class:`KVCache` subclasses (comparison tests, usage of
+    :class:`TestShadowKVCache`).
+
+    """
+    return isinstance(cache, GenericKVCache) or (
+        isinstance(cache, TestShadowKVCache) and not cache.return_from_old
+    )
 
 
 _GENERAL_STATE_NAMES = [

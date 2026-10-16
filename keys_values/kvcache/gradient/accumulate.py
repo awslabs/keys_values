@@ -15,7 +15,7 @@ from collections import Counter
 import contextlib
 from functools import partial
 from itertools import accumulate
-from typing import List, Optional, Dict, Any, Tuple, Iterable
+from typing import List, Optional, Dict, Any, Tuple, Iterable, Union
 
 import torch
 
@@ -24,11 +24,11 @@ from keys_values.config import Config
 from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.base import (
-    KVCacheReplayLog,
+    KVCache,
+    KVCacheReplayLog as KVCacheReplayLog_old,
     DefaultKVCache,
     KVCacheParams,
 )
-from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.kvcache.buffers import (
     KVCacheBuffersParams,
     DefaultKVCacheBuffers,
@@ -53,7 +53,9 @@ from keys_values.kvcache.gradient.checkpoints import (
     QuantizerStateForCheckpoint,
 )
 from keys_values.kvcache.gradient.inference_replay import inference_replay_cache_factory
+from keys_values.kvcache.new.basics import KVCacheReplayLog as KVCacheReplayLog_new
 from keys_values.kvcache.stack_layers import CellBlocks
+from keys_values.kvcache.test_shadow import use_new_kvcache_code
 from keys_values.long_context import (
     get_chunks_for_cells,
     compute_loss_for_chunk,
@@ -61,6 +63,9 @@ from keys_values.long_context import (
 )
 from keys_values.model import GPT
 from keys_values.utils import VerbosityLevels, wrap_tqdm_conditional
+
+# Just while old and new code co-exist:
+_KVCacheReplayLog = Union[KVCacheReplayLog_old, KVCacheReplayLog_new]
 
 
 def checkpoint_hook(
@@ -294,9 +299,39 @@ class GradientAccumulator:
             del self._buffers_per_length
             self._buffers_per_length = None
 
+    def _check_and_copy_replay_logs(
+        self,
+        replay_logs: List[_KVCacheReplayLog],
+        chunks_per_cell: List[int],
+    ) -> List[int]:
+        if len(replay_logs) != self.config.n_layer:
+            raise ValueError(
+                f"len(replay_logs) = {len(replay_logs)} != {self.config.n_layer} = config.n_layer"
+            )
+        log_layer0 = replay_logs[0]
+        is_old_code = isinstance(log_layer0, KVCacheReplayLog_old)
+        if is_old_code:
+            num_chunks = len(log_layer0.token_chunks)
+        else:
+            num_chunks = len(log_layer0)
+        if sum(chunks_per_cell) != num_chunks:
+            raise ValueError(
+                f"chunks_per_cell = {chunks_per_cell}: Entries must sum to {num_chunks}"
+            )
+        if is_old_code:
+            self.replay_logs = replay_logs.copy()
+            self.seq_length = len(log_layer0)
+            chunk_lens = list(idx.shape[-1] for idx in log_layer0.token_chunks)
+        else:
+            # Ensure that each list is copied
+            self.replay_logs = [log.copy() for log in replay_logs]
+            chunk_lens = list(c.token_idx.shape[-1] for c in log_layer0)
+        self.seq_length = sum(chunk_lens)
+        return chunk_lens
+
     def _initialize_internal(
         self,
-        replay_logs: List[KVCacheReplayLog],
+        replay_logs: List[_KVCacheReplayLog],
         chunks_per_cell: List[int],
         head_model_needs_logits: bool = True,
     ):
@@ -308,27 +343,16 @@ class GradientAccumulator:
             replay_logs,
             self._batch_size,
         )
-        if len(replay_logs) != self.config.n_layer:
-            raise ValueError(
-                f"len(replay_logs) = {len(replay_logs)} != {self.config.n_layer} = config.n_layer"
-            )
         if len(chunks_per_cell) == 0:
             raise ValueError(f"chunks_per_cell must not be empty")
         if any(x <= 0 for x in chunks_per_cell):
             raise ValueError(
                 f"chunks_per_cell = {chunks_per_cell}: All entries must be positive"
             )
-        num_chunks = len(replay_logs[0].token_chunks)
-        if sum(chunks_per_cell) != num_chunks:
-            raise ValueError(
-                f"chunks_per_cell = {chunks_per_cell}: Entries must sum to {num_chunks}"
-            )
-        self.replay_logs = replay_logs.copy()
         self.chunks_per_cell = chunks_per_cell.copy()
-        self.seq_length = len(self.replay_logs[0])
         self.do_checkpointing = len(chunks_per_cell) > 1
+        chunk_lens = self._check_and_copy_replay_logs(replay_logs, chunks_per_cell)
         # Ranges to split up `inputs`
-        chunk_lens = list(idx.shape[-1] for idx in self.replay_logs[0].token_chunks)
         self.inputs_ranges = [
             elem.input_range
             for elem in get_chunks_for_cells(chunks_per_cell, chunk_lens)
@@ -532,7 +556,17 @@ class GradientAccumulator:
     def _create_inference_replay_caches(
         self,
         model_part: CellBlocks,
-    ) -> List[KVCacheWithBuffers]:
+    ) -> List[KVCache]:
+        """
+        This method works both for old and new KV cache implementations: the
+        new imolementations use :class:`GenericKVCache`.
+
+        For new implementations, no extra KV cache objects are created, but the
+        existing ones are switched to "play" mode. They need to be switched
+        back to "record" after use here. Also, replay logs are the ones recorded
+        just before, they need not be assigned.
+
+        """
         assert self.do_checkpointing
         cache_buffers, checkpoints = self._get_checkpoints_and_buffers(model_part)
         # For easy reference outside of inference replay caches
@@ -545,24 +579,36 @@ class GradientAccumulator:
         ):
             # Use the same MHA object. Ensures that properties like position
             # encoding are transferred
-            if isinstance(kv_cache, DefaultKVCache):
-                extra_kwargs = dict(mha=kv_cache.mha)
+            if not use_new_kvcache_code(kv_cache):
+                # Old code: Replay cache is separate object created here
+                if isinstance(kv_cache, DefaultKVCache):
+                    extra_kwargs = dict(mha=kv_cache.mha)
+                else:
+                    extra_kwargs = dict()
+                ir_cache = inference_replay_cache_factory(
+                    kv_cache=kv_cache,
+                    config=self.config,
+                    buffers=buffers,
+                    block_idx=block_idx,
+                    replay_log=self.replay_logs[block_idx],
+                    **extra_kwargs,
+                    **self.cache_kwargs,
+                )
+                # Set hook to write checkpoints
+                ir_cache.set_checkpoint_hook(
+                    checkpoint_hook=partial(checkpoint_hook, checkpoints=checkpoint),
+                )
             else:
-                extra_kwargs = dict()
-            ir_cache = inference_replay_cache_factory(
-                kv_cache=kv_cache,
-                config=self.config,
-                buffers=buffers,
-                block_idx=block_idx,
-                replay_log=self.replay_logs[block_idx],
-                **extra_kwargs,
-                **self.cache_kwargs,
-            )
-            # Set hook to write checkpoints
-            ir_cache.set_checkpoint_hook(
-                checkpoint_hook=partial(checkpoint_hook, checkpoints=checkpoint),
-            )
+                # New implementation: We just switch `kv_cache` to "play"
+                # mode
+                ir_cache = kv_cache
+                ir_cache.policy.reset(replay_log_status="play")
+                # Set hook to write checkpoints
+                ir_cache.driver.set_checkpoint_hook(
+                    checkpoint_hook=partial(checkpoint_hook, checkpoints=checkpoint),
+                )
             infer_replay_caches.append(ir_cache)
+
         return infer_replay_caches
 
     def _hooks_for_cell_computation(self) -> Optional[CellComputationAutogradHooks]:
@@ -726,10 +772,17 @@ class GradientAccumulator:
                 # blocked. This matters: profiling shows this synchronize
                 # blocks the host for ~1 second per row of cells.
                 torch.cuda.synchronize()
-            # Remove caches (underlying buffers are kept)
+            # Clean up inference replay caches
             while infer_replay_caches:
                 cache = infer_replay_caches.pop()
-                del cache
+                if use_new_kvcache_code(cache):
+                    # New code: Just switch the cache back to "record"
+                    # Note that this resets the replay logs, so they have to
+                    # be copied first to `self.replay_logs`.
+                    cache.policy.reset(replay_log_status="record")
+                else:
+                    # Old code: This is a copy, which can be deleted
+                    del cache
 
         try:
             # Loop over cells from right to left
@@ -1043,7 +1096,7 @@ class GradientAccumulator:
     def _compute_checkpoints(
         self,
         model_part: CellBlocks,
-        infer_replay_caches: List[KVCacheWithBuffers],
+        infer_replay_caches: List[KVCache],
         get_inputs_slice: GetInputSlice,
     ):
         # Setup KV caches in `gpt_model`. These record the required checkpoints
@@ -1063,8 +1116,13 @@ class GradientAccumulator:
 
             # Run forward in order to compute checkpoints
             with torch.no_grad():
+                log_layer0 = self.replay_logs[0]
+                if isinstance(log_layer0, KVCacheReplayLog_old):
+                    token_idxs = log_layer0.token_chunks
+                else:
+                    token_idxs = [c.token_idx for c in log_layer0]
                 cell_computation(
-                    token_idxs=self.replay_logs[0].token_chunks,
+                    token_idxs=token_idxs,
                     model_part=model_part,
                     get_inputs_slice=get_inputs_slice,
                     input_pos=0,
@@ -1139,12 +1197,15 @@ class GradientAccumulator:
         # End of gradient accumulation on a batch: Clear internals
         self._clear_internal()
 
+    # Note: If new KV cache code (`GenericKVCache`) is used, `replay_logs`
+    # need not be passed. The argument is ignored, the logs are taken from
+    # the caches.
     def run_head_model(
         self,
         gpt_model: GPT,
         head_model: HeadModel,
         scale_factor: float,
-        replay_logs: List[KVCacheReplayLog],
+        replay_logs: Optional[List[KVCacheReplayLog_old]],
         chunks_per_cell: List[int],
         get_inputs_slice: GetInputSlice,
         write_head_gradients_slice: WriteOutputsSlice,
@@ -1194,6 +1255,16 @@ class GradientAccumulator:
         ), "Call 'run_input_embeddings' to end processing a batch"
         assert targets.ndim == 2
         num_output_tokens = targets.shape[1]
+        # For new code: Replay logs need not be passed, but are obtained
+        # from the caches
+        use_new_code = use_new_kvcache_code(gpt_model.get_kv_caches()[0])
+        if replay_logs is None:
+            if not use_new_code:
+                raise ValueError("replay_logs must be given")
+            replay_logs = [
+                cache.policy.get_replay_log()
+                for cache in gpt_model.get_kv_caches()
+            ]
         # Initialize members which are needed for processing this batch
         self._batch_size = targets.shape[0]
         self._initialize_internal(
