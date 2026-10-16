@@ -490,7 +490,9 @@ class TestShadowKVCache(KVCache):
             do_compare=False,
         )
 
-    # For new KVCache code, this method can be removed
+    # For new KVCache code, this method can be removed. There, a cache is
+    # either recording or replaying at all times, or not at all, and the
+    # switching beteen "record" and "play" works differently.
     def switch_replay_logging(self, status: bool) -> None:
         self.old_cache.switch_replay_logging(status)
         if not isinstance(self.new_cache, GenericKVCache):
@@ -503,6 +505,13 @@ def use_new_kvcache_code(cache: KVCache) -> bool:
     :class:`KVCache` subclasses (comparison tests, usage of
     :class:`TestShadowKVCache`).
 
+    Args:
+        cache: KV cache in question
+
+    Returns:
+        Using new code? If `cache` is of type :class:`TestShadowKVCache`,
+        this depends on `cache.return_from_old`
+
     """
     return isinstance(cache, GenericKVCache) or (
         isinstance(cache, TestShadowKVCache) and not cache.return_from_old
@@ -510,10 +519,34 @@ def use_new_kvcache_code(cache: KVCache) -> bool:
 
 
 def use_new_replay_log(replay_log: KVCacheReplayLog_oldornew) -> bool:
+    """
+    Use this in code meant to work with new and old implementation of
+    :class:`KVCache` subclasses (comparison tests, usage of
+    :class:`TestShadowKVCache`).
+
+    Args:
+        replay_log: KV cache replay log in question
+
+    Returns:
+        Using new code? Depends on the concrete type of `replay_log`
+
+    """
     return not isinstance(replay_log, KVCacheReplayLog_old)
 
 
 def get_chunks_from_log(log: KVCacheReplayLog_oldornew) -> List[torch.Tensor]:
+    """
+     Use this in code meant to work with new and old implementation of
+    :class:`KVCache` subclasses (comparison tests, usage of
+    :class:`TestShadowKVCache`).
+
+    Args:
+        log: KV cache replay log (old or new type)
+
+    Returns:
+        List of token indexes, one for each chunk, from the log
+
+    """
     if isinstance(log, KVCacheReplayLog_old):
         return log.token_chunks
     else:
