@@ -19,7 +19,11 @@ import torch
 from keys_values.attention import KeysAndValues, MultiHeadSelfAttention
 from keys_values.config import Config
 from keys_values.constants import DEFAULT_PAD_ID
-from keys_values.kvcache.base import KVCache, KVCacheParams
+from keys_values.kvcache.base import (
+    KVCache,
+    KVCacheParams,
+    KVCacheReplayLog as KVCacheReplayLog_old,
+)
 from keys_values.kvcache.consts import split_name
 from keys_values.kvcache.factory import (
     KVCacheFactory,
@@ -38,16 +42,19 @@ from keys_values.kvcache.new import (
     QuantizedVLengthH2OKVCachePolicy,
     H2OOriginalKVCachePolicy,
 )
+from keys_values.kvcache.new.basics import KVCacheReplayLog as KVCacheReplayLog_new
 from keys_values.kvcache.qh2o import (
     DEFAULT_COMBINATION_CONSTANT,
     DEFAULT_SCRATCH_BLOCKSIZE,
 )
 from keys_values.model import GPT
-from keys_values.tools.intermediates import debug_store_or_compare_state
 
 _EXCLUDE_FROM_COMPARISON = (
     MultiHeadSelfAttention,
 )
+
+# Just while old and new code co-exist:
+KVCacheReplayLog_oldornew = Union[KVCacheReplayLog_old, KVCacheReplayLog_new]
 
 
 def _error_message(prefix: str, msg: str) -> str:
@@ -496,6 +503,17 @@ def use_new_kvcache_code(cache: KVCache) -> bool:
     return isinstance(cache, GenericKVCache) or (
         isinstance(cache, TestShadowKVCache) and not cache.return_from_old
     )
+
+
+def use_new_replay_log(replay_log: KVCacheReplayLog_oldornew) -> bool:
+    return not isinstance(replay_log, KVCacheReplayLog_old)
+
+
+def get_chunks_from_log(log: KVCacheReplayLog_oldornew) -> List[torch.Tensor]:
+    if isinstance(log, KVCacheReplayLog_old):
+        return log.token_chunks
+    else:
+        return [c.token_idx for c in log]
 
 
 _GENERAL_STATE_NAMES = [

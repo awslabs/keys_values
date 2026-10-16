@@ -15,7 +15,7 @@ from collections import Counter
 import contextlib
 from functools import partial
 from itertools import accumulate
-from typing import List, Optional, Dict, Any, Tuple, Iterable, Union
+from typing import List, Optional, Dict, Any, Tuple, Iterable
 
 import torch
 
@@ -25,7 +25,6 @@ from keys_values.gpu_memory import RecordGPUMemory
 from keys_values.head_model import HeadModel
 from keys_values.kvcache.base import (
     KVCache,
-    KVCacheReplayLog as KVCacheReplayLog_old,
     DefaultKVCache,
     KVCacheParams,
 )
@@ -53,9 +52,13 @@ from keys_values.kvcache.gradient.checkpoints import (
     QuantizerStateForCheckpoint,
 )
 from keys_values.kvcache.gradient.inference_replay import inference_replay_cache_factory
-from keys_values.kvcache.new.basics import KVCacheReplayLog as KVCacheReplayLog_new
 from keys_values.kvcache.stack_layers import CellBlocks
-from keys_values.kvcache.test_shadow import use_new_kvcache_code
+from keys_values.kvcache.test_shadow import (
+    use_new_kvcache_code,
+    use_new_replay_log,
+    get_chunks_from_log,
+    KVCacheReplayLog_oldornew,
+)
 from keys_values.long_context import (
     get_chunks_for_cells,
     compute_loss_for_chunk,
@@ -63,9 +66,6 @@ from keys_values.long_context import (
 )
 from keys_values.model import GPT
 from keys_values.utils import VerbosityLevels, wrap_tqdm_conditional
-
-# Just while old and new code co-exist:
-_KVCacheReplayLog = Union[KVCacheReplayLog_old, KVCacheReplayLog_new]
 
 
 def checkpoint_hook(
@@ -301,7 +301,7 @@ class GradientAccumulator:
 
     def _check_and_copy_replay_logs(
         self,
-        replay_logs: List[_KVCacheReplayLog],
+        replay_logs: List[KVCacheReplayLog_oldornew],
         chunks_per_cell: List[int],
     ) -> List[int]:
         if len(replay_logs) != self.config.n_layer:
@@ -309,29 +309,24 @@ class GradientAccumulator:
                 f"len(replay_logs) = {len(replay_logs)} != {self.config.n_layer} = config.n_layer"
             )
         log_layer0 = replay_logs[0]
-        is_old_code = isinstance(log_layer0, KVCacheReplayLog_old)
-        if is_old_code:
-            num_chunks = len(log_layer0.token_chunks)
-        else:
-            num_chunks = len(log_layer0)
+        is_old_code = not use_new_replay_log(log_layer0)
+        num_chunks = len(get_chunks_from_log(log_layer0))
         if sum(chunks_per_cell) != num_chunks:
             raise ValueError(
                 f"chunks_per_cell = {chunks_per_cell}: Entries must sum to {num_chunks}"
             )
         if is_old_code:
             self.replay_logs = replay_logs.copy()
-            self.seq_length = len(log_layer0)
-            chunk_lens = list(idx.shape[-1] for idx in log_layer0.token_chunks)
         else:
             # Ensure that each list is copied
             self.replay_logs = [log.copy() for log in replay_logs]
-            chunk_lens = list(c.token_idx.shape[-1] for c in log_layer0)
+        chunk_lens = list(idx.shape[-1] for idx in get_chunks_from_log(log_layer0))
         self.seq_length = sum(chunk_lens)
         return chunk_lens
 
     def _initialize_internal(
         self,
-        replay_logs: List[_KVCacheReplayLog],
+        replay_logs: List[KVCacheReplayLog_oldornew],
         chunks_per_cell: List[int],
         head_model_needs_logits: bool = True,
     ):
@@ -1116,13 +1111,8 @@ class GradientAccumulator:
 
             # Run forward in order to compute checkpoints
             with torch.no_grad():
-                log_layer0 = self.replay_logs[0]
-                if isinstance(log_layer0, KVCacheReplayLog_old):
-                    token_idxs = log_layer0.token_chunks
-                else:
-                    token_idxs = [c.token_idx for c in log_layer0]
                 cell_computation(
-                    token_idxs=token_idxs,
+                    token_idxs=get_chunks_from_log(self.replay_logs[0]),
                     model_part=model_part,
                     get_inputs_slice=get_inputs_slice,
                     input_pos=0,
@@ -1205,7 +1195,7 @@ class GradientAccumulator:
         gpt_model: GPT,
         head_model: HeadModel,
         scale_factor: float,
-        replay_logs: Optional[List[KVCacheReplayLog_old]],
+        replay_logs: Optional[List[KVCacheReplayLog_oldornew]],
         chunks_per_cell: List[int],
         get_inputs_slice: GetInputSlice,
         write_head_gradients_slice: WriteOutputsSlice,
