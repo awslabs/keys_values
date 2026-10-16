@@ -301,6 +301,78 @@ in [finetune/longcontext_eval.py](keys_values/evaluation/longcontext_eval.py) an
 [finetune/longcontext_eval_ext.py](keys_values/evaluation/longcontext_eval_ext.py),
 more details are given [below](#evaluation-of-fine-tuned-models).
 
+### Speculative Decoding
+
+[generate/speculative_decoding.py](keys_values/generate/speculative_decoding.py)
+implements speculative decoding: a small draft model proposes up to
+`speculative_k` tokens, which the target model verifies in a single forward
+call. Tokens are accepted or rejected so that the output is distributed
+according to the target model, with the same sampling arguments as
+`generate/base` (for `temperature=0`, the output is the greedy output of the
+target model in exact arithmetic). In finite precision, outputs can differ
+from token-by-token generation; see the note below. Both models need their
+own KV caches, and the same vocabulary:
+
+```python
+from keys_values.generate.speculative_decoding import (
+    SpeculativeDecodingStats,
+    speculative_generate,
+)
+
+stats = SpeculativeDecodingStats()
+tokens = speculative_generate(
+    target_model=target_model,  # LongContextInferenceModel
+    draft_model=draft_model,  # LongContextInferenceModel
+    prompt=prompt,
+    max_returned_tokens=max_returned_tokens,
+    speculative_k=4,
+    temperature=0.0,
+    stats=stats,
+)
+print(stats.acceptance_rate, stats.tokens_per_step)
+```
+
+Up to LitGPT 0.5.12, `generate/base` samples for `temperature=0` (unless
+`top_p=0`), so outputs differ there. Speculative decoding is greedy for
+`temperature=0`, as `generate/base` is from LitGPT 0.5.13 on.
+
+Draft tokens are inserted into the KV caches as tentative updates, and only
+the accepted ones are kept, see
+[kvcache/tentative.py](keys_values/kvcache/tentative.py). This uses buffer
+switching: quantized buffers are replaced by replay buffers while updates are
+tentative, default buffers by buffers which keep the content of overwritten
+slots. This is currently supported by `dense` and `lastrec` caches (with
+default or quantized buffers), but not by H2O-type caches. For caches which
+evict tokens (such as `lastrec`), the target model verifies several tokens in
+one forward call, so each of them attends to the cache content left after all
+of them have been inserted. This is the same approximation as processing a
+prompt in chunks. For `dense` caches, outputs follow the target model exactly,
+up to floating point differences between verifying several tokens at once and
+decoding one by one. For `lastrec`, outputs can differ from token-by-token
+decoding once tokens are evicted.
+
+With `temperature=0`, the output is the greedy output of the target model
+when computed exactly. In floating point it can differ from ordinary greedy
+decoding at individual tokens: the target model checks the draft tokens of a
+step in one call, and that is not numerically identical to processing them
+one at a time (the same holds for processing a prompt in chunks). With
+quantized KV buffers the difference is larger, because tokens inserted in
+the same call see each other unquantized. In one test (Qwen3-8B with
+Qwen3-0.6B, bf16, 8-bit KV cache), one of two prompts diverged from ordinary
+greedy decoding after 38 tokens, while both matched with default buffers.
+
+Model loading for the command line is in
+`scripts/benchmark_speculative_decoding.py`. It supports `32-true`,
+`bf16-true` and `16-true` precision. Mixed precision (including the aliases
+`bf16` and `16`) is rejected, since no autocast is applied.
+
+The phases of each step (draft, verify, accept, keep) are annotated for
+`torch.profiler`.
+[scripts/benchmark_speculative_decoding.py](keys_values/scripts/benchmark_speculative_decoding.py)
+compares generation with and without speculative decoding on a set of prompts
+(for example, from a Hugging Face dataset), and with `--profile` breaks down
+where time is spent.
+
 
 ## Long Context Fine-tuning
 
