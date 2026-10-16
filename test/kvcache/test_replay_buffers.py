@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Generation/replay regression tests ported from upstream switch_buffers4 (ea31f1a)."""
+
 from dataclasses import replace
 from itertools import product
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -34,6 +35,16 @@ from keys_values.model import GPT
 from keys_values.utils import randint_torch
 
 
+# Compiled FlexAttention kernels can round differently between the two cache
+# layouts in float16. Non-FlexAttention configurations keep the default strict
+# comparison; the CUDA FlexAttention path uses a bounded fp16 tolerance.
+def _assert_logits_close(a: torch.Tensor, b: torch.Tensor, use_flex_attention: bool):
+    if use_flex_attention:
+        torch.testing.assert_close(a, b, atol=4e-3, rtol=1e-2)
+    else:
+        torch.testing.assert_close(a, b)
+
+
 def create_model_and_data(
     cache_name: str,
     cache_kwargs: Dict[str, Any],
@@ -41,6 +52,7 @@ def create_model_and_data(
     device: torch.device,
     max_num_targets: Optional[int] = None,
     non_quantized_buffers: bool = False,
+    use_flex_attention: bool = False,
 ) -> Tuple[
     LongContextInferenceModel,
     ModelForTokenGeneration,
@@ -74,7 +86,7 @@ def create_model_and_data(
         cache_length=cache_lengths[0],
         dtype=dtype,
     )
-    mha_kwargs = {} if device.type == "cpu" else {"flexatt_args": FlexAttentionArgs()}
+    mha_kwargs = {"flexatt_args": FlexAttentionArgs()} if use_flex_attention else {}
     _cache_kwargs = {**cache_kwargs, **mha_kwargs}
     with torch.device(device):
         gpt_model = GPT(config, **mha_kwargs)
@@ -93,7 +105,9 @@ def create_model_and_data(
     all_input_ids, all_targets = [], []
     for batch_size in batch_sizes:
         seq_length = randint_torch(min_sequence_length, max_sequence_length)
-        token_ids = torch.randint(0, vocab_size, (batch_size, seq_length), device=device)
+        token_ids = torch.randint(
+            0, vocab_size, (batch_size, seq_length), device=device
+        )
         num_output_tokens = randint_torch(4, int(seq_length * 0.5))
         if max_num_targets is not None:
             num_output_tokens = min(max_num_targets, num_output_tokens)
@@ -101,17 +115,30 @@ def create_model_and_data(
         all_targets.append(token_ids[:, -num_output_tokens:])
     head_model = HeadModelFactory.create(name=CrossEntropyOnLogits.NAME, config=config)
     model = LongContextInferenceModel(
-        gpt_model=gpt_model, head_model=head_model, chunk_size=16,
+        gpt_model=gpt_model,
+        head_model=head_model,
+        chunk_size=16,
     )
     model.eval()
-    return model, ModelForTokenGeneration(gpt_model), all_input_ids, all_targets, params, mha_kwargs
+    return (
+        model,
+        ModelForTokenGeneration(gpt_model),
+        all_input_ids,
+        all_targets,
+        params,
+        mha_kwargs,
+    )
 
 
 def args_loss_after_replay():
     return [
-        b + c + (a,)
-        for a, b, c in product(
-            available_backends(),
+        b + c + (a, use_flex)
+        for (a, use_flex), b, c in product(
+            [
+                (device, use_flex)
+                for device in available_backends()
+                for use_flex in ((False, True) if device.type == "cuda" else (False,))
+            ],
             [
                 ("lastrec", {}),
                 ("h2o", {"replay_log_blocksize": 64}),
@@ -122,41 +149,69 @@ def args_loss_after_replay():
     ]
 
 
-@pytest.mark.parametrize("cache_name, cache_kwargs, cache_lengths, device", args_loss_after_replay())
-def test_loss_after_replay(cache_name, cache_kwargs, cache_lengths, device):
+@pytest.mark.parametrize(
+    "cache_name, cache_kwargs, cache_lengths, device, use_flex_attention",
+    args_loss_after_replay(),
+)
+def test_loss_after_replay(
+    cache_name, cache_kwargs, cache_lengths, device, use_flex_attention
+):
     torch.random.manual_seed(31415927)
     model, wrapper, batches, targets_batches, _, _ = create_model_and_data(
-        cache_name, cache_kwargs, cache_lengths, device,
+        cache_name,
+        cache_kwargs,
+        cache_lengths,
+        device,
+        use_flex_attention=use_flex_attention,
     )
-    direct = [model(inputs, targets).mean().detach() for inputs, targets in zip(batches, targets_batches)]
+    direct = [
+        model(inputs, targets).mean().detach()
+        for inputs, targets in zip(batches, targets_batches)
+    ]
+    # Computing the loss clears the chunk state
+    assert model.chunk_sizes is None and model.chunks_per_cell is None
     indirect = []
     for inputs, targets in zip(batches, targets_batches):
         logits = model(inputs, targets, mode="inputs")
         wrapper.switch_status(True)
-        _ = list(batched_generate_fn(
-            model=model,
-            prompts=logits,
-            max_returned_tokens=8,
-            sample_args={},
-            deallocate_cache_buffers=False,
-        ))
+        _ = list(
+            batched_generate_fn(
+                model=model,
+                prompts=logits,
+                max_returned_tokens=8,
+                sample_args={},
+                deallocate_cache_buffers=False,
+            )
+        )
         wrapper.switch_status(False)
         loss = model(inputs, targets, mode="targets")
         indirect.append(loss.mean().detach())
     for a, b in zip(direct, indirect):
-        torch.testing.assert_close(a, b)
+        _assert_logits_close(a, b, use_flex_attention)
 
 
-@pytest.mark.parametrize("cache_name, cache_kwargs, cache_lengths, device", args_loss_after_replay())
-def test_generate_several_times(cache_name, cache_kwargs, cache_lengths, device):
+@pytest.mark.parametrize(
+    "cache_name, cache_kwargs, cache_lengths, device, use_flex_attention",
+    args_loss_after_replay(),
+)
+def test_generate_several_times(
+    cache_name, cache_kwargs, cache_lengths, device, use_flex_attention
+):
     torch.random.manual_seed(31415927)
     model, wrapper, batches, targets_batches, _, _ = create_model_and_data(
-        cache_name, cache_kwargs, cache_lengths, device, max_num_targets=20,
+        cache_name,
+        cache_kwargs,
+        cache_lengths,
+        device,
+        max_num_targets=20,
+        use_flex_attention=use_flex_attention,
     )
     generated_logits = []
     data_idx = [0]
 
-    def forced_sample(logits: torch.Tensor, kwargs: Union[dict, List[dict]]) -> torch.Tensor:
+    def forced_sample(
+        logits: torch.Tensor, kwargs: Union[dict, List[dict]]
+    ) -> torch.Tensor:
         pos = len(generated_logits)
         generated_logits.append(logits.detach().clone())
         return targets_batches[data_idx[0]][:, pos].unsqueeze(-1)
@@ -171,32 +226,53 @@ def test_generate_several_times(cache_name, cache_kwargs, cache_lengths, device)
             wrapper.switch_status(True)
             generated_logits.clear()
             with mock.patch("keys_values.generate.base.batched_sample", forced_sample):
-                list(batched_generate_fn(
-                    model=model,
-                    prompts=init_logits,
-                    max_returned_tokens=num_targets,
-                    sample_args={},
-                    deallocate_cache_buffers=False,
-                ))
+                list(
+                    batched_generate_fn(
+                        model=model,
+                        prompts=init_logits,
+                        max_returned_tokens=num_targets,
+                        sample_args={},
+                        deallocate_cache_buffers=False,
+                    )
+                )
             assert len(generated_logits) == num_targets
             all_results.append(generated_logits.copy())
             wrapper.switch_status(False)
         for logits_for_position in zip(*all_results):
             for other in logits_for_position[1:]:
-                torch.testing.assert_close(logits_for_position[0], other)
+                _assert_logits_close(logits_for_position[0], other, use_flex_attention)
 
 
-@pytest.mark.parametrize("cache_name, cache_kwargs, cache_lengths, device", args_loss_after_replay())
-def test_generate_old_new(cache_name, cache_kwargs, cache_lengths, device):
+@pytest.mark.parametrize(
+    "cache_name, cache_kwargs, cache_lengths, device, use_flex_attention",
+    args_loss_after_replay(),
+)
+def test_generate_old_new(
+    cache_name, cache_kwargs, cache_lengths, device, use_flex_attention
+):
     torch.random.manual_seed(31415927)
-    model, wrapper, batches, targets_batches, params, mha_kwargs = create_model_and_data(
-        cache_name, cache_kwargs, cache_lengths, device,
-        max_num_targets=20, non_quantized_buffers=True,
+    (
+        model,
+        wrapper,
+        batches,
+        targets_batches,
+        params,
+        mha_kwargs,
+    ) = create_model_and_data(
+        cache_name,
+        cache_kwargs,
+        cache_lengths,
+        device,
+        max_num_targets=20,
+        non_quantized_buffers=True,
+        use_flex_attention=use_flex_attention,
     )
     generated_logits = []
     data_idx = [0]
 
-    def forced_sample(logits: torch.Tensor, kwargs: Union[dict, List[dict]]) -> torch.Tensor:
+    def forced_sample(
+        logits: torch.Tensor, kwargs: Union[dict, List[dict]]
+    ) -> torch.Tensor:
         pos = len(generated_logits)
         generated_logits.append(logits.detach().clone())
         return targets_batches[data_idx[0]][:, pos].unsqueeze(-1)
@@ -210,30 +286,36 @@ def test_generate_old_new(cache_name, cache_kwargs, cache_lengths, device):
         wrapper.switch_status(True)
         generated_logits.clear()
         with mock.patch("keys_values.generate.base.batched_sample", forced_sample):
-            list(batched_generate_fn(
-                model=model,
-                prompts=init_logits,
-                max_returned_tokens=num_targets,
-                sample_args={},
-                deallocate_cache_buffers=False,
-            ))
+            list(
+                batched_generate_fn(
+                    model=model,
+                    prompts=init_logits,
+                    max_returned_tokens=num_targets,
+                    sample_args={},
+                    deallocate_cache_buffers=False,
+                )
+            )
         assert len(generated_logits) == num_targets
         replay_results.append(generated_logits.copy())
         wrapper.switch_status(False)
 
     gpt_model = model.gpt_model
-    gpt_model.assign_kv_caches([
-        create_kv_cache(
-            name=cache_name + "-default",
-            params=replace(params, cache_length=cache_length),
-            block_idx=block_idx,
-            **cache_kwargs,
-            **mha_kwargs,
-        )
-        for block_idx, cache_length in enumerate(cache_lengths)
-    ])
+    gpt_model.assign_kv_caches(
+        [
+            create_kv_cache(
+                name=cache_name + "-default",
+                params=replace(params, cache_length=cache_length),
+                block_idx=block_idx,
+                **cache_kwargs,
+                **mha_kwargs,
+            )
+            for block_idx, cache_length in enumerate(cache_lengths)
+        ]
+    )
     model2 = LongContextInferenceModel(
-        gpt_model=gpt_model, head_model=model.head_model, chunk_size=16,
+        gpt_model=gpt_model,
+        head_model=model.head_model,
+        chunk_size=16,
     ).eval()
     normal_results = []
     for i, inputs in enumerate(batches):
@@ -243,15 +325,17 @@ def test_generate_old_new(cache_name, cache_kwargs, cache_lengths, device):
         gpt_model.max_seq_length = inputs.shape[-1]
         generated_logits.clear()
         with mock.patch("keys_values.generate.base.batched_sample", forced_sample):
-            list(batched_generate_fn(
-                model=model2,
-                prompts=inputs[:, :-num_targets],
-                max_returned_tokens=num_targets,
-                sample_args={},
-                deallocate_cache_buffers=False,
-            ))
+            list(
+                batched_generate_fn(
+                    model=model2,
+                    prompts=inputs[:, :-num_targets],
+                    max_returned_tokens=num_targets,
+                    sample_args={},
+                    deallocate_cache_buffers=False,
+                )
+            )
         assert len(generated_logits) == num_targets
         normal_results.append(generated_logits.copy())
     for replay_case, normal_case in zip(replay_results, normal_results):
         for replay_logits, normal_logits in zip(replay_case, normal_case):
-            torch.testing.assert_close(replay_logits, normal_logits)
+            _assert_logits_close(replay_logits, normal_logits, use_flex_attention)
