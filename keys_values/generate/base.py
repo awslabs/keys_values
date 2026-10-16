@@ -253,7 +253,9 @@ def _batched_generate_impl(
     Args:
         model: The model to use. Must be :class:`LongContextInferenceModel`,
             defining the chunking to be used.
-        prompts: A 2D tensor of shape `(batch_size, prompt_len)`. Note that
+        prompts: Token IDs (batch, prompt_len) or previously computed logits
+            (batch, 1, vocab). The latter skips prompt processing; KV caches
+            must already contain the prompt. Note that
             all prompts need to have the same length; use left padding.
             Prompt tokens are not returned.
         max_returned_tokens: The maximum number of tokens returned
@@ -286,13 +288,22 @@ def _batched_generate_impl(
         active_mask)`` tuples instead.
 
     """
+    is_logits = prompts.ndim == 3
     if prompts.ndim == 1:
         prompts = prompts.unsqueeze(0)
-    assert prompts.ndim == 2, "Prompts must be a 2D tensor."
+    assert prompts.ndim in (
+        2,
+        3,
+    ), "Prompts must be token IDs (2D) or cached logits (3D)."
+    if is_logits and (not torch.is_floating_point(prompts) or prompts.shape[1] != 1):
+        raise ValueError(
+            "Precomputed logits must be floating-point with shape (batch, 1, vocab)"
+        )
     if max_returned_tokens <= 0:
         raise ValueError("max_returned_tokens must be > 0")
 
-    batch_size, prompt_len = prompts.shape
+    batch_size = prompts.shape[0]
+    prompt_len = 0 if is_logits else prompts.shape[1]
     if isinstance(sample_args, dict):
         sample_args = [sample_args] * batch_size
     else:
@@ -310,8 +321,15 @@ def _batched_generate_impl(
     # We need the logits for the final chunk in order to generate the
     # first token below. Chunk size does not matter, just must be nonzero.
     gpt_model = model.gpt_model
-    gpt_model.max_seq_length = prompt_len + max_returned_tokens
-    logits_final_position = model(prompts, targets=None)
+    if is_logits:
+        input_pos = gpt_model.kv_cache_input_pos()
+        if input_pos is None or input_pos <= 0:
+            raise ValueError("Precomputed logits require nonempty KV caches")
+        gpt_model.max_seq_length = input_pos + max_returned_tokens
+        logits_final_position = prompts
+    else:
+        gpt_model.max_seq_length = prompt_len + max_returned_tokens
+        logits_final_position = model(prompts, targets=None)
     assert logits_final_position.ndim == 3 and logits_final_position.shape[1] == 1, (
         logits_final_position.shape,
     )
@@ -328,7 +346,7 @@ def _batched_generate_impl(
     )
     ignore_ind_vec = torch.tensor(
         ignore_index,
-        dtype=prompts.dtype,
+        dtype=torch.int64 if is_logits else prompts.dtype,
         device=logits_final_position.device,
     )
 
