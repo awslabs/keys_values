@@ -49,9 +49,7 @@ from keys_values.kvcache.qh2o import (
 )
 from keys_values.model import GPT
 
-_EXCLUDE_FROM_COMPARISON = (
-    MultiHeadSelfAttention,
-)
+_EXCLUDE_FROM_COMPARISON = (MultiHeadSelfAttention,)
 
 # Just while old and new code co-exist:
 KVCacheReplayLog_oldornew = Union[KVCacheReplayLog_old, KVCacheReplayLog_new]
@@ -444,7 +442,7 @@ class TestShadowKVCache(KVCache):
         self._compare_state(f"After '{name}'")
         return result
 
-   # Temporary attributes to run comparison testing
+    # Temporary attributes to run comparison testing
     # TODO: Remove them once comparison testing is done and old code
     # is removed.
 
@@ -491,6 +489,12 @@ class TestShadowKVCache(KVCache):
             return_from_old=self.return_from_old,
             do_compare=False,
         )
+
+    # For new KVCache code, this method can be removed
+    def switch_replay_logging(self, status: bool) -> None:
+        self.old_cache.switch_replay_logging(status)
+        if not isinstance(self.new_cache, GenericKVCache):
+            self.new_cache.switch_replay_logging(status)
 
 
 def use_new_kvcache_code(cache: KVCache) -> bool:

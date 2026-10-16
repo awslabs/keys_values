@@ -252,7 +252,8 @@ class CellComputation(nn.Module):
 
     def get_input_pos(self, first_chunk_idx: int) -> int:
         return sum(
-            idx.shape[-1] for idx in get_chunks_from_log(self.replay_logs[0])[:first_chunk_idx]
+            idx.shape[-1]
+            for idx in get_chunks_from_log(self.replay_logs[0])[:first_chunk_idx]
         )
 
     def forward(

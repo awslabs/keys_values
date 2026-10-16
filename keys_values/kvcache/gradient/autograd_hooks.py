@@ -19,7 +19,6 @@ import torch
 
 from keys_values.config import Config
 
-from keys_values.kvcache.base import KVCacheReplayLog
 from keys_values.kvcache.gradient.annotation import (
     NodeAnnotation,
     NodeAnnotationForLog,
@@ -547,7 +546,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._remaining_pack_args_were_flushed = None
         self._remaining_annotations = None
         self._shapes_counter = None
-        self.replay_logs = None
+        self.token_chunks = None
         self.cache_lengths = None
         self.grace_period = None
         # If this is set, we log all annotations being matched
@@ -566,7 +565,8 @@ class CellComputationAutogradHooks(AutogradHooks):
         first_layer_idx,
         first_chunk_idx,
         cache_lengths: List[int],
-        replay_logs: List[KVCacheReplayLog],
+        token_chunks: List[torch.Tensor],
+        grace_period: int = 0,
     ):
         """
         Has to be called before a new cell is processed.
@@ -577,7 +577,8 @@ class CellComputationAutogradHooks(AutogradHooks):
             first_layer_idx: Index of first layer in this cell
             first_chunk_idx: Index of first chunk in this cell
             cache_lengths: List of cache lengths, size `eff_num_layers`
-            replay_logs: Replay logs for these layers
+            token_chunks: Tokens for each chunk
+            grace_period: Grace period for KV cache logic. Defaults to 0
 
         """
         if eff_num_layers <= 0:
@@ -593,14 +594,13 @@ class CellComputationAutogradHooks(AutogradHooks):
         assert num_chunks > 0
         assert first_layer_idx >= 0
         assert first_chunk_idx >= 0
-        assert len(replay_logs) == eff_num_layers
         self.eff_num_layers = eff_num_layers
         self.num_chunks = num_chunks
         self.first_layer_idx = first_layer_idx
         self.first_chunk_idx = first_chunk_idx
-        self.replay_logs = replay_logs
+        self.token_chunks = token_chunks
         self.cache_lengths = cache_lengths.copy()
-        self.grace_period = replay_logs[0].grace_period
+        self.grace_period = grace_period
         self._node_annotations.clear()
         self._initialize_shapes(cache_lengths, first_chunk_idx)
         self._pack_arguments: List[PackHookArgument] = []
@@ -692,7 +692,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._unmatched_pack_args = None
         self._remaining_annotations = None
         self._shapes_counter = None
-        self.replay_logs = None
+        self.token_chunks = None
         self.cache_lengths = None
         self.grace_period = None
         self._node_annotations.clear()
@@ -724,8 +724,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         # Only "cat" arguments >= this length can happen with this value
         # of `first_chunk_idx`
         min_cat_length = sum(
-            chunk.shape[-1]
-            for chunk in self.replay_logs[0].token_chunks[:first_chunk_idx]
+            chunk.shape[-1] for chunk in self.token_chunks[:first_chunk_idx]
         )
         key_shape = [
             self.batch_size,
@@ -739,7 +738,7 @@ class CellComputationAutogradHooks(AutogradHooks):
             # "cat" has smaller shapes
             if min_cat_length < cache_length:
                 cat_length = 0
-                for chunk in self.replay_logs[0].token_chunks:
+                for chunk in self.token_chunks:
                     cat_length += chunk.shape[-1]
                     if cat_length >= cache_length:
                         break

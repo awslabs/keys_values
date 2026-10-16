@@ -1252,9 +1252,10 @@ class GradientAccumulator:
             if not use_new_code:
                 raise ValueError("replay_logs must be given")
             replay_logs = [
-                cache.policy.get_replay_log()
-                for cache in gpt_model.get_kv_caches()
+                cache.policy.get_replay_log() for cache in gpt_model.get_kv_caches()
             ]
+        elif use_new_code:
+            raise ValueError("For new KVCache code, replay_logs must not be passed")
         # Initialize members which are needed for processing this batch
         self._batch_size = targets.shape[0]
         self._initialize_internal(
