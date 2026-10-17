@@ -197,10 +197,9 @@ class DefaultKVCacheDriver(KVCacheDriver):
     ) -> Dict[str, Any]:
         """
         Can be used in subclasses to provide additional keyword arguments for
-        the `self.mha(...)` call in :meth:`_prefill_or_forward_mha`.
-
-        Since this method is called just before `self.mha(...)`, it can
-        also be used as callback.
+        the `self.mha(...)` call in :meth:`_prefill_or_forward_mha`. Since this
+        method is called just before `self.mha(...)`, it can also be used as
+        callback.
 
         """
         return dict()

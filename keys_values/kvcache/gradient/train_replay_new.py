@@ -23,7 +23,6 @@ from keys_values.attention.base import (
     MultiHeadSelfAttention,
     KeysAndValues,
     DefaultKeysAndValues,
-    SDPA_IMPL_QPADDED_PYTORCH,
 )
 from keys_values.attention.sdpa_op import (
     scatter_on_buffers,
@@ -119,7 +118,7 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
                 "softcapping, or use FlexAttention by passing flexatt_args "
                 "when creating the MultiHeadSelfAttention object."
             )
-        self.replay_log = replay_log
+        self.token_chunks = get_chunks_from_log(replay_log)
         self.kv_buffers = None
         self.layer_idx = layer_idx
         self.num_chunks = num_chunks
@@ -162,7 +161,7 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         self.prefill_length = None
         do_grace_period = self.grace_period > 0
         done = False
-        for chunk in self.replay_log.token_chunks:
+        for chunk in self.token_chunks:
             if self.input_pos >= input_pos:
                 done = self.input_pos == input_pos
                 break
@@ -184,9 +183,9 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
             )
         self._start_token_chunk_pos = self._token_chunk_pos
         self._end_token_chunk_pos = self._token_chunk_pos + self.num_chunks
-        if self._end_token_chunk_pos > len(self.replay_log.token_chunks):
+        if self._end_token_chunk_pos > len(self.token_chunks):
             raise ValueError(
-                f"token_chunk_pos = {self._token_chunk_pos}, num_chunks = {self.num_chunks}, sum must be <= {len(self.replay_log.token_chunks)}"
+                f"token_chunk_pos = {self._token_chunk_pos}, num_chunks = {self.num_chunks}, sum must be <= {len(self.token_chunks)}"
             )
 
     def initialize_buffers(self, kv_buffers: KeysAndValues):
@@ -418,7 +417,8 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         return self.kv_buffers
 
     def _padded_query_annotation(self, query: torch.Tensor):
-        if self._sdpa_kwargs["sdpa_mode"] == SDPA_IMPL_QPADDED_PYTORCH:
+        sliding_window_size = self.mha._get_sliding_window_size(self.layer_idx)
+        if not self.mha.has_flex_attention and sliding_window_size is None:
             # Create annotation for padded query
             _, _, q_len, head_size = query.shape
             kv_len = self.kv_buffers.keys().shape[2]
@@ -608,7 +608,7 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
             `None`.
 
         """
-        other = self.replay_log.token_chunks[self._token_chunk_pos]
+        other = self.token_chunks[self._token_chunk_pos]
         if not token_idx.equal(other):
             raise ValueError(
                 f"token_idx:\n{token_idx}\nreplay_log.token_chunks[{self._token_chunk_pos}]:\n{other}\nShould be the same!"
