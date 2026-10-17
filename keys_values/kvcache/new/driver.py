@@ -162,6 +162,16 @@ class DefaultKVCacheDriver(KVCacheDriver):
             k_and_v = self._forward(key, value, positions)
 
         # Multi-head self-attention main computation
+        mha_kwargs = self.extra_mha_kwargs(
+            query=query,
+            key=key,
+            value=value,
+            token_idx=token_idx,
+            input_pos=input_pos,
+            positions=positions,
+            token_positions=token_positions,
+            return_attn_weights=return_attn_weights,
+        )
         attn_outputs, attn_weights = self.mha(
             query=query,
             k_and_v=k_and_v,
@@ -169,9 +179,31 @@ class DefaultKVCacheDriver(KVCacheDriver):
             input_pos=input_pos,
             return_attn_weights=return_attn_weights,
             token_positions=token_positions,
+            **mha_kwargs,
         )
 
         return attn_outputs, attn_weights
+
+    def extra_mha_kwargs(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        token_idx: torch.Tensor,
+        input_pos: int,
+        positions: Optional[PositionsNewEntriesType],
+        token_positions: Optional[torch.Tensor],
+        return_attn_weights,
+    ) -> Dict[str, Any]:
+        """
+        Can be used in subclasses to provide additional keyword arguments for
+        the `self.mha(...)` call in :meth:`_prefill_or_forward_mha`.
+
+        Since this method is called just before `self.mha(...)`, it can
+        also be used as callback.
+
+        """
+        return dict()
 
     def _prefill(
         self,
