@@ -58,7 +58,7 @@ from keys_values.attention.flex_attention import (
 from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
 from keys_values.config import Config as ConfigFull
 from keys_values.cpu_memory import FileNameManager
-from keys_values.data import Helmet, LongBenchV2, MyDataLoader, INPUT_IDS_NAME
+from keys_values.data import Helmet, LongBenchV2, MyDataLoader, Ruler, INPUT_IDS_NAME
 from keys_values.data.base import EncodableDataModuleMixin, DataModuleEncoding
 from keys_values.data.constants import TARGETS_STRINGS_NAME
 from keys_values.data.factory import data_module_from_encoding
@@ -442,9 +442,10 @@ def setup_internal(
     ):
         data.metadata_dir = str(out_dir / "data")
         print(f"Setting data.metadata_dir to {data.metadata_dir}")
+    # Note: `Ruler` is a subclass of `Helmet`
     if not isinstance(data, Helmet) and eval.use_sample_metric:
         raise ValueError(
-            "use_sample_metric=True currently supported only for Helmet datasets"
+            "use_sample_metric=True currently supported only for Helmet and Ruler datasets"
         )
     if isinstance(data, Helmet) and data.use_old_metrics:
         print(
@@ -826,13 +827,15 @@ def main(
 
     if eval.use_sample_metric:
         assert isinstance(data, Helmet)
+        if isinstance(data, Ruler):
+            metric = SampleBasedMetricsEvaluator.metric_for_ruler_task(data.dataset_key)
+        else:
+            metric = SampleBasedMetricsEvaluator.metric_for_helmet_task(
+                data.dataset_key,
+                old_setup=getattr(data, "use_old_metrics", False),
+            )
         evaluator = SampleBasedMetricsEvaluator(
-            metrics=[
-                SampleBasedMetricsEvaluator.metric_for_helmet_task(
-                    data.dataset_key,
-                    old_setup=getattr(data, "use_old_metrics", False),
-                )
-            ],
+            metrics=[metric],
             max_generated_tokens=eval.sample_metric_max_generated_tokens,
             tokenizer=tokenizer,
             sample_kwargs=eval.sample_metric_kwargs,

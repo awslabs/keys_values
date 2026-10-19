@@ -54,7 +54,9 @@ class SFTDataset(LongContextDataset):
     If `retain_targets_strings == True`, we also append the original
     targets `data[idx][OUTPUT_NAME]`, either string or list of strings,
     as :const:`TARGETS_STRINGS_NAME` field. This is needed by a number of
-    evaluation metrics.
+    evaluation metrics. If `data[idx]` has a :const:`TARGETS_STRINGS_NAME`
+    field, this is used instead, which allows evaluation targets to differ
+    from the training target (see :class:`keys_values.data.ruler.Ruler`).
     """
 
     def __init__(
@@ -155,7 +157,7 @@ class SFTDataset(LongContextDataset):
         if POSITION_NAME in example:
             result[POSITION_NAME] = example[POSITION_NAME]
         if self._retain_target_strings:
-            result[TARGETS_STRINGS_NAME] = targets
+            result[TARGETS_STRINGS_NAME] = example.get(TARGETS_STRINGS_NAME, targets)
         return result
 
 
