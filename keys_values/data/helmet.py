@@ -154,6 +154,11 @@ class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
     """
 
     EncodedName = "Helmet"
+    # Overwritten by subclasses which load a different benchmark, see
+    # :class:`keys_values.data.ruler.Ruler`
+    BenchmarkName = "HELMET"
+    MetadataFName = METADATA_FNAME
+    SupportedDatasetKeys = SUPPORTED_DATASET_KEYS
 
     def __init__(
         self,
@@ -217,10 +222,10 @@ class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
             trainloader_longest_first=trainloader_longest_first,
             trainloader_shortest_first=trainloader_shortest_first,
         )
-        if dataset_key not in SUPPORTED_DATASET_KEYS:
+        if dataset_key not in self.SupportedDatasetKeys:
             raise ValueError(
                 f"dataset_key = {dataset_key} is not supported. Choose from:\n"
-                + str(SUPPORTED_DATASET_KEYS)
+                + str(self.SupportedDatasetKeys)
             )
         self.dataset_key = dataset_key
         self.max_length = max_length
@@ -244,14 +249,19 @@ class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
             split,
         ]
 
-    def _get_dataset(self) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
-        dev_data, eval_data = load_helmet_dev_eval(
+    def _load_dev_eval(self) -> Tuple[Any, Any]:
+        return load_helmet_dev_eval(
             self.dataset_key,
             tokenizer=self.tokenizer.processor,
             max_length=self.max_length,
             dataset_parent_dir=self.dataset_parent_dir,
         )
-        print(f"\nTransforming HELMET '{self.dataset_key}' ({self.max_length}) ...")
+
+    def _get_dataset(self) -> Tuple[RawDatasetType, Optional[RawDatasetType]]:
+        dev_data, eval_data = self._load_dev_eval()
+        print(
+            f"\nTransforming {self.BenchmarkName} '{self.dataset_key}' ({self.max_length}) ..."
+        )
         metadata = self._load_metadata()
         train_data, dev_seq_lengths, dev_needs_store = self._transform(
             dev_data, split="dev", seq_lengths=self._get_seq_lengths(metadata, "dev")
@@ -358,7 +368,7 @@ class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
             needs_store = self.metadata_dir is not None
         if needs_store:
             print(
-                f"\nTokenizing HELMET '{self.dataset_key}' ({self.max_length}) split "
+                f"\nTokenizing {self.BenchmarkName} '{self.dataset_key}' ({self.max_length}) split "
                 f"'{split}'. Sequence lengths will be stored in {self.metadata_dir} "
                 "so next time this split runs fast."
             )
@@ -378,17 +388,21 @@ class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
                 seq_length = seq_lengths[idx]
             if self.max_seq_length is not None and seq_length > self.max_seq_length:
                 continue
-            output = instance["output"]
-            results.append(
-                {
-                    INSTRUCTION_NAME: instruction,
-                    OUTPUT_NAME: output,
-                    NUM_TOKENS_NAME: seq_length,
-                }
-            )
+            results.append(self._create_record(instance, seq_length))
         final_seq_lengths = new_seq_lengths if seq_lengths is None else seq_lengths
         print(f"Kept {len(results)} of {len(dataset)} {split} records")
         return results, final_seq_lengths, needs_store
+
+    def _create_record(
+        self,
+        instance: Dict[str, Any],
+        seq_length: int,
+    ) -> Dict[str, Any]:
+        return {
+            INSTRUCTION_NAME: instance["input"],
+            OUTPUT_NAME: instance["output"],
+            NUM_TOKENS_NAME: seq_length,
+        }
 
     def _get_seq_lengths(
         self, metadata: Optional[Dict[str, Any]], split: str
@@ -403,7 +417,7 @@ class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
     def _load_metadata(self) -> Optional[Dict[str, Any]]:
         if self.metadata_dir is None:
             return None
-        meta_path = Path(self.metadata_dir) / METADATA_FNAME
+        meta_path = Path(self.metadata_dir) / self.MetadataFName
         if not meta_path.exists():
             return None
         with meta_path.open("r") as fp:
@@ -418,7 +432,7 @@ class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
 
     def _store_metadata(self, data: Dict[str, Any]) -> None:
         if self.metadata_dir is not None:
-            meta_path = Path(self.metadata_dir) / METADATA_FNAME
+            meta_path = Path(self.metadata_dir) / self.MetadataFName
             meta_path.parent.mkdir(parents=True, exist_ok=True)
             with meta_path.open("w") as fp:
                 json.dump(data, fp)
