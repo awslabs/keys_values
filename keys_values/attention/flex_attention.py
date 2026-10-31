@@ -13,6 +13,7 @@
 # limitations under the License.
 from functools import partial
 import math
+import types
 from typing import Optional, Callable, Tuple, List, Dict, Any
 
 import torch
@@ -42,6 +43,34 @@ ScoreModifier = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     torch.Tensor,
 ]
+
+
+def compile_with_own_cache(fn: Callable) -> Callable:
+    """
+    `torch.compile` keeps compiled graphs in a cache attached to the code
+    object being compiled. The `flex_attention` partials compiled by
+    :class:`FlexAttnManager` would all share one code object (a wrapper
+    inside PyTorch), and therefore one cache. Graphs for different shapes
+    then count against the same `recompile_limit`, or are recompiled with
+    dynamic shapes, so that which kernel runs depends on the order of
+    earlier calls, and results differ in low-order bits.
+
+    Here, the function compiled gets a code object of its own, so that the
+    compiled graphs of different managed entries do not interact.
+
+    """
+
+    def call(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    own_call = types.FunctionType(
+        call.__code__.replace(),  # Fresh code object, so a fresh cache
+        call.__globals__,
+        call.__name__,
+        call.__defaults__,
+        call.__closure__,
+    )
+    return torch.compile(own_call, fullgraph=True, dynamic=False)
 
 
 def causal_mask_for_prefill(
@@ -193,14 +222,13 @@ class FlexAttnManager:
                     )
                 else:
                     score_mod = nan_to_minus_infty
-            attn_fn = torch.compile(
+            attn_fn = compile_with_own_cache(
                 partial(
                     flex_attention,
                     score_mod=score_mod,
                     block_mask=block_mask,
                     **self._extra_flex_attention_kwargs(args),
-                ),
-                fullgraph=True,
+                )
             )
             extend_kv = True if self._entries else False
             result = (attn_fn, extend_kv)
