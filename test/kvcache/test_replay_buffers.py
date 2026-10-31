@@ -35,16 +35,6 @@ from keys_values.model import GPT
 from keys_values.utils import randint_torch
 
 
-# Compiled FlexAttention kernels can round differently between the two cache
-# layouts in float16. Non-FlexAttention configurations keep the default strict
-# comparison; the CUDA FlexAttention path uses a bounded fp16 tolerance.
-def _assert_logits_close(a: torch.Tensor, b: torch.Tensor, use_flex_attention: bool):
-    if use_flex_attention:
-        torch.testing.assert_close(a, b, atol=4e-3, rtol=1e-2)
-    else:
-        torch.testing.assert_close(a, b)
-
-
 def create_model_and_data(
     cache_name: str,
     cache_kwargs: Dict[str, Any],
@@ -187,7 +177,7 @@ def test_loss_after_replay(
         loss = model(inputs, targets, mode="targets")
         indirect.append(loss.mean().detach())
     for a, b in zip(direct, indirect):
-        _assert_logits_close(a, b, use_flex_attention)
+        torch.testing.assert_close(a, b)
 
 
 @pytest.mark.parametrize(
@@ -240,7 +230,7 @@ def test_generate_several_times(
             wrapper.switch_status(False)
         for logits_for_position in zip(*all_results):
             for other in logits_for_position[1:]:
-                _assert_logits_close(logits_for_position[0], other, use_flex_attention)
+                torch.testing.assert_close(logits_for_position[0], other)
 
 
 @pytest.mark.parametrize(
@@ -338,4 +328,4 @@ def test_generate_old_new(
         normal_results.append(generated_logits.copy())
     for replay_case, normal_case in zip(replay_results, normal_results):
         for replay_logits, normal_logits in zip(replay_case, normal_case):
-            _assert_logits_close(replay_logits, normal_logits, use_flex_attention)
+            torch.testing.assert_close(replay_logits, normal_logits)
