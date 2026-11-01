@@ -33,7 +33,7 @@ For B, the prompt is processed only once, and the replay buffers are rolled
 back after each trial.
 
 Why this matters: `test_generate_old_new` in `test_replay_buffers.py` used to
-fail with FlexAttention (logits off by up to 1e-3 in float16), which looked
+fail with FlexAttention (logits off by up to 1.2e-3 in float16), which looked
 like a replay bug but was not. All FlexAttention graphs shared one
 `torch.compile` cache. Once several shapes had been seen, dynamo recompiled
 with dynamic shapes, so the kernel used for a call depended on which calls
