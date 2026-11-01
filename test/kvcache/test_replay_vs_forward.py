@@ -32,6 +32,19 @@ different numbers of tokens (drawn at random) and different token values.
 For B, the prompt is processed only once, and the replay buffers are rolled
 back after each trial.
 
+Why this matters: `test_generate_old_new` in `test_replay_buffers.py` used to
+fail with FlexAttention (logits off by up to 1e-3 in float16), which looked
+like a replay bug but was not. All FlexAttention graphs shared one
+`torch.compile` cache. Once several shapes had been seen, dynamo recompiled
+with dynamic shapes, so the kernel used for a call depended on which calls
+came before it. Two runs doing the same math in a different order then gave
+slightly different logits. `FlexAttnManager` now compiles each graph with
+its own cache and `dynamic=False` (see `compile_with_own_cache`).
+
+For other tests: if two code paths using FlexAttention differ by small,
+unexplained amounts, check whether they call compiled graphs in a different
+order before loosening tolerances.
+
 """
 
 from itertools import product
