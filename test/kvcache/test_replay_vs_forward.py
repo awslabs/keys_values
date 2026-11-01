@@ -28,9 +28,9 @@ A and B must give the same logits, with default `assert_close` tolerances,
 for every attention implementation, FlexAttention included.
 
 In the extended version, the tokens are processed several times, with
-different numbers of tokens and different token values. For B, the prompt
-is processed only once, and the replay buffers are rolled back after each
-trial.
+different numbers of tokens (drawn at random) and different token values.
+For B, the prompt is processed only once, and the replay buffers are rolled
+back after each trial.
 
 """
 
@@ -57,8 +57,10 @@ CHUNK_SIZE = 16
 # processed), and one longer than all caches (eviction, ring buffer wraps
 # around)
 PROMPT_LENGTHS = (40, 300)
-# Number of tokens processed per trial, for the extended test
-NUM_TOKENS_PER_TRIAL = (3, 1, 5, 2)
+# Trials of the extended test. The number of tokens processed in each trial
+# is drawn at random from `1, ..., MAX_NUM_TOKENS`, different for each trial
+NUM_TRIALS = 4
+MAX_NUM_TOKENS = 5
 
 # FlexAttention without padding, and with padding of `kv_len` and `q_len`,
 # which is how it is used in practice to limit the number of compiled
@@ -250,13 +252,14 @@ def test_replay_vs_forward(
     )
     batch_size = 3
     prompt = torch.randint(0, VOCAB_SIZE, (batch_size, prompt_length), device=device)
-    max_seq_length = prompt_length + max(NUM_TOKENS_PER_TRIAL)
+    max_seq_length = prompt_length + MAX_NUM_TOKENS
+    num_tokens_per_trial = (torch.randperm(MAX_NUM_TOKENS)[:NUM_TRIALS] + 1).tolist()
 
     # B: The prompt is processed only once
     prompt_logits_b = model_b.process_prompt(prompt, max_seq_length)
     wrapper = ModelForTokenGeneration(gpt_model)
 
-    for trial, num_tokens in enumerate(NUM_TOKENS_PER_TRIAL):
+    for trial, num_tokens in enumerate(num_tokens_per_trial):
         tokens = torch.randint(0, VOCAB_SIZE, (batch_size, num_tokens), device=device)
         msg = (
             f"trial {trial}, num_tokens = {num_tokens}, prompt_length = "
