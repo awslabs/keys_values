@@ -992,6 +992,7 @@ def test_load_legacy_state_dict():
     attention_2.load_state_dict(state_dict)
 
 
+@pytest.mark.slow
 def test_forward_qwen3_4b():
     device = torch.device("cpu")
     T = 20

@@ -86,6 +86,7 @@ def test_generate():
     torch.testing.assert_close(out, expected)
 
 
+@pytest.mark.slow
 def test_cli():
     args = ["litgpt", "generate", "-h"]
     output = subprocess.check_output(args)

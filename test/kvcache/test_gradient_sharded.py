@@ -56,6 +56,7 @@ def args_gradient_sharded():
     ]
 
 
+@pytest.mark.slow
 @_RunIf(min_cuda_gpus=1)
 @pytest.mark.parametrize(
     "cache_name, cache_kwargs, cache_length, chunk_size, seq_length, layers_per_cell",
