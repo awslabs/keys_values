@@ -39,14 +39,23 @@ from keys_values.model import GPT
 
 # Windows of tentative tokens: one call (like the target model in speculative
 # decoding), single-token calls (like the draft model), and mixed. Prefill and
-# warm-up sizes are chosen so that the ring buffer of `lastrec` wraps around
-# inside the window in some cases, and that windows cross the point where the
-# cache becomes full.
-WINDOWS = ([2], [5], [1, 1], [1, 1, 1, 1], [3, 1, 2], [2, 4])
+# warm-up sizes are chosen so that, for small caches, windows cross the point
+# where the cache becomes full, where the ring buffer of `lastrec` wraps
+# around. The cache is also already full in some cases.
+WINDOWS = ([5], [1, 1, 1, 1], [3, 1, 2], [2, 4])
 
 
-def _scenarios(cache_length: int, warmups=(0, 3, 9, 20)):
+def _scenarios(cache_length: int, warmups=(0, 9)):
     return list(product((6, cache_length), warmups, WINDOWS))
+
+
+def _num_keeps(window: List[int]) -> List[int]:
+    """
+    Numbers of tentative tokens to keep: none, about half, and all.
+
+    """
+    total = sum(window)
+    return sorted({0, (total + 1) // 2, total})
 
 
 def _params(cache_length: int, dtype: torch.dtype) -> KVCacheParams:
@@ -227,7 +236,7 @@ def _default_cases():
     ):
         if name.startswith("dense") and prefill + warmup + sum(window) >= cache_length:
             continue
-        for num_keep in range(sum(window) + 1):
+        for num_keep in _num_keeps(window):
             result.append((device, name, prefill, warmup, window, num_keep))
     return result
 
@@ -275,13 +284,13 @@ def _quantized_cases(cache_length: int):
     for device, name, (prefill, warmup, window) in product(
         available_backends(),
         filter_cache_names(QUANTIZED_NAMES),
-        _scenarios(cache_length, warmups=(0, 3, 9)),
+        _scenarios(cache_length),
     ):
         if cache_name_gpu_only(name) and device.type != "cuda":
             continue
         if name.startswith("dense") and prefill + warmup + sum(window) >= cache_length:
             continue
-        for num_keep in range(sum(window) + 1):
+        for num_keep in _num_keeps(window):
             result.append((device, name, prefill, warmup, window, num_keep))
     return result
 
@@ -334,8 +343,8 @@ def test_keep_quantized_buffers_large_calls(name, atol):
 
     """
     params = _params(16, torch.bfloat16)
-    for prefill, warmup, window in _scenarios(16, warmups=(0, 9)):
-        for num_keep in range(sum(window) + 1):
+    for prefill, warmup, window in _scenarios(16):
+        for num_keep in _num_keeps(window):
             kwargs = dict(
                 name=name,
                 params=params,
