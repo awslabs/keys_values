@@ -47,7 +47,6 @@ def create_chunk_sizes(
     seq_length: int,
     chunk_size: int,
     randomize_chunk_sizes: bool,
-    num_output_tokens: int = 0,
 ) -> List[int]:
     """
     Creates list of chunk sizes which are compatible with the KV caches
@@ -69,8 +68,6 @@ def create_chunk_sizes(
     advantages for `flex_attention` SDPA.
 
     """
-    if num_output_tokens and not (0 < num_output_tokens < seq_length):
-        raise ValueError("num_output_tokens must lie strictly within seq_length")
     mpl = min(c.max_prefill_length for c in gpt_model.get_kv_caches())
     points_to_cover = sorted(
         list(
@@ -81,24 +78,87 @@ def create_chunk_sizes(
             )
         )
     )
-    if num_output_tokens:
-        points_to_cover = sorted(
-            set(points_to_cover + [seq_length - num_output_tokens])
-        )
-    if not points_to_cover or mpl >= seq_length:
-        # Keep ordinary chunking unchanged, and honor the split even if the
-        # entire sequence fits within a single prefill chunk.
+    if not points_to_cover:
+        # Does not need anything special, but should still work
         if mpl >= seq_length:
-            chunk_sizes = (
-                [seq_length - num_output_tokens, num_output_tokens]
-                if num_output_tokens
-                else [seq_length]
-            )
+            chunk_sizes = [seq_length]
         else:
             chunk_sizes = [mpl, seq_length - mpl]
     else:
+        chunk_sizes = [mpl]  # First chunk (prefill)
+        num_done = mpl
+        step = chunk_size // 2
+        min_val = max(chunk_size - step, 1)
+        max_val = min(chunk_size + step, points_to_cover[0])
+        if randomize_chunk_sizes:
+            random_sizes = torch.randint(
+                min_val,
+                max_val + 1,
+                (NUM_RANDOM_CHUNK_SIZE_VALUES,),
+            )
+        else:
+            random_sizes = None
+        while num_done < seq_length:
+            if randomize_chunk_sizes:
+                ind = randint_torch(0, NUM_RANDOM_CHUNK_SIZE_VALUES - 1)
+                c_size = random_sizes[ind].item()
+            else:
+                c_size = chunk_size
+            c_size = min(c_size, seq_length - num_done)
+            next_pt = num_done + c_size
+            if points_to_cover and next_pt >= points_to_cover[0] - CLOSEBY_THRESHOLD:
+                c_size = points_to_cover.pop(0) - num_done
+            if c_size > 0:
+                chunk_sizes.append(c_size)
+            num_done += c_size
+    assert sum(chunk_sizes) == seq_length  # Sanity check
+    _assert_chunk_sizes(
+        chunk_sizes,
+        gpt_model,
+        chunk_size,
+        randomize_chunk_sizes,
+    )
+    return chunk_sizes
+
+
+def create_chunk_sizes_with_boundary(
+    gpt_model: GPT,
+    seq_length: int,
+    chunk_size: int,
+    randomize_chunk_sizes: bool,
+    num_target_tokens: int,
+) -> List[int]:
+    """
+    Same as :func:`create_chunk_sizes`, but there is also a chunk boundary at
+    `seq_length - num_target_tokens`.
+
+    This is not used for training. It is needed by
+    :class:`LongContextInferenceModel` with `mode="inputs"` and
+    `mode="targets"`, where the inputs and the targets are processed in
+    separate calls, so that tokens can be generated in between (see
+    :class:`keys_values.kvcache.replay_buffers.ModelForTokenGeneration`).
+
+    """
+    if not (0 < num_target_tokens < seq_length):
+        raise ValueError(
+            f"num_target_tokens = {num_target_tokens}, must be in "
+            f"[1, {seq_length - 1}]"
+        )
+    boundary = seq_length - num_target_tokens
+    mpl = min(c.max_prefill_length for c in gpt_model.get_kv_caches())
+    points_to_cover = sorted(
+        set(
+            cache.cache_length
+            for cache in gpt_model.get_kv_caches()
+            if cache.cache_length <= seq_length
+        ).union([boundary])
+    )
+    if mpl >= seq_length:
+        chunk_sizes = [boundary, num_target_tokens]
+    else:
+        # The first chunk ends at the boundary if this comes before `mpl`
         fcs = mpl
-        if num_output_tokens and fcs > points_to_cover[0]:
+        if fcs > points_to_cover[0]:
             fcs = points_to_cover.pop(0)
         chunk_sizes = [fcs]
         num_done = fcs
@@ -785,17 +845,22 @@ class LongContextInferenceModel(GPTAndHeadModel):
         # Select chunk sizes
         if self.single_tokens_for_targets:
             seq_length -= num_output_tokens
-        chunk_sizes = create_chunk_sizes(
+        kwargs = dict(
             gpt_model=self.gpt_model,
             seq_length=seq_length,
             chunk_size=self.chunk_size,
             randomize_chunk_sizes=self.randomize_chunk_sizes,
-            num_output_tokens=(
-                num_output_tokens
-                if inputs_targets_boundary and not self.single_tokens_for_targets
-                else 0
-            ),
         )
+        if (
+            inputs_targets_boundary
+            and not self.single_tokens_for_targets
+            and num_output_tokens > 0
+        ):
+            chunk_sizes = create_chunk_sizes_with_boundary(
+                **kwargs, num_target_tokens=num_output_tokens
+            )
+        else:
+            chunk_sizes = create_chunk_sizes(**kwargs)
         assert all(
             x > 0 for x in chunk_sizes
         ), f"chunk_sizes = {chunk_sizes}, must all be positive"
