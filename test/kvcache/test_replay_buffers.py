@@ -174,6 +174,7 @@ def test_loss_after_replay(
             batched_generate_fn(
                 model=model,
                 prompts=logits,
+                input_pos=inputs.shape[-1] - targets.shape[-1],
                 max_returned_tokens=8,
                 sample_args={},
                 deallocate_cache_buffers=False,
@@ -226,6 +227,7 @@ def test_generate_several_times(
                     batched_generate_fn(
                         model=model,
                         prompts=init_logits,
+                        input_pos=inputs.shape[-1] - num_targets,
                         max_returned_tokens=num_targets,
                         sample_args={},
                         deallocate_cache_buffers=False,
@@ -286,6 +288,7 @@ def test_generate_old_new(
                 batched_generate_fn(
                     model=model,
                     prompts=init_logits,
+                    input_pos=inputs.shape[-1] - num_targets,
                     max_returned_tokens=num_targets,
                     sample_args={},
                     deallocate_cache_buffers=False,

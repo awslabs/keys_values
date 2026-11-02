@@ -412,19 +412,6 @@ class GPT(nn.Module):
         else:
             return min(c.max_prefill_length for c in self.get_kv_caches())
 
-    def kv_cache_input_pos(self) -> Optional[int]:
-        if not self.are_kv_caches_assigned():
-            return None
-        else:
-            caches = self.get_kv_caches()
-            input_pos = caches[0].input_pos
-            if any(c.input_pos != input_pos for c in caches[1:]):
-                raise AssertionError(
-                    "input_pos must be the same for all caches, but obtained "
-                    + str({c.input_pos for c in caches})
-                )
-            return input_pos
-
     def _empty_clone(self, device: Optional[torch.device] = None) -> "GPT":
         """
         Creates empty clone of this object. Parameters are not copied. The

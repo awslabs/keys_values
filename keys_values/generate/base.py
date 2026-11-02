@@ -207,8 +207,11 @@ def batched_generate_fn(
     deallocate_cache_buffers: bool = True,
     return_logprobs: bool = False,
     no_inference_mode: bool = False,
+    input_pos: Optional[int] = None,
 ) -> Iterator[torch.Tensor]:
-    """Generate tokens for a batch of prompts (see :func:`_batched_generate_impl`).
+    """Generate tokens for a batch of prompts. The prompts are given as token
+    IDs, or, if they have been processed already, as the logits for their final
+    position (see :func:`_batched_generate_impl`).
 
     ``no_inference_mode``: when ``True``, run under ``torch.no_grad`` instead of
     ``torch.inference_mode``. Required when the KV-cache buffers written during
@@ -231,6 +234,7 @@ def batched_generate_fn(
             stop_tokens=stop_tokens,
             deallocate_cache_buffers=deallocate_cache_buffers,
             return_logprobs=return_logprobs,
+            input_pos=input_pos,
         )
 
 
@@ -244,20 +248,29 @@ def _batched_generate_impl(
     stop_tokens: Tuple[List[int], ...] = (),
     deallocate_cache_buffers: bool = True,
     return_logprobs: bool = False,
+    input_pos: Optional[int] = None,
 ) -> Iterator[torch.Tensor]:
     """
-    Generates tokens for a batch of prompts.
+    Generates tokens for a batch of prompts. The prompts are given in one of
+    two ways:
+
+    * Token IDs, shape `(batch_size, prompt_len)`. The prompts are processed
+      first, starting with empty KV caches. All prompts need to have the same
+      length; use left padding.
+    * Logits for the final prompt position, shape
+      `(batch_size, 1, padded_vocab_size)`. This is for prompts which have
+      been processed into the KV caches already, for example by calling
+      `model` with `mode="inputs"`. Prompt processing is skipped, and
+      `input_pos` must be the number of tokens processed so far.
+
+    Prompt tokens are not returned.
 
     Note: Semantics have changed from `LitGPT` code!
 
     Args:
         model: The model to use. Must be :class:`LongContextInferenceModel`,
             defining the chunking to be used.
-        prompts: Token IDs (batch, prompt_len) or previously computed logits
-            (batch, 1, vocab). The latter skips prompt processing; KV caches
-            must already contain the prompt. Note that
-            all prompts need to have the same length; use left padding.
-            Prompt tokens are not returned.
+        prompts: Token IDs or logits for the final prompt position, see above
         max_returned_tokens: The maximum number of tokens returned
         ignore_index: Token index returned for batch dimensions where generation
             has stopped already
@@ -279,6 +292,9 @@ def _batched_generate_impl(
             tokens, including the one that triggers a stop sequence). This lets
             a GRPO rollout capture old-policy log-probs without a separate
             scoring pass.
+        input_pos: Number of tokens already processed into the KV caches.
+            Must be given if `prompts` are logits, and must not be given
+            otherwise.
 
     Yields:
         Tensors of shape `(batch_size, num)`, where `num >= 1`. Usually,
@@ -297,8 +313,16 @@ def _batched_generate_impl(
     ), "Prompts must be token IDs (2D) or cached logits (3D)."
     if is_logits and (not torch.is_floating_point(prompts) or prompts.shape[1] != 1):
         raise ValueError(
-            "Precomputed logits must be floating-point with shape (batch, 1, vocab)"
+            "Precomputed logits must be floating-point with shape "
+            "(batch_size, 1, padded_vocab_size)"
         )
+    if is_logits and (input_pos is None or input_pos <= 0):
+        raise ValueError(
+            f"input_pos = {input_pos}: If prompts are logits, input_pos must be "
+            "the number of tokens already processed into the KV caches"
+        )
+    if not is_logits and input_pos is not None:
+        raise ValueError("input_pos must only be given if prompts are logits")
     if max_returned_tokens <= 0:
         raise ValueError("max_returned_tokens must be > 0")
 
@@ -322,9 +346,6 @@ def _batched_generate_impl(
     # first token below. Chunk size does not matter, just must be nonzero.
     gpt_model = model.gpt_model
     if is_logits:
-        input_pos = gpt_model.kv_cache_input_pos()
-        if input_pos is None or input_pos <= 0:
-            raise ValueError("Precomputed logits require nonempty KV caches")
         gpt_model.max_seq_length = input_pos + max_returned_tokens
         logits_final_position = prompts
     else:

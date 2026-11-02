@@ -325,6 +325,7 @@ class ModelForTokenGeneration:
 
         # Call keys_values.generate.base.batched_generate_fn for token
         # generation, passing prompts=logits (the already-computed logits),
+        # input_pos set to the number of tokens processed above,
         # deallocate_cache_buffers=False, and max_returned_tokens set to the
         # number of tokens to generate (excluding the prompt).
 
