@@ -38,12 +38,14 @@ like a replay bug but was not. All FlexAttention graphs shared one
 `torch.compile` cache. Once several shapes had been seen, dynamo recompiled
 with dynamic shapes, so the kernel used for a call depended on which calls
 came before it. Two runs doing the same math in a different order then gave
-slightly different logits. `FlexAttnManager` now compiles each graph with
-its own cache and `dynamic=False` (see `compile_with_own_cache`).
+slightly different logits. With `separate_compile_caches=True` in
+`FlexAttentionArgs`, each graph is compiled with its own cache and static
+shapes (see `compile_with_own_cache`), so results do not depend on the order
+of calls. This test and `test_replay_buffers.py` use this option.
 
 For other tests: if two code paths using FlexAttention differ by small,
 unexplained amounts, check whether they call compiled graphs in a different
-order before loosening tolerances.
+order before loosening tolerances, and use `separate_compile_caches=True`.
 
 """
 
@@ -90,7 +92,10 @@ FLEX_CONFIGS = {
 
 def _flexatt_args(attention: str) -> Optional[FlexAttentionArgs]:
     kwargs = FLEX_CONFIGS.get(attention)
-    return None if kwargs is None else FlexAttentionArgs(**kwargs)
+    if kwargs is None:
+        return None
+    # See "Why this matters" above
+    return FlexAttentionArgs(**kwargs, separate_compile_caches=True)
 
 
 class _Contender:

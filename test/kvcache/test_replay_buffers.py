@@ -76,7 +76,13 @@ def create_model_and_data(
         cache_length=cache_lengths[0],
         dtype=dtype,
     )
-    mha_kwargs = {"flexatt_args": FlexAttentionArgs()} if use_flex_attention else {}
+    # Results must not depend on the order of calls, see
+    # `test_replay_vs_forward.py`
+    mha_kwargs = (
+        {"flexatt_args": FlexAttentionArgs(separate_compile_caches=True)}
+        if use_flex_attention
+        else {}
+    )
     _cache_kwargs = {**cache_kwargs, **mha_kwargs}
     with torch.device(device):
         gpt_model = GPT(config, **mha_kwargs)

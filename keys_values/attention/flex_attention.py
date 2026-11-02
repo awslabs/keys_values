@@ -47,16 +47,22 @@ ScoreModifier = Callable[
 
 def compile_with_own_cache(fn: Callable) -> Callable:
     """
-    `torch.compile` keeps compiled graphs in a cache attached to the code
-    object being compiled. The `flex_attention` partials compiled by
-    :class:`FlexAttnManager` would all share one code object (a wrapper
-    inside PyTorch), and therefore one cache. Graphs for different shapes
-    then count against the same `recompile_limit`, or are recompiled with
-    dynamic shapes, so that which kernel runs depends on the order of
-    earlier calls, and results differ in low-order bits.
+    Used by :class:`FlexAttnManager` if `separate_compile_caches=True`.
 
-    Here, the function compiled gets a code object of its own, so that the
-    compiled graphs of different managed entries do not interact.
+    `torch.compile` keeps compiled graphs in a cache attached to the code
+    object being compiled. A `functools.partial` has no code object of its
+    own, so `torch.compile` wraps it in a small function from PyTorch
+    (`inner` in `torch/_dynamo/external_utils.py`). All `flex_attention`
+    partials compiled by :class:`FlexAttnManager` then share the code object
+    of this wrapper, and therefore one cache and one `recompile_limit`. Once
+    the cache holds a graph for one shape, a call with another shape is
+    recompiled with dynamic shapes. Which graphs get static or dynamic
+    kernels then depends on the order of calls, and results can differ in
+    low-order bits.
+
+    Here, the function compiled gets a code object of its own, and is
+    compiled with static shapes, so that the compiled graphs of different
+    managed entries do not interact.
 
     """
 
@@ -144,9 +150,10 @@ class FlexAttnManager:
     are required initially only.
     """
 
-    def __init__(self):
+    def __init__(self, separate_compile_caches: bool = False):
         self._entries = dict()
         self.num_hits = dict()
+        self.separate_compile_caches = separate_compile_caches
 
     def _use_kv_lens(self) -> bool:
         raise NotImplementedError
@@ -222,14 +229,16 @@ class FlexAttnManager:
                     )
                 else:
                     score_mod = nan_to_minus_infty
-            attn_fn = compile_with_own_cache(
-                partial(
-                    flex_attention,
-                    score_mod=score_mod,
-                    block_mask=block_mask,
-                    **self._extra_flex_attention_kwargs(args),
-                )
+            attn_fn = partial(
+                flex_attention,
+                score_mod=score_mod,
+                block_mask=block_mask,
+                **self._extra_flex_attention_kwargs(args),
             )
+            if self.separate_compile_caches:
+                attn_fn = compile_with_own_cache(attn_fn)
+            else:
+                attn_fn = torch.compile(attn_fn, fullgraph=True)
             extend_kv = True if self._entries else False
             result = (attn_fn, extend_kv)
             self._entries[args] = result
@@ -295,8 +304,12 @@ class FlexAttnForPrefillManager(FlexAttnManager):
 
     """
 
-    def __init__(self, kv_lens: Optional[List[int]] = None):
-        super().__init__()
+    def __init__(
+        self,
+        kv_lens: Optional[List[int]] = None,
+        separate_compile_caches: bool = False,
+    ):
+        super().__init__(separate_compile_caches)
         self.kv_lens = prepare_lens(kv_lens, "kv_lens")
 
     def transform_kv_len(self, kv_len: int) -> int:
@@ -438,8 +451,9 @@ class FlexAttnForChunkManager(FlexAttnManager):
         kv_lens: Optional[List[int]] = None,
         q_lens: Optional[List[int]] = None,
         forward_return_lse: bool = False,
+        separate_compile_caches: bool = False,
     ):
-        super().__init__()
+        super().__init__(separate_compile_caches)
         self.kv_lens = prepare_lens(kv_lens, "kv_lens")
         self.q_lens = prepare_lens(q_lens, "q_lens")
         self.forward_return_lse = forward_return_lse
@@ -610,6 +624,12 @@ class FlexAttentionArgs:
             needs more memory, only use if the default does not work.
         forward_return_lse: If `True`, the forward graphs also return the
             `lse` tensors. This is done for `input_pos > 0` only.
+        separate_compile_caches: If `True`, each graph is compiled with a
+            `torch.compile` cache of its own and with static shapes (see
+            :func:`compile_with_own_cache`). Results then do not depend on the
+            order in which graphs are called. Use this in tests which compare
+            the logits of two code paths. Defaults to `False`, where all
+            graphs share one cache.
     """
 
     def __init__(
@@ -618,15 +638,21 @@ class FlexAttentionArgs:
         q_lens: Optional[List[int]] = None,
         extend_kv: bool = False,
         forward_return_lse: bool = False,
+        separate_compile_caches: bool = False,
     ):
-        self.attn_prefill_manager = FlexAttnForPrefillManager(kv_lens)
+        self.attn_prefill_manager = FlexAttnForPrefillManager(
+            kv_lens,
+            separate_compile_caches,
+        )
         self.attn_chunk_manager = FlexAttnForChunkManager(
             kv_lens,
             q_lens,
             forward_return_lse,
+            separate_compile_caches,
         )
         self.extend_kv = extend_kv
         self.forward_return_lse = forward_return_lse
+        self.separate_compile_caches = separate_compile_caches
 
     def attn_fn(
         self,
