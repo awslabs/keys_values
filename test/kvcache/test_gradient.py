@@ -49,6 +49,19 @@ def make_write_outputs_slice(x: torch.Tensor) -> WriteOutputsSlice:
     return result
 
 
+def _append_name(case: tuple) -> tuple:
+    cache_name, cache_kwargs, cache_lengths, _, _, device, _, _ = case
+    gp = cache_kwargs.get("grace_period")
+    if gp is not None:
+        cache_name += f"_gp{gp}"
+    parts = (
+        cache_name,
+        str(cache_lengths[1]),
+        "cpu" if device.type == "cpu" else "cuda",
+    )
+    return case + ("-".join(parts),)
+
+
 def args_gradient_row_of_cells():
     setups = [
         a + b + (c,)
@@ -75,7 +88,7 @@ def args_gradient_row_of_cells():
     tol_kwargs3 = dict(atol=0.0015, rtol=0.01)
     # Note: We use `flex_attention` for GPU, zero-padded query SDPA for
     # CPU. This is why limits depend on device
-    return [
+    cases = [
         a + b
         for a, b in (
             zip(
@@ -105,10 +118,12 @@ def args_gradient_row_of_cells():
             )
         )
     ]
+    return [_append_name(case) for case in cases]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, device, limit_num_unmatched, tol_kwargs",
+    "cache_name, cache_kwargs, cache_lengths, tokens_per_chunk, chunks_per_cell, device, limit_num_unmatched, tol_kwargs, case_name",
     args_gradient_row_of_cells(),
 )
 def test_gradient_row_of_cells(
@@ -120,6 +135,7 @@ def test_gradient_row_of_cells(
     device,
     limit_num_unmatched,
     tol_kwargs,
+    case_name,
 ):
     seed = 31415927
     torch.random.manual_seed(seed)
@@ -137,6 +153,7 @@ def test_gradient_row_of_cells(
             f"device:           {device}",
         ]
     )
+    print(case_name)
     print(error_prefix)
 
     use_autograd_hooks = True

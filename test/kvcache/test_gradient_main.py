@@ -51,9 +51,11 @@ def gradcomp_mha_kwargs() -> Dict[str, Any]:
 
 def _append_name(case: tuple) -> tuple:
     cache_name, cache_kwargs, cache_lengths, device = case
+    gp = cache_kwargs.get("grace_period")
+    if gp is not None:
+        cache_name += f"_gp{gp}"
     parts = (
         cache_name,
-        "gp10" if "grace_period" in cache_kwargs else "none",
         str(cache_lengths[0]),
         "cpu" if device.type == "cpu" else "cuda",
     )
@@ -79,6 +81,7 @@ def args_complete_gradient_computation():
     return [_append_name(case) for case in cases]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     "cache_name, cache_kwargs, cache_lengths, device, case_name",
     args_complete_gradient_computation(),
