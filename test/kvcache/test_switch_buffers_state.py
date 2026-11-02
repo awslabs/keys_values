@@ -14,7 +14,7 @@
 """Round-trip regression tests for KV-cache state and buffer switching.
 
 This exercises the state classes reintroduced from #89, including eviction
-scores and grace-period metadata that tentative decoding itself does not use.
+scores and grace-period metadata.
 """
 
 import copy
@@ -94,7 +94,7 @@ def _forward(cache, data, sizes):
 
 
 @pytest.mark.parametrize(
-    "device, case, tentative_sizes",
+    "device, case, sizes_after_save",
     list(
         product(
             available_backends(),
@@ -103,7 +103,7 @@ def _forward(cache, data, sizes):
         )
     ),
 )
-def test_switch_buffers_restores_state_and_outputs(device, case, tentative_sizes):
+def test_switch_buffers_restores_state_and_outputs(device, case, sizes_after_save):
     """Restoring state is bit-exact, even after eviction and repeated restore.
 
     This catches omissions from subclasses' state objects (e.g. H2O scores or
@@ -123,7 +123,7 @@ def test_switch_buffers_restores_state_and_outputs(device, case, tentative_sizes
     pre = random_args_cache_forward(
         params, cache_length + 24, vocab_size=64, device=device
     )
-    tentative = random_args_cache_forward(params, 12, vocab_size=64, device=device)
+    after_save = random_args_cache_forward(params, 12, vocab_size=64, device=device)
     further = random_args_cache_forward(params, 12, vocab_size=64, device=device)
     kwargs = {"grace_period": grace_period} if grace_period else {}
     cache = create_kv_cache(name, params, **kwargs)
@@ -140,14 +140,14 @@ def test_switch_buffers_restores_state_and_outputs(device, case, tentative_sizes
     saved_buffers = copy.deepcopy(cache.kv_buffers)
     second_buffers = copy.deepcopy(cache.kv_buffers)
 
-    _forward(cache, tentative, tentative_sizes)
+    _forward(cache, after_save, sizes_after_save)
     assert _snapshot(cache)["input_pos"] > original["input_pos"]
     cache.switch_buffers(saved_buffers, cache_state=saved_state)
     _assert_same(_snapshot(cache), original)
 
     # Reusing the same state object must work; restoring must not mutate it.
     second_cache = copy.deepcopy(cache)
-    _forward(second_cache, tentative, (2, 2))
+    _forward(second_cache, after_save, (2, 2))
     second_cache.switch_buffers(second_buffers, cache_state=saved_state)
     _assert_same(_snapshot(second_cache), original)
 
