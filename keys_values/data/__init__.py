@@ -16,6 +16,7 @@ from keys_values.data.dataloader import MyDataLoader
 from keys_values.data.helmet import Helmet
 from keys_values.data.iterators import BatchSampler, SimilarSequenceLengthSampler
 from keys_values.data.longbench_v2 import LongBenchV2
+from keys_values.data.ruler import Ruler
 
 __all__ = [
     "BatchSampler",
@@ -24,5 +25,6 @@ __all__ = [
     "LABELS_NAME",
     "LongBenchV2",
     "MyDataLoader",
+    "Ruler",
     "SimilarSequenceLengthSampler",
 ]

@@ -28,6 +28,10 @@ from keys_values.data.longbench_v2 import (
 from keys_values.data.load_helmet_dev_eval import (
     get_instruction_template as get_template_helmet,
 )
+from keys_values.data.load_ruler_dev_eval import (
+    get_instruction_template as get_template_ruler,
+)
+from keys_values.data.ruler import Ruler
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.smart_lastrec import SmartInitialLastRecentlyInsertedKVCache
@@ -95,6 +99,10 @@ def sample_slot_values(
         ("helmet", "ruler_mk_needle", None, 4096, [28, 28]),
         ("helmet", "ruler_mk_uuid", None, 4096, [28, 28]),
         ("helmet", "ruler_mv", None, 4096, [28, 28]),
+        ("ruler", "niah_single_1", None, 4096, [28, 28]),
+        ("ruler", "vt", None, 4096, [19, 19, 19]),
+        ("ruler", "cwe", None, 4096, [29, 29]),
+        ("ruler", "fwe", None, 4096, [24, 24, 24]),
     ],
 )
 def test_smart_lastrec_update_protected_ranges(
@@ -115,6 +123,8 @@ def test_smart_lastrec_update_protected_ranges(
     tokenizer = load_tokenizer()
     if data_name == "longbench_v2":
         data = LongBenchV2()
+    elif data_name == "ruler":
+        data = Ruler(dataset_key=dataset_key)
     else:
         data = Helmet(dataset_key=dataset_key)
     smart_lastrec_info = replace(
@@ -157,6 +167,9 @@ def test_smart_lastrec_update_protected_ranges(
     if data_name == "longbench_v2":
         assert head_model is not None
         instruction_template, slot_names = get_template_longbench_v2(head_model)
+    elif data_name == "ruler":
+        assert dataset_key is not None
+        instruction_template, slot_names = get_template_ruler(dataset_key)
     else:
         assert dataset_key is not None
         instruction_template, slot_names = get_template_helmet(dataset_key)
@@ -267,6 +280,10 @@ def test_smart_lastrec_update_protected_ranges(
         ("helmet", "ruler_mk_needle", None, [28, 28]),
         ("helmet", "ruler_mk_uuid", None, [28, 28]),
         ("helmet", "ruler_mv", None, [28, 28]),
+        ("ruler", "niah_single_1", None, [28, 28]),
+        ("ruler", "vt", None, [19, 19, 19]),
+        ("ruler", "cwe", None, [29, 29]),
+        ("ruler", "fwe", None, [24, 24, 24]),
     ],
 )
 def test_smart_lastrec_update_ranges_several_chunks(
@@ -287,6 +304,10 @@ def test_smart_lastrec_update_ranges_several_chunks(
         data = LongBenchV2()
         assert head_model is not None
         instruction_template, slot_names = get_template_longbench_v2(head_model)
+    elif data_name == "ruler":
+        data = Ruler(dataset_key=dataset_key)
+        assert dataset_key is not None
+        instruction_template, slot_names = get_template_ruler(dataset_key)
     else:
         data = Helmet(dataset_key=dataset_key)
         assert dataset_key is not None

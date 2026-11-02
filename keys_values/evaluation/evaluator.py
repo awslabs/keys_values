@@ -21,6 +21,7 @@ from keys_values.evaluation.metrics import (
     sub_exact_match,
     rouge_n_f1,
     initial_word_or_row,
+    string_match_all,
 )
 from keys_values.evaluation.evaluation import (
     _eval_rerank,
@@ -70,11 +71,20 @@ METRICS_FOR_HELMET_TASKS_OLD = {
     "trivia_qa": "sub_exact_match",
 }
 
+# Same metric as used by RULER
+METRICS_FOR_RULER_TASKS = {
+    "cwe": "string_match_all",
+    "fwe": "string_match_all",
+    "niah_single_1": "string_match_all",
+    "vt": "string_match_all",
+}
+
 TargetType = Union[List[str], str]
 
 _SUPPORTS_LIST_TARGETS = (
     "sub_exact_match",
     "match_first_word_or_phrase",
+    "string_match_all",
 )
 
 
@@ -102,6 +112,11 @@ def compute_metric(
             return float(sub_exact_match(output, targets))
     elif metric == "match_first_word_or_phrase":
         return initial_word_or_row(
+            response=output,
+            targets=targets if isinstance(targets, list) else [targets],
+        )
+    elif metric == "string_match_all":
+        return string_match_all(
             response=output,
             targets=targets if isinstance(targets, list) else [targets],
         )
@@ -170,7 +185,7 @@ class SampleBasedMetricsEvaluator:
             METRICS_FOR_HELMET_TASKS.values()
             if not old_setup
             else METRICS_FOR_HELMET_TASKS_OLD.values()
-        )
+        ) + list(METRICS_FOR_RULER_TASKS.values())
 
     @staticmethod
     def metric_for_helmet_task(
@@ -193,6 +208,19 @@ class SampleBasedMetricsEvaluator:
             if not old_setup
             else METRICS_FOR_HELMET_TASKS_OLD.get(dataset_key)
         )
+
+    @staticmethod
+    def metric_for_ruler_task(dataset_key: str) -> Optional[str]:
+        """
+        Args:
+            dataset_key: Name of RULER dataset
+
+        Returns:
+            Evaluation metric to use for this task; or `None` if metric is
+            not supported here for this task, or `dataset_key` is invalid.
+
+        """
+        return METRICS_FOR_RULER_TASKS.get(dataset_key)
 
     def __call__(
         self,

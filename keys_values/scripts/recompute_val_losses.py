@@ -33,7 +33,7 @@ from litgpt.utils import (
 
 from keys_values.attention.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
-from keys_values.data import Helmet, LongBenchV2
+from keys_values.data import Helmet, LongBenchV2, Ruler
 from keys_values.data.constants import (
     LIT_MODEL_FNAME,
     HEAD_MODEL_FNAME,
@@ -378,6 +378,11 @@ def main(
         if data.metadata_dir is None:
             data.metadata_dir = str(out_dir / "data")
             print(f"Setting Helmet.metadata_dir to {data.metadata_dir}")
+    elif data_class_path.endswith("data.Ruler"):
+        data = Ruler(**data_init_args)
+        if data.metadata_dir is None:
+            data.metadata_dir = str(out_dir / "data")
+            print(f"Setting Ruler.metadata_dir to {data.metadata_dir}")
     else:
         raise ValueError(f"Data class path {data_class_path} is not supported")
 

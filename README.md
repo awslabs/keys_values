@@ -245,7 +245,9 @@ python3 keys_values/__main__.py finetune_long_lora \
 * Play round with different datasets. `--data LongBenchV2` gives access to the
   `LongBench V2` dataset (for which you also want to add
   `--head_model seq_classification_on_logits`, as this is a multi-way
-  classification problem).
+  classification problem). `--data Ruler` gives access to synthetic tasks
+  generated with RULER, with context lengths up to 256k tokens (see
+  [ruler.md](./keys_values/data/ruler.md)).
 * Try using `finetune_offload_lora` instead of `finetune_long_lora`, and
   `--kv_cache.cpu_offload True`. This uses CPU offloading to free up memory
   during forward and backward pass, allowing you to explore options like

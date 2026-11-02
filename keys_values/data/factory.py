@@ -14,17 +14,21 @@
 from keys_values.data.base import DataModuleEncoding, EncodableDataModuleMixin
 from keys_values.data.helmet import Helmet
 from keys_values.data.longbench_v2 import LongBenchV2, LongBenchV2Truncated
+from keys_values.data.ruler import Ruler
 
 SUPPORTED_ENCODING_DATAMODULES = (
     Helmet.EncodedName,
     LongBenchV2.EncodedName,
     LongBenchV2Truncated.EncodedName,
+    Ruler.EncodedName,
 )
 
 
 def data_module_from_encoding(encoding: DataModuleEncoding) -> EncodableDataModuleMixin:
     if encoding.name == Helmet.EncodedName:
         return Helmet(**encoding.kwargs)
+    elif encoding.name == Ruler.EncodedName:
+        return Ruler(**encoding.kwargs)
     elif encoding.name == LongBenchV2.EncodedName:
         return LongBenchV2(**encoding.kwargs)
     elif encoding.name == LongBenchV2Truncated.EncodedName:

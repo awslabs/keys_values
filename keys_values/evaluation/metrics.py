@@ -262,3 +262,20 @@ def initial_word_or_row(
             return 0.0
         extracts.append(_normalize(rows[0]))
     return int(any(x == y for x in extracts for y in targets))
+
+
+def string_match_all(
+    response: str,
+    targets: List[str],
+) -> float:
+    """
+    Metric used by RULER for its synthetic tasks: The fraction of entries of
+    `targets` which are contained in `response`, ignoring case. See
+    `scripts/eval/synthetic/constants.py` in
+    [https://github.com/NVIDIA/RULER].
+
+    """
+    if not targets:
+        raise ValueError("targets must not be empty")
+    response = response.lower()
+    return sum(target.lower() in response for target in targets) / len(targets)

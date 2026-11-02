@@ -33,7 +33,7 @@ from litgpt.utils import (
 from keys_values.attention.attention_utils import DEFAULT_TMP_ARRAY_LIMIT_GB
 from keys_values.config import Config as ConfigFull
 from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
-from keys_values.data import LongBenchV2, Helmet, INPUT_IDS_NAME
+from keys_values.data import LongBenchV2, Helmet, Ruler, INPUT_IDS_NAME
 from keys_values.data.evaluation import EvaluationDataLoader
 from keys_values.data.constants import (
     ORIG_IDX_NAME,
@@ -492,6 +492,11 @@ def main(
                 if data.metadata_dir is None:
                     data.metadata_dir = str(out_dir / "data")
                     print(f"Setting Helmet.metadata_dir to {data.metadata_dir}")
+            elif _data_class_path.endswith("data.Ruler"):
+                data = Ruler(**_data_init_args)
+                if data.metadata_dir is None:
+                    data.metadata_dir = str(out_dir / "data")
+                    print(f"Setting Ruler.metadata_dir to {data.metadata_dir}")
             else:
                 raise ValueError(f"Data class path {_data_class_path} is not supported")
             data_class_path = _data_class_path
@@ -652,15 +657,17 @@ def eval_for_setup(
 
     if use_sample_metric:
         assert isinstance(data, Helmet)
-        if use_old_metrics is None:
-            use_old_metrics = getattr(data, "use_old_metrics", False)
+        if isinstance(data, Ruler):
+            metric = SampleBasedMetricsEvaluator.metric_for_ruler_task(data.dataset_key)
+        else:
+            if use_old_metrics is None:
+                use_old_metrics = getattr(data, "use_old_metrics", False)
+            metric = SampleBasedMetricsEvaluator.metric_for_helmet_task(
+                data.dataset_key,
+                old_setup=use_old_metrics,
+            )
         evaluator = SampleBasedMetricsEvaluator(
-            metrics=[
-                SampleBasedMetricsEvaluator.metric_for_helmet_task(
-                    data.dataset_key,
-                    old_setup=use_old_metrics,
-                )
-            ],
+            metrics=[metric],
             max_generated_tokens=sample_metric_max_generated_tokens,
             tokenizer=tokenizer,
             sample_kwargs=sample_metric_kwargs,
