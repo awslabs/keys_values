@@ -2484,20 +2484,24 @@ class Solution_1927:
             return True
 
 
+# TODO: Incomplete: This is a pretty stupid exercise!
 class Solution_3756:
     """
     https://leetcode.com/problems/concatenate-non-zero-digits-and-multiply-by-sum-ii/?envType=daily-question&envId=2026-08-25
 
-    You are given a string s of length m consisting of digits. You are also given a 2D integer array queries, where queries[i] = [li, ri].
+    You are given a string s of length m consisting of digits.
+    You are also given a 2D integer array queries, where queries[i] = [li, ri].
 
     For each queries[i], extract the s[li..ri]. Then, perform the following:
 
-        Form a new integer x by concatenating all the non-zero digits from the substring in their original order. If there are no non-zero digits, x = 0.
-        Let sum be the sum of digits in x. The answer is x * sum.
+        - Form a new integer x by concatenating all the non-zero digits from
+          the substring in their original order. If there are no non-zero
+          digits, x = 0.
+        - Let sum be the sum of digits in x. The answer is x * sum.
 
     Return an array of integers answer where answer[i] is the answer to the ith query.
 
-    Since the answers may be very large, return them modulo 109 + 7.
+    Since the answers may be very large, return them modulo 10^9 + 7.
 
     Example 1:
 
@@ -2549,7 +2553,7 @@ class Solution_3756:
             x = 987654321
             sum = 9 + 8 + 7 + 6 + 5 + 4 + 3 + 2 + 1 = 45
             Therefore, the answer is 987654321 * 45 = 44444444445.
-            We return 44444444445 modulo (109 + 7) = 444444137.
+            We return 44444444445 modulo (10^9 + 7) = 444444137.
 
     Constraints:
 
@@ -2559,8 +2563,303 @@ class Solution_3756:
         queries[i] = [li, ri]
         0 <= li <= ri < m
 
-     """
-    pass
+    """
+    def sumAndMultiply(self, s: str, queries: List[List[int]]) -> List[int]:
+        # Deal with zeros: Remove them and remap query indexes
+        map_li = dict()
+        map_ri = dict()
+        li_v = 0
+        nz_digits = []
+        for pos, x in enumerate(s):
+            is_zero = x == "0"
+            map_li[pos] = li_v
+            map_ri[pos] = li_v - int(is_zero)
+            if not is_zero:
+                li_v += 1
+                nz_digits.append(int(x))
+        # Precomputations
+        cumsum = [0]
+        csum = 0
+        cumprod = []
+        cprod = 0
+        for d in nz_digits:
+            csum += d
+            cumsum.append(csum)
+            cprod = cprod * 10 + d
+            cumprod.append(cprod)
+        result = []
+        # O(1) computation per query
+        for li, ri in queries:
+            li = map_li[li]
+            ri = map_ri[ri]
+            if ri >= li:
+                sum = cumsum[ri + 1] - cumsum[li]
+                x = cumprod[ri] // (10 ** li)
+                result.append(x * sum)
+            else:
+                result.append(0)
+        return result
+
+
+class Solution_36:
+    """
+    Determine if a 9 x 9 Sudoku board is valid. Only the filled cells need to be validated according to the following rules:
+
+    - Each row must contain the digits 1-9 without repetition.
+    - Each column must contain the digits 1-9 without repetition.
+    - Each of the nine 3 x 3 sub-boxes of the grid must contain the digits 1-9 without repetition.
+
+    Note:
+
+    - A Sudoku board (partially filled) could be valid but is not necessarily solvable.
+    - Only the filled cells need to be validated according to the mentioned rules.
+
+    Example 1:
+
+    Input: board =
+        [["5","3",".",".","7",".",".",".","."]
+        ,["6",".",".","1","9","5",".",".","."]
+        ,[".","9","8",".",".",".",".","6","."]
+        ,["8",".",".",".","6",".",".",".","3"]
+        ,["4",".",".","8",".","3",".",".","1"]
+        ,["7",".",".",".","2",".",".",".","6"]
+        ,[".","6",".",".",".",".","2","8","."]
+        ,[".",".",".","4","1","9",".",".","5"]
+        ,[".",".",".",".","8",".",".","7","9"]]
+    Output: true
+
+    Example 2:
+
+    Input: board =
+        [["8","3",".",".","7",".",".",".","."]
+        ,["6",".",".","1","9","5",".",".","."]
+        ,[".","9","8",".",".",".",".","6","."]
+        ,["8",".",".",".","6",".",".",".","3"]
+        ,["4",".",".","8",".","3",".",".","1"]
+        ,["7",".",".",".","2",".",".",".","6"]
+        ,[".","6",".",".",".",".","2","8","."]
+        ,[".",".",".","4","1","9",".",".","5"]
+        ,[".",".",".",".","8",".",".","7","9"]]
+    Output: false
+
+    Explanation: Same as Example 1, except with the 5 in the top left corner being modified to 8. Since there are two 8's in the top left 3x3 sub-box, it is invalid.
+
+    Constraints:
+
+    - board.length == 9
+    - board[i].length == 9
+    - board[i][j] is a digit 1-9 or '.'.
+    """
+    def _is_valid(self, vals: List[str]) -> bool:
+        hist = Counter(v for v in vals if v != ".")
+        return all(v <= 1 for v in hist.values())
+
+    def isValidSudoku(self, board: list[list[str]]) -> bool:
+        cols = [[] for _ in range(9)]
+        tiles = [[] for _ in range(9)]
+        for row_idx, row in enumerate(board):
+            if not self._is_valid(row):
+                return False
+            til_off = (row_idx // 3) * 3
+            for col_idx, (v, col) in enumerate(zip(row, cols)):
+                col.append(v)
+                tiles[til_off + (col_idx // 3)].append(v)
+        return all(
+            self._is_valid(vals)
+            for vals in cols + tiles
+        )
+
+
+# - Messed around a bit with indexes (used lpos-1 instead of lpos)
+# - NOTE: str.find, str.rfind. Useful!!
+class Solution_1190:
+    """
+    https://leetcode.com/problems/reverse-substrings-between-each-pair-of-parentheses/?envType=daily-question&envId=2026-08-25
+
+    You are given a string s that consists of lower case English letters and brackets.
+
+    Reverse the strings in each pair of matching parentheses, starting from the
+    innermost one.
+
+    Your result should not contain any brackets.
+
+    Example 1:
+
+    Input: s = "(abcd)"
+    Output: "dcba"
+
+    Example 2:
+
+    Input: s = "(u(love)i)"
+    Output: "iloveu"
+    Explanation: The substring "love" is reversed first, then the whole string is reversed.
+
+    Example 3:
+
+    Input: s = "(ed(et(oc))el)"
+    Output: "leetcode"
+    Explanation: First, we reverse the substring "oc", then "etco", and finally, the whole string.
+
+    Constraints:
+
+    - 1 <= s.length <= 2000
+    - s only contains lower case English characters and parentheses.
+    - It is guaranteed that all parentheses are balanced.
+
+    """
+    def reverseParentheses(self, s: str) -> str:
+        # Find innermost bracket
+        lpos = s.rfind("(")
+        if lpos == -1:
+            # No bracket anymore
+            return s
+        rpos = s.find(")", lpos + 1)
+        assert rpos != -1, f"s = '{s}' has no balanced parantheses"
+        middle = s[(lpos + 1):rpos]
+        new_s = s[:lpos] + middle[::-1] + s[(rpos + 1):]
+        return self.reverseParentheses(new_s)
+
+
+# - More a puzzle
+# - Need to understand relevance of max and min element
+class Solution_3863:
+    """
+    https://leetcode.com/problems/minimum-operations-to-sort-a-string/?envType=daily-question&envId=2026-08-25
+
+    You are given a string s consisting of lowercase English letters.
+
+    In one operation, you can select any substring of s that is not the entire string
+    and sort it in non-descending alphabetical order.
+
+    Return the minimum number of operations required to make s sorted in
+    non-descending order. If it is not possible, return -1.
+
+    Example 1:
+
+    Input: s = "dog"
+
+    Output: 1
+
+    Explanation:
+
+        Sort substring "og" to "go".
+        Now, s = "dgo", which is sorted in ascending order. Thus, the answer is 1.
+
+    Example 2:
+
+    Input: s = "card"
+
+    Output: 2
+
+    Explanation:
+
+        Sort substring "car" to "acr", so s = "acrd".
+        Sort substring "rd" to "dr", making s = "acdr", which is sorted in
+        ascending order. Thus, the answer is 2.
+
+    Example 3:
+
+    Input: s = "gf"
+
+    Output: -1
+
+    Explanation:
+
+        It is impossible to sort s under the given constraints.
+        Thus, the answer is -1.
+
+    Constraints:
+
+        1 <= s.length <= 10^5
+        s consists of only lowercase English letters.
+
+    """
+    def minOperations(self, s: str) -> int:
+        len_s = len(s)
+        if len_s == 1:
+            return 0
+        elif len_s == 2:
+            return 0 if s[0] <= s[1] else -1
+        else:
+            min_s = min(s)
+            max_s = max(s)
+            if min_s == max_s:
+                return 0  # All entries are the same
+            if all(x <= y for x, y in zip(s[:-1], s[1:])):
+                return 0  # Already sorted
+            if min_s == s[0] or max_s == s[-1]:
+                return 1
+            # Sorted requires min_s == s[0] and max_s == s[-1]
+            if max_s != s[0] or min_s != s[-1]:
+                return 2
+            if sum(min_s < x < max_s for x in s) < len_s - 2:
+                # Either min_s or max_s is not unique
+                return 2
+            # Here: s = [max_s|...|min_s], both unique: Cannot do < 3
+            return 3
+
+
+# TODO!
+class Solution_1254:
+    """
+    https://leetcode.com/problems/number-of-closed-islands/?envType=daily-question&envId=2026-08-25
+
+    Given a 2D grid consists of 0s (land) and 1s (water).  An island is a maximal
+    4-directionally connected group of 0s and a closed island is an island totally
+    (all left, top, right, bottom) surrounded by 1s.
+
+    Return the number of closed islands.
+
+    Example 1:
+
+    Input: grid = [[1,1,1,1,1,1,1,0],[1,0,0,0,0,1,1,0],[1,0,1,0,1,1,1,0],[1,0,0,0,0,1,0,1],[1,1,1,1,1,1,1,0]]
+
+    Output: 2
+
+    Explanation:
+
+        The grid contains four islands of 0s.
+        The island spanning rows 1 to 3 and columns 1 to 4 is surrounded entirely by 1s. It also
+        encloses the water cell at row 2, column 2. It is therefore closed.
+        The single 0 at row 3, column 6 has 1s on all four sides, so it is also closed.
+        The two remaining islands both lie in column 7, which is on the border of the grid, so neither of them is closed.
+        Two islands are closed, shown in gray, so the answer is 2.
+
+    Example 2:
+
+    Input: grid = [[0,0,1,0,0],[0,1,0,1,0],[0,1,1,1,0]]
+
+    Output: 1
+
+    Explanation:
+
+        The grid contains three islands of 0s.
+        The single 0 at row 1, column 2 has 1s above it, below it, to its left and to its right, so it is closed. It is shown in gray.
+        The island formed by rows 0 to 2 of column 0 together with row 0, column 1 lies on the border, so it is not closed.
+        The island formed by rows 0 to 2 of column 4 together with row 0, column 3 also lies on the border, so it is not closed.
+        One island is closed, so the answer is 1.
+
+    Example 3:
+
+    Input: grid = [[1,1,1,1,1,1,1],[1,0,0,0,0,0,1],[1,0,1,1,1,0,1],[1,0,1,0,1,0,1],[1,0,1,1,1,0,1],[1,0,0,0,0,0,1],[1,1,1,1,1,1,1]]
+
+    Output: 2
+
+    Explanation:
+
+        The grid contains two islands of 0s, one nested inside the other.
+        The outer island is the ring of 0s occupying rows 1 to 5 and columns 1 to 5. It is enclosed by the outer border of 1s, so it is closed.
+        The inner island is the single 0 at row 3, column 3. It is enclosed by the inner ring of 1s, so it is also closed.
+        Both islands are closed, so the answer is 2.
+
+    Constraints:
+
+        1 <= grid.length, grid[0].length <= 100
+        0 <= grid[i][j] <=1
+
+    """
+    def closedIsland(self, grid: list[list[int]]) -> int:
+        pass
 
 
 # === Hard ===

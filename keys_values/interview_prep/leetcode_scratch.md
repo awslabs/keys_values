@@ -617,4 +617,22 @@ Greedy solution can be done in O(1), from start state:
 delta = sum_left - sum_right
 - If delta == 0:
   A wins if free_left + free_right is odd; B otherwise.
-  Namely: 
+  Namely:
+
+
+## 3863
+
+- Sort string `s` by sorting substrings which must not be all of `s`
+- Return minimum number of required sort calls; or -1 if not possible
+
+Hypothesis:
+- If len(s) == 1: Return 0
+- If len(s) == 2: Return -1 or 0
+- If len(s) > 2:
+  - If already sorted: Return 0
+  - Determine min, max
+  - If min is at 0 or max at -1: Return 1
+  - If max not at 0: Return 2 (could be 1?)
+  - If min not at -1: Return 2 (could be 1?)
+  - If max or min not unique: Return 2
+  - Here: [max|...|min], both unique: Return 3
