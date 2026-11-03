@@ -22,9 +22,16 @@ scripts.keys_values = "keys_values.__main__:main"
 
 dependencies = [
     "filelock",
-    "black>=26.3.1",
+    "black>=26.3.1",  # dev dependencies
     "flake8",
-    "hypothesis",
+    "hypothesis",  # test dependencies
+    "tiktoken",  # Ruler dataset dependencies
+    "wonderwords",
+    "nltk",
+    "pyyaml",
+    "tqdm",
+    "tenacity",
+    "scipy",
 ]
 
 [project.optional-dependencies]
