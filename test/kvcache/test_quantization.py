@@ -316,9 +316,10 @@ def test_explore_bitsandbytes():
         )
         num_channels = params.max_batch_size * n_query_groups * params.cache_length
 
-        x = random_tensor(params, num=params.cache_length)
+        x = random_tensor(params, num=params.cache_length, device=device)
         shape = (params.max_batch_size, n_query_groups, params.cache_length)
         assert x.shape == shape + (blocksize,)
+        assert x.device == device
         q_x, state = quant_func(x)
         lines = [
             f"\nx.shape = {tuple(x.shape)}",
