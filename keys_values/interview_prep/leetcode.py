@@ -2939,7 +2939,20 @@ class Solution_453:
 
     """
     def minMoves(self, nums: list[int]) -> int:
-        pass
+        # Permutation of `nums` does not change the solution. Can sort it.
+        # Algorithm: In each round:
+        # - Increase all x < max
+        # - If several x == max: Do not increase leftmost
+        # Is this optimal?
+        # - Increase n-1 entries is equivalent to decreasing one entry
+        # - Why right to left? This keeps all delta's except current one
+        #   unaffected
+        # - Loop in order of delta size? Does not help!
+        nums = sorted(nums)
+        deltas = [b - a for a, b in zip(nums[:-1], nums[1:])]
+        return sum(
+            x * delta for x, delta in zip(range(len(nums), 0, -1), deltas)
+        )
 
 
 # === Hard ===

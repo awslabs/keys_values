@@ -645,3 +645,17 @@ Idea:
 - Island closed iff no cell on boundary
 - Method to grow island and return if closed or not: Can be recursive
 - Grow and count all closed islands
+
+
+## 453
+
+Idea:
+- Reordering entries does not change solution -> sort
+- Greedy: Always lift all but max
+- If several entries at max: Drop first. Array remains sorted
+
+Is this optimal?
+- Incrementing n-1 entries is equivalent to decrementing one entry
+- What about ordering? Why from right to left?
+- Would it not be better to deal with largest delta's first?
+
