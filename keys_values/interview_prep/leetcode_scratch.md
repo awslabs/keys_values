@@ -636,3 +636,12 @@ Hypothesis:
   - If min not at -1: Return 2 (could be 1?)
   - If max or min not unique: Return 2
   - Here: [max|...|min], both unique: Return 3
+
+
+## 1254
+
+Idea:
+- Collect land cells in set
+- Island closed iff no cell on boundary
+- Method to grow island and return if closed or not: Can be recursive
+- Grow and count all closed islands

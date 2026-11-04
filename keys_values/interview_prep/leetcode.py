@@ -2858,7 +2858,87 @@ class Solution_1254:
         0 <= grid[i][j] <=1
 
     """
+    # Label values:
+    # - 1: Water (stays that)
+    # - 0: Initially Island
+    # - 2: Island already covered
+    def _cover_island_cells(self, y: int, x: int) -> bool:
+        self.grid[y][x] = 2
+        self.orig_island.remove((y, x))
+        is_closed = True
+        cands = []
+        if x > 0:
+            cands.append((y, x - 1))
+        else:
+            is_closed = False
+        if x < self.n - 1:
+            cands.append((y, x + 1))
+        else:
+            is_closed = False
+        if y > 0:
+            cands.append((y - 1, x))
+        else:
+            is_closed = False
+        if y < self.m - 1:
+            cands.append((y + 1, x))
+        else:
+            is_closed = False
+        for ys, xs in cands:
+            if self.grid[ys][xs] == 0:
+                _is_closed = self._cover_island_cells(ys, xs)
+                is_closed = is_closed or _is_closed
+        return is_closed
+
     def closedIsland(self, grid: list[list[int]]) -> int:
+        self.m = len(grid)
+        self.n = len(grid[0])
+        self.grid = [row.copy() for row in grid]
+        self.orig_island = {
+            (y, x)
+            for y, row in enumerate(grid)
+            for x, v in enumerate(row)
+            if v == 0
+        }
+        num_closed = 0
+        while self.orig_island:
+            is_closed = self._cover_island_cells(*next(iter(self.orig_island)))
+            if is_closed:
+                num_closed += 1
+        return num_closed
+
+
+# TODO!
+class Solution_453:
+    """
+    https://leetcode.com/problems/minimum-moves-to-equal-array-elements/?envType=daily-question&envId=2026-08-25
+
+    You are given an integer array nums of size n.
+
+    Return the minimum number of moves required to make all array elements equal.
+
+    In one move, you must increment n - 1 elements of the array by 1.
+
+    Example 1:
+
+    Input: nums = [1,2,3]
+    Output: 3
+    Explanation: Only three moves are needed (remember each move increments two elements):
+    [1,2,3]  =>  [2,3,3]  =>  [3,4,3]  =>  [4,4,4]
+
+    Example 2:
+
+    Input: nums = [1,1,1]
+    Output: 0
+
+    Constraints:
+
+        n == nums.length
+        1 <= nums.length <= 10^5
+        -10^9 <= nums[i] <= 10^9
+        The answer is guaranteed to fit in a 32-bit integer.
+
+    """
+    def minMoves(self, nums: list[int]) -> int:
         pass
 
 
