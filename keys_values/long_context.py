@@ -686,15 +686,31 @@ class LongContextInferenceModel(GPTAndHeadModel):
     ) -> torch.Tensor:
         """
         Different to `GPT.forward`, this is processing a batch of full
-        sequences. Depending on whether `targets` are provided or not,
-        this method does different things:
+        sequences. Depending on whether `targets` are provided or not, and
+        on `mode`, this method does different things:
 
-        * `targets` given: Process `input_ids`, compute loss function given
-            by `head_model` (must be given). The loss value is returned.
-            The KV caches are reset, their buffers are deallocated.
-        * `targets` not given: Process `input_ids`. Return logits for the
-            final token position being processed. The KV caches are not reset,
-            as the model is to be used for token generations.
+        * `mode == "both"`, `targets` given: Reset KV caches, then process
+            `input_ids`, compute loss function given by `head_model` (must be
+            given). The loss value is returned. The KV caches are reset, their
+            buffers are deallocated.
+        * `mode == "both"`, `targets` not given: Reset KV caches, then process
+            `input_ids`. Return logits for the final token position being
+            processed. The KV caches are not reset, as the model is to be used
+            for token generations.
+        * `mode == "inputs"`, `targets` given: Reset KV caches, then process
+            `input_ids[:, :-num_output_tokens]`, where
+            `num_output_tokens = targets.shape[1]`. Return logits for the final
+            token position being processed. The KV caches are not reset, as the
+            model is to be used for token generations. Generated tokens are
+            then compared with `targets` in a sample-based metric.
+        * `mode == "targets"`, `targets` given: Do not reset KV caches, as they
+            have been computed before, by a call with `mode = "inputs"`.
+            Process `input_ids[:, -num_output_tokens:]`, compute loss
+            function given by `head_model` (must be given). The loss value is
+            returned. The KV caches are reset, their buffers are deallocated.
+
+        See :class:`keys_values.kvcache.replay_buffers.ModelForTokenGeneration`
+        for how to evaluate sample-based metric(s) and loss function.
 
         Some luss functions are defined over target tokens. For these:
         If `average_loss_per_batch == False`, each loss value
@@ -711,12 +727,13 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 if `head_model` is given. If `head_model` is given and
                 `targets=None`, we return logits as well
             scale_factor: Loss is multiplied by this factor. Defaults to 1.
+            mode: Mode for computation, see above. Defaults to "both".
             average_loss_per_batch: See above. Defaults to `False`.
 
         Returns:
-            Loss values, shape `(batch_size,)`. If `targets` are not given,
-            we return the logits for the final token position, shape
-            `(batch_size, 1, config.padded_vocab_size)`.
+            Loss values, shape `(batch_size,)`. If `targets` are not given, or
+            `mode == "inputs"`, we return the logits for the final token
+            position, shape `(batch_size, 1, config.padded_vocab_size)`.
 
         """
         if self.head_model is None and targets is not None:
@@ -736,6 +753,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
             )
         if mode != "both" and targets is None:
             raise ValueError(f"mode = {mode}: targets must be given")
+        # `inputs_targets_boundary` in `kwargs` is only for unit testing
         self._init_members_from_tokens(
             input_ids,
             targets,

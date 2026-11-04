@@ -232,6 +232,9 @@ class KVCacheFactory:
             dtype: Data type for cache buffers (de-quantized). If not given,
                 this is determined with first usage
             cache_kwargs: Additional keyword arguments for cache creation
+            for_testing: If `True` and quantized buffers are used, we create
+                :class:`TestingKVCacheBuffers` instead. This is only used
+                for unit testing
 
         Returns:
             KV cache objects

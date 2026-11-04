@@ -364,11 +364,13 @@ class ModelForTokenGeneration:
         if token_generating == self.is_token_generating:
             return
         if token_generating:
+            # False -> True: Switch in replay buffers
             self._cache_states = []
             for cache in self.gpt_model.get_kv_caches():
                 self._cache_states.append(cache.get_state())
                 cache.switch_buffers(ReplayKVCacheBuffers(cache.kv_buffers))
         else:
+            # True -> False: Switch back to base buffers
             assert (
                 self._cache_states is not None
                 and len(self._cache_states) == self.gpt_model.config.n_layer

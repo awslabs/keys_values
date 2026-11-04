@@ -52,7 +52,7 @@ def create_model_and_data(
     Dict[str, Any],
 ]:
     dtype = torch.float16
-    torch.set_default_dtype(dtype)
+    torch.set_default_dtype(dtype)  # Set default dtype
     qname = "torch-quantized8"
     batch_sizes = [5] + [4] * (len(cache_lengths) - 1)
     n_head = 8
@@ -61,6 +61,8 @@ def create_model_and_data(
     vocab_size = 128
     max_sequence_length = max(cache_lengths) * 8
     min_sequence_length = max(cache_lengths) * 2
+
+    # Create model and KV caches
     config = Config(
         n_layer=len(cache_lengths),
         n_head=n_head,
@@ -86,7 +88,7 @@ def create_model_and_data(
     _cache_kwargs = {**cache_kwargs, **mha_kwargs}
     with torch.device(device):
         gpt_model = GPT(config, **mha_kwargs)
-        gpt_model.apply(gpt_model._init_weights)
+        gpt_model.apply(gpt_model._init_weights)  # Initialization
     caches = KVCacheFactory.create(
         gpt_model=gpt_model,
         name=cache_name + "-" + qname,
@@ -98,6 +100,8 @@ def create_model_and_data(
         for_testing=non_quantized_buffers,
     )
     gpt_model.assign_kv_caches(caches)
+
+    # Create data batches
     all_input_ids, all_targets = [], []
     for batch_size in batch_sizes:
         seq_length = randint_torch(min_sequence_length, max_sequence_length)
@@ -109,6 +113,8 @@ def create_model_and_data(
             num_output_tokens = min(max_num_targets, num_output_tokens)
         all_input_ids.append(token_ids[:, :-1])
         all_targets.append(token_ids[:, -num_output_tokens:])
+
+    # Create model
     head_model = HeadModelFactory.create(name=CrossEntropyOnLogits.NAME, config=config)
     model = LongContextInferenceModel(
         gpt_model=gpt_model,
@@ -160,6 +166,10 @@ def test_loss_after_replay(
         device,
         use_flex_attention=use_flex_attention,
     )
+
+    # We compare loss values (1) computed directly and (2) computed by first
+    # processing the prompt, then generating tokens with replay buffers,
+    # finally computing the loss value.
     direct = [
         model(inputs, targets).mean().detach()
         for inputs, targets in zip(batches, targets_batches)
@@ -183,6 +193,8 @@ def test_loss_after_replay(
         wrapper.switch_status(False)
         loss = model(inputs, targets, mode="targets")
         indirect.append(loss.mean().detach())
+
+    # Compare the two
     for a, b in zip(direct, indirect):
         torch.testing.assert_close(a, b)
 
@@ -195,6 +207,7 @@ def test_generate_several_times(
     cache_name, cache_kwargs, cache_lengths, device, use_flex_attention
 ):
     torch.random.manual_seed(31415927)
+    num_comp = 4
     model, wrapper, batches, targets_batches, _, _ = create_model_and_data(
         cache_name,
         cache_kwargs,
@@ -213,13 +226,15 @@ def test_generate_several_times(
         generated_logits.append(logits.detach().clone())
         return targets_batches[data_idx[0]][:, pos].unsqueeze(-1)
 
+    # We process the targets `num_comp` times and check whether the same
+    # logits are produced
     for i, inputs in enumerate(batches):
         data_idx[0] = i
         num_targets = targets_batches[i].shape[-1]
         model.gpt_model.max_seq_length = inputs.shape[-1]
         init_logits = model(inputs[:, :-num_targets], targets=None)
         all_results = []
-        for _ in range(4):
+        for _ in range(num_comp):
             wrapper.switch_status(True)
             generated_logits.clear()
             with mock.patch("keys_values.generate.base.batched_sample", forced_sample):
@@ -236,6 +251,7 @@ def test_generate_several_times(
             assert len(generated_logits) == num_targets
             all_results.append(generated_logits.copy())
             wrapper.switch_status(False)
+        # Compare them
         for logits_for_position in zip(*all_results):
             for other in logits_for_position[1:]:
                 torch.testing.assert_close(logits_for_position[0], other)
@@ -249,6 +265,8 @@ def test_generate_old_new(
     cache_name, cache_kwargs, cache_lengths, device, use_flex_attention
 ):
     torch.random.manual_seed(31415927)
+    # We use non-quantized KV cache buffers here, since otherwise the logits
+    # cannot be the same
     (
         model,
         wrapper,
@@ -275,6 +293,7 @@ def test_generate_old_new(
         generated_logits.append(logits.detach().clone())
         return targets_batches[data_idx[0]][:, pos].unsqueeze(-1)
 
+    # Generate targets the new way (with replay buffers)
     replay_results = []
     for i, inputs in enumerate(batches):
         data_idx[0] = i
@@ -298,6 +317,7 @@ def test_generate_old_new(
         replay_results.append(generated_logits.copy())
         wrapper.switch_status(False)
 
+    # Generate targets the old way (without replay buffers)
     gpt_model = model.gpt_model
     gpt_model.assign_kv_caches(
         [
@@ -335,6 +355,8 @@ def test_generate_old_new(
             )
         assert len(generated_logits) == num_targets
         normal_results.append(generated_logits.copy())
+
+    # Compare them
     for replay_case, normal_case in zip(replay_results, normal_results):
         for replay_logits, normal_logits in zip(replay_case, normal_case):
             torch.testing.assert_close(replay_logits, normal_logits)
