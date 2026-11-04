@@ -659,3 +659,13 @@ Is this optimal?
 - What about ordering? Why from right to left?
 - Would it not be better to deal with largest delta's first?
 
+
+## 2916
+
+Idea:
+- Iterate over all subarrays
+- Keep set of distinct entries
+- Start with set of all
+- Remove left and right
+- Collect (a, b) already done in a set
+

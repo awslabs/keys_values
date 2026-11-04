@@ -3375,3 +3375,159 @@ class Solution_115:
         return self._num_distinct(0, 0)
 
 
+MODULO_VALUE = 10 ** 9 + 7
+
+
+# - Claude is OK with my solution
+# - But it suggests something better, using a "lazy segment tree"
+class Solution_2916:
+    """
+    https://leetcode.com/problems/subarrays-distinct-element-sum-of-squares-ii/?envType=daily-question&envId=2026-08-25
+
+    You are given a 0-indexed integer array nums.
+
+    The distinct count of a subarray of nums is defined as:
+
+        Let nums[i..j] be a subarray of nums consisting of all the indices from
+        i to j such that 0 <= i <= j < nums.length. Then the number of distinct
+        values in nums[i..j] is called the distinct count of nums[i..j].
+
+    Return the sum of the squares of distinct counts of all subarrays of nums.
+
+    Since the answer may be very large, return it modulo 10^9 + 7.
+
+    A subarray is a contiguous non-empty sequence of elements within an array.
+
+    Example 1:
+
+    Input: nums = [1,2,1]
+    Output: 15
+    Explanation: Six possible subarrays are:
+    [1]: 1 distinct value
+    [2]: 1 distinct value
+    [1]: 1 distinct value
+    [1,2]: 2 distinct values
+    [2,1]: 2 distinct values
+    [1,2,1]: 2 distinct values
+    The sum of the squares of the distinct counts in all subarrays is equal to 1^2 + 1^2 + 1^2 + 2^2 + 2^2 + 2^2 = 15.
+
+    Example 2:
+
+    Input: nums = [2,2]
+    Output: 3
+    Explanation: Three possible subarrays are:
+    [2]: 1 distinct value
+    [2]: 1 distinct value
+    [2,2]: 1 distinct value
+    The sum of the squares of the distinct counts in all subarrays is equal to 1^2 + 1^2 + 1^2 = 3.
+
+    Constraints:
+
+        1 <= nums.length <= 10^5
+        1 <= nums[i] <= 10^5
+
+    """
+    def _sum_squares_distinct(
+        self,
+        left: int,
+        right: int,
+        num_distinct: int,
+    ) -> int:
+        tup = (left, right)
+        if tup in self.span_done:
+            return 0
+        self.span_done.add(tup)
+        if left == right:
+            return 1
+        lval, rval = self.nums[left], self.nums[right]
+        ssq_all = (num_distinct * num_distinct) % MODULO_VALUE
+        for nleft, nright, val in (
+            (left + 1, right, lval), (left, right - 1, rval),
+        ):
+            nd_new = num_distinct - int(self.histogram[val] == 1)
+            self.histogram[val] -= 1
+            ssq_part = self._sum_squares_distinct(nleft, nright, nd_new)
+            if ssq_part != 0:
+                ssq_all = (ssq_all + ssq_part) % MODULO_VALUE
+            self.histogram[val] += 1
+        return ssq_all
+
+    def sumCounts(self, nums: List[int]) -> int:
+        if len(nums) == 1:
+            return 1
+        self.span_done: Set[Tuple[int, int]] = set()
+        self.histogram: Dict[int, int] = Counter(nums)
+        return self._sum_squares_distinct(0, len(nums) - 1, len(self.histogram))
+
+
+class _SegTree:
+    """Lazy segment tree: range +1 increment, range sum of squares query.
+
+    Maintains sum_sq[i] = f(i)^2 and sum_lin[i] = f(i).
+    When f[i] += 1 over a range: new_sum_sq = sum_sq + 2*sum_lin + len,
+    new_sum_lin = sum_lin + len.
+    """
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+        self.sum_sq = [0] * (4 * n)
+        self.sum_lin = [0] * (4 * n)
+        self.lazy = [0] * (4 * n)
+
+    def _apply(self, node: int, l: int, r: int, k: int) -> None:
+        m = r - l + 1
+        self.sum_sq[node] = (self.sum_sq[node] + 2 * k * self.sum_lin[node] + k * k * m) % MODULO_VALUE
+        self.sum_lin[node] = (self.sum_lin[node] + k * m) % MODULO_VALUE
+        self.lazy[node] = (self.lazy[node] + k) % MODULO_VALUE
+
+    def _push_down(self, node: int, l: int, r: int) -> None:
+        if self.lazy[node]:
+            mid = (l + r) // 2
+            self._apply(2 * node, l, mid, self.lazy[node])
+            self._apply(2 * node + 1, mid + 1, r, self.lazy[node])
+            self.lazy[node] = 0
+
+    def update(self, node: int, l: int, r: int, ql: int, qr: int) -> None:
+        if qr < l or r < ql:
+            return
+        if ql <= l and r <= qr:
+            self._apply(node, l, r, 1)
+            return
+        self._push_down(node, l, r)
+        mid = (l + r) // 2
+        self.update(2 * node, l, mid, ql, qr)
+        self.update(2 * node + 1, mid + 1, r, ql, qr)
+        self.sum_sq[node] = (self.sum_sq[2 * node] + self.sum_sq[2 * node + 1]) % MODULO_VALUE
+        self.sum_lin[node] = (self.sum_lin[2 * node] + self.sum_lin[2 * node + 1]) % MODULO_VALUE
+
+    def query(self, node: int, l: int, r: int, ql: int, qr: int) -> int:
+        if qr < l or r < ql:
+            return 0
+        if ql <= l and r <= qr:
+            return self.sum_sq[node]
+        self._push_down(node, l, r)
+        mid = (l + r) // 2
+        return (self.query(2 * node, l, mid, ql, qr) +
+                self.query(2 * node + 1, mid + 1, r, ql, qr)) % MODULO_VALUE
+
+
+class Solution_2916_Fast:
+    """O(n log n) solution using a lazy segment tree.
+
+    Sweep j from 0 to n-1. At each step maintain seg[i] = f(i,j)^2 where
+    f(i,j) is the distinct count for nums[i..j]. When we add nums[j] (last
+    seen at position p), only indices i in [p+1, j] gain a new distinct element,
+    so we do a range +1 on that interval and accumulate the sum over [0, j].
+    """
+
+    def sumCounts(self, nums: List[int]) -> int:
+        n = len(nums)
+        seg = _SegTree(n)
+        last_seen: Dict[int, int] = {}
+        ans = 0
+        for j, x in enumerate(nums):
+            p = last_seen.get(x, -1)
+            seg.update(1, 0, n - 1, p + 1, j)
+            last_seen[x] = j
+            ans = (ans + seg.query(1, 0, n - 1, 0, j)) % MODULO_VALUE
+        return ans
