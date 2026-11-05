@@ -121,6 +121,84 @@ def create_chunk_sizes(
     return chunk_sizes
 
 
+def create_chunk_sizes_with_boundary(
+    gpt_model: GPT,
+    seq_length: int,
+    chunk_size: int,
+    randomize_chunk_sizes: bool,
+    num_target_tokens: int,
+) -> List[int]:
+    """
+    Same as :func:`create_chunk_sizes`, but there is also a chunk boundary at
+    `seq_length - num_target_tokens`.
+
+    This is not used for training. It is needed by
+    :class:`LongContextInferenceModel` with `mode="inputs"` and
+    `mode="targets"`, where the inputs and the targets are processed in
+    separate calls, so that tokens can be generated in between (see
+    :class:`keys_values.kvcache.replay_buffers.ModelForTokenGeneration`).
+
+    """
+    if not (0 < num_target_tokens < seq_length):
+        raise ValueError(
+            f"num_target_tokens = {num_target_tokens}, must be in "
+            f"[1, {seq_length - 1}]"
+        )
+    boundary = seq_length - num_target_tokens
+    mpl = min(c.max_prefill_length for c in gpt_model.get_kv_caches())
+    points_to_cover = sorted(
+        set(
+            cache.cache_length
+            for cache in gpt_model.get_kv_caches()
+            if cache.cache_length <= seq_length
+        ).union([boundary])
+    )
+    if mpl >= seq_length:
+        chunk_sizes = [boundary, num_target_tokens]
+    else:
+        # The first chunk ends at the boundary if this comes before `mpl`
+        fcs = mpl
+        if fcs > points_to_cover[0]:
+            fcs = points_to_cover.pop(0)
+        chunk_sizes = [fcs]
+        num_done = fcs
+        step = chunk_size // 2
+        min_val = max(chunk_size - step, 1)
+        max_val = min(
+            chunk_size + step,
+            points_to_cover[0] if points_to_cover else seq_length - num_done,
+        )
+        if randomize_chunk_sizes:
+            random_sizes = torch.randint(
+                min_val,
+                max_val + 1,
+                (NUM_RANDOM_CHUNK_SIZE_VALUES,),
+            )
+        else:
+            random_sizes = None
+        while num_done < seq_length:
+            if randomize_chunk_sizes:
+                ind = randint_torch(0, NUM_RANDOM_CHUNK_SIZE_VALUES - 1)
+                c_size = random_sizes[ind].item()
+            else:
+                c_size = chunk_size
+            c_size = min(c_size, seq_length - num_done)
+            next_pt = num_done + c_size
+            if points_to_cover and next_pt >= points_to_cover[0] - CLOSEBY_THRESHOLD:
+                c_size = points_to_cover.pop(0) - num_done
+            if c_size > 0:
+                chunk_sizes.append(c_size)
+            num_done += c_size
+    assert sum(chunk_sizes) == seq_length  # Sanity check
+    _assert_chunk_sizes(
+        chunk_sizes,
+        gpt_model,
+        chunk_size,
+        randomize_chunk_sizes,
+    )
+    return chunk_sizes
+
+
 def _assert_chunk_sizes(
     chunk_sizes: List[int],
     gpt_model: GPT,
@@ -603,19 +681,36 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
         scale_factor: float = 1.0,
+        mode: str = "both",
         **kwargs,
     ) -> torch.Tensor:
         """
         Different to `GPT.forward`, this is processing a batch of full
-        sequences. Depending on whether `targets` are provided or not,
-        this method does different things:
+        sequences. Depending on whether `targets` are provided or not, and
+        on `mode`, this method does different things:
 
-        * `targets` given: Process `input_ids`, compute loss function given
-            by `head_model` (must be given). The loss value is returned.
-            The KV caches are reset, their buffers are deallocated.
-        * `targets` not given: Process `input_ids`. Return logits for the
-            final token position being processed. The KV caches are not reset,
-            as the model is to be used for token generations.
+        * `mode == "both"`, `targets` given: Reset KV caches, then process
+            `input_ids`, compute loss function given by `head_model` (must be
+            given). The loss value is returned. The KV caches are reset, their
+            buffers are deallocated.
+        * `mode == "both"`, `targets` not given: Reset KV caches, then process
+            `input_ids`. Return logits for the final token position being
+            processed. The KV caches are not reset, as the model is to be used
+            for token generations.
+        * `mode == "inputs"`, `targets` given: Reset KV caches, then process
+            `input_ids[:, :-num_output_tokens]`, where
+            `num_output_tokens = targets.shape[1]`. Return logits for the final
+            token position being processed. The KV caches are not reset, as the
+            model is to be used for token generations. Generated tokens are
+            then compared with `targets` in a sample-based metric.
+        * `mode == "targets"`, `targets` given: Do not reset KV caches, as they
+            have been computed before, by a call with `mode = "inputs"`.
+            Process `input_ids[:, -num_output_tokens:]`, compute loss
+            function given by `head_model` (must be given). The loss value is
+            returned. The KV caches are reset, their buffers are deallocated.
+
+        See :class:`keys_values.kvcache.replay_buffers.ModelForTokenGeneration`
+        for how to evaluate sample-based metric(s) and loss function.
 
         Some luss functions are defined over target tokens. For these:
         If `average_loss_per_batch == False`, each loss value
@@ -632,12 +727,13 @@ class LongContextInferenceModel(GPTAndHeadModel):
                 if `head_model` is given. If `head_model` is given and
                 `targets=None`, we return logits as well
             scale_factor: Loss is multiplied by this factor. Defaults to 1.
+            mode: Mode for computation, see above. Defaults to "both".
             average_loss_per_batch: See above. Defaults to `False`.
 
         Returns:
-            Loss values, shape `(batch_size,)`. If `targets` are not given,
-            we return the logits for the final token position, shape
-            `(batch_size, 1, config.padded_vocab_size)`.
+            Loss values, shape `(batch_size,)`. If `targets` are not given, or
+            `mode == "inputs"`, we return the logits for the final token
+            position, shape `(batch_size, 1, config.padded_vocab_size)`.
 
         """
         if self.head_model is None and targets is not None:
@@ -651,14 +747,28 @@ class LongContextInferenceModel(GPTAndHeadModel):
         input_ids = input_ids.to(device)
         if targets is not None:
             targets = targets.to(device)
-        self._init_members_from_tokens(input_ids, targets)
-        # Reset all KV caches
-        self.gpt_model.reset()
+        if mode not in ("both", "inputs", "targets"):
+            raise ValueError(
+                f"mode = {mode}, must be one of ['both', 'inputs', 'targets']"
+            )
+        if mode != "both" and targets is None:
+            raise ValueError(f"mode = {mode}: targets must be given")
+        # `inputs_targets_boundary` in `kwargs` is only for unit testing
+        self._init_members_from_tokens(
+            input_ids,
+            targets,
+            inputs_targets_boundary=(
+                kwargs.get("inputs_targets_boundary", False) or mode != "both"
+            ),
+        )
+        if mode != "targets":
+            self.gpt_model.reset()
         return self._forward_only(
             input_ids,
             targets,
             scale_factor,
             average_loss_per_batch=kwargs.get("average_loss_per_batch", False),
+            mode=mode,
         )
 
     def set_record_gpu_memory(
@@ -684,6 +794,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         self,
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor],
+        inputs_targets_boundary: bool = False,
     ):
         """
         Initialize members required for processing the current batch.
@@ -723,22 +834,51 @@ class LongContextInferenceModel(GPTAndHeadModel):
         else:
             num_output_tokens = 0
         # Select chunk sizes and chunks per cell
-        self._select_chunks_and_cells(num_output_tokens, seq_length)
+        self._select_chunks_and_cells(
+            num_output_tokens,
+            seq_length,
+            inputs_targets_boundary=inputs_targets_boundary,
+        )
+
+    def _num_target_chunks(self, num_output_tokens: int) -> int:
+        if num_output_tokens <= 0:
+            return 0
+        count = 0
+        covered = 0
+        for cs in reversed(self.chunk_sizes):
+            count += 1
+            covered += cs
+            if covered == num_output_tokens:
+                return count
+            if covered > num_output_tokens:
+                break
+        raise ValueError("No chunk boundary at the start of targets")
 
     def _select_chunks_and_cells(
         self,
         num_output_tokens: int,
         seq_length: int,
+        inputs_targets_boundary: bool = False,
     ):
         # Select chunk sizes
         if self.single_tokens_for_targets:
             seq_length -= num_output_tokens
-        chunk_sizes = create_chunk_sizes(
+        kwargs = dict(
             gpt_model=self.gpt_model,
             seq_length=seq_length,
             chunk_size=self.chunk_size,
             randomize_chunk_sizes=self.randomize_chunk_sizes,
         )
+        if (
+            inputs_targets_boundary
+            and not self.single_tokens_for_targets
+            and num_output_tokens > 0
+        ):
+            chunk_sizes = create_chunk_sizes_with_boundary(
+                **kwargs, num_target_tokens=num_output_tokens
+            )
+        else:
+            chunk_sizes = create_chunk_sizes(**kwargs)
         assert all(
             x > 0 for x in chunk_sizes
         ), f"chunk_sizes = {chunk_sizes}, must all be positive"
@@ -748,10 +888,17 @@ class LongContextInferenceModel(GPTAndHeadModel):
         # Select chunks per cell. If `chunks_per_cell_multiplier == 1`, the
         # maximum chunk length is chosen so that the size of embeddings of
         # this length are equal to the maximum cache buffer size,
+        num_target_chunks = (
+            self._num_target_chunks(num_output_tokens) if inputs_targets_boundary else 0
+        )
         if self._debug_single_cell_per_row:
-            # This is used for unit testing only: Force single cell per row.
-            # Do not use!
-            chunks_per_cell = [len(chunk_sizes)]
+            if inputs_targets_boundary:
+                chunks_per_cell = [
+                    len(chunk_sizes) - num_target_chunks,
+                    num_target_chunks,
+                ]
+            else:
+                chunks_per_cell = [len(chunk_sizes)]
         else:
             factor = (
                 2
@@ -768,21 +915,24 @@ class LongContextInferenceModel(GPTAndHeadModel):
             # Round up or down to the closest multiple of `chunk_size`
             max_cell_length = self.chunk_size * round(max_cell_length / self.chunk_size)
             chunks_per_cell = []
-            cell_length = 0
-            num_chunks = 0
-            for chunk_size in chunk_sizes:
-                new_length = cell_length + chunk_size
-                # If a single chunk is longer than `max_cell_length` (for
-                # example, the first one -- prefill), we need to make an
-                # exception to have a cell longer than `max_cell_length`:
-                if new_length > max_cell_length and num_chunks > 0:
-                    chunks_per_cell.append(num_chunks)
-                    cell_length = chunk_size
-                    num_chunks = 1
-                else:
-                    cell_length = new_length
-                    num_chunks += 1
-            chunks_per_cell.append(num_chunks)
+            if inputs_targets_boundary:
+                n_input_chunks = len(chunk_sizes) - num_target_chunks
+                parts = (chunk_sizes[:n_input_chunks], chunk_sizes[n_input_chunks:])
+            else:
+                parts = (chunk_sizes,)
+            for part in parts:
+                cell_length = 0
+                num_chunks = 0
+                for c_size in part:
+                    new_length = cell_length + c_size
+                    if new_length > max_cell_length and num_chunks > 0:
+                        chunks_per_cell.append(num_chunks)
+                        cell_length = c_size
+                        num_chunks = 1
+                    else:
+                        cell_length = new_length
+                        num_chunks += 1
+                chunks_per_cell.append(num_chunks)
             assert sum(chunks_per_cell) == len(chunk_sizes)
         self.chunks_per_cell = chunks_per_cell
 
@@ -1067,6 +1217,7 @@ class LongContextInferenceModel(GPTAndHeadModel):
         targets: Optional[torch.Tensor],
         scale_factor: float,
         average_loss_per_batch: bool,
+        mode: str = "both",
     ) -> torch.Tensor:
         # Ensure that all KV caches do not record replay logs
         for cache in self.gpt_model.get_kv_caches():
@@ -1075,12 +1226,40 @@ class LongContextInferenceModel(GPTAndHeadModel):
             print(
                 f"\nForward pass over {len(self.chunk_sizes)} chunks, grouped into {len(self.chunks_per_cell)} cells (inference mode)"
             )
-        result = self._forward_internal(
-            input_ids,
-            targets,
-            scale_factor,
-            average_loss_per_batch,
-        )
-        if not (targets is None or self._debug_no_deallocate_buffers):
-            self.clear()
-        return result
+        original_chunks = self.chunk_sizes
+        original_cells = self.chunks_per_cell
+        if mode != "both":
+            n_target_chunks = self._num_target_chunks(targets.shape[-1])
+            n_input_chunks = len(original_chunks) - n_target_chunks
+            target_cells = 0
+            chunks_covered = 0
+            for count in reversed(original_cells):
+                chunks_covered += count
+                target_cells += 1
+                if chunks_covered >= n_target_chunks:
+                    break
+            if chunks_covered != n_target_chunks:
+                raise ValueError("Target cells are not aligned with chunk boundary")
+            if mode == "inputs":
+                self.chunk_sizes = original_chunks[:n_input_chunks]
+                self.chunks_per_cell = original_cells[:-target_cells]
+                input_ids = input_ids[:, : -targets.shape[-1]]
+                targets = None
+            else:
+                self.chunk_sizes = original_chunks[n_input_chunks:]
+                self.chunks_per_cell = original_cells[-target_cells:]
+                input_ids = input_ids[:, -targets.shape[-1] :]
+        try:
+            result = self._forward_internal(
+                input_ids,
+                targets,
+                scale_factor,
+                average_loss_per_batch,
+            )
+            if not (targets is None or self._debug_no_deallocate_buffers):
+                self.clear()
+            return result
+        finally:
+            if mode != "both":
+                self.chunk_sizes = original_chunks
+                self.chunks_per_cell = original_cells
