@@ -46,6 +46,34 @@ def create_norm(config: Config, do_norm: bool) -> nn.Module:
     )
 
 
+# TODO: What about the frozen linear block? This is not correct!
+class LinearFullOrLoRA(nn.Module):
+    """
+    Represents a linear block, either as fully connected (`rank == 0`) or
+    as LoRA.
+
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        rank: int = 0,
+    ):
+        super().__init__()
+        if rank == 0:
+            self.linear = nn.Linear(in_features, out_features, bias=bias)
+        else:
+            self.linear = nn.Sequential(
+                nn.Linear(in_features, rank, bias=False),
+                nn.Linear(rank, out_features, bias=bias),
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)
+
+
 class Transformer(nn.Module):
     """
     Implements complete transformer model.
@@ -275,7 +303,7 @@ def sdpa_naive(
         q_shape = (bs, nh_k, q_per_kv) + query.shape[2:]
         arg1 = arg1.view(*q_shape)
         arg2 = arg2.unsqueeze(2)
-        # At this point:
+        # At this point (with nh_q == nh_k * q_per_kv):
         # - arg1:   (bs, nh_k, q_per_kv, q_len, head_size)
         # - arg2:   (bs, nh_k,        1, head_size, kv_len)
         # - scores: (bs, nh_k, q_per_kv, q_len, kv_len)
