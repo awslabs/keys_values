@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from keys_values.generate.base import generate
+from keys_values.generate.speculative_decoding import speculative_generate
 
 __all__ = [
     "generate",
+    "speculative_generate",
 ]

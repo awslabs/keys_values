@@ -99,6 +99,38 @@ class ScatterInformation:
                 values.scatter_(2, index, self.value)
 
 
+def _slot_runs(index: PositionsType, num: int) -> List[Tuple[int, int, int]]:
+    """
+    Args:
+        index: Slot positions of an update, `(start, end)` or an index of shape
+            `(batch_size, n_query_groups, n)` which is the same for all batch
+            entries and heads
+        num: Only the first `num` positions are used
+
+    Returns:
+        List of `(start, end, offset)`, where slots `range(start, end)`
+        receive entries `range(offset, offset + end - start)` of the update
+
+    """
+    if isinstance(index, tuple):
+        start = index[0]
+        return [(start, start + num, 0)] if num > 0 else []
+    if not is_index_1d(index):
+        raise NotImplementedError(
+            "Updates must use the same slots for all batch entries and heads"
+        )
+    # Index tensors only arise when the slots wrap around the end of the
+    # cache, so this transfer to the host is rare
+    slots = index[0, 0, :num].tolist()
+    result = []
+    offset = 0
+    for pos in range(1, num + 1):
+        if pos == num or slots[pos] != slots[pos - 1] + 1:
+            result.append((slots[offset], slots[pos - 1] + 1, offset))
+            offset = pos
+    return result
+
+
 class ReplayKVCacheBuffers(KVCacheBuffers):
     """
     Wrapper around :class:`QuantizedKVCacheBuffers`, drives efficient token
@@ -253,6 +285,71 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
         self.current_length = self.quant_buffers.current_length
         self._updates = []
         self._base_has_been_updated = True
+
+    @property
+    def num_updated_tokens(self) -> int:
+        """
+        Returns:
+            Number of tokens for which updates are stored
+
+        """
+        return sum(scat_info.key.shape[2] for scat_info in self._updates)
+
+    def commit_prefix(self, num: int):
+        """
+        Writes the updates for the first `num` tokens into the base buffers
+        `quant_buffers` and drops the updates for all later tokens. Afterwards,
+        the base buffers are in the state of having received only these `num`
+        tokens. These buffers here should not be used anymore.
+
+        Different to :meth:`update_base_buffers`, the new entries are quantized
+        directly into the slots they occupy, without de-quantizing the base
+        buffers first. Slots of dropped tokens are not touched. This requires
+        updates whose index is the same for all batch entries and heads, as
+        created by :class:`DenseKVCache` and
+        :class:`LastRecentlyInsertedKVCache`.
+
+        Args:
+            num: Number of tokens to keep, in `[0, num_updated_tokens]`
+
+        """
+        total = self.num_updated_tokens
+        if not (0 <= num <= total):
+            raise ValueError(f"num = {num}, must be in [0, {total}]")
+        if self._is_testing:
+            raise NotImplementedError("commit_prefix is not supported for test buffers")
+        base = self.quant_buffers
+        dequant = self.dequant_buffers
+        # The de-quantized buffer must not keep content of these buffers or
+        # the base, which is stale after this. Normally, it is associated with
+        # some replay buffers, and the next access to the base re-associates
+        # it anyway, so this is a safeguard. Dropping the association writes
+        # back pending changes first
+        if dequant._quantized_cache is self or dequant._quantized_cache is base:
+            dequant.set_quantized_cache(None)
+        num_left = num
+        for scat_info in self._updates:
+            if num_left == 0:
+                break
+            num_scat = min(scat_info.key.shape[2], num_left)
+            for start, end, offset in _slot_runs(scat_info.index, num_scat):
+                for quantizer, values in (
+                    (base.quantizer_k, scat_info.key),
+                    (base.quantizer_v, scat_info.value),
+                ):
+                    quantizer.quantize(
+                        start,
+                        end,
+                        values[:, :, offset : (offset + end - start), :].to(
+                            dtype=base.dtype
+                        ),
+                        block_idx=base.block_idx,
+                    )
+            num_left -= num_scat
+        base.current_length = min(base.cache_length, base.current_length + num)
+        self.current_length = base.current_length
+        self._updates = []
+        self._base_has_been_updated = num > 0
 
     def _deallocate(self):
         self._updates = []
