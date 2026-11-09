@@ -302,6 +302,11 @@ class ReplayKVCacheBuffers(KVCacheBuffers):
         the base buffers are in the state of having received only these `num`
         tokens. These buffers here should not be used anymore.
 
+        This is needed for speculative decoding: draft tokens are inserted as
+        tentative updates, and only the ones accepted by the target model are
+        kept, see :meth:`TentativeKVCacheUpdates.keep`.
+        :meth:`update_base_buffers` would write all of them.
+
         Different to :meth:`update_base_buffers`, the new entries are quantized
         directly into the slots they occupy, without de-quantizing the base
         buffers first. Slots of dropped tokens are not touched. This requires

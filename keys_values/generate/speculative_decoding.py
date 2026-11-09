@@ -53,8 +53,18 @@ each other unquantized. Tentative updates themselves don't change the
 verification: the target's call gives the same logits as the same call in
 normal mode.
 
+Relation to LitGPT: :func:`sampling_probs` follows the steps of
+:func:`litgpt.generate.base.sample`, but returns the distribution instead of
+a sample, and :func:`_filter_top_p` is a batched version of
+:func:`litgpt.generate.base.sample_top_p`. Neither can be imported, since
+`sample` only works on the final position, and `sample_top_p` only on 1-D
+inputs. LitGPT's `litgpt.generate.speculative_decoding` is not used. In
+version 0.5.13, it does not return the first generated token, is not greedy
+for `temperature=0`, and fails for `top_p < 1` after a rejection.
+
 """
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Tuple
 
@@ -282,7 +292,13 @@ class _StopSequenceMatcher:
     Tracks the longest prefix of a stop sequence which is a suffix of the
     tokens seen so far, using the Knuth-Morris-Pratt failure function, so
     that overlapping occurrences are detected. For example, the stop sequence
-    `[1, 2, 1, 2, 3]` is found in `[1, 2, 1, 2, 1, 2, 3]`.
+    `[1, 2, 1, 2, 3]` is found in `[1, 2, 1, 2, 1, 2, 3]`. This is needed
+    since several tokens are generated per step, so a stop sequence can
+    start in one step and end in a later one.
+
+    Knuth, Morris, Pratt
+    Fast Pattern Matching in Strings
+    SIAM Journal on Computing 6(2), 1977
 
     """
 
@@ -326,6 +342,10 @@ class _TokenEmitter:
     Tokens which may be the start of a stop sequence are held back. Once a
     stop sequence is complete, the remaining tokens are released, without
     the stop sequence if `include_eos == False`.
+
+    This implements the handling of `stop_tokens` and `include_eos` in
+    :func:`keys_values.generate.base.generate_fn` for several tokens per
+    step.
 
     """
 
@@ -443,6 +463,7 @@ def speculative_generate_fn(
     include_eos: bool,
     deallocate_cache_buffers: bool = True,
     stats: Optional[SpeculativeDecodingStats] = None,
+    profile: bool = False,
 ) -> Iterator[torch.Tensor]:
     """
     Generates tokens for a single prompt by speculative decoding. Same
@@ -460,9 +481,10 @@ def speculative_generate_fn(
     :func:`keys_values.generate.base.generate_fn`. If `include_eos == False`,
     all tokens before the completed stop sequence are returned.
 
-    Phases of each step are annotated with `torch.profiler.record_function`
-    (names starting with `speculative_decoding::`), so that their cost can
-    be analyzed with `torch.profiler`.
+    If `profile == True`, phases of each step are annotated with
+    `torch.profiler.record_function` (names starting with
+    `speculative_decoding::`), so that their cost can be analyzed with
+    `torch.profiler`.
 
     Args:
         target_model: Model to sample from. Must be
@@ -488,6 +510,8 @@ def speculative_generate_fn(
         deallocate_cache_buffers: Whether to deallocate KV cache buffers of
             both models at the end.
         stats: If given, statistics are written into this object.
+        profile: Annotate phases with `record_function`? Defaults to
+            `False`.
 
     Yields:
         The prompt (if `include_prompt`), then generated tokens, each of
@@ -523,6 +547,11 @@ def speculative_generate_fn(
     target_updates = TentativeKVCacheUpdates(target_gpt.get_kv_caches())
     draft_updates = TentativeKVCacheUpdates(draft_gpt.get_kv_caches())
 
+    def phase(name: str):
+        if profile:
+            return record_function("speculative_decoding::" + name)
+        return nullcontext()
+
     def probs(logits: torch.Tensor) -> torch.Tensor:
         return sampling_probs(logits[..., :vocab_size], **sample_kwargs)
 
@@ -541,7 +570,7 @@ def speculative_generate_fn(
         # Prompt processing for both models. This is done in chunks by the
         # long context inference models. The final logits of the draft model
         # are not needed, since the first token is sampled from the target.
-        with record_function("speculative_decoding::prefill"):
+        with phase("prefill"):
             logits = target_model(prompt.unsqueeze(0).to(target_device), targets=None)
             draft_model(prompt.unsqueeze(0).to(draft_device), targets=None)
             token = _draw(probs(logits[0, -1]), greedy)  # (1,)
@@ -580,7 +609,7 @@ def speculative_generate_fn(
             if num_draft > 0:
                 # Draft phase: Generate `num_draft` tokens. The pending
                 # tokens are inserted first; they are always kept.
-                with record_function("speculative_decoding::draft"):
+                with phase("draft"):
                     logits = draft_gpt(
                         torch.cat(draft_pending).to(draft_device).view(1, -1)
                     )
@@ -603,11 +632,11 @@ def speculative_generate_fn(
 
             # Verification: The target model processes `token` and the draft
             # tokens in a single call
-            with record_function("speculative_decoding::verify"):
+            with phase("verify"):
                 if num_draft > 0:
                     target_updates.start()
                 logits = target_gpt(torch.cat((token, draft_tokens)).view(1, -1))
-            with record_function("speculative_decoding::accept"):
+            with phase("accept"):
                 num_accepted, next_token = accept_or_reject(
                     draft_tokens=draft_tokens,
                     draft_probs=draft_probs,
@@ -624,7 +653,7 @@ def speculative_generate_fn(
             # tentative updates of the target caches are `token` and all draft
             # tokens, those of the draft caches all draft tokens except for
             # the first and the last one.
-            with record_function("speculative_decoding::keep"):
+            with phase("keep"):
                 if num_draft > 0:
                     target_updates.keep(num_accepted + 1)
                 if num_draft > 1:

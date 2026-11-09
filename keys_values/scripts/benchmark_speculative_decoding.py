@@ -422,7 +422,7 @@ def main(args: argparse.Namespace):
     stop_tokens = () if args.ignore_eos else ([tokenizer.eos_id],)
     use_cuda = device.type == "cuda"
 
-    def make_iter(prompt: torch.Tensor, k: Optional[int], stats=None):
+    def make_iter(prompt: torch.Tensor, k: Optional[int], stats=None, annotate=False):
         kwargs = dict(
             prompt=prompt,
             max_returned_tokens=prompt.numel() + args.max_new_tokens,
@@ -438,6 +438,7 @@ def main(args: argparse.Namespace):
             draft_model=draft,
             speculative_k=k,
             stats=stats,
+            profile=annotate,
             **kwargs,
         )
 
@@ -520,7 +521,7 @@ def main(args: argparse.Namespace):
                 with profile(
                     activities=activities, with_stack=args.profile_with_stack
                 ) as prof:
-                    timed_run(make_iter(encoded[0], k), device)
+                    timed_run(make_iter(encoded[0], k, annotate=True), device)
             name = config_name(k)
             print_profile(prof, name, use_cuda, args.profile_top)
             trace_path = profile_dir / f"trace_{name}.json"
