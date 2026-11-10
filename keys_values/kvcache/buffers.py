@@ -448,11 +448,16 @@ class DefaultKVCacheBuffers(KVCacheBuffers):
         region is zeros; the existing region is kept. Batch size and device
         stay the same.
 
+        The extra region is allocated with length `num_slots - n`, not by
+        slicing the current buffer. A caller can jump straight to
+        `cache_length` in one step.
+
         """
         n = self.k.shape[2]
         extra = num_slots - n
-        k_extra = torch.zeros_like(self.k[:, :, :extra, :])
-        v_extra = torch.zeros_like(self.v[:, :, :extra, :])
+        extra_shape = self.k.shape[:2] + (extra,) + self.k.shape[3:]
+        k_extra = self.k.new_zeros(extra_shape)
+        v_extra = self.v.new_zeros(extra_shape)
         self.k = torch.cat((self.k, k_extra), dim=2)
         self.v = torch.cat((self.v, v_extra), dim=2)
 

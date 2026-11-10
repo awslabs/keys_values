@@ -345,3 +345,27 @@ def test_set_slots_doubles_when_write_does_not_fit(device):
     )
     assert _physical_slots(cache) == init_length * 4
     assert torch.equal(cache.kv_buffers.k[:, :, :init_length, :], prefix)
+
+
+@pytest.mark.parametrize("device", available_backends())
+def test_expand_slots_can_jump_past_a_doubling(device):
+    torch.manual_seed(2)
+    init_length = 4
+    cache_length = 32
+    params = _grow_buffers_params(cache_length)
+    cache = create_kv_cache(
+        "lastrec-default",
+        params,
+        grow_buffers_init_length=init_length,
+        init_grace_tokens=0,
+    )
+    data = random_args_cache_forward(params, init_length, vocab_size=32, device=device)
+    cache(**range_from_args(data, 0, init_length))
+    prefix_k = cache.kv_buffers.k.clone()
+    prefix_v = cache.kv_buffers.v.clone()
+    cache.kv_buffers._expand_slots(cache_length)
+    assert _physical_slots(cache) == cache_length
+    assert torch.equal(cache.kv_buffers.k[:, :, :init_length, :], prefix_k)
+    assert torch.equal(cache.kv_buffers.v[:, :, :init_length, :], prefix_v)
+    assert torch.count_nonzero(cache.kv_buffers.k[:, :, init_length:, :]) == 0
+    assert torch.count_nonzero(cache.kv_buffers.v[:, :, init_length:, :]) == 0
