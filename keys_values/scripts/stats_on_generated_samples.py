@@ -333,14 +333,10 @@ if __name__ == "__main__":
     # dataset_size = "64k"
     dataset_size = "128k"
     is_rerun = False
-    # is_rerun = True
     is_baseline = False
-    # is_baseline = True
     is_base_model = False
-    # is_base_model = True
     extra_data = False
-    # extra_data = True
-    # is_exact = False
+    is_ruler = False
     is_exact = True
 
     if not is_exact:
@@ -362,6 +358,7 @@ if __name__ == "__main__":
             extra_data,
             is_baseline,
             is_base_model,
+            is_ruler,
             with_short=True,
         )
         if not table_type_1 and not extra_data:

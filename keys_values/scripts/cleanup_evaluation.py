@@ -28,23 +28,31 @@ ALL_CASES = [
 ]
 
 
+# TODO: Improve selection of datasets: Get rid of extra_data, is_ruler
 def datasets_and_cases(
     dataset_size: str,
     extra_data: bool,
     is_baseline: bool,
     is_base_model: bool,
+    is_ruler: bool = False,
     with_short: bool = False,
     filter_dataset: Optional[Callable[[str], bool]] = None,
     filter_case: Optional[Callable[[str], bool]] = None,
     chunk_sizes: Optional[List[int]] = None,
 ) -> Tuple[List[str], List[Union[str, Tuple[str, str]]]]:
     multiple_tasks = not is_baseline and not is_base_model
-    if not extra_data:
+    if is_ruler:
         datasets = [
-            f"helmet_nq_{dataset_size}",
-            f"helmet_trivia_qa_{dataset_size}",
-            f"helmet_hotpot_qa_{dataset_size}",
-            f"helmet_pop_qa_{dataset_size}",
+            f"ruler_{task}_{dataset_size}"
+            for task in ("cwe", "fwe", "niah_single_1", "vt")
+        ]
+        if chunk_sizes is None:
+            chunk_sizes = [8192]
+        case_patterns = [ALL_CASES[1], ALL_CASES[3], ALL_CASES[4]]
+    elif not extra_data:
+        datasets = [
+            f"helmet_{task}_{dataset_size}"
+            for task in ("nq", "trivia_qa", "hotpot_qa", "pop_qa")
         ]
         if chunk_sizes is None:
             chunk_sizes = [2048, 1024]
@@ -53,14 +61,17 @@ def datasets_and_cases(
         case_patterns = ALL_CASES
     else:
         datasets = [
-            f"helmet_trec_coarse_{dataset_size}",
-            f"helmet_nlu_{dataset_size}",
-            f"helmet_clinc150_{dataset_size}",
-            f"helmet_infinite_bench_qa_{dataset_size}",
-            f"helmet_infinite_bench_mc_{dataset_size}",
-            f"helmet_json_kv_{dataset_size}",
-            f"helmet_trec_fine_{dataset_size}",
-            f"helmet_banking77_{dataset_size}",
+            f"helmet_{task}_{dataset_size}"
+            for task in (
+                "trec_coarse",
+                "nlu",
+                "clinc150",
+                "infinite_bench_qa",
+                "infinite_bench_mc",
+                "json_kv",
+                "trec_fine",
+                "banking77",
+            )
         ]
         if chunk_sizes is None:
             chunk_sizes = [1024]
@@ -111,14 +122,11 @@ if __name__ == "__main__":
     eval_dir = "eval"
     # dataset_size = "64k"
     dataset_size = "128k"
-    # is_rerun = False
     is_rerun = True
     is_baseline = False
-    # is_baseline = True
     is_base_model = False
-    # is_base_model = True
     extra_data = False
-    # extra_data = True
+    is_ruler = False
     filter_dataset = None
     filter_case = None
     chunk_sizes = None
@@ -135,6 +143,7 @@ if __name__ == "__main__":
         extra_data,
         is_baseline,
         is_base_model,
+        is_ruler,
         filter_dataset=filter_dataset,
         filter_case=filter_case,
         chunk_sizes=chunk_sizes,

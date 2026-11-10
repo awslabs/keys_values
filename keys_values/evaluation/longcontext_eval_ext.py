@@ -474,31 +474,16 @@ def main(
                 f"data_class_path = {_data_class_path}, data_init_args = {_data_init_args}\nSame as previous setup."
             )
         else:
-            if _data_class_path.endswith("data.LongBenchV2"):
-                data = LongBenchV2(**cleanup_longbench_v2_kwargs(_data_init_args))
-                if data.metadata_dir is None:
-                    data.metadata_dir = str(out_dir / "data")
-                    print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
-                if data.test_set_tag is None:
-                    data.test_set_tag = "rest"
-                    print(f"Setting LongBenchV2.test_set_tag to {data.test_set_tag}")
-                if use_sample_metric:
-                    print(
-                        "LongBenchV2 does not support a sample-based metric. Switching to loss used during training"
-                    )
-                    use_sample_metric = False
-            elif _data_class_path.endswith("data.Helmet"):
-                data = Helmet(**_data_init_args)
-                if data.metadata_dir is None:
-                    data.metadata_dir = str(out_dir / "data")
-                    print(f"Setting Helmet.metadata_dir to {data.metadata_dir}")
-            elif _data_class_path.endswith("data.Ruler"):
-                data = Ruler(**_data_init_args)
-                if data.metadata_dir is None:
-                    data.metadata_dir = str(out_dir / "data")
-                    print(f"Setting Ruler.metadata_dir to {data.metadata_dir}")
-            else:
-                raise ValueError(f"Data class path {_data_class_path} is not supported")
+            data = create_data_module(
+                data_class_path=_data_class_path,
+                out_dir=out_dir,
+                data_init_args=_data_init_args,
+            )
+            if _data_class_path.endswith("data.LongBenchV2") and use_sample_metric:
+                print(
+                    "LongBenchV2 does not support a sample-based metric. Switching to loss used during training"
+                )
+                use_sample_metric = False
             data_class_path = _data_class_path
             data_init_args = _data_init_args
         # At this point, `data` is determined, so the default head model name
@@ -656,16 +641,7 @@ def eval_for_setup(
     ignore_index = getattr(data, "ignore_index", DEFAULT_IGNORE_INDEX)
 
     if use_sample_metric:
-        assert isinstance(data, Helmet)
-        if isinstance(data, Ruler):
-            metric = SampleBasedMetricsEvaluator.metric_for_ruler_task(data.dataset_key)
-        else:
-            if use_old_metrics is None:
-                use_old_metrics = getattr(data, "use_old_metrics", False)
-            metric = SampleBasedMetricsEvaluator.metric_for_helmet_task(
-                data.dataset_key,
-                old_setup=use_old_metrics,
-            )
+        metric = get_metric_for_task(data, use_old_metrics)
         evaluator = SampleBasedMetricsEvaluator(
             metrics=[metric],
             max_generated_tokens=sample_metric_max_generated_tokens,
@@ -864,6 +840,59 @@ def eval_for_setup_internal(
             print("Caught exception during evaluation:\n" + str(ex))
             eval_metrics_path.unlink(missing_ok=True)
             raise ex
+
+
+DATA_MODULES = {
+    "Helmet": Helmet,
+    "Ruler": Ruler,
+}
+
+
+def create_data_module(
+    data_class_path: str,
+    out_dir: Path,
+    data_init_args: Dict[str, Any],
+) -> DataModule:
+    if data_class_path.endswith("data.LongBenchV2"):
+        data = LongBenchV2(**cleanup_longbench_v2_kwargs(data_init_args))
+        if data.metadata_dir is None:
+            data.metadata_dir = str(out_dir / "data")
+            print(f"Setting LongBenchV2.metadata_dir to {data.metadata_dir}")
+        if data.test_set_tag is None:
+            data.test_set_tag = "rest"
+            print(f"Setting LongBenchV2.test_set_tag to {data.test_set_tag}")
+    else:
+        data = None
+        for name, constructor in DATA_MODULES.items():
+            if data_class_path.endswith("data." + name):
+                data = constructor(**data_init_args)
+                if data.metadata_dir is None:
+                    data.metadata_dir = str(out_dir / "data")
+                    print(f"Setting {name}.metadata_dir to {data.metadata_dir}")
+                break
+        if data is None:
+            raise ValueError(f"Data class path {data_class_path} is not supported")
+    return data
+
+
+def get_metric_for_task(
+    data: DataModule,
+    use_old_metrics: Optional[bool],
+) -> str:
+    if isinstance(data, Ruler):
+        metric = SampleBasedMetricsEvaluator.metric_for_ruler_task(data.dataset_key)
+    elif isinstance(data, Helmet):
+        if use_old_metrics is None:
+            use_old_metrics = getattr(data, "use_old_metrics", False)
+        metric = SampleBasedMetricsEvaluator.metric_for_helmet_task(
+            data.dataset_key,
+            old_setup=use_old_metrics,
+        )
+    else:
+        raise ValueError(
+            f"Data module of type {type(data)} does not support sample-based metrics"
+        )
+    return metric
 
 
 def get_dataloader(
