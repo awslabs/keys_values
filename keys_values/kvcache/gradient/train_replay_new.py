@@ -337,8 +337,7 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         self._append_debug_intermediates(query, key, value, token_idx, attn_outputs)
         return attn_outputs, attn_weights
 
-    # Needs to be rewritten, to be based on `positions`. Also cater for
-    # special cases!
+    # TODO: Case when `positions` is list
     def _forward(
         self,
         key: torch.Tensor,
@@ -346,15 +345,25 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         positions: PositionsNewEntriesType,
     ) -> KeysAndValues:
         assert self.input_pos > 0  # Not to be used for prefill
-        num = key.shape[2]
-        # Cache full: Single scatter. `update_result` is given iff there is
-        # a grace period.
-        do_grace_period = update_result is not None
-        if not do_grace_period:
-            positions = None
+        if isinstance(positions, list):
+            if len(positions) > 1:
+                raise NotImplementedError("positions is list: Not yet implemented")
+            index = positions[0][0]
         else:
-            # All slices are the same
-            positions = update_result.positions[0, 0, :]
+            index = positions
+        num = key.shape[2]
+        index_sz = index.shape[-1]
+        if index_sz < num:
+            raise ValueError(
+                f"index.shape = {index.shape}, num = {num}: Index is too short"
+            )
+        if index_sz > num:
+            # Special case
+            extra_positions = index[..., num:]
+            index = index[..., :num]
+        else:
+            extra_positions = None
+        # Cache full: Single scatter
         do_scatter = self.current_length >= self.cache_length
         if do_scatter:
             index_e = expand_index(index, head_size=self.head_size)
@@ -362,13 +371,13 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
             self._create_node_before_creator(
                 kind="scatter-key",
                 index=index_e,
-                positions=positions,
+                positions=extra_positions,
                 debug_msg="scatter-before",
             )
             self._create_node_before_creator(
                 kind="scatter-value",
                 index=index_e,
-                positions=positions,
+                positions=extra_positions,
                 debug_msg="scatter-before",
             )
             # "scatter" update of KV cache buffers
@@ -378,7 +387,7 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
                 self.kv_buffers.keys(),
                 self.kv_buffers.values(),
                 index,
-                positions,
+                extra_positions,
             )
             # Post-processing w.r.t. annotations
             self._annotation_callback = self._create_callback_after_creator(
@@ -390,8 +399,16 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
                 key_buffer_new,
                 value_buffer_new,
             )
+            # TODO: _next_grace_pos? grace_period?
+            # What happens in the default driver?
+            if update_result is not None and update_result.num1 == 0:
+                # Increment in round-robin fashion (only if num <= grace_period)
+                prefix = update_result.prefix
+                self._next_grace_pos = (
+                    self._next_grace_pos - prefix + num
+                ) % self.grace_period + prefix
         else:
-            assert not do_grace_period  # Sanity check
+            assert extra_positions is None  # Sanity check
             # Annotations of inputs, before new nodes are created
             debug_msg = f"cat-before (clen={self.current_length})"
             self._create_node_before_creator(
