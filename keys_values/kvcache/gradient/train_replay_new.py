@@ -17,8 +17,6 @@ from typing import Optional, Tuple, Dict, Any
 
 import torch
 
-from keys_values.config import Config
-
 from keys_values.attention.base import (
     MultiHeadSelfAttention,
     KeysAndValues,
@@ -29,10 +27,7 @@ from keys_values.attention.sdpa_op import (
     cat_on_buffers,
 )
 from keys_values.attention.sdpa_wrapper import ReorderAnnotationCallback
-from keys_values.kvcache.attn_weights import (
-    update_token_positions,
-    UpdateTokenPositionsGracePeriod,
-)
+from keys_values.config import Config
 from keys_values.kvcache.gradient.autograd_hooks import Annotations
 from keys_values.kvcache.gradient.annotation import (
     NodeAnnotation,
@@ -48,11 +43,7 @@ from keys_values.kvcache.test_shadow import (
     get_chunks_from_log,
 )
 from keys_values.tools.debug_utils import for_debug
-from keys_values.utils import (
-    expand_index,
-    shape_to_tuple,
-    is_index_1d,
-)
+from keys_values.utils import expand_index, shape_to_tuple
 
 
 class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
@@ -124,6 +115,7 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         self.num_chunks = num_chunks
         self._node_annotations = node_annotations
         self.input_pos = start_input_pos  # Will be validated
+        # These are initialized in `_initialize_replay`:
         self._token_chunk_pos = None
         self._start_token_chunk_pos = None
         self._end_token_chunk_pos = None
@@ -131,7 +123,6 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         self._annotation_callback = None
         self._initialize_replay()
         # For debugging
-        # TODO: Is this still needed?
         self._debug_tensors = debug_tensors
         self.debug_print_annotations = debug_print_annotations
         self._debug_full_args = debug_full_args
@@ -150,20 +141,15 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
     def batch_size(self) -> Optional[int]:
         return self.max_batch_size
 
-    # TODO: Which members here are really needed?
-    # token_positions is maintained outside!
     def _initialize_replay(self):
         # Initialize `_token_chunk_pos`, `_start_token_chunk_pos`,
-        # `_end_token_chunk_pos`, `input_pos`, and
+        # `_end_token_chunk_pos`, `input_pos`
         input_pos = self.input_pos  # target value to reach
         self.input_pos = 0
         self._token_chunk_pos = 0
         self.prefill_length = None
-        do_grace_period = self.grace_period > 0
-        done = False
         for chunk in self.token_chunks:
             if self.input_pos >= input_pos:
-                done = self.input_pos == input_pos
                 break
             # This advances `_token_chunk_pos`
             num = chunk.shape[-1]
@@ -177,7 +163,7 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
                     )
             if self.prefill_length is None:
                 self.prefill_length = num
-        if not done:
+        if self.input_pos != input_pos:
             raise ValueError(
                 f"start_input_pos = {input_pos} does not map to start of a token chunk"
             )
@@ -399,14 +385,6 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
                 key_buffer_new,
                 value_buffer_new,
             )
-            # TODO: _next_grace_pos? grace_period?
-            # What happens in the default driver?
-            if update_result is not None and update_result.num1 == 0:
-                # Increment in round-robin fashion (only if num <= grace_period)
-                prefix = update_result.prefix
-                self._next_grace_pos = (
-                    self._next_grace_pos - prefix + num
-                ) % self.grace_period + prefix
         else:
             assert extra_positions is None  # Sanity check
             # Annotations of inputs, before new nodes are created
@@ -614,24 +592,16 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
             self._debug_tensors[name + "-value"] = value.clone()
         return annotation_callback
 
-    # TODO: Is this needed?
     def _process_token_chunk(
         self,
         token_idx: torch.Tensor,
-    ) -> Tuple[Optional[torch.Tensor], Optional[UpdateTokenPositionsGracePeriod]]:
+    ):
         """
         Processes token chunk, comparing `token_idx` against the current chunk
-        in the replay log, and advancing `token_chunk_pos`. We also update
-        `_token_positions`.
-
-        `_input_pos` is not modified here.
+        in the replay log, and advancing `token_chunk_pos`.
 
         Args:
             token_idx: Token chunk to process
-
-        Returns:
-            (index, update_result), to be used in `_forward`. Either can be
-            `None`.
 
         """
         other = self.token_chunks[self._token_chunk_pos]
@@ -640,29 +610,6 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
                 f"token_idx:\n{token_idx}\nreplay_log.token_chunks[{self._token_chunk_pos}]:\n{other}\nShould be the same!"
             )
         self._token_chunk_pos += 1
-        num = token_idx.shape[-1]
-        index = None
-        update_result = None
-        if self.current_length >= self.cache_length:
-            # scatter case
-            index = self.replay_log.extract_index(
-                self.input_pos,
-                num,
-                dtype=torch.int32,
-                device=self._device,
-            ).detach()
-            if is_index_1d(self._token_positions) and not is_index_1d(index):
-                self._token_positions = self._token_positions.contiguous()
-            update_result = update_token_positions(
-                token_positions=self._token_positions,
-                input_pos=self.input_pos,
-                num=num,
-                batch_size=self.batch_size,
-                index=index,
-                grace_period=self.grace_period,
-                next_grace_pos=self._next_grace_pos,
-            )
-        return index, update_result
 
     def _reset(self):
         raise NotImplementedError("This type of cache is not meant to be reset")
