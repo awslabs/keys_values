@@ -76,7 +76,7 @@ class Ruler(Helmet):
         max_seq_length: Optional[int] = None,
         seed: int = 42,
         metadata_dir: Optional[str] = None,
-        store_split_in_metadata: bool = False,
+        store_split_in_metadata: bool = True,
         trainloader_longest_first: bool = False,
         trainloader_shortest_first: bool = False,
         recompute_lengths: bool = False,
@@ -108,7 +108,7 @@ class Ruler(Helmet):
                 calls to :meth:`_transform` can skip re-tokenisation.
             store_split_in_metadata: If `True`, we sample and store the
                 train/val split in the metadata and also load it from there,
-                instead of sampling it anew each time.
+                instead of sampling it anew each time. Defaults to `True`.
             trainloader_longest_first: If ``True``, the first training batch
                 contains the longest sequences (useful for early OOM detection).
             trainloader_shortest_first: If ``True``, the first training batch
