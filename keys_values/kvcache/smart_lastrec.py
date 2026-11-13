@@ -502,6 +502,7 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
 
     def _forward_internal(
         self,
+        query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,

@@ -19,6 +19,7 @@ from keys_values.kvcache.h2o import (
     H2OOriginalKVCache,
     VLengthH2OKVCache,
 )
+from keys_values.kvcache.paged_sparse import PagedQueryAwareKVCache
 from keys_values.kvcache.qh2o import QuantizedH2OKVCache, QuantizedVLengthH2OKVCache
 from keys_values.kvcache.quant_buffers import (
     QuantizedKVCacheBuffers,
@@ -37,6 +38,7 @@ __all__ = [
     "H2OOriginalKVCache",
     "KVCacheBuffers",
     "LastRecentlyInsertedKVCache",
+    "PagedQueryAwareKVCache",
     "QuantizedH2OKVCache",
     "QuantizedKVCacheBuffers",
     "QuantizedVLengthH2OKVCache",

@@ -194,3 +194,86 @@ This is also why the mean-key representative `self.avg` has shape
 `(batch, num_kv_heads, head_dim, num_pages)` — the mean is taken jointly over
 all `page_size` tokens in the page, but kept separate per batch element and
 per KV head.
+
+
+## Question
+
+I don't understand one point. The `select` method in `topk_cache.py` appends
+an index of shape `(batch, num_q_tiles, page_budget)` to `self.idx`, and this
+is passed to `flash_paged_sparse_attn_func` called in `self_attn_forward` in
+`train_blockwise_tp_sparse.py`. This means that different pages are selected
+for each `(b, j)`, `b` batch position, `j` tile index. On the other hand, you
+say that a page covers all batch positions. How does this go together? Please
+look into the flash attention code to explain this.
+
+## Answer
+
+The resolution lies in how `stride_kvb` is computed and what `data_ptr()`
+points to.
+
+### The page pointers point to batch=0 of the full original tensor
+
+Pages are created by `torch.chunk(key, ..., dim=1)`
+([kv_cache.py:137](chunkoptim/cache/kv_cache.py#L137)), where `key` has shape
+`(batch, num_tokens, num_kv_heads, head_dim)`. `torch.chunk` on `dim=1`
+produces **non-contiguous views** of the original tensor. Each page has:
+
+- shape: `(batch, page_size, num_kv_heads, head_dim)`  
+- **stride along dim=0 (batch): `num_tokens × num_kv_heads × head_dim`**
+
+The page's `data_ptr()` stored in the page table points to element
+`[0, j·page_size, 0, 0]` of the original tensor — that is, batch=0 of that
+page's token range.
+
+### The kernel uses `stride_kvb = num_kv × num_kv_heads × head_dim`
+
+Look at [flash_paged_topk.py:369](chunkoptim/ops/flash_paged_topk.py#L369):
+
+```python
+stride_kvb = num_kv * num_kv_heads * kv_head_dim
+```
+
+This matches exactly the batch stride of the chunked page tensors above. Then
+[line 103](chunkoptim/ops/flash_paged_topk.py#L103):
+
+```python
+kv_offs = off_b * stride_kvb + off_kv_h * stride_kvh + (offs_n[:, None] * stride_kvn + offs_d[None, :])
+```
+
+Each kernel instance is launched for one `(batch, head)` pair
+(`off_hb = tl.program_id(1)`), so `off_b` is fixed per instance. The KV load is:
+
+```python
+k_page_ptr = tl.load(T + kv_block_idx * 4)   # raw pointer to element [0, j*page_size, 0, 0]
+k = tl.load(k_page_ptr + kv_offs, ...)         # + off_b * stride_kvb navigates to batch off_b
+```
+
+This correctly addresses element
+`key[off_b, j·page_size + offs_n, off_kv_h, offs_d]`.
+
+### How the per-batch-element selection is used
+
+The selection table is indexed ([line 114](chunkoptim/ops/flash_paged_topk.py#L114)):
+
+```python
+sel_ptrs = ST + off_b * stride_sel_b + start_m_block * stride_sel_q
+```
+
+So kernel instance `(b=1, h=5, q_tile=3)` reads page indices from
+`self.idx[-1][1, 3, :]`, while `(b=0, h=5, q_tile=3)` reads from
+`self.idx[-1][0, 3, :]`. These can be completely different sets of page indices.
+
+For each selected page index `kv_block_idx`, the instance loads the page pointer
+from `T` and then uses `off_b * stride_kvb` to read only batch=1's data out of
+that page.
+
+### Summary
+
+The apparent contradiction resolves as follows: a **page** spans all batch
+elements in memory (it is a non-contiguous view of the original
+`(batch, num_tokens, ...)` tensor), but each kernel instance independently
+selects which pages it wants (per batch element, via
+`self.idx[-1][b, q_tile, :]`) and reads only its own batch slice from each
+page via the `off_b * stride_kvb` offset. The key to making this work is that
+`stride_kvb` passed to the kernel matches the actual batch stride of the
+chunked page tensors.

@@ -573,7 +573,7 @@ class DefaultKVCache(KVCache):
             # Extend KV cache and retrieve key, value tensors to be used.
             # Instead of asking for the key and value tensors as such,
             # `k_and_v` allows access to them.
-            k_and_v = self._forward(key, value, token_idx)
+            k_and_v = self._forward(query, key, value, token_idx)
         # Important to increase this here, since cache has been extended
         self._input_pos += num
 
@@ -588,8 +588,9 @@ class DefaultKVCache(KVCache):
             return_attn_weights=return_attn_weights,
             token_positions=token_positions,
         )
-        if attn_weights is not None and return_attn_weights:
-            # Pass attention weights and query length to KV cache
+        if not for_prefill:
+            # Note: `_update` is called in any case, even if
+            # `return_attn_weights == False`. In that case, `attn_weights=None`.
             self._update(attn_weights=attn_weights, query_length=num)
 
         return attn_outputs
@@ -619,6 +620,7 @@ class DefaultKVCache(KVCache):
 
     def _forward(
         self,
+        query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
@@ -627,10 +629,12 @@ class DefaultKVCache(KVCache):
         Implements part of :meth:`forward` if `input_pos > 0`. Namely, `key`
         and `value` are written into the cache, possibly evicting slots. Then,
         an object is returned which provides read access to the full keys and
-        values buffers.
+        values buffers. `query` is passed as well, since the decision where to
+        write the new KV information to, may depend on it.
         `input_pos` need not be increased here.
 
         Args:
+            query: New keys, `(batch_size, n_head, num, head_size)`
             key: New keys, `(batch_size, n_query_groups, num, head_size)`,
                 where `1 <= num <= max_forward_length()`
             value: New values, `(batch_size, n_query_groups, num, head_size)`

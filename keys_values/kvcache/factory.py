@@ -34,6 +34,7 @@ from keys_values.kvcache.h2o import (
     H2OOriginalKVCache,
 )
 from keys_values.kvcache.offloading import KVCacheOffloader
+from keys_values.kvcache.paged_sparse import PagedQueryAwareKVCache
 from keys_values.kvcache.qh2o import (
     QuantizedH2OKVCache,
     QuantizedVLengthH2OKVCache,
@@ -57,6 +58,7 @@ _SUPPORTED_CACHES = (
     ("qh2o", QuantizedH2OKVCache, False),
     ("qh2o-vlen", QuantizedVLengthH2OKVCache, False),
     ("h2o-orig", H2OOriginalKVCache, True),
+    ("quest", PagedQueryAwareKVCache, True),
 )
 
 SUPPORTED_CACHES = {
@@ -577,29 +579,36 @@ QH2O_REMKEYS = (
     "scratch_blocksize",
 )
 
+QUEST_REMKEYS = ("page_size",)
+
 REMOVE_KEYS = {
     "dense": LASTREC_REMKEYS
     + SMART_LASTREC_REMKEYS
     + ATTN_WEIGHTS_REMKEYS
     + H2O_REMKEYS
-    + QH2O_REMKEYS,
+    + QH2O_REMKEYS
+    + QUEST_REMKEYS,
     "lastrec": SMART_LASTREC_REMKEYS
     + ATTN_WEIGHTS_REMKEYS
     + H2O_REMKEYS
-    + QH2O_REMKEYS,
+    + QH2O_REMKEYS
+    + QUEST_REMKEYS,
     "smart-lastrec": LASTREC_REMKEYS
     + ATTN_WEIGHTS_REMKEYS
     + H2O_REMKEYS
-    + QH2O_REMKEYS,
-    "h2o": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS + QH2O_REMKEYS,
-    "h2o-vlen": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS + QH2O_REMKEYS,
-    "qh2o": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS,
-    "qh2o-vlen": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS,
+    + QH2O_REMKEYS
+    + QUEST_REMKEYS,
+    "h2o": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS + QH2O_REMKEYS + QUEST_REMKEYS,
+    "h2o-vlen": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS + QH2O_REMKEYS + QUEST_REMKEYS,
+    "qh2o": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS + QUEST_REMKEYS,
+    "qh2o-vlen": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS + QUEST_REMKEYS,
     "h2o-orig": LASTREC_REMKEYS
     + SMART_LASTREC_REMKEYS
     + ATTN_WEIGHTS_REMKEYS
     + H2O_REMKEYS
-    + QH2O_REMKEYS,
+    + QH2O_REMKEYS
+    + QUEST_REMKEYS,
+    "quest": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS + QH2O_REMKEYS + H2O_REMKEYS,
 }
 
 

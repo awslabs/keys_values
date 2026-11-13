@@ -561,6 +561,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
 
     def _forward_internal(
         self,
+        query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
@@ -645,6 +646,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             )
             # Update score buffers
             self._update_score_buffers_in_forward(
+                query=query,
                 grace_period_case=True,
                 positions=positions,
                 index=index,
@@ -665,6 +667,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             )
             # Update score buffers
             self._update_score_buffers_in_forward(
+                query=query,
                 grace_period_case=False,
                 positions=None,
                 index=index,
@@ -688,6 +691,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
 
     def _update_score_buffers_in_forward(
         self,
+        query: torch.Tensor,
         grace_period_case: bool,
         positions: Optional[PositionsType],
         index: torch.Tensor,

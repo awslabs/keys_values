@@ -286,6 +286,7 @@ class KVCacheWithBuffers(DefaultKVCache):
 
     def _forward(
         self,
+        query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
@@ -298,10 +299,11 @@ class KVCacheWithBuffers(DefaultKVCache):
             self._chunk_idx += 1
             self._checkpoint_hook(self.kv_buffers, self._chunk_idx)
         self._validate_token_idx(token_idx)
-        return self._forward_internal(key, value, token_idx)
+        return self._forward_internal(query, key, value, token_idx)
 
     def _forward_internal(
         self,
+        query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
@@ -492,6 +494,7 @@ class DenseKVCache(KVCacheWithBuffers):
 
     def _forward_internal(
         self,
+        query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
@@ -773,6 +776,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
 
     def _forward_internal(
         self,
+        query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,

@@ -96,6 +96,8 @@ class KVCacheArgs:
             because left-padding tokens should not be attended to. Initial
             experiments did not show an advantage though. Needs to be revisited
             (maybe some of the left-pad tokens are useful, as attention sinks?).
+        page_size: Only for `quest` cache policy. See
+            :class:`PagedQueryAwareKVCache`
     """
 
     name: str
@@ -109,6 +111,7 @@ class KVCacheArgs:
     cpu_offload: bool = False
     normalize_scores: bool = False
     range_is_prefix: bool = True
+    page_size: int = 64
     # Legacy (these are global args now)
     verbose: Optional[str] = None
     attention_forward_temp_size_gb: Optional[float] = None
