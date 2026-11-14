@@ -138,6 +138,8 @@ class KVCacheArgs:
             raise NotImplementedError(
                 "CPU offloading (--kv_cache.cpu_offload True) is currently not supported for non-quantized KV cache buffers"
             )
+        if self.page_size <= 0:
+            raise ValueError("page_size must be positive")
         # Deprecated
         if self.verbose is None:
             self.verbose = VerbosityLevels.SOME.value
