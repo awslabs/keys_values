@@ -53,6 +53,7 @@ _CACHE_KWARGS_NAMES = (
     "init_grace_tokens",
     "normalize_scores",
     "range_is_prefix",
+    "page_size",
 )
 
 
