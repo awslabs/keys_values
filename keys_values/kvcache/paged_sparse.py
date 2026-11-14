@@ -104,8 +104,8 @@ class PagedQueryAwareKVCache(AttnWeightsKVCache):
 
     * They keep the complete KV cache around in the form of pages. Then, for
       each chunk processed, they load pages into GPU memory, as selected by
-      their score. Our policy overwrites the lowest scoring pages when
-      processing each chunk. Once a page (corresponding to a token range)
+      their score. Our policy overwrites the lowest scoring pages (or slices)
+      when processing each chunk. Once a page (corresponding to a token range)
       is overwritten, it cannot be used in the future.
     * When processing a new chunk of size `q_len == page_size * num_q_tiles)`,
       they allow for a different set of KV pages to be used for each of the
@@ -123,7 +123,7 @@ class PagedQueryAwareKVCache(AttnWeightsKVCache):
     The index `self._next_positions` is set in :meth:`_update` (which is
     overwritten here). We also overwrite :meth:`_update_score_buffers_in_forward`
     here. This is because we need information on which buffer positions have
-    been overwritten in :meth:`_update`.
+    been overwritten in :meth:`_update`, and also the current `query` tensor.
     """
 
     def __init__(
