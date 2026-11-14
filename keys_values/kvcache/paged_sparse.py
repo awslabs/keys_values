@@ -241,6 +241,28 @@ class PagedQueryAwareKVCache(AttnWeightsKVCache):
         self._index_just_written_to = index[:, 0, :].clone()
         self._query_current_forward = query
 
+    def _check_index_slice_is_valid(self, rel_start: int) -> Tuple[torch.Tensor, int]:
+        index = self._index_just_written_to
+        query_length = index.shape[-1]
+        start = index[:, rel_start]
+        sz = min(self.page_size, query_length - rel_start)
+        if not (start % self.page_size == 0).all().item():
+            raise ValueError(
+                f"Internal error: rel_start = {rel_start}. start = {start}"
+                f"not multiple of page_size = {self.page_size}. _index_just_written_to:\n"
+                f"{index}"
+            )
+        compare_to = start.unsqueeze(-1) + torch.arange(
+            sz, dtype=index.dtype, device=index.device
+        ).unsqueeze(0)
+        if not (index[:, rel_start : (rel_start + sz)] == compare_to).all().item():
+            raise ValueError(
+                f"Internal error: Slice {rel_start}:{rel_start + sz} not equal to:\n"
+                f"{compare_to}\n_index_just_written_to:\n"
+                f"{index}"
+            )
+        return start, sz
+
     def _update(self, *args, **kwargs):
         """
         Determine `self._next_positions` for the next call of
@@ -260,33 +282,21 @@ class PagedQueryAwareKVCache(AttnWeightsKVCache):
         batch_size, query_length = index.shape
         # Update `self.avg_keys`
         for rel_start in range(0, query_length, self.page_size):
-            start = index[rel_start].item()
-            sz = min(self.page_size, query_length - start)
-            end = start + sz
-            if start % self.page_size != 0:
-                raise ValueError(
-                    f"Internal error: rel_start = {rel_start}. start = {start}"
-                    f"not multiple of page_size = {self.page_size}. _index_just_written_to:\n"
-                    f"{self._index_just_written_to}"
-                )
-            if (
-                not (
-                    index[rel_start : (rel_start + sz)]
-                    == torch.arange(start, end, dtype=index.dtype, device=index.device)
-                )
-                .all()
-                .item()
-            ):
-                raise ValueError(
-                    f"Internal error: Slice {rel_start}:{rel_start + sz} not equal to "
-                    f"{start}:{end}. _index_just_written_to:\n"
-                    f"{self._index_just_written_to}"
-                )
+            start, sz = self._check_index_slice_is_valid(rel_start)
             # If `query_length % page_size != 0`, we can have
             # `sz < page_size` for the final slice. But `self.avg_keys` is
             # always updated based on the full slice
-            _end = start + self.page_size
-            keys_slice, _ = self.kv_buffers.get_slots((start, _end))
+            positions = (
+                (
+                    start.unsqueeze(-1)
+                    + torch.arange(
+                        self.page_size, dtype=index.dtype, device=index.device
+                    ).unsqueeze(0)
+                )
+                .unsqueeze(1)
+                .expand(-1, self.n_query_groups, -1)
+            )
+            keys_slice, _ = self.kv_buffers.get_slots(positions)
             new_avg_key = keys_slice.mean(dim=2)
             page_pos = start // self.page_size
             self.avg_keys[:, :, :, page_pos] = new_avg_key

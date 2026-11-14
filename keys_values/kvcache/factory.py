@@ -608,7 +608,11 @@ REMOVE_KEYS = {
     + H2O_REMKEYS
     + QH2O_REMKEYS
     + QUEST_REMKEYS,
-    "quest": LASTREC_REMKEYS + SMART_LASTREC_REMKEYS + QH2O_REMKEYS + H2O_REMKEYS + ("grace_period",),
+    "quest": LASTREC_REMKEYS
+    + SMART_LASTREC_REMKEYS
+    + QH2O_REMKEYS
+    + H2O_REMKEYS
+    + ("grace_period",),
 }
 
 
