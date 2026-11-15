@@ -62,7 +62,10 @@ def _cache_kwargs(name: str) -> Dict[str, Any]:
     if name.startswith("lastrec") or name.startswith("smart-lastrec"):
         return dict()
     else:
-        return dict(replay_log_blocksize=16)
+        result = dict(replay_log_blocksize=16)
+        if name.startswith("quest"):
+            result["page_size"] = 64
+        return result
 
 
 def args_inference_replay():

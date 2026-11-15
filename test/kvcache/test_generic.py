@@ -67,6 +67,8 @@ def test_store_retrieve(device, name, kwargs):
     cache_length = params.cache_length
     if name.startswith("smart-lastrec"):
         kwargs = {**kwargs, **cache_kwargs_for_smart_lastrec()}
+    elif name.startswith("quest"):
+        kwargs = {**kwargs, "page_size": 64}
     kv_cache = create_kv_cache(name, params, **kwargs)
     if name.startswith("dense"):
         num_insert = randint_torch(cache_length // 2, cache_length)
@@ -135,6 +137,8 @@ def test_prefill(name, device):
     cache_length = params.cache_length
     if name.startswith("smart-lastrec"):
         cache_kwargs = cache_kwargs_for_smart_lastrec()
+    elif name.startswith("quest"):
+        cache_kwargs = dict(page_size=64)
     else:
         cache_kwargs = dict()
     kv_cache = create_kv_cache(name, params, **cache_kwargs)
@@ -260,6 +264,8 @@ def test_size_estimate(
             cache_kwargs = dict(blocks_over_heads=blocks_over_heads)
         if name.startswith("smart-lastrec"):
             cache_kwargs.update(cache_kwargs_for_smart_lastrec())
+        elif name.startswith("quest"):
+            cache_kwargs["page_size"] = 64
         kv_caches = [
             KVCacheFactory.create_single(
                 name=name,
