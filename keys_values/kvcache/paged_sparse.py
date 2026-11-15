@@ -308,7 +308,11 @@ class PagedQueryAwareKVCache(AttnWeightsKVCache):
             keys_slice, _ = self.kv_buffers.get_slots(positions)
             new_avg_key = keys_slice.mean(dim=2)
             page_pos = start // self.page_size
-            self.avg_keys[:, :, :, page_pos] = new_avg_key
+            self.avg_keys.scatter_(
+                -1,
+                page_pos[:, None, None, None].expand(-1, self.n_query_groups, self.head_size, -1),
+                new_avg_key.unsqueeze(-1),
+            )
 
         # Compute local scores, based on `query` and `avg_keys`
         # query: (batch_size, n_head, num, head_size)
