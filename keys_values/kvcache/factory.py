@@ -450,6 +450,8 @@ class KVCacheFactory:
                 bits_by_part[f"dequant_" + k] = v
         return num_bits_total, bits_by_part
 
+    NAMES_FROM_CACHE_KWARGS = ("page_size",)
+
     @staticmethod
     def size_estimate_apriori(
         name: str,
@@ -492,6 +494,9 @@ class KVCacheFactory:
                 kwargs["quantizer_type"] = quantizer_type
                 # Extra arguments going to the cache buffer
                 kwargs.update(quant_kwargs)
+            for name in KVCacheFactory.NAMES_FROM_CACHE_KWARGS:
+                if name in cache_kwargs:
+                    kwargs[name] = cache_kwargs[name]
             total_sz, dct_sz = cache_type.size_estimate_apriori(params, **kwargs)
             num_bits_total = total_sz * n_layers
             # Note: Only one entry for all layers, they are all the same

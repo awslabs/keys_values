@@ -28,7 +28,7 @@ from keys_values.kvcache.basics import (
     KVCacheWithBuffersState,
 )
 from keys_values.kvcache.buffers import KVCacheBuffers
-from keys_values.utils import bits_for_torch_dtype, bitsize_of
+from keys_values.utils import bits_for_torch_dtype
 
 
 class H2OKVCacheState(AttnWeightsKVCacheState):
@@ -295,15 +295,6 @@ class H2OKVCache(AttnWeightsKVCache):
         """
         return scores  # Default: no modification
 
-    def size_estimate(self) -> Tuple[int, Dict[str, int]]:
-        sz_total, dct_sz = super().size_estimate()
-        sz_sc = 0
-        for scores, name in self._score_buffers():
-            sz = int(bitsize_of(scores))
-            dct_sz[name] = sz
-            sz_sc += sz
-        return sz_total + sz_sc, dict(dct_sz, scores=sz_sc)
-
     @classmethod
     def size_estimate_apriori(
         cls, params: KVCacheParams, **kwargs
@@ -315,7 +306,7 @@ class H2OKVCache(AttnWeightsKVCache):
         for name in cls._score_buffer_names():
             dct_sz[name] = sz
             sz_sc += sz
-        return sz_total + sz_sc, dict(dct_sz, scores=sz_sc)
+        return sz_total + sz_sc, dct_sz
 
     def clone(self) -> KVCache:
         return H2OKVCache(**self._base_kwargs_for_clone())
@@ -810,11 +801,6 @@ class H2OOriginalKVCache(AttnWeightsKVCache):
             return self.scores[: self.batch_size]
         else:
             return None
-
-    def size_estimate(self) -> Tuple[int, Dict[str, int]]:
-        sz_total, dct_sz = super().size_estimate()
-        sz_sc = bitsize_of(self.scores)
-        return sz_total + sz_sc, dict(dct_sz, scores=sz_sc)
 
     @classmethod
     def size_estimate_apriori(

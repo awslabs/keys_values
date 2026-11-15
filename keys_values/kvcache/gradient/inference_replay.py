@@ -434,6 +434,7 @@ class InferenceSmartInitialLastRecentlyInsertedReplayCache(
 
     def _forward_internal(
         self,
+        query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
@@ -448,7 +449,7 @@ class InferenceSmartInitialLastRecentlyInsertedReplayCache(
                     f"replay_log.{name}: {v2}\n"
                     "Must be the same!"
                 )
-        return super()._forward_internal(key, value, token_idx)
+        return super()._forward_internal(query, key, value, token_idx)
 
 
 def inference_replay_cache_factory(

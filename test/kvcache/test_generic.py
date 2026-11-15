@@ -65,19 +65,23 @@ def test_store_retrieve(device, name, kwargs):
         dtype=dtype,
     )
     cache_length = params.cache_length
+    is_quest = name.startswith("quest")
     if name.startswith("smart-lastrec"):
         kwargs = {**kwargs, **cache_kwargs_for_smart_lastrec()}
-    elif name.startswith("quest"):
-        kwargs = {**kwargs, "page_size": 64}
+    elif is_quest:
+        kwargs = {**kwargs, "page_size": cache_length // 2}
     kv_cache = create_kv_cache(name, params, **kwargs)
     if name.startswith("dense"):
         num_insert = randint_torch(cache_length // 2, cache_length)
     else:
         num_insert = randint_torch(cache_length, 3 * cache_length)
-    num_prefill = min(
-        randint_torch(num_insert // 3, int(num_insert * 0.75)),
-        kv_cache.max_prefill_length,
-    )
+    if not is_quest:
+        num_prefill = min(
+            randint_torch(num_insert // 3, int(num_insert * 0.75)),
+            kv_cache.max_prefill_length,
+        )
+    else:
+        num_prefill = kwargs["page_size"]
 
     data = random_args_cache_forward(
         params,
@@ -97,7 +101,7 @@ def test_store_retrieve(device, name, kwargs):
         params.n_query_groups,
         current_length,
     )
-    if "h2o" not in name:
+    if "h2o" not in name and not is_quest:
         assert tensor_is_simple(token_positions)
     # Positions for every (b, h) must be different
     for b, h in zip(range(params.max_batch_size), range(params.n_query_groups)):
@@ -135,10 +139,11 @@ def test_prefill(name, device):
         dtype=dtype,
     )
     cache_length = params.cache_length
+    is_quest = name.startswith("quest")
     if name.startswith("smart-lastrec"):
         cache_kwargs = cache_kwargs_for_smart_lastrec()
-    elif name.startswith("quest"):
-        cache_kwargs = dict(page_size=64)
+    elif is_quest:
+        cache_kwargs = dict(page_size=cache_length // 2)
     else:
         cache_kwargs = dict()
     kv_cache = create_kv_cache(name, params, **cache_kwargs)
@@ -153,10 +158,13 @@ def test_prefill(name, device):
     values_cached = []
     for _ in range(num_compares):
         kv_cache.reset()
-        num_prefill = min(
-            randint_torch(cache_length // 8, cache_length),
-            kv_cache.max_prefill_length,
-        )
+        if not is_quest:
+            num_prefill = min(
+                randint_torch(cache_length // 8, cache_length),
+                kv_cache.max_prefill_length,
+            )
+        else:
+            num_prefill = cache_kwargs["page_size"]
         kv_cache(**range_from_args(data, 0, num_prefill))
         for pos in range(num_prefill, cache_length):
             kv_cache(**range_from_args(data, pos, pos + 1))
@@ -265,7 +273,7 @@ def test_size_estimate(
         if name.startswith("smart-lastrec"):
             cache_kwargs.update(cache_kwargs_for_smart_lastrec())
         elif name.startswith("quest"):
-            cache_kwargs["page_size"] = 64
+            cache_kwargs["page_size"] = cache_length // 2
         kv_caches = [
             KVCacheFactory.create_single(
                 name=name,

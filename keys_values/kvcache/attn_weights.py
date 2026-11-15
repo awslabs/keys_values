@@ -975,7 +975,13 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         sz_buffs, dct_sz = self.kv_buffers.size_estimate()
         sz_tp = bitsize_of(self.token_pos)
         dct_sz["token_pos"] = sz_tp
-        return sz_buffs + sz_tp, dct_sz
+        sz_total = sz_buffs + sz_tp
+        sz_sc = 0
+        for scores, name in self._score_buffers():
+            sz = int(bitsize_of(scores))
+            dct_sz[name] = sz
+            sz_sc += sz
+        return sz_total + sz_sc, dct_sz
 
     @classmethod
     def size_estimate_apriori(

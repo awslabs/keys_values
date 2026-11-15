@@ -28,6 +28,7 @@ from keys_values.kvcache.basics import (
     KVCacheWithBuffersState,
 )
 from keys_values.kvcache.buffers import KVCacheBuffers, PositionsType
+from keys_values.utils import bits_for_torch_dtype
 
 
 class PagedQueryAwareKVCacheState(AttnWeightsKVCacheState):
@@ -216,7 +217,7 @@ class PagedQueryAwareKVCache(AttnWeightsKVCache):
         return super()._parameter_names() + cls._score_buffer_names()
 
     def _score_buffers(self) -> List[Tuple[torch.Tensor, str]]:
-        return [(self.scores, "avg_keys")]
+        return [(self.avg_keys, "avg_keys")]
 
     @classmethod
     def _score_buffer_names(cls) -> List[str]:
@@ -330,14 +331,17 @@ class PagedQueryAwareKVCache(AttnWeightsKVCache):
         scores = (query @ self.avg_keys).softmax(dim=-1).sum([1, 2])
         # scores: (batch_size, num_slices)
         # Determine `_next_positions`.
-        max_num_slices = math.ceil(self.max_chunk_size / self.page_size)
-        next_slices_to_overwrite = scores.topk(
-            k=max_num_slices,
-            dim=-1,
-            largest=False,
-        )[
-            1
-        ]  # (batch_size, max_num_slices)
+        if self.max_chunk_size is not None:
+            max_num_slices = math.ceil(self.max_chunk_size / self.page_size)
+            next_slices_to_overwrite = scores.topk(
+                k=max_num_slices,
+                dim=-1,
+                largest=False,
+            )[
+                1
+            ]  # (batch_size, max_num_slices)
+        else:
+            next_slices_to_overwrite = scores.argsort(dim=-1)
         next_positions_2d = (
             next_slices_to_overwrite.unsqueeze(-1) * self.page_size
             + torch.arange(
@@ -371,14 +375,22 @@ class PagedQueryAwareKVCache(AttnWeightsKVCache):
                 :, :, start : (start + extra), :
             ].sum(2)
 
-    def size_estimate(self) -> Tuple[int, Dict[str, int]]:
-        raise NotImplementedError()
-
     @classmethod
     def size_estimate_apriori(
         cls, params: KVCacheParams, **kwargs
     ) -> Tuple[int, Dict[str, int]]:
-        raise NotImplementedError()
+        sz_total, dct_sz = super().size_estimate_apriori(params, **kwargs)
+        page_size = kwargs.get("page_size")
+        if page_size is None:
+            raise ValueError("page_size must be given")
+        num_slices = params.cache_length / page_size
+        numel = params.max_batch_size * params.n_query_groups * params.head_size * num_slices
+        sz = int(numel * bits_for_torch_dtype(torch.float32))
+        sz_sc = 0
+        for name in cls._score_buffer_names():
+            dct_sz[name] = sz
+            sz_sc += sz
+        return sz_total + sz_sc, dct_sz
 
     def clone(self) -> KVCache:
         return PagedQueryAwareKVCache(**self._base_kwargs_for_clone())
