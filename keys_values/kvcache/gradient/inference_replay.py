@@ -221,6 +221,7 @@ class InferenceAttnWeightsReplayCache(AttnWeightsKVCache, InferenceReplayCacheMi
 
     def _update_score_buffers_in_forward(
         self,
+        query: torch.Tensor,
         grace_period_case: bool,
         positions: Optional[PositionsType],
         index: torch.Tensor,
