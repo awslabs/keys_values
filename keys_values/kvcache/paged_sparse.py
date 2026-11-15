@@ -322,7 +322,7 @@ class PagedQueryAwareKVCache(AttnWeightsKVCache):
         # avg_keys: (batch_size, n_query_groups, head_size, num_slices)
         query = (
             query.contiguous()
-            .unflatten(1, (self.n_query_heads, -1))
+            .unflatten(1, (self.n_query_groups, -1))
             .sum(2)
             .to(dtype=ak_dtype)
         )
