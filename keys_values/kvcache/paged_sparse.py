@@ -289,6 +289,7 @@ class PagedQueryAwareKVCache(AttnWeightsKVCache):
         assert query.ndim == 4
         assert index.shape == (query.shape[0], query.shape[2])
         batch_size, query_length = index.shape
+        ak_dtype = self.avg_keys.dtype
         # Update `self.avg_keys`
         for rel_start in range(0, query_length, self.page_size):
             start, sz = self._check_index_slice_is_valid(rel_start)
@@ -310,14 +311,21 @@ class PagedQueryAwareKVCache(AttnWeightsKVCache):
             page_pos = start // self.page_size
             self.avg_keys.scatter_(
                 -1,
-                page_pos[:, None, None, None].expand(-1, self.n_query_groups, self.head_size, -1),
-                new_avg_key.unsqueeze(-1),
+                page_pos[:, None, None, None].expand(
+                    -1, self.n_query_groups, self.head_size, -1
+                ),
+                new_avg_key.unsqueeze(-1).to(dtype=ak_dtype),
             )
 
         # Compute local scores, based on `query` and `avg_keys`
         # query: (batch_size, n_head, num, head_size)
         # avg_keys: (batch_size, n_query_groups, head_size, num_slices)
-        query = query.contiguous().unflatten(1, (self.n_query_heads, -1)).sum(2)
+        query = (
+            query.contiguous()
+            .unflatten(1, (self.n_query_heads, -1))
+            .sum(2)
+            .to(dtype=ak_dtype)
+        )
         # query: (batch_size, n_query_groups, num, head_size)
         scores = (query @ self.avg_keys).softmax(dim=-1).sum([1, 2])
         # scores: (batch_size, num_slices)

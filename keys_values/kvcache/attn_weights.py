@@ -561,13 +561,13 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
 
     def _initial_rule_num_to_keep(self, num: int) -> int:
         """
-        The default implementation is based on `keep_initial_fraction`.
+            The default implementation is based on `keep_initial_fraction`.
 
-    `   Args:
-            num: Length of new information passed to :meth:`forward`
+        `   Args:
+                num: Length of new information passed to :meth:`forward`
 
-        Returns:
-            How many initial slots to keep when applying the initial rule.
+            Returns:
+                How many initial slots to keep when applying the initial rule.
 
         """
         return min(
