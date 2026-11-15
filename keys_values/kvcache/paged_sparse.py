@@ -225,6 +225,15 @@ class PagedQueryAwareKVCache(AttnWeightsKVCache):
     def update_requires_attn_weights(self) -> bool:
         return False
 
+    def _initial_rule_num_to_keep(self, num: int) -> int:
+        """
+        The number of kept slots must be a multiple of `page_size`.
+
+        """
+        num_keep = super()._initial_rule_num_to_keep(num)
+        num_keep_slices = max(round(num_keep / self.page_size), 1)
+        return num_keep_slices * self.page_size
+
     def _update_score_buffers_in_forward(
         self,
         query: torch.Tensor,
@@ -248,7 +257,7 @@ class PagedQueryAwareKVCache(AttnWeightsKVCache):
         sz = min(self.page_size, query_length - rel_start)
         if not (start % self.page_size == 0).all().item():
             raise ValueError(
-                f"Internal error: rel_start = {rel_start}. start = {start}"
+                f"Internal error: rel_start = {rel_start}. start = {start} "
                 f"not multiple of page_size = {self.page_size}. _index_just_written_to:\n"
                 f"{index}"
             )

@@ -559,6 +559,22 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             result = min(result, self.max_chunk_size)
         return result
 
+    def _initial_rule_num_to_keep(self, num: int) -> int:
+        """
+        The default implementation is based on `keep_initial_fraction`.
+
+    `   Args:
+            num: Length of new information passed to :meth:`forward`
+
+        Returns:
+            How many initial slots to keep when applying the initial rule.
+
+        """
+        return min(
+            int(self._keep_initial_fraction * self.cache_length),
+            self.cache_length - num,
+        )
+
     def _forward_internal(
         self,
         query: torch.Tensor,
@@ -588,10 +604,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                 )
         if self._use_initial_rule:
             # Set `_next_positions` according to the initial rule
-            num_keep = min(
-                int(self._keep_initial_fraction * self.cache_length),
-                self.cache_length - num,
-            )
+            num_keep = self._initial_rule_num_to_keep(num)
             self._next_positions = index_to_3d(
                 torch.arange(
                     num_keep, num_keep + num, dtype=torch.int64, device=self.device
