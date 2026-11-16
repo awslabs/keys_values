@@ -27,6 +27,7 @@ from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
 from keys_values.data import Helmet, LongBenchV2, Ruler
 from keys_values.data.constants import INPUT_IDS_NAME, ORIG_IDX_NAME, TARGETS_STRINGS_NAME
 from keys_values.evaluation.longcontext_eval_ext import get_dataloader
+from keys_values.finetune.batch_transform import BatchTransformFactory
 from keys_values.head_model import CrossEntropyOnLogits
 
 
@@ -74,12 +75,19 @@ def setup(
         model_name=str(checkpoint_dir).split("/")[-1],
     )
     ignore_index = getattr(data, "ignore_index", DEFAULT_IGNORE_INDEX)
+    batch_transform = BatchTransformFactory.from_head_model(
+        head_model=CrossEntropyOnLogits.NAME,
+        pad_id=DEFAULT_PAD_ID,
+        eos_id=tokenizer.eos_id,
+        ignore_index=ignore_index,
+    )
 
     result = []
     for batch in test_dataloader:
         if not batch:
             print("Empty batch: Continue")
             continue
+        batch = batch_transform(batch)
         orig_idxs = batch[ORIG_IDX_NAME]
         input_ids = batch[INPUT_IDS_NAME]
         targets = batch["targets"]
