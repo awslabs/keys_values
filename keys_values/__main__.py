@@ -28,6 +28,7 @@ from keys_values.finetune.longcontext_lora import setup as finetune_long_lora_fn
 from keys_values.finetune.longcon_offload_full import setup as finetune_offload_full_fn
 from keys_values.finetune.longcon_offload_lora import setup as finetune_offload_lora_fn
 from keys_values.parser_config import parser_commands
+from keys_values.scripts.extract_test_set import setup as extract_test_set_fn
 from keys_values.scripts.recompute_val_losses import setup as recomp_val_losses_fn
 
 ENV_VAR_LOG_DIR = "KEYSVALS_LOG_DIR"
@@ -39,6 +40,7 @@ PARSER_DATA = {
     **PARSER_DATA_LITGPT,
     "eval_long": eval_long_fn,
     "eval_long_ext": eval_long_ext_fn,
+    "extract_test_set": extract_test_set_fn,
     "finetune_long_full": finetune_long_full_fn,
     "finetune_long_lora": finetune_long_lora_fn,
     "finetune_offload_full": finetune_offload_full_fn,
