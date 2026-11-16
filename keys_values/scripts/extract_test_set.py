@@ -71,7 +71,7 @@ def setup(
         head_model=CrossEntropyOnLogits.NAME,
         batch_size=1,
         devices=1,
-        model_name=None,
+        model_name=str(checkpoint_dir).split("/")[-1],
     )
     ignore_index = getattr(data, "ignore_index", DEFAULT_IGNORE_INDEX)
 
