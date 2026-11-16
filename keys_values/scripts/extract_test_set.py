@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from tqdm import tqdm
 from typing import Optional
 import yaml
 
@@ -83,7 +84,7 @@ def setup(
     )
 
     result = []
-    for batch in test_dataloader:
+    for batch in tqdm(test_dataloader):
         if not batch:
             print("Empty batch: Continue")
             continue
