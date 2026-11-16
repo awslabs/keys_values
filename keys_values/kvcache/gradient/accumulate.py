@@ -684,6 +684,10 @@ class GradientAccumulator:
         assert self.replay_logs is not None, "Call 'run_head_model' for a new batch"
         assert self._batch_size is not None
         use_multi_streams = device_to_host_stream is not None
+        # DEBUG
+        if use_multi_streams:
+            raise NotImplementedError("DEBUG does not work with multi-streams")
+        # END DEBUG
         if use_multi_streams != (host_to_device_stream is not None):
             raise ValueError(
                 "Either both or none of device_to_host_stream, host_to_device_stream must be given"
@@ -814,6 +818,11 @@ class GradientAccumulator:
                 pair_k_buffers,
                 pair_v_buffers,
             )
+            # DEBUG
+            head_grad_top_is_zero = (
+                pair_head_gradients_top.read().flatten() == 0.0
+            ).all().item()
+            # END DEBUG
             # Cycle of `_write_to_cpu` state must be opposite to cycle of
             # `_load_from_cpu` state
             pair_head_gradients_bottom.flip()
@@ -861,49 +870,69 @@ class GradientAccumulator:
                 # - Inputs left:     k_buffers, v_buffers
                 # - Gradients top:   head_gradients_top
                 # - Gradients right: head_gradients_k, head_gradients_v
-                cell_inputs = copy_requires_grad(pair_cell_inputs.read())
-                head_gradients_top = pair_head_gradients_top.read()
+                # DEBUG
+                if not head_grad_top_is_zero:
+                    cell_inputs = copy_requires_grad(pair_cell_inputs.read())
+                    head_gradients_top = pair_head_gradients_top.read()
+                else:
+                    # No gradients needed
+                    cell_inputs = pair_cell_inputs.read()
+                    head_gradients_top = torch.zeros_like(cell_inputs)
+                # END DEBUG
                 if col_idx == 0:
                     k_buffers = None
                     v_buffers = None
                 else:
-                    k_buffers = [
-                        copy_requires_grad(k_buff.read()) for k_buff in pair_k_buffers
-                    ]
-                    v_buffers = [
-                        copy_requires_grad(v_buff.read()) for v_buff in pair_v_buffers
-                    ]
+                    # DEBUG
+                    #k_buffers = [
+                    #    copy_requires_grad(k_buff.read()) for k_buff in pair_k_buffers
+                    #]
+                    #v_buffers = [
+                    #    copy_requires_grad(v_buff.read()) for v_buff in pair_v_buffers
+                    #]
+                    k_buffers = [k_buff.read() for k_buff in pair_k_buffers]
+                    v_buffers = [v_buff.read() for v_buff in pair_v_buffers]
+                    # END DEBUG
 
                 # Forward-backward, using the autograd hooks (if given)
                 scalar_output = None
                 try:
-                    with (
-                        torch.autograd.graph.saved_tensors_hooks(
-                            lambda x: self.autograd_hooks.pack_hook(x),
-                            lambda x: self.autograd_hooks.unpack_hook(x),
-                        )
-                        if self.autograd_hooks is not None
-                        else contextlib.nullcontext()
-                    ):
-                        scalar_output = self.forward_computation(
-                            cell=cell,
-                            cell_inputs=cell_inputs,
-                            k_buffers=k_buffers,
-                            v_buffers=v_buffers,
-                            head_gradients_top=head_gradients_top,
-                            head_gradients_k=head_gradients_k,
-                            head_gradients_v=head_gradients_v,
-                            first_chunk_idx=first_chunk_idx,
-                            num_chunks=num_chunks,
-                        )
+                    # DEBUG:
+                    if not head_grad_top_is_zero:
+                        with (
+                            torch.autograd.graph.saved_tensors_hooks(
+                                lambda x: self.autograd_hooks.pack_hook(x),
+                                lambda x: self.autograd_hooks.unpack_hook(x),
+                            )
+                            if self.autograd_hooks is not None
+                            else contextlib.nullcontext()
+                        ):
+                            scalar_output = self.forward_computation(
+                                cell=cell,
+                                cell_inputs=cell_inputs,
+                                k_buffers=k_buffers,
+                                v_buffers=v_buffers,
+                                head_gradients_top=head_gradients_top,
+                                head_gradients_k=head_gradients_k,
+                                head_gradients_v=head_gradients_v,
+                                first_chunk_idx=first_chunk_idx,
+                                num_chunks=num_chunks,
+                            )
 
-                    scalar_output.backward()
-                    if col_idx > 0:
-                        head_gradients_k = [x.grad for x in k_buffers]
-                        head_gradients_v = [x.grad for x in v_buffers]
-                    # Written to CPU in the next iteration (`_write_to_cpu`),
-                    # or after the loop for the first cell
-                    pair_head_gradients_bottom.write(cell_inputs.grad)
+                        scalar_output.backward()
+                        # DEBUG
+                        #if col_idx > 0:
+                        #    head_gradients_k = [x.grad for x in k_buffers]
+                        #    head_gradients_v = [x.grad for x in v_buffers]
+                        # END DEBUG
+                        # Written to CPU in the next iteration (`_write_to_cpu`),
+                        # or after the loop for the first cell
+                        pair_head_gradients_bottom.write(cell_inputs.grad)
+                    else:
+                        print(f"Head gradient is zero: Skipping cell for first_layer_idx = {first_layer_idx}, col_idx {col_idx}")
+                        # Note: head_gradients_top is 0
+                        pair_head_gradients_bottom.write(head_gradients_top)
+                    # END DEBUG
                     if use_multi_streams:
                         # Fires once the computation for this cell is done
                         main_event = torch.cuda.current_stream().record_event()
@@ -934,6 +963,11 @@ class GradientAccumulator:
                         pair_k_buffers,
                         pair_v_buffers,
                     )
+                    # DEBUG
+                    head_grad_top_is_zero = (
+                        pair_head_gradients_top.read().flatten() == 0.0
+                    ).all().item()
+                    # END DEBUG
                 finally:
                     del scalar_output
                     del cell_inputs
@@ -943,7 +977,7 @@ class GradientAccumulator:
                         del v_buffers
 
                 # Store annotation usage logs
-                if self.autograd_hooks is not None:
+                if self.autograd_hooks is not None and not head_grad_top_is_zero:
                     cell_hooks = self._hooks_for_cell_computation()
                     if cell_hooks is not None:
                         self._annotation_usage_logs[first_chunk_idx] = (
