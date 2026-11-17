@@ -75,7 +75,7 @@ def main(
                     combined_path.unlink()
                 with open(combined_path, "w") as fp:
                     yaml.safe_dump(all_data, fp)
-            break
+                break
         except KeyError as ex:
             if it == len(eval_dirs) - 1:
                 raise ex
