@@ -76,7 +76,7 @@ def main(
                 with open(combined_path, "w") as fp:
                     yaml.safe_dump(all_data, fp)
                 break
-        except KeyError as ex:
+        except Exception as ex:
             if it == len(eval_dirs) - 1:
                 raise ex
             print(f"Metric {metric_name} not found in eval_dir {eval_dir}")
