@@ -26,7 +26,11 @@ from litgpt.utils import (
 
 from keys_values.constants import DEFAULT_IGNORE_INDEX, DEFAULT_PAD_ID
 from keys_values.data import Helmet, LongBenchV2, Ruler
-from keys_values.data.constants import INPUT_IDS_NAME, ORIG_IDX_NAME, TARGETS_STRINGS_NAME
+from keys_values.data.constants import (
+    INPUT_IDS_NAME,
+    ORIG_IDX_NAME,
+    TARGETS_STRINGS_NAME,
+)
 from keys_values.evaluation.longcontext_eval_ext import get_dataloader
 from keys_values.finetune.batch_transform import BatchTransformFactory
 from keys_values.head_model import CrossEntropyOnLogits
@@ -55,7 +59,9 @@ def setup(
         is_helmet = isinstance(data, Helmet)
         if is_helmet or isinstance(data, Ruler):
             name = "helmet" if is_helmet else "ruler"
-            out_path = f"./{name}_{data.dataset_key}_{data.max_length}_test_dataset.yaml"
+            out_path = (
+                f"./{name}_{data.dataset_key}_{data.max_length}_test_dataset.yaml"
+            )
         elif isinstance(data, LongBenchV2):
             out_path = f"./longbench_v2_test_dataset.yaml"
     out_path = Path(out_path)
