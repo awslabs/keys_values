@@ -39,10 +39,10 @@ from keys_values.evaluation.evaluator import (
 #]
 
 DATASETS = [
-    ("cwe", "20261118_134917"),
-    ("fwe", "20261118_145829"),
-    ("vt", "20261118_165442"),
-    ("niah_single_1", "20261118_155631"),
+    ("cwe_256k_500", "20261118_134917"),
+    ("fwe_256k_500", "20261118_145829"),
+    ("vt_256k_500", "20261118_165442"),
+    ("niah_single_1_256k_500", "20261118_155631"),
 ]
 
 SAMPLE_FNAME = "generated_samples_0.yaml"
