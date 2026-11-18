@@ -18,23 +18,31 @@ import yaml
 from keys_values.evaluation.evaluator import (
     compute_metric,
     METRICS_FOR_HELMET_TASKS,
+    METRICS_FOR_RULER_TASKS,
 )
 
+#DATASETS = [
+#    "clinc150_128k",
+#    "hotpot_qa_128k",
+#    "hotpot_qa_64k",
+#    "infinite_bench_mc_128k",
+#    "infinite_bench_qa_128k",
+#    "json_kv_128k",
+#    "nlu_128k",
+#    "nq_128k",
+#    "nq_64k",
+#    "pop_qa_128k",
+#    "pop_qa_64k",
+#    "trec_coarse_128k",
+#    "trivia_qa_128k",
+#    "trivia_qa_64k",
+#]
+
 DATASETS = [
-    "clinc150_128k",
-    "hotpot_qa_128k",
-    "hotpot_qa_64k",
-    "infinite_bench_mc_128k",
-    "infinite_bench_qa_128k",
-    "json_kv_128k",
-    "nlu_128k",
-    "nq_128k",
-    "nq_64k",
-    "pop_qa_128k",
-    "pop_qa_64k",
-    "trec_coarse_128k",
-    "trivia_qa_128k",
-    "trivia_qa_64k",
+    ("cwe", "20261118_134917"),
+    ("fwe", "20261118_145829"),
+    ("vt", "20261118_165442"),
+    ("niah_single_1", "20261118_155631"),
 ]
 
 SAMPLE_FNAME = "generated_samples_0.yaml"
@@ -60,14 +68,27 @@ def main(path: Path, metric: str) -> Tuple[float, int]:
 
 
 if __name__ == "__main__":
-    base_path = Path("/mnt/efs/kbenidis/results/20260807_000000/finetuned")
-    metric = "match_first_word_or_phrase"
+    base_path = Path("/mnt/efs/kbenidis/results")
+    subdir = "20260807_000000"
+    metric = "string_match_all"
+    is_ruler = True
 
+    if is_ruler:
+        metric_for_tasks = METRICS_FOR_RULER_TASKS
+    else:
+        metric_for_tasks = METRICS_FOR_HELMET_TASKS
     for dataset in DATASETS:
-        metric = METRICS_FOR_HELMET_TASKS[_strip_name(dataset)]
-        path = base_path / dataset / SAMPLE_FNAME
+        if isinstance(dataset, str):
+            _subdir = subdir
+        else:
+            dataset, _subdir = dataset
+        if metric is None:
+            _metric = metric_for_tasks[_strip_name(dataset)]
+        else:
+            _metric = metric
+        path = base_path / _subdir / "finetuned" / dataset / SAMPLE_FNAME
         if path.exists():
-            avg_metric_val, num_vals = main(path, metric)
-            print(f"{dataset}: {metric} = {(avg_metric_val * 100):.3f} [{num_vals}]")
+            avg_metric_val, num_vals = main(path, _metric)
+            print(f"{dataset}: {_metric} = {(avg_metric_val * 100):.3f} [{num_vals}]")
         else:
             print(f"{dataset}: {path} not found")
