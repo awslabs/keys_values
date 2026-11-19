@@ -247,25 +247,27 @@ class LLaMAMoE(nn.Module):
         See also figure 1 in https://arxiv.org/abs/2211.15841
 
         """
-        x_2d = x.view(-1, x.shape[-1])  # (B*T, n_embd)
-        router = self.gate(x_2d)  # (B*T, n_expert)
-        # `probs`, `indices`: `(B*T, n_expert_per_token)`
+        # x: (B, N, n_embd)
+        x_2d = x.view(-1, x.shape[-1])  # (B*N, n_embd)
+        router = self.gate(x_2d)  # (B*N, n_expert)
+        # probs, indices: (B*N, n_expert_per_token)
         probs, indices = torch.topk(router, self.n_expert_per_token)
         probs = probs.softmax(dim=1, dtype=torch.float).to(dtype=x.dtype)
         if self.routed_scaling_factor != 1.0:
             probs = probs * self.routed_scaling_factor
-        y = torch.zeros_like(x_2d)  # (B*T, n_embd)
+        y = torch.zeros_like(x_2d)  # (B*N, n_embd)
         for idx, expert in enumerate(self.experts):
-            # `mask = indices == idx`: `(B*T, n_expert_per_token)`
-            # `zip(token_idx, expert_idx) = [(t, j)]` where `mask[t, j] == True`
+            # mask = indices == idx: (B*N, n_expert_per_token)
+            # token_idx, expert_idx: (N_a,)
+            # zip(token_idx, expert_idx) = [(t, j)] where mask[t, j] == True
             token_idx, expert_idx = torch.nonzero(indices == idx, as_tuple=True)
-            # If `N = len(token_idx)` is the number of tokens `expert` is active for
-            # (we can have N == 0):
-            # `y[token_idx]`: `(N, n_embd)`
-            # `probs[token_idx, expert_idx].unsqueeze(-1)`: `(N, 1)`
-            # `expert(x_2d[token_idx])`: `(N, n_embd)`
+            # If N_a = len(token_idx) is the number of tokens `expert` is active for
+            # (we can have N_a == 0):
+            # y[token_idx]: (N_a, n_embd)
+            # probs[token_idx, expert_idx].unsqueeze(-1): (N_a, 1)
+            # expert(x_2d[token_idx]): (N_a, n_embd)
             y[token_idx] += probs[token_idx, expert_idx].unsqueeze(-1) * expert(x_2d[token_idx])
-        return y.view(*x.shape)  # (B, T, n_embd)
+        return y.view(*x.shape)  # (B, N, n_embd)
 
 
 def sdpa_naive(
@@ -348,6 +350,8 @@ def sdpa_torch(
     scale_factor: Optional[float] = None,
     causal_mask: bool = True,
 ) -> torch.Tensor:
+    # query: (B, H_q, N, hs)
+    # key, value: (B, H_k, N, hs)
     if causal_mask and query.shape[-2] != key.shape[-2]:
         # Major flaw in `F.scaled_dot_product_attention`:
         # - If `q_len < kv_len`, the default masking with `is_causal=True` does
@@ -367,9 +371,10 @@ def sdpa_torch(
         # better to extend keys, values in this case, since otherwise a slow
         # naive kernel is called
         q_per_kv = n_head // n_query_groups
+        # key, value: (B, H_q, N, hs)
         key = torch.repeat_interleave(key, q_per_kv, dim=1)
         value = torch.repeat_interleave(value, q_per_kv, dim=1)
-        enable_gqa = key.shape[1] == n_query_groups
+        enable_gqa = False
 
     return F.scaled_dot_product_attention(
         query=query,
@@ -420,6 +425,12 @@ class MultiHeadAttention(nn.Module):
             self.norm_q = self.norm_k = None
 
     def forward(self, x: torch.Tensor, rope: RotaryPositionEncoding) -> torch.Tensor:
+        # B:   bs = x.shape[0]
+        # H_q: n_head
+        # H_k: n_query_groups
+        # N:   x.shape[1]
+        # hs:  head_size
+        # x: (B, N, n_embd)
         bs = x.shape[0]
         q_n_embd = self.n_head * self.head_size
         kv_n_embd = self.n_query_groups * self.head_size
@@ -427,6 +438,8 @@ class MultiHeadAttention(nn.Module):
         # Transpose to shape used in SDPA
         q_shape = (bs, -1, self.n_head, self.head_size)
         kv_shape = (bs, -1, self.n_query_groups, self.head_size)
+        # q: (B, H_q, N, hs)
+        # k, v: (B, H_k, N, hs)
         q = q.view(*q_shape).transpose(1, 2)
         k = k.view(*kv_shape).transpose(1, 2)
         v = v.view(*kv_shape).transpose(1, 2)
@@ -439,6 +452,7 @@ class MultiHeadAttention(nn.Module):
         k = rope(k).contiguous()
         v = v.contiguous()
         # Scaled dot product attention
+        # sdpa_output: (B, H_q, N, hs)
         sdpa_output = self._sdpa(q, k, v)
         # Reverse transpose, final projection
         return self.proj(sdpa_output.transpose(1, 2).reshape(bs, -1, q_n_embd))
