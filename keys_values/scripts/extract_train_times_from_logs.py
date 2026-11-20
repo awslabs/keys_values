@@ -69,6 +69,10 @@ def _wrap(s: str) -> str:
     return "{\\small\\!" + s + "}"
 
 
+def _last_two(p: Path) -> str:
+    return p.parent.name + "/" + p.name
+
+
 def main(
     mode: str,
     dataset_size: str,
@@ -88,12 +92,11 @@ def main(
         log_files = _find_log_files(log_dir)
         if not log_files:
             continue
-        print(f"({dataset}, {policy}): {log_files}")
+        print(f"({dataset}, {policy}): {[_last_two(p) for p in log_files]}")
         records = [
             entry
             for log_file in log_files
-            for records in _parse_log(log_file, mode, filter_epochs)
-            for entry in records
+            for entry in _parse_log(log_file, mode, filter_epochs)
         ]
         times = []
         for epoch, iter_val, time_secs in records:
@@ -111,6 +114,7 @@ def main(
             times_by_combo[(dataset, policy)] = times
 
     csv_path = base_path / f"times_{mode}_{dataset_size}.csv"
+    print(f"\nWriting {csv_path}")
     with csv_path.open("w", newline="") as f:
         writer = csv.DictWriter(
             f, fieldnames=["dataset", "policy", "epoch", "iter", "time_secs"]
@@ -138,6 +142,7 @@ def main(
     tex_lines += [r"\hline", r"\end{tabular}"]
 
     tex_path = base_path / f"times_{mode}_{dataset_size}.tex"
+    print(f"\nWriting {tex_path}")
     tex_path.write_text("\n".join(tex_lines) + "\n")
 
 
