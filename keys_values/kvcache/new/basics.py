@@ -281,10 +281,16 @@ class KVCacheDriver(torch.nn.Module):
     Update of KV buffers based on `positions` in :meth:`forward`:
 
     We either have `positions == index` (single 3D index), or a list of
-    entries `(index, off, num)`. In the latter case, we do the following
-    for every entry in order, using `key[:, :, off:(off + num), :],
-    `value[:, :, off:(off + num), :]` instead of `key, value` in each
-    step.
+    entries `(index, off, num)`. In the latter case, if
+    `positions = zip(indexes, offs, nums)`, we must have `offs[0] == 0`,
+    `offs[i + 1] = offs[i] + nums[i]`, and `offs[-1] + nums[-1] == key.shape[2]`.
+    We then do the following for every entry in order, using
+    `key[:, :, off:(off + num), :], `value[:, :, off:(off + num), :]` instead
+    of `key, value` in each step. If `positions` is a list, none of its
+    entries must be a special case (see below):
+    `indexes[i].shape[-1] == nums[i]` for all entries. See
+    :class:`SmartInitialLastRecentlyInsertedKVCachePolicy` for an example
+    where `positions` is a list.
 
     If `index.shape[-1] == num` (where `num = key.shape[2]` in the single
     entry case), then `key, value` are written to positions `index` (with
@@ -296,6 +302,7 @@ class KVCacheDriver(torch.nn.Module):
     `index`. See :class:`AttnWeightsKVCachePolicy` for an example where
     this special case is needed.
 
+    See also :meth:`check_positions_for_forward`.
     """
 
     def __init__(self, config: Config):
@@ -506,6 +513,31 @@ class KVCacheDriver(torch.nn.Module):
         cls, params: KVCacheParams, **kwargs
     ) -> Tuple[int, Dict[str, int]]:
         raise NotImplementedError
+
+    @staticmethod
+    def check_positions_for_forward(
+        positions: PositionsNewEntriesType,
+        num: int,
+    ):
+        """
+        Checks whether `positions` passed to :meth:`forward`, and returned
+        by :meth:`KVCachePolicy.forward`, is valid. `num` is the length of
+        the chunk, i.e. `num == key.shape[2]` as passed to meth:`forward`.
+
+        """
+        if isinstance(positions, list):
+            curr_pos = 0
+            for i, (index, off, sz) in enumerate(positions):
+                if off != curr_pos:
+                    raise ValueError(f"Entry {i} in positions: off = {off}, must be {curr_pos}")
+                if index.ndim != 3 or index.shape[-1] != sz:
+                    raise ValueError(f"Entry {i} in positions: index.shape = {index.shape}, num = {sz}")
+                curr_pos += sz
+            if curr_pos != num:
+                raise ValueError(f"positions: Total length {curr_pos}, must be equal to {num}")
+        else:
+            if positions.ndim != 3 or positions.shape[-1] < num:
+                raise ValueError(f"positions.shape = {positions.shape}: Must be 3D with final axis >= {num}")
 
 
 class GenericKVCache(KVCache):
