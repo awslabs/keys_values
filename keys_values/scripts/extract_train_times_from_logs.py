@@ -16,9 +16,11 @@ import re
 import statistics
 from itertools import product
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List
 
 from keys_values.scripts.cleanup_evaluation import datasets_and_cases
+
+LOG_FILENAME = "gpu0.log"
 
 _TRAIN_RE = re.compile(
     r"Epoch\s+(\d+)\s*\|\s*iter\s+(\d+)\s*\|.*\|\s*iter time:\s*([\d.]+)\s*(ms|s)\b"
@@ -28,17 +30,18 @@ _VALID_RE = re.compile(
 )
 
 
-def _find_log_file(log_dir: Path) -> Optional[Path]:
-    resume_candidates = []
+def _find_log_files(log_dir: Path) -> List[Path]:
+    result = []
     if log_dir.exists():
         for child in log_dir.iterdir():
             m = re.fullmatch(r"resume(\d+)", child.name)
-            if m and (child / "gpu0.log").exists():
-                resume_candidates.append((int(m.group(1)), child / "gpu0.log"))
-    if resume_candidates:
-        return max(resume_candidates, key=lambda x: x[0])[1]
-    base_log = log_dir / "gpu0.log"
-    return base_log if base_log.exists() else None
+            base_log = child / LOG_FILENAME
+            if m and base_log.exists():
+                result.append(base_log)
+        base_log = log_dir / LOG_FILENAME
+        if base_log.exists():
+            result.append(base_log)
+    return result
 
 
 def _parse_log(
@@ -82,11 +85,16 @@ def main(
         log_dir = base_dir / "logs"
         if not base_dir.exists():
             continue
-        log_file = _find_log_file(log_dir)
-        if log_file is None:
+        log_files = _find_log_files(log_dir)
+        if not log_files:
             continue
-        print(f"({dataset}, {policy}): {log_file}")
-        records = _parse_log(log_file, mode, filter_epochs)
+        print(f"({dataset}, {policy}): {log_files}")
+        records = [
+            entry
+            for log_file in log_files
+            for records in _parse_log(log_file, mode, filter_epochs)
+            for entry in records
+        ]
         times = []
         for epoch, iter_val, time_secs in records:
             all_rows.append(
@@ -141,8 +149,10 @@ if __name__ == "__main__":
     is_baseline = False
     is_base_model = False
     extra_data = True
+    is_ruler = False
     filter_dataset = None
     filter_case = None
+    chunk_sizes = None
 
     if is_rerun:
         base_path = base_path / "rerun"
@@ -155,8 +165,10 @@ if __name__ == "__main__":
         extra_data,
         is_baseline,
         is_base_model,
+        is_ruler,
         filter_dataset=filter_dataset,
         filter_case=filter_case,
+        chunk_sizes=chunk_sizes,
     )
 
     # Skip epoch 0 (warm-up)
