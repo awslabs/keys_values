@@ -248,14 +248,18 @@ class LLaMAMoE(nn.Module):
 
         """
         # x: (B, N, n_embd)
+        # Flatten (B, N) -> (B*N,): "Tokens" always meant along this flat axis
         x_2d = x.view(-1, x.shape[-1])  # (B*N, n_embd)
         router = self.gate(x_2d)  # (B*N, n_expert)
         # probs, indices: (B*N, n_expert_per_token)
+        # Top n_expert_per_token positions per token
         probs, indices = torch.topk(router, self.n_expert_per_token)
         probs = probs.softmax(dim=1, dtype=torch.float).to(dtype=x.dtype)
         if self.routed_scaling_factor != 1.0:
             probs = probs * self.routed_scaling_factor
         y = torch.zeros_like(x_2d)  # (B*N, n_embd)
+        # Loop over experts. For each expert, sum contributions for all tokens
+        # for which this expert is in the top n_expert_per_token positions
         for idx, expert in enumerate(self.experts):
             # mask = indices == idx: (B*N, n_expert_per_token)
             # token_idx, expert_idx: (N_a,)
@@ -329,6 +333,8 @@ def sdpa_naive(
         scores = scores + mask
     # Softmax to compute attention weights
     scores = F.softmax(scores, dim=-1)
+    # scores: (bs, nh_q, q_len, kv_len)
+    # value: (bs, nh_k, kv_len, head_size)
     if q_per_kv == 1:
         return torch.matmul(scores, value)
     else:
@@ -438,11 +444,11 @@ class MultiHeadAttention(nn.Module):
         # Transpose to shape used in SDPA
         q_shape = (bs, -1, self.n_head, self.head_size)
         kv_shape = (bs, -1, self.n_query_groups, self.head_size)
-        # q: (B, H_q, N, hs)
-        # k, v: (B, H_k, N, hs)
         q = q.view(*q_shape).transpose(1, 2)
         k = k.view(*kv_shape).transpose(1, 2)
         v = v.view(*kv_shape).transpose(1, 2)
+        # q: (B, H_q, N, hs)
+        # k, v: (B, H_k, N, hs)
         if self.norm_q is not None:
             q = self.norm_q(q)
             k = self.norm_k(k)
@@ -452,7 +458,7 @@ class MultiHeadAttention(nn.Module):
         k = rope(k).contiguous()
         v = v.contiguous()
         # Scaled dot product attention
-        # sdpa_output: (B, H_q, N, hs)
         sdpa_output = self._sdpa(q, k, v)
+        # sdpa_output: (B, H_q, N, hs)
         # Reverse transpose, final projection
         return self.proj(sdpa_output.transpose(1, 2).reshape(bs, -1, q_n_embd))
