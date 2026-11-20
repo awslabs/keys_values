@@ -64,13 +64,13 @@ def datasets_and_cases(
             f"helmet_{task}_{dataset_size}"
             for task in (
                 "trec_coarse",
+                "trec_fine",
                 "nlu",
+                "banking77",
                 "clinc150",
                 "infinite_bench_qa",
                 "infinite_bench_mc",
                 "json_kv",
-                "trec_fine",
-                "banking77",
             )
         ]
         if chunk_sizes is None:

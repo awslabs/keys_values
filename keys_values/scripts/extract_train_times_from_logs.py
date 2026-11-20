@@ -70,7 +70,8 @@ def _wrap(s: str) -> str:
 
 
 def _last_two(p: Path) -> str:
-    return p.parent.name + "/" + p.name
+    p_name = p.parent.name
+    return (p_name + "/" if p_name != "logs" else "") + p.name
 
 
 def main(
