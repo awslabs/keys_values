@@ -130,6 +130,7 @@ class DefaultKVCacheDriver(KVCacheDriver):
         return_attn_weights: bool,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert input_pos > 0  # Sanity check
+        self.check_positions_for_forward(positions, key.shape[2])
         return self._prefill_or_forward_mha(
             query=query,
             key=key,

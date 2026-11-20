@@ -323,7 +323,6 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         self._append_debug_intermediates(query, key, value, token_idx, attn_outputs)
         return attn_outputs, attn_weights
 
-    # TODO: Case when `positions` is list
     def _forward(
         self,
         key: torch.Tensor,
@@ -332,9 +331,7 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
     ) -> KeysAndValues:
         assert self.input_pos > 0  # Not to be used for prefill
         if isinstance(positions, list):
-            if len(positions) > 1:
-                raise NotImplementedError("positions is list: Not yet implemented")
-            index = positions[0][0]
+            index = torch.cat([x[0] for x in positions], dim=-1)
         else:
             index = positions
         num = key.shape[2]
