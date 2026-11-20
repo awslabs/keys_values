@@ -18,61 +18,52 @@ from itertools import product
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from keys_values.scripts.cleanup_evaluation import datasets_and_cases
+
 _TRAIN_RE = re.compile(
-    r"Epoch\s+(\d+)\s*\|\s*iter\s+(\d+)\s*\|.*\|\s*iter time:\s*([\d.]+)\s*(ms|s)"
+    r"Epoch\s+(\d+)\s*\|\s*iter\s+(\d+)\s*\|.*\|\s*iter time:\s*([\d.]+)\s*(ms|s)\b"
 )
 _VALID_RE = re.compile(
-    r"Epoch\s+(\d+)\s*\|\s*iter\s+(\d+)\s*\|.*\|\s*val_time:\s*([\d.]+)\s*(ms|s)"
+    r"Epoch\s+(\d+)\s*\|\s*iter\s+(\d+)\s*\|.*\|\s*val_time:\s*([\d.]+)\s*(ms|s)\b"
 )
 
 
-def _find_log_files(log_dir: Path) -> List[Path]:
-    result = []
+def _find_log_file(log_dir: Path) -> Optional[Path]:
+    resume_candidates = []
     if log_dir.exists():
-        path = log_dir / "gpu0.log"
-        if path.exists():
-            result.append(path)
         for child in log_dir.iterdir():
-            if child.name.startswith("resume"):
-                path = child / "gpu0.log"
-                if path.exists():
-                    result.append(path)
-    return result
+            m = re.fullmatch(r"resume(\d+)", child.name)
+            if m and (child / "gpu0.log").exists():
+                resume_candidates.append((int(m.group(1)), child / "gpu0.log"))
+    if resume_candidates:
+        return max(resume_candidates, key=lambda x: x[0])[1]
+    base_log = log_dir / "gpu0.log"
+    return base_log if base_log.exists() else None
 
 
-def _parse_logs(
-    log_files: List[Path], mode: str, filter_epochs: Callable[[int], bool]
+def _parse_log(
+    log_file: Path, mode: str, filter_epochs: Callable[[int], bool]
 ) -> List[tuple]:
     pattern = _TRAIN_RE if mode == "train" else _VALID_RE
     records = []
-    for log_file in log_files:
-        with log_file.open() as f:
-            for line in f:
-                m = pattern.search(line)
-                if not m:
-                    continue
-                epoch = int(m.group(1))
-                if not filter_epochs(epoch):
-                    continue
-                iter_val = int(m.group(2))
-                time_val = float(m.group(3))
-                if m.group(4) == "ms":
-                    time_val /= 1000.0
-                records.append((epoch, iter_val, time_val))
+    with log_file.open() as f:
+        for line in f:
+            m = pattern.search(line)
+            if not m:
+                continue
+            epoch = int(m.group(1))
+            if not filter_epochs(epoch):
+                continue
+            iter_val = int(m.group(2))
+            time_val = float(m.group(3))
+            if m.group(4) == "ms":
+                time_val /= 1000.0
+            records.append((epoch, iter_val, time_val))
     return records
 
 
 def _wrap(s: str) -> str:
     return "{\\small\\!" + s + "}"
-
-
-def _for_output(paths: List[Path], len_base: int) -> List[str]:
-    off = len_base + 1
-    return [str(path)[off:] for path in paths]
-
-
-def _print_ratios(ratios: List[Optional[float]]) -> str:
-    return ", ".join(f"{((r - 1) * 100):.1f}" for r in ratios if r is not None)
 
 
 def main(
@@ -85,20 +76,17 @@ def main(
 ):
     all_rows = []
     times_by_combo = {}  # (dataset, policy) -> [time_secs, ...]
-    len_base = len(str(base_path))
 
     for dataset, policy in product(datasets, policies):
         base_dir = base_path / dataset / policy
+        log_dir = base_dir / "logs"
         if not base_dir.exists():
             continue
-        log_dir = base_dir / "logs"
-        log_files = _find_log_files(log_dir)
-        if not log_files:
+        log_file = _find_log_file(log_dir)
+        if log_file is None:
             continue
-        records = _parse_logs(log_files, mode, filter_epochs)
-        print(
-            f"({dataset}, {policy}): {len(records)} records from {_for_output(log_files, len_base)}"
-        )
+        print(f"({dataset}, {policy}): {log_file}")
+        records = _parse_log(log_file, mode, filter_epochs)
         times = []
         for epoch, iter_val, time_secs in records:
             all_rows.append(
@@ -114,7 +102,6 @@ def main(
         if times:
             times_by_combo[(dataset, policy)] = times
 
-    # CSV file
     csv_path = base_path / f"times_{mode}_{dataset_size}.csv"
     with csv_path.open("w", newline="") as f:
         writer = csv.DictWriter(
@@ -123,7 +110,6 @@ def main(
         writer.writeheader()
         writer.writerows(all_rows)
 
-    # LaTeX file
     tex_lines = [
         r"\begin{tabular}{l" + "c" * len(datasets) + "}",
         r"\hline",
@@ -142,94 +128,37 @@ def main(
                 cells.append(_wrap(f"{mean:.2f} ({std:.2f})"))
         tex_lines.append(" & ".join(cells) + r" \\")
     tex_lines += [r"\hline", r"\end{tabular}"]
-    tex_path = base_path / f"times_{mode}_{dataset_size}.tex"
-    print(f"\nWriting timing table to {tex_path}")
-    tex_path.write_text("\n".join(tex_lines) + "\n")
 
-    # Ratios
-    if mode == "train":
-        for policy in policies:
-            if "2048" in policy:
-                pol_1024 = policy.replace("2048", "1024")
-                pol_128 = policy.replace("2048", "128")
-                do_128 = pol_128 in policies
-                ratios_2048_1024 = []
-                ratios_2048_128 = []
-                for dataset in datasets:
-                    times = times_by_combo.get((dataset, policy))
-                    if times is None:
-                        ratios_2048_1024.append(None)
-                        if do_128:
-                            ratios_2048_128.append(None)
-                    else:
-                        mean_2048 = statistics.mean(times)
-                        times = times_by_combo.get((dataset, pol_1024))
-                        if times is None:
-                            ratios_2048_1024.append(None)
-                        else:
-                            mean_1024 = statistics.mean(times)
-                            ratios_2048_1024.append(mean_1024 / mean_2048)
-                        if do_128:
-                            times = times_by_combo.get((dataset, pol_128))
-                            if times is None:
-                                ratios_2048_128.append(None)
-                            else:
-                                mean_128 = statistics.mean(times)
-                                ratios_2048_128.append(mean_128 / mean_2048)
-                num_1024 = sum(r is not None for r in ratios_2048_1024)
-                if num_1024 > 0:
-                    print(f"{policy}: 1k/2k  = [{_print_ratios(ratios_2048_1024)}]")
-                if do_128:
-                    num_128 = sum(r is not None for r in ratios_2048_128)
-                    if num_128 > 0:
-                        print(f"{policy}: 128/2k = [{_print_ratios(ratios_2048_128)}]")
+    tex_path = base_path / f"times_{mode}_{dataset_size}.tex"
+    tex_path.write_text("\n".join(tex_lines) + "\n")
 
 
 if __name__ == "__main__":
     base_path = Path.home() / "out/finetune/neurips_exp/lora/qwen3_4b"
 
-    dataset_size = "64k"
-    # dataset_size = "128k"
-    is_rerun = True
+    dataset_size = "128k"
+    is_rerun = False
+    is_baseline = False
+    is_base_model = False
+    extra_data = True
+    filter_dataset = None
+    filter_case = None
+
     if is_rerun:
         base_path = base_path / "rerun"
-    datasets = [
-        f"helmet_nq_{dataset_size}",
-        f"helmet_trivia_qa_{dataset_size}",
-        f"helmet_hotpot_qa_{dataset_size}",
-        f"helmet_pop_qa_{dataset_size}",
-    ]
-    policies = [
-        "lr_4gpu_cs2048_lr5",
-        "slr_4gpu_cs2048_lr5",
-        "h2o_4gpu_cs2048_lr5",
-        "h2onorm_4gpu_cs2048_lr5",
-        "h2oorig_4gpu_cs2048_lr5",
-        "lr_4gpu_cs1024_lr5",
-        "slr_4gpu_cs1024_lr5",
-        "h2o_4gpu_cs1024_lr5",
-        "h2onorm_4gpu_cs1024_lr5",
-        "h2oorig_4gpu_cs1024_lr5",
-    ]
-    if dataset_size == "64k":
-        policies.extend(
-            [
-                "slr_4gpu_cs128_lr5",
-                "h2o_4gpu_cs128_lr5",
-                "h2onorm_4gpu_cs128_lr5",
-                "h2oorig_4gpu_cs128_lr5",
-            ]
-        )
-    else:
-        policies.extend(
-            [
-                "lr_4gpu_cs8192_lr5",
-                "slr_4gpu_cs8192_lr5",
-                "h2o_4gpu_cs8192_lr5",
-                "h2onorm_4gpu_cs8192_lr5",
-                "h2oorig_4gpu_cs8192_lr5",
-            ]
-        )
+    elif is_baseline:
+        base_path = base_path / "baseline"
+    elif is_base_model:
+        base_path = base_path / "basemod"
+    datasets, policies = datasets_and_cases(
+        dataset_size,
+        extra_data,
+        is_baseline,
+        is_base_model,
+        filter_dataset=filter_dataset,
+        filter_case=filter_case,
+    )
+
     # Skip epoch 0 (warm-up)
     filter_epochs = lambda epoch: epoch > 0
 

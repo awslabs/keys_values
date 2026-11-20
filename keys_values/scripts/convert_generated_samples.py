@@ -57,7 +57,9 @@ def main(
             trg_record = {trg: src_record[src] for src, trg in DATA_KEYS}
             trg_list = None
             if is_ruler_cwe:
-                trg_list = ruler_cwe_expected_to_raw_target(src_record[expected_keys[0]])
+                trg_list = ruler_cwe_expected_to_raw_target(
+                    src_record[expected_keys[0]]
+                )
             elif has_list_targets:
                 trg_list = [
                     x.strip()
