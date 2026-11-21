@@ -157,6 +157,18 @@ class KVCacheWithBuffers(DefaultKVCache):
     slow for token generation. We can use buffers with offloading for the
     prompt processing, then switch to in-GPU-memory buffers for the token
     generation.
+
+    Optional growth of default buffers:
+
+    Pass `grow_buffers_init_length` to :meth:`from_config` (any subclass that
+    builds default buffers). `None`, the default, allocates those buffers at
+    `cache_length`. A positive int starts them at that many slots, capped at
+    `cache_length`, and doubles that length until a write fits or
+    `cache_length` is reached. While `current_length < cache_length` every
+    cache type only appends, so the same rule covers dense, last-recent,
+    smart-lastrec, and H2O caches. Quantized buffers do not support this
+    option.
+
     """
 
     def __init__(
@@ -206,10 +218,22 @@ class KVCacheWithBuffers(DefaultKVCache):
     def extract_default_buffers_kwargs(
         kwargs: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """
+        Pulls keyword arguments for :class:`DefaultKVCacheBuffers` out of
+        `kwargs`.
+
+        `allocate_buffers`: If given, forwarded to the buffer constructor.
+
+        `grow_buffers_init_length`: If `None` or omitted, buffers are allocated
+        at `cache_length`. If a positive int, they start with that many slots
+        (at most `cache_length`) and double until a write fits or
+        `cache_length` is reached.
+
+        """
         result = dict()
-        name = "allocate_buffers"
-        if name in kwargs:
-            result[name] = kwargs.pop(name)
+        for name in ("allocate_buffers", "grow_buffers_init_length"):
+            if name in kwargs:
+                result[name] = kwargs.pop(name)
         return result
 
     @staticmethod
@@ -434,8 +458,11 @@ class DenseKVCache(KVCacheWithBuffers):
     as its cache length. It requires a lot of memory, so can only be used for
     moderate cache lengths.
 
-    Note: If the cache is full, :meth:`forward` raises an exception. The cache
-    buffers are allocated up front and are not enlarged later on.
+    Note: If the cache is full, :meth:`forward` raises an exception. By
+    default the buffers are allocated at `cache_length` and are not enlarged
+    later on. `grow_buffers_init_length` passed to :meth:`from_config` starts
+    them smaller and doubles until `cache_length`, see
+    :class:`KVCacheWithBuffers`.
 
     """
 
@@ -688,6 +715,12 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     Xiao etal.
     Efficient Streaming Language Models with Attention Sinks
     https://arxiv.org/abs/2309.17453
+
+    `grow_buffers_init_length` is passed at construction (`__init__` or
+    :meth:`from_config`). `None` (the default) allocates default buffers at
+    `cache_length`. A positive int starts them at that many slots, capped at
+    `cache_length`, and doubles that length until a write fits or
+    `cache_length` is reached. `token_pos` stays `cache_length` sized.
     """
 
     def __init__(
@@ -696,9 +729,22 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         buffers: KVCacheBuffers,
         block_idx: int,
         init_grace_tokens: Optional[int] = None,
+        grow_buffers_init_length: Optional[int] = None,
         **base_kwargs,
     ):
         super().__init__(config, buffers, block_idx, **base_kwargs)
+        if (
+            isinstance(buffers, DefaultKVCacheBuffers)
+            and grow_buffers_init_length is not None
+        ):
+            buffers.grow_buffers_init_length = buffers._clip_grow_init_length(
+                grow_buffers_init_length
+            )
+        self.grow_buffers_init_length = (
+            buffers.grow_buffers_init_length
+            if isinstance(buffers, DefaultKVCacheBuffers)
+            else grow_buffers_init_length
+        )
         if init_grace_tokens is None:
             init_grace_tokens = min(
                 DEFAULT_INIT_GRACE_TOKENS,
@@ -728,6 +774,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
         init_grace_tokens: Optional[int] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
+        grow_buffers_init_length: Optional[int] = None,
         **base_kwargs,
     ) -> "LastRecentlyInsertedKVCache":
         """
@@ -744,6 +791,10 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
                 first :meth:`forward` call, based on the input arguments.
             dtype: Data type for buffers. If not given, it is set with the
                 first :meth:`forward` call, based on the input arguments.
+            grow_buffers_init_length: If `None` (default), buffers are
+                allocated at `cache_length`. If a positive int, they start
+                with that many slots (at most `cache_length`) and double
+                until a write fits or `cache_length` is reached.
             base_kwargs: Extra keyword arguments for cache and default buffer
 
         """
@@ -754,6 +805,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             cache_length=cache_length,
             device=device,
             dtype=dtype,
+            grow_buffers_init_length=grow_buffers_init_length,
             **buffers_kwargs,
         )
         return LastRecentlyInsertedKVCache(
@@ -761,6 +813,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             buffers,
             block_idx,
             init_grace_tokens=init_grace_tokens,
+            grow_buffers_init_length=grow_buffers_init_length,
             **base_kwargs,
         )
 
@@ -894,6 +947,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
     def _base_kwargs_for_clone(self) -> Dict[str, Any]:
         result = super()._base_kwargs_for_clone()
         result["init_grace_tokens"] = self.init_grace_tokens
+        result["grow_buffers_init_length"] = self.grow_buffers_init_length
         return result
 
     def clone(self) -> KVCache:
