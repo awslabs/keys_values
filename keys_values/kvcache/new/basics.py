@@ -292,6 +292,19 @@ class KVCacheDriver(torch.nn.Module):
     :class:`SmartInitialLastRecentlyInsertedKVCachePolicy` for an example
     where `positions` is a list.
 
+    Why allow `positions` to be a list? We could just concatenate the entries
+    of `indexes`. The list mode is needed because a single index obtained by
+    concatenation could be not unique. In this case, `torch.scatter` has
+    non-deterministic behaviour, and its gradient may be wrong. As a rule,
+    multiple entries in `positions` should be used only if their
+    concatenation is non-unique.
+
+    NOTE: A :class:`KVCachePolicy` should return a list for `positions` only
+    in special circumstances which are rare (e.g., if chunks are very large).
+    This is because some downstream classes, such as
+    :class:`TrainingReplayKVCacheDriver`, may ignore the list feature for
+    simplicity and use the concatenation of indexes instead.
+
     If `index.shape[-1] == num` (where `num = key.shape[2]` in the single
     entry case), then `key, value` are written to positions `index` (with
     `scatter_`) of the respective buffers. A special case arises if

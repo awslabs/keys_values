@@ -52,6 +52,22 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
     are overwritten, the subsequent buffer states are nodes in a computation
     graph. The main task is to create all necessary annotations for
     :class:`CellComputationAutogradHooks` to work.
+
+    Potential gradient errors if `positions` arg of :meth:`forward` is a list
+
+    Recall from the :class:`KVCacheDriver` header comments that `positions`
+    can be a list of multiple indexes and consecutive ranges. While a correct
+    implementation of :class:`KVCacheDriver` implements :meth:`forward` by
+    iterating over the entries of `positions`, processing the buffer updates
+    sequentially, this is not done here. Instead, in order to avoid extra
+    difficulties with annotations, we simply concatenate the index entries
+    in `positions`. Since the concatenation produces indexes which can be
+    non-unique, `torch.scatter` could have non-deterministic behaviour
+    (the correct behaviour for us would be processing the indexes from left
+    to right).
+
+    Since `positions` lists are very rarely used, such approximation errors
+    can be tolerated.
     """
 
     def __init__(
@@ -331,6 +347,7 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
     ) -> KeysAndValues:
         assert self.input_pos > 0  # Not to be used for prefill
         if isinstance(positions, list):
+            # Note: `index` may be non-unique, see header comment
             index = torch.cat([x[0] for x in positions], dim=-1)
         else:
             index = positions
