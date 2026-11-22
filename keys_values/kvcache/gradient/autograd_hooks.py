@@ -518,6 +518,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self.num_chunks = None
         self.first_layer_idx = None
         self.first_chunk_idx = None
+        self.token_chunks = None
         # This set contains shapes to look out for
         self._shapes_to_match = None
         # Maintains list of pack hook arguments not yet matched
@@ -546,7 +547,6 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._remaining_pack_args_were_flushed = None
         self._remaining_annotations = None
         self._shapes_counter = None
-        self.token_chunks = None
         self.cache_lengths = None
         self.grace_period = None
         # If this is set, we log all annotations being matched

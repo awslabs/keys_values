@@ -355,7 +355,7 @@ class CellComputation(nn.Module):
                     first_layer_idx=self.model_part.first_layer_idx,
                     first_chunk_idx=first_chunk_idx,
                     cache_lengths=list(cache_lengths),
-                    replay_logs=self.replay_logs,
+                    token_chunks=token_idxs,
                 )
 
             # Outer loop over chunks

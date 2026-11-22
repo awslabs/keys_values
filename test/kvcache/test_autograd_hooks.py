@@ -222,23 +222,15 @@ def test_unpack_walks_multi_chunk_annotation_chain(device, num_states):
         batch_size=batch_size,
     )
     token_kwargs = dict(dtype=torch.int64, device=device)
-    replay_log = DefaultKVCacheReplayLog(
-        token_chunks=[torch.zeros(batch_size, cache_length, **token_kwargs)]
-        + [
-            torch.zeros(batch_size, chunk_size, **token_kwargs)
-            for _ in range(num_states)
-        ],
-        cache_length=cache_length,
-        max_prefill_length=cache_length,
-        grace_period=0,
-    )
+    ch_sizes = [cache_length] + [chunk_size] * num_states
+    token_chunks = [torch.zeros(batch_size, sz, **token_kwargs) for sz in ch_sizes]
     hooks.initialize_cell(
         eff_num_layers=1,
         num_chunks=num_states + 1,
         first_layer_idx=layer_idx,
         first_chunk_idx=0,
         cache_lengths=[cache_length],
-        replay_logs=[replay_log],
+        token_chunks=token_chunks,
     )
 
     # Ground-truth buffer states 1, ..., num_states. State `c + 1` arises
@@ -360,23 +352,15 @@ def test_unpack_out_of_order_request_after_walking_past(device):
         batch_size=batch_size,
     )
     token_kwargs = dict(dtype=torch.int64, device=device)
-    replay_log = DefaultKVCacheReplayLog(
-        token_chunks=[torch.zeros(batch_size, cache_length, **token_kwargs)]
-        + [
-            torch.zeros(batch_size, chunk_size, **token_kwargs)
-            for _ in range(num_states)
-        ],
-        cache_length=cache_length,
-        max_prefill_length=cache_length,
-        grace_period=0,
-    )
+    ch_sizes = [cache_length] + [chunk_size] * num_states
+    token_chunks = [torch.zeros(batch_size, sz, **token_kwargs) for sz in ch_sizes]
     hooks.initialize_cell(
         eff_num_layers=1,
         num_chunks=num_states + 1,
         first_layer_idx=layer_idx,
         first_chunk_idx=0,
         cache_lengths=[cache_length],
-        replay_logs=[replay_log],
+        token_chunks=token_chunks,
     )
 
     buffer_kwargs = dict(dtype=dtype, device=device)
@@ -493,23 +477,15 @@ def test_parked_memory_is_bounded_and_released(device):
     )
     hooks = CellComputationAutogradHooks(config=config, batch_size=batch_size)
     token_kwargs = dict(dtype=torch.int64, device=device)
-    replay_log = DefaultKVCacheReplayLog(
-        token_chunks=[torch.zeros(batch_size, cache_length, **token_kwargs)]
-        + [
-            torch.zeros(batch_size, chunk_size, **token_kwargs)
-            for _ in range(num_states)
-        ],
-        cache_length=cache_length,
-        max_prefill_length=cache_length,
-        grace_period=0,
-    )
+    ch_sizes = [cache_length] + [chunk_size] * num_states
+    token_chunks = [torch.zeros(batch_size, sz, **token_kwargs) for sz in ch_sizes]
     hooks.initialize_cell(
         eff_num_layers=1,
         num_chunks=num_states + 1,
         first_layer_idx=layer_idx,
         first_chunk_idx=0,
         cache_lengths=[cache_length],
-        replay_logs=[replay_log],
+        token_chunks=token_chunks,
     )
 
     buffer_kwargs = dict(dtype=dtype, device=device)
@@ -574,7 +550,7 @@ def test_parked_memory_is_bounded_and_released(device):
         first_layer_idx=layer_idx,
         first_chunk_idx=0,
         cache_lengths=[cache_length],
-        replay_logs=[replay_log],
+        token_chunks=token_chunks,
     )
     ids = {}
     for chunk_idx, annot in annotations.items():
@@ -662,23 +638,15 @@ def test_late_ext_request_served_from_parked_state(device):
     )
     hooks = CellComputationAutogradHooks(config=config, batch_size=batch_size)
     token_kwargs = dict(dtype=torch.int64, device=device)
-    replay_log = DefaultKVCacheReplayLog(
-        token_chunks=[torch.zeros(batch_size, cache_length, **token_kwargs)]
-        + [
-            torch.zeros(batch_size, chunk_size, **token_kwargs)
-            for _ in range(num_states)
-        ],
-        cache_length=cache_length,
-        max_prefill_length=cache_length,
-        grace_period=0,
-    )
+    ch_sizes = [cache_length] + [chunk_size] * num_states
+    token_chunks = [torch.zeros(batch_size, sz, **token_kwargs) for sz in ch_sizes]
     hooks.initialize_cell(
         eff_num_layers=1,
         num_chunks=num_states + 1,
         first_layer_idx=layer_idx,
         first_chunk_idx=0,
         cache_lengths=[cache_length],
-        replay_logs=[replay_log],
+        token_chunks=token_chunks,
     )
 
     buffer_kwargs = dict(dtype=dtype, device=device)
@@ -805,23 +773,15 @@ def test_in_order_ext_first_ordering_parks_nothing(device):
     )
     hooks = CellComputationAutogradHooks(config=config, batch_size=batch_size)
     token_kwargs = dict(dtype=torch.int64, device=device)
-    replay_log = DefaultKVCacheReplayLog(
-        token_chunks=[torch.zeros(batch_size, cache_length, **token_kwargs)]
-        + [
-            torch.zeros(batch_size, chunk_size, **token_kwargs)
-            for _ in range(num_states)
-        ],
-        cache_length=cache_length,
-        max_prefill_length=cache_length,
-        grace_period=0,
-    )
+    ch_sizes = [cache_length] + [chunk_size] * num_states
+    token_chunks = [torch.zeros(batch_size, sz, **token_kwargs) for sz in ch_sizes]
     hooks.initialize_cell(
         eff_num_layers=1,
         num_chunks=num_states + 1,
         first_layer_idx=layer_idx,
         first_chunk_idx=0,
         cache_lengths=[cache_length],
-        replay_logs=[replay_log],
+        token_chunks=token_chunks,
     )
 
     buffer_kwargs = dict(dtype=dtype, device=device)
