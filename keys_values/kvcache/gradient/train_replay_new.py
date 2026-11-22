@@ -68,6 +68,12 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
 
     Since `positions` lists are very rarely used, such approximation errors
     can be tolerated.
+
+    TODO: Should this ever become a problem (i.e., cache policies need to
+    use `positions` lists frequently): The right way to deal with this is
+    to split the update into several parts, so that a chunk is processed
+    in parts for which eviction indexes are unique. If these parts are
+    written to the replay log separately, there'd be no errors here.
     """
 
     def __init__(

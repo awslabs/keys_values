@@ -14,7 +14,7 @@
 from itertools import product
 import math
 import os
-from typing import Tuple, Optional, List, Dict, Callable
+from typing import Tuple, Optional, List, Dict, Callable, Literal
 
 import torch
 
@@ -26,7 +26,8 @@ from keys_values.attention.base import (
 )
 from keys_values.attention.attention_utils import build_mask_cache
 from keys_values.kvcache.base import KVCacheParams, KVCache
-from keys_values.kvcache.factory import KVCacheFactory
+from keys_values.kvcache.factory import KVCacheFactory as KVCacheFactory_old
+from keys_values.kvcache.new.factory import KVCacheFactory as KVCacheFactory_new
 from keys_values.kvcache.test_shadow import ShadowKVCacheFactory
 
 # Tests run quite slowly for "mps". If this changes, switch this to True
@@ -34,15 +35,34 @@ RUN_TESTS_FOR_MPS = False
 
 ENV_VAR_SKIP_CUDA_TESTS = "KEYSVALS_SKIP_CUDA_TESTS"
 
+ENV_VAR_KVCACHE_CODE_VARIANT = "KEYSVALS_KVCACHE_CODE_VARIANT"
+
+KVCACHE_SUPPORTED_CODE_VARIANT = ("old", "new", "shadow")
+
+
+def _get_code_variant(
+    code_variant: Optional[str],
+) -> str:
+    if code_variant is not None:
+        return code_variant
+    code_variant = os.environ.get(ENV_VAR_KVCACHE_CODE_VARIANT)
+    if code_variant is not None and code_variant not in KVCACHE_SUPPORTED_CODE_VARIANT:
+        raise ValueError(
+            f"Environment variable {ENV_VAR_KVCACHE_CODE_VARIANT}: Value "
+            f"'{code_variant}' not supported, must be in {KVCACHE_SUPPORTED_CODE_VARIANT}"
+        )
+    return "old" if code_variant is None else code_variant
+
 
 def create_kv_cache(
     name: str,
     params: KVCacheParams,
     block_idx: int = 0,
-    create_shadow: bool = False,
+    code_variant: Optional[Literal["old", "new", "shadow"]] = None,
     return_from_old: bool = True,
     **kwargs,
 ) -> KVCache:
+    code_variant = _get_code_variant(code_variant)
     config = Config(
         n_embd=params.n_head * params.head_size,
         n_head=params.n_head,
@@ -58,8 +78,10 @@ def create_kv_cache(
         dtype=params.dtype,
         cache_kwargs=kwargs,
     )
-    if not create_shadow:
-        return KVCacheFactory.create_single(**create_kwargs)
+    if code_variant == "old":
+        return KVCacheFactory_old.create_single(**create_kwargs)
+    elif code_variant == "new":
+        return KVCacheFactory_new.create_single(**create_kwargs)
     else:
         return ShadowKVCacheFactory.create_single(
             **create_kwargs,
@@ -292,7 +314,7 @@ def cache_names_and_devices(
         filter_name = lambda name: True
     result = []
     for name, device in product(
-        KVCacheFactory.supported_names(),
+        KVCacheFactory_old.supported_names(),
         available_backends(),
     ):
         if filter_name(name):
