@@ -192,7 +192,7 @@ class CellComputation(nn.Module):
             )
 
         self._token_pos_per_chunk = [0] + list(
-            accumulate(idx.shape[-1] for idx in replay_logs[0].token_chunks)
+            accumulate(idx.shape[-1] for idx in get_chunks_from_log(replay_logs[0]))
         )
         self._debug_tensors = debug_tensors
 

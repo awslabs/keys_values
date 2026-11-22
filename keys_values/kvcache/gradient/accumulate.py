@@ -346,6 +346,7 @@ class GradientAccumulator:
             )
         self.chunks_per_cell = chunks_per_cell.copy()
         self.do_checkpointing = len(chunks_per_cell) > 1
+        # Sets `self.seq_length`, `self.replay_logs` (copy)
         chunk_lens = self._check_and_copy_replay_logs(replay_logs, chunks_per_cell)
         # Ranges to split up `inputs`
         self.inputs_ranges = [
@@ -553,8 +554,8 @@ class GradientAccumulator:
         model_part: CellBlocks,
     ) -> List[KVCache]:
         """
-        This method works both for old and new KV cache implementations: the
-        new imolementations use :class:`GenericKVCache`.
+        This method works both for old and new KV cache implementations. The
+        new implementations use :class:`GenericKVCache`.
 
         For new implementations, no extra KV cache objects are created, but the
         existing ones are switched to "play" mode. They need to be switched

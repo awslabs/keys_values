@@ -53,7 +53,6 @@ from keys_values.kvcache.gradient.cleanup import (
     ArraysForCleanup,
     protect_named_params_buffers_of_model,
 )
-from keys_values.kvcache.new import GenericKVCache
 from keys_values.kvcache.offloading import KVCacheOffloader
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
 from keys_values.kvcache.test_shadow import use_new_kvcache_code
@@ -1017,7 +1016,7 @@ class LongContextGradientModel(LongContextInferenceModel):
             self.gpt_model = gpt_model
             # Ensure that all KV caches record replay logs
             for kv_cache in self.gpt_model.get_kv_caches():
-                if not isinstance(kv_cache, GenericKVCache):
+                if not use_new_kvcache_code(kv_cache):
                     kv_cache.switch_replay_logging(True)
             # Run inference forward pass. Layer inputs are checkpointed.
             # Mean reduction over batch dimension.
@@ -1033,11 +1032,13 @@ class LongContextGradientModel(LongContextInferenceModel):
 
         # Replay logs from KV caches are required in
         # :meth:`_backward_accumulate_gradients`.
-        self._replay_logs = None if self._use_new_code else []
-        for kv_cache in gpt_model.get_kv_caches():
-            if not self._use_new_code:
+        if self._use_new_code:
+            self._replay_logs = None
+        else:
+            self._replay_logs = []
+            for kv_cache in gpt_model.get_kv_caches():
                 self._replay_logs.append(kv_cache.get_replay_log())
-            kv_cache.switch_replay_logging(False)
+                kv_cache.switch_replay_logging(False)
 
         deallocate_kv_cache_buffers_of_model(gpt_model)
         if self.offload_device is not None:
