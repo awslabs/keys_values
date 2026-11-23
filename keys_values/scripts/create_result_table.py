@@ -194,6 +194,7 @@ if __name__ == "__main__":
     is_baseline = False
     is_base_model = False
     extra_data = False
+    is_ruler = False
     filter_dataset = None
     filter_case = None
     chunk_sizes = None
@@ -210,6 +211,7 @@ if __name__ == "__main__":
         extra_data,
         is_baseline,
         is_base_model,
+        is_ruler,
         with_short=True,
         filter_dataset=filter_dataset,
         filter_case=filter_case,

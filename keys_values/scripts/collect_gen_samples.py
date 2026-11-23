@@ -13,7 +13,7 @@
 # limitations under the License.
 from itertools import product
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 import yaml
 
 from keys_values.evaluation.tasks import EvaluationTasks
@@ -30,40 +30,56 @@ def main(
     metric_name: str,
     tasks: Optional[List[str]] = None,
     multiple_tasks: bool = True,
-    eval_dir: str = "eval",
+    eval_dir: Union[str, List[str]] = "eval",
 ):
-    # Collect results from all files across all tasks
-    print(f"\nLoading generated samples files from {out_dir}")
-    eval_tasks = EvaluationTasks(
-        out_dir=out_dir,
-        model_type=model_type,
-        tasks=tasks,
-        collect_results=True,
-        eval_metrics_filename=eval_dir + "/" + GENERATED_SAMPLES_FILENAME,
-        multiple_tasks=multiple_tasks,
-    )
-    all_data: Dict[str, List[Dict[str, Any]]] = dict()
-    num_total = 0
-    for task_name, result_file_paths in eval_tasks.eval_result_files():
-        print(f"{task_name}: {len(result_file_paths)}")
-        records: List[Dict[str, Any]] = []
-        for path in result_file_paths:
-            records.extend(yaml.safe_load(path.open()))
-        print(f"    {len(records)} records")
-        num_total += len(records)
-        records = sorted(
-            records,
-            key=lambda x: (x[metric_name], x["idx"]),
-        )
-        all_data[task_name] = records
+    if isinstance(eval_dir, str):
+        eval_dirs = [eval_dir]
+    else:
+        eval_dirs = eval_dir
 
-    print(f"Total number of records: {num_total}")
-    if all_data:
-        combined_path = out_dir / GENERATED_SAMPLES_ALL_FILENAME
-        if combined_path.exists():
-            combined_path.unlink()
-        with open(combined_path, "w") as fp:
-            yaml.safe_dump(all_data, fp)
+    for it, eval_dir in enumerate(eval_dirs):
+        try:
+            # Collect results from all files across all tasks
+            print(f"\nLoading generated samples files from {out_dir}")
+            eval_tasks = EvaluationTasks(
+                out_dir=out_dir,
+                model_type=model_type,
+                tasks=tasks,
+                collect_results=True,
+                eval_metrics_filename=eval_dir + "/" + GENERATED_SAMPLES_FILENAME,
+                multiple_tasks=multiple_tasks,
+            )
+            all_data: Dict[str, List[Dict[str, Any]]] = dict()
+            num_total = 0
+            first_task = True
+            for task_name, result_file_paths in eval_tasks.eval_result_files():
+                if len(result_file_paths) > 0 and first_task:
+                    print(result_file_paths[0].parent)
+                    first_task = False
+                print(f"{task_name}: {len(result_file_paths)}")
+                records: List[Dict[str, Any]] = []
+                for path in result_file_paths:
+                    records.extend(yaml.safe_load(path.open()))
+                print(f"    {len(records)} records")
+                num_total += len(records)
+                records = sorted(
+                    records,
+                    key=lambda x: (x[metric_name], x["idx"]),
+                )
+                all_data[task_name] = records
+
+            print(f"Total number of records: {num_total}")
+            if all_data:
+                combined_path = out_dir / GENERATED_SAMPLES_ALL_FILENAME
+                if combined_path.exists():
+                    combined_path.unlink()
+                with open(combined_path, "w") as fp:
+                    yaml.safe_dump(all_data, fp)
+                break
+        except Exception as ex:
+            if it == len(eval_dirs) - 1:
+                raise ex
+            print(f"Metric {metric_name} not found in eval_dir {eval_dir}")
 
 
 if __name__ == "__main__":
@@ -71,16 +87,17 @@ if __name__ == "__main__":
 
     metric_name = "match_first_word_or_phrase"  # New setup
     # metric_name = "sub_exact_match"  # Old setup
-    eval_dir = "eval"
+    eval_dir = ["eval_new", "eval_128", "eval"]
     mode = "collect"
     # mode = "sweep"
-    dataset_size = "64k"
-    # dataset_size = "128k"
+    # dataset_size = "64k"
+    dataset_size = "128k"
+    is_rerun = True
     is_baseline = False
-    # is_baseline = True
-    # extra_data = False
-    extra_data = True
-    if is_baseline:
+    extra_data = False
+    if is_rerun:
+        base_path = base_path / "rerun"
+    elif is_baseline:
         base_path = base_path / "baseline"
     if not extra_data:
         datasets = [
@@ -106,11 +123,12 @@ if __name__ == "__main__":
         "h2o_4gpu_cs2048_lr5",
         "qh2o_4gpu_cs2048_lr5",
         "h2onorm_4gpu_cs2048_lr5",
-        "qh2onorm_4gpu_cs2048_lr5",
+        "h2oorig_4gpu_cs2048_lr5",
         "lr_4gpu_cs1024_lr5",
         "slr_4gpu_cs1024_lr5",
         "h2o_4gpu_cs1024_lr5",
         "h2onorm_4gpu_cs1024_lr5",
+        "h2oorig_4gpu_cs1024_lr5",
     ]
     model_type = "lora"
     if mode == "collect":

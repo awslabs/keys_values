@@ -171,7 +171,7 @@ class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
         max_seq_length: Optional[int] = None,
         seed: int = 42,
         metadata_dir: Optional[str] = None,
-        store_split_in_metadata: bool = False,
+        store_split_in_metadata: bool = True,
         trainloader_longest_first: bool = False,
         trainloader_shortest_first: bool = False,
         recompute_lengths: bool = False,
@@ -200,7 +200,7 @@ class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
                 calls to :meth:`_transform` can skip re-tokenisation.
             store_split_in_metadata: If `True`, we sample and store the
                 train/val split in the metadata and also load it from there,
-                instead of sampling it anew each time.
+                instead of sampling it anew each time. Defaults to `True`.
             trainloader_longest_first: If ``True``, the first training batch
                 contains the longest sequences (useful for early OOM detection).
             trainloader_shortest_first: If ``True``, the first training batch
@@ -327,7 +327,10 @@ class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
                 "train": dev_perm[val_size:].tolist(),
                 "val": dev_perm[:val_size].tolist(),
             }
+            print("Train / validation split sampled at random")
             needs_store = True
+        else:
+            print("Train / validation split loaded from metadata")
         return needs_store
 
     def _get_train_val_split_from_metadata(
@@ -428,6 +431,7 @@ class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
                 f"{METADATA_KEYS}:\n{data}"
             )
             return None
+        print(f"Loaded metadata from {meta_path}")
         return data
 
     def _store_metadata(self, data: Dict[str, Any]) -> None:
@@ -436,7 +440,7 @@ class Helmet(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
             meta_path.parent.mkdir(parents=True, exist_ok=True)
             with meta_path.open("w") as fp:
                 json.dump(data, fp)
-            print(f"Metadata stored in {meta_path}")
+            print(f"Metadata stored to {meta_path}")
 
     def _create_datasets(
         self,

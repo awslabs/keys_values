@@ -128,7 +128,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
         repo_id: str = "THUDM/LongBench-v2",
         access_token: Optional[str] = None,
         metadata_dir: Optional[str] = None,
-        store_split_in_metadata: bool = False,
+        store_split_in_metadata: bool = True,
         debug_num_cases: Optional[int] = None,
         trainloader_longest_first: bool = False,
         trainloader_shortest_first: bool = False,
@@ -158,7 +158,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
                 directory. Strongly recommended to save time.
             store_split_in_metadata: If `True`, we sample and store the
                 train/val split in the metadata and also load it from there,
-                instead of sampling it anew each time.
+                instead of sampling it anew each time. Defaults to `True`.
             debug_num_cases: If used, we only keep this number of records.
             trainloader_longest_first: If set, :meth:`train_dataloader` returns
                 a data loader whose first batch contain the longest sequences in
@@ -481,7 +481,10 @@ class LongBenchV2(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
                 "train": dev_perm[val_size:].tolist(),
                 "val": dev_perm[:val_size].tolist(),
             }
+            print("Train / validation split sampled at random")
             needs_store = True
+        else:
+            print("Train / validation split loaded from metadata")
         return needs_store
 
     def _get_train_val_split_from_metadata(
@@ -514,6 +517,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
         if any(int(x) != x or x <= 0 for x in seq_lenghts):
             print(prefix + ", must contain positive integers")
             return None
+        print(f"Loaded metadata from {meta_path}")
         return data
 
     def _store_metadata(self, data: Dict[str, Any]) -> None:
@@ -522,7 +526,7 @@ class LongBenchV2(SequenceLengthFilteredDataModule, EncodableDataModuleMixin):
             meta_path.parent.mkdir(parents=True, exist_ok=True)
             with meta_path.open("w") as fp:
                 json.dump(data, fp)
-            print(f"Metadata stored in {meta_path}")
+            print(f"Metadata stored to {meta_path}")
 
     def smart_lastrec_info(self, tokenizer: HFTokenizer) -> SmartInitialInformation:
         """
