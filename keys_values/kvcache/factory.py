@@ -17,6 +17,7 @@ from typing import List, Dict, Any, Optional, Union, Tuple
 import torch
 
 from keys_values.config import Config
+from keys_values.kvcache.attn_weights import AttnWeightsKVCache
 from keys_values.kvcache.base import KVCache, KVCacheParams
 from keys_values.kvcache.basics import (
     KVCacheWithBuffers,
@@ -582,6 +583,21 @@ def deallocate_kv_cache_buffers_of_model(gpt_model: GPT):
 
     """
     deallocate_kv_cache_buffers(gpt_model.get_kv_caches())
+
+
+def get_grace_period(cache: KVCache) -> int:
+    """
+    Information needed in :class:`CellComputationAutogradHooks`.
+
+    TODO: Flaw in design, need to refactor
+    :class:`CellComputationAutogradHooks`, which must not depend on specifics
+    of certain KV caches.
+
+    """
+    if isinstance(cache, AttnWeightsKVCache):
+        return cache.grace_period
+    else:
+        return 0
 
 
 LASTREC_REMKEYS = ("init_grace_tokens",)

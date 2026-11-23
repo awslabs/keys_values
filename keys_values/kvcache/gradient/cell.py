@@ -23,6 +23,7 @@ from keys_values.config import Config
 from keys_values.attention import DefaultKeysAndValues
 from keys_values.tools.debug_utils import for_debug
 from keys_values.kvcache.base import DefaultKVCache
+from keys_values.kvcache.factory import get_grace_period
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.train_attn_weights_replay import (
     TrainingAttnWeightsReplayCache,
@@ -334,6 +335,7 @@ class CellComputation(nn.Module):
         )
         kv_caches_copy = self.model_part.get_kv_caches()
         cache_lengths = [c.cache_length for _, c in kv_caches_copy]
+        grace_period = get_grace_period(kv_caches_copy[0][1])
         if first_chunk_idx > 0:
             for rc, keys, values in zip(
                 train_replay_caches,
@@ -355,6 +357,7 @@ class CellComputation(nn.Module):
                     first_chunk_idx=first_chunk_idx,
                     cache_lengths=list(cache_lengths),
                     chunk_lengths=chunk_lengths,
+                    grace_period=grace_period,
                 )
 
             # Outer loop over chunks
