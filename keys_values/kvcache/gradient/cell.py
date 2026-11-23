@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections.abc import Callable
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Union
 from itertools import accumulate
 
 import torch
@@ -28,6 +28,8 @@ from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradH
 from keys_values.kvcache.gradient.train_attn_weights_replay import (
     TrainingAttnWeightsReplayCache,
 )
+from keys_values.kvcache.gradient.train_replay_new import TrainingReplayKVCacheDriver
+from keys_values.kvcache.new.basics import GenericKVCache
 from keys_values.kvcache.new.driver import DefaultKVCacheDriver
 from keys_values.kvcache.stack_layers import CellBlocks
 from keys_values.kvcache.test_shadow import (
@@ -158,7 +160,7 @@ class CellComputation(nn.Module):
             self._debug_intermediates, self._name_prefix = self._debug_intermediates
         else:
             self._name_prefix = None
-        # Arguments for `TrainingAttnWeightsReplayCache` cache objects.
+        # Common arguments for `TrainingAttnWeightsReplayCache` cache objects.
         kwargs = dict(
             cache_kwargs,
             config=self.config,
@@ -183,10 +185,15 @@ class CellComputation(nn.Module):
                         self._name_prefix + f"_part{block_idx}",
                     )
                 )
+            # Still missing here:
+            # - replay_log
+            # - start_input_pos
+            # - num_chunks
             self._train_cache_kwargs.append(
                 dict(
                     kwargs,
                     cache_length=kv_cache.cache_length,
+                    layer_idx=block_idx,
                     mha=mha,
                     **extra_kwargs,
                 )
@@ -232,24 +239,37 @@ class CellComputation(nn.Module):
         self,
         first_chunk_idx: int,
         num_chunks: int,
-    ) -> List[TrainingAttnWeightsReplayCache]:
-        first_layer_idx = self.model_part.first_layer_idx
+        use_new_code: bool = False,
+    ) -> List[Union[TrainingAttnWeightsReplayCache, GenericKVCache]]:
         more_kwargs = dict(
             start_input_pos=self._token_pos_per_chunk[first_chunk_idx],
             num_chunks=num_chunks,
             debug_tensors=self._debug_tensors,
         )
-        return [
-            TrainingAttnWeightsReplayCache(
-                **kwargs,
-                replay_log=replay_log,
-                layer_idx=first_layer_idx + rel_block_idx,
-                **more_kwargs,
-            )
-            for rel_block_idx, (replay_log, kwargs) in enumerate(
-                zip(self.replay_logs, self._train_cache_kwargs)
-            )
-        ]
+        if not use_new_code:
+            return [
+                TrainingAttnWeightsReplayCache(
+                    **kwargs,
+                    replay_log=replay_log,
+                    **more_kwargs,
+                )
+                for replay_log, kwargs in zip(self.replay_logs, self._train_cache_kwargs)
+            ]
+        else:
+            kv_caches = [c for _, c in self.model_part.get_kv_caches()]
+            if not all(isinstance(c, GenericKVCache) for c in kv_caches):
+                raise TypeError("All KV caches of model_part must be GenericKVCache")
+            return [
+                GenericKVCache(
+                    policy=cache.policy,
+                    driver=TrainingReplayKVCacheDriver(
+                        **kwargs,
+                        replay_log=replay_log,
+                        **more_kwargs,
+                    )
+                )
+                for replay_log, kwargs, cache in zip(self.replay_logs, self._train_cache_kwargs, kv_caches)
+            ]
 
     def get_input_pos(self, first_chunk_idx: int) -> int:
         return sum(

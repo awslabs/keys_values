@@ -81,7 +81,6 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         config: Config,
         batch_size: int,
         cache_length: int,
-        block_idx: int,
         replay_log: KVCacheReplayLog_oldornew,
         start_input_pos: int,
         layer_idx: int,
@@ -105,13 +104,13 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         if num_chunks <= 0:
             raise ValueError(f"num_chunks {num_chunks}, must be positive")
         super().__init__(
-            config,
-            batch_size,
-            cache_length,
-            block_idx,
-            dtype,
-            head_size,
-            mha,
+            config=config,
+            max_batch_size=batch_size,
+            cache_length=cache_length,
+            block_idx=layer_idx,
+            dtype=dtype,
+            head_size=head_size,
+            mha=mha,
             **mha_kwargs,
         )
 
