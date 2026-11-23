@@ -26,12 +26,13 @@ from keys_values.attention.flex_attention import FlexAttentionArgs
 from keys_values.kvcache.gradient.accumulate import GradientAccumulator
 from keys_values.kvcache.gradient.autograd_hooks import CellComputationAutogradHooks
 from keys_values.kvcache.gradient.cell import GetInputSlice, WriteOutputsSlice
-from keys_values.kvcache.gradient.inference_replay import get_replay_logs
 from keys_values.kvcache.stack_layers import DefaultCellBlocks
+from keys_values.kvcache.test_shadow import use_new_kvcache_code
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     copy_gradients,
     available_backends,
+    get_replay_logs,
 )
 from keys_values.kvcache.test_utils_advanced import exchange_kv_cache_checkpoints
 from keys_values.model import GPT
@@ -226,6 +227,7 @@ def test_gradient_row_of_cells(
         device=device,
     )
     kv_caches = []
+    use_new_kvc_code = None
     for block_idx, cache_length in enumerate(cache_lengths):
         kv_cache = create_kv_cache(
             name=cache_name + "-" + qname,
@@ -234,7 +236,9 @@ def test_gradient_row_of_cells(
             **mha_kwargs,
             **cache_kwargs,
         )
-        kv_cache.switch_replay_logging(True)
+        use_new_kvc_code = use_new_kvcache_code(kv_cache)
+        if not use_new_kvc_code:
+            kv_cache.switch_replay_logging(True)
         kv_caches.append(kv_cache)
     gpt_model.assign_kv_caches(kv_caches)
 
@@ -252,14 +256,19 @@ def test_gradient_row_of_cells(
     assert y.device == device
     gpt_model.set_start_of_layer_hook(None)  # Do not record layer inputs from now on
     seq_len = sum(tokens_per_chunk)
+    # Checks on replay logs
     replay_logs = get_replay_logs(gpt_model)
     assert len(replay_logs) == n_layer
-    # Checks on replay logs
-    for replay_log in replay_logs:
-        assert len(replay_log) == seq_len
-        assert len(replay_log.token_chunks) == num_chunks
-    for kv_cache in kv_caches:
-        kv_cache.switch_replay_logging(False)
+    if not use_new_kvc_code:
+        for replay_log in replay_logs:
+            assert len(replay_log) == seq_len
+            assert len(replay_log.token_chunks) == num_chunks
+        for kv_cache in kv_caches:
+            kv_cache.switch_replay_logging(False)
+    else:
+        for replay_log in replay_logs:
+            assert len(replay_log) == num_chunks
+            assert sum(log.token_idx.shape[-1] for log in replay_log) == seq_len
     # Check on layer inputs
     assert set(layer_inputs.keys()) == {0, n_layer}
     shape = (batch_size, seq_len, config.n_embd)

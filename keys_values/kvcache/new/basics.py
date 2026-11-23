@@ -760,6 +760,10 @@ class GenericKVCache(KVCache):
     from keys_values.kvcache.buffers import KVCacheBuffers
 
     @property
+    def current_length(self) -> int:
+        return self.driver.current_length
+
+    @property
     def mha(self) -> MultiHeadSelfAttention:
         return self.driver.mha
 

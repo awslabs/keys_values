@@ -26,9 +26,15 @@ from keys_values.attention.base import (
 )
 from keys_values.attention.attention_utils import build_mask_cache
 from keys_values.kvcache.base import KVCacheParams, KVCache
+from keys_values.kvcache.basics import KVCacheWithBuffers
 from keys_values.kvcache.factory import KVCacheFactory as KVCacheFactory_old
+from keys_values.kvcache.new.basics import GenericKVCache
 from keys_values.kvcache.new.factory import KVCacheFactory as KVCacheFactory_new
-from keys_values.kvcache.test_shadow import ShadowKVCacheFactory
+from keys_values.kvcache.test_shadow import (
+    ShadowKVCacheFactory,
+    KVCacheReplayLog_oldornew, use_new_kvcache_code,
+)
+from keys_values.model import GPT
 
 # Tests run quite slowly for "mps". If this changes, switch this to True
 RUN_TESTS_FOR_MPS = False
@@ -349,3 +355,23 @@ def debug_print_gradients(model: torch.nn.Module):
                 row = f"{name}: None"
             rows.append(row)
     print("\n".join(rows))
+
+
+def get_replay_logs(gpt_model: GPT) -> List[KVCacheReplayLog_oldornew]:
+    kv_caches = gpt_model.get_kv_caches()
+    if use_new_kvcache_code(kv_caches[0]):
+        if any(c is None or not isinstance(c, GenericKVCache) for c in kv_caches):
+            raise IndexError(
+                "All blocks of GPT model must have KV caches of type GenericKVCache assigned"
+            )
+        return [c.policy.get_replay_log() for c in kv_caches]
+    else:
+        if any(c is None or not isinstance(c, KVCacheWithBuffers) for c in kv_caches):
+            raise IndexError(
+                "All blocks of GPT model must have KV caches of type KVCacheWithBuffers assigned"
+            )
+        if not all(c.do_replay_logging for c in kv_caches):
+            raise IndexError(
+                "All KV caches of GPT model must have replay logging activated"
+            )
+        return [c.get_replay_log() for c in kv_caches]

@@ -24,7 +24,6 @@ from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.consts import split_name
 from keys_values.kvcache.gradient.inference_replay import (
     inference_replay_cache_factory,
-    get_replay_logs,
     InferenceAttnWeightsReplayCache,
 )
 from keys_values.kvcache.gradient.train_attn_weights_replay import (
@@ -33,6 +32,7 @@ from keys_values.kvcache.gradient.train_attn_weights_replay import (
 from keys_values.kvcache.test_utils import (
     create_kv_cache,
     cache_names_and_devices,
+    get_replay_logs,
 )
 from keys_values.kvcache.test_utils_advanced import cache_kwargs_for_smart_lastrec
 from keys_values.model import GPT

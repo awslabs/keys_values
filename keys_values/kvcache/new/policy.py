@@ -170,6 +170,9 @@ class DefaultKVCachePolicy(KVCachePolicy):
         self._batch_size = token_idx.shape[0]
         self._input_pos = 0
         self._prefill(query, key, value, token_idx)
+        self._append_to_replay_log(
+            token_idx=token_idx.to(device=query.device),
+        )
         self._input_pos = token_idx.shape[-1]
 
     def _prefill(
@@ -200,15 +203,25 @@ class DefaultKVCachePolicy(KVCachePolicy):
             token_idx,
             positions=positions,
         )
+        self._append_to_replay_log(
+            token_idx=token_idx.to(device=query.device),
+            positions=positions,
+        )
+        self._input_pos += token_idx.shape[-1]
+        return positions
+
+    def _append_to_replay_log(
+        self,
+        token_idx: torch.Tensor,
+        positions: Optional[PositionsNewEntriesType] = None,
+    ):
         if self._replay_log_status == "record":
             self._replay_log.append(
                 KVCacheReplayLogEntry(
-                    token_idx=token_idx.to(device=query.device),
+                    token_idx=token_idx,
                     positions=positions,
                 )
             )
-        self._input_pos += token_idx.shape[-1]
-        return positions
 
     def _forward(
         self,

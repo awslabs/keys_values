@@ -35,7 +35,6 @@ from keys_values.kvcache.attn_weights import (
 from keys_values.kvcache.base import KVCacheParams
 from keys_values.kvcache.buffers import KVCacheBuffers
 from keys_values.kvcache.gradient.accumulate import copy_requires_grad
-from keys_values.kvcache.gradient.inference_replay import get_replay_logs
 from keys_values.attention.sdpa_op import (
     SDPAFunction,
     sdpa_backward,
@@ -51,6 +50,7 @@ from keys_values.kvcache.test_utils import (
     product_with_devices,
     available_backends,
     create_kv_cache,
+    get_replay_logs,
 )
 from keys_values.model import GPT
 from keys_values.attention.sdpa_wrapper import scaled_dot_product_attention

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Dict, Tuple, List, Iterable, Any
+from typing import Optional, Dict, Tuple, Iterable, Any
 
 import torch
 
@@ -39,8 +39,6 @@ from keys_values.kvcache.smart_lastrec import (
     SmartInitialLastRecentlyInsertedKVCache,
     SmartInitialLastRecentlyInsertedKVCacheReplayLog,
 )
-
-from keys_values.model import GPT
 
 
 class InferenceReplayCacheMixin:
@@ -480,16 +478,3 @@ def inference_replay_cache_factory(
             f"type(kv_cache) = {type(kv_cache)}, does not have corresponding "
             "inference replay cache type"
         )
-
-
-def get_replay_logs(gpt_model: GPT) -> List[KVCacheReplayLog]:
-    kv_caches = gpt_model.get_kv_caches()
-    if any(c is None or not isinstance(c, KVCacheWithBuffers) for c in kv_caches):
-        raise IndexError(
-            "All blocks of GPT model must have KV caches of type KVCacheWithBuffers assigned"
-        )
-    if not all(c.do_replay_logging for c in kv_caches):
-        raise IndexError(
-            "All KV caches of GPT model must have replay logging activated"
-        )
-    return [c.get_replay_log() for c in kv_caches]
