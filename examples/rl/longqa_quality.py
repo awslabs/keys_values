@@ -19,7 +19,7 @@ the same set of long-context QA examples under a full (dense) KV cache vs H2O
 at several cache budgets. If H2O already degrades accuracy at inference, RL
 won't fix it; if it holds, the dense-vs-H2O GRPO comparison is worth running.
 
-    python examples/longqa_quality.py --device cuda \
+    python examples/rl/longqa_quality.py --device cuda \
         --model Qwen/Qwen2.5-0.5B-Instruct \
         --context-len 8192 --n-examples 40 --h2o-budgets 1024,2048,4096
 """

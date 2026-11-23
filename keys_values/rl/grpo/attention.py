@@ -40,7 +40,7 @@ changes every step until the cache is full, so every decode step recompiles
 (observed: a 2-step smoke test did not finish in 25 minutes). The finetune
 scripts never generate, which is why they can put ``flexatt_args`` on every
 MHA. The right fix for a worker without FlashInfer is to build it
-(``scripts/provision_worker.sh``), not to pick a different kernel.
+(``scripts/rl/provision_worker.sh``), not to pick a different kernel.
 
 Per-phase mechanism: :func:`attention_mha_kwargs` configures the MHA objects
 of the model and the caches (decode). :func:`gradient_train_cache_kwargs`
@@ -124,7 +124,7 @@ EAGER_WARNING = (
     "FlashInfer extension is not built: KV cache '{name}' needs attention "
     "weights and will run the EAGER SDPA (several times slower in decode). "
     "Build it with `pip install flashinfer-python && python build_ext.py` "
-    "(see scripts/provision_worker.sh)."
+    "(see scripts/rl/provision_worker.sh)."
 )
 
 

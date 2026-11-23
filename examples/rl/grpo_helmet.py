@@ -23,11 +23,11 @@ reward and evaluation measure the same thing.
 Run one arm per invocation; compare a sparse arm against a dense arm:
 
     # sparse (H2O) arm: cache budget < context, so eviction is real
-    python examples/grpo_helmet.py --device cuda --kv-cache-name h2o-torch-quantized8 \
+    python examples/rl/grpo_helmet.py --device cuda --kv-cache-name h2o-torch-quantized8 \
         --cache-length 4096 --steps 150 --out-dir runs/h2o
 
     # dense (full attention) arm at the same settings
-    python examples/grpo_helmet.py --device cuda --kv-cache-name dense-default \
+    python examples/rl/grpo_helmet.py --device cuda --kv-cache-name dense-default \
         --cache-length 0 --steps 150 --out-dir runs/dense   # 0 = fit longest prompt
 
 Metrics stream to ``<out-dir>/metrics.jsonl``; the final weights are saved to

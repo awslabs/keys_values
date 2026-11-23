@@ -4,8 +4,8 @@ Consolidates the experimental findings from the GRPO-on-HELMET campaign
 (PR #142): training GRPO, RLOO, and SFT end-to-end through an actively
 evicting H2O cache, cross-evaluated against dense-attention arms.
 
-Reproduce with `examples/grpo_helmet.py` (training arms) and
-`examples/grpo_helmet_crosseval.py` (evaluation matrix).
+Reproduce with `examples/rl/grpo_helmet.py` (training arms) and
+`examples/rl/grpo_helmet_crosseval.py` (evaluation matrix).
 
 ## Setup
 
@@ -55,7 +55,7 @@ pattern: all cells within noise of base.
    mostly-degenerate groups under binary EM.
 
 Footprint: ~13–24 s/step at ~7k-token prompts, ~8 GB peak — roughly half
-the dense footprint, consistent with `docs/GRPO_CONTEXT_SCALING.md`.
+the dense footprint, consistent with `docs/rl/GRPO_CONTEXT_SCALING.md`.
 
 ## Round 2: learning gains (lr 5e-6, group 8 × 2 accumulated prompts × 400 updates)
 
@@ -226,7 +226,7 @@ First results under the fixed evaluation: base Qwen2.5-0.5B-Instruct,
   reproducibility note above, the *effective* n of the pre-fix eval is
   smaller (17 distinct questions), widening these bars further.
 - 0.5B model, two tasks, 8k bucket; larger models and longer contexts are
-  the natural next axis (see `docs/GRPO_CONTEXT_SCALING.md` for the memory
+  the natural next axis (see `docs/rl/GRPO_CONTEXT_SCALING.md` for the memory
   scaling that motivates them).
 - RLOO mode and the SFT driver live on stacked branches (`rl-rloo`,
   `sft-helmet`); follow-up PRs once the base PR lands.
@@ -235,7 +235,7 @@ First results under the fixed evaluation: base Qwen2.5-0.5B-Instruct,
 
 ```bash
 # Training arm (H2O @ 4096 slots, em_f1 reward, gradient accumulation)
-python examples/grpo_helmet.py --device cuda \
+python examples/rl/grpo_helmet.py --device cuda \
     --model Qwen/Qwen2.5-0.5B-Instruct \
     --dataset-key nq --max-length 8k \
     --kv-cache-name h2o-torch-quantized8 --cache-length 4096 \
@@ -243,7 +243,7 @@ python examples/grpo_helmet.py --device cuda \
     --prompts-per-update 2 --steps 400 --lr 5e-6
 
 # Cross-evaluation matrix (train-cache x eval-cache, n=100)
-python examples/grpo_helmet_crosseval.py --device cuda \
+python examples/rl/grpo_helmet_crosseval.py --device cuda \
     --model Qwen/Qwen2.5-0.5B-Instruct \
     --dataset-key nq --max-length 8k --n-eval 100 \
     --h2o-cache-length 4096 \

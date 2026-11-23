@@ -61,8 +61,8 @@ Run
 ---
 ::
 
-    python examples/grpo_qwen.py --max-steps 20
-    python examples/grpo_qwen.py --device cuda --kv-cache-name h2o-torch-quantized8
+    python examples/rl/grpo_qwen.py --max-steps 20
+    python examples/rl/grpo_qwen.py --device cuda --kv-cache-name h2o-torch-quantized8
 
 A small built-in prompt list is used by default so the script is self
 contained. Swap in a real dataset (e.g. ``trl-lib/tldr``) by editing

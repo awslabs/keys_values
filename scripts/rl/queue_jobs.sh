@@ -9,9 +9,9 @@
 #     gains, no answer-style drift, high signal rate)
 #
 # Usage:
-#   ./scripts/queue_jobs.sh <max_length> <task1,task2,...> <seed1,seed2,...> [prefix]
+#   ./scripts/rl/queue_jobs.sh <max_length> <task1,task2,...> <seed1,seed2,...> [prefix]
 # Example (the 32k flagship):
-#   ./scripts/queue_jobs.sh 32k nq,hotpot_qa 0,1 flag32k
+#   ./scripts/rl/queue_jobs.sh 32k nq,hotpot_qa 0,1 flag32k
 set -euo pipefail
 
 MAXLEN="${1:?max_length, e.g. 32k}"
@@ -34,14 +34,14 @@ git pull -q
 source ~/venv/bin/activate
 pip install -q bitsandbytes==0.49.1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-python examples/grpo_helmet.py --device cuda --model ${MODEL} \\
+python examples/rl/grpo_helmet.py --device cuda --model ${MODEL} \\
     --dataset-key ${task} --max-length ${MAXLEN} \\
     --kv-cache-name h2o-torch-quantized8 --cache-length ${CACHE_LEN} \\
     --group-size 4 --prompts-per-update 2 --reward em_f1 --adv-mode rloo \\
     --optimizer paged_adamw8bit \\
     --steps ${STEPS} --lr 5e-6 --eval-every 100 --n-eval 8 --seed ${seed} \\
     --chunk-size 1024 --disable-flashinfer --out-dir \$OUT
-python examples/grpo_helmet_crosseval.py --device cuda --model ${MODEL} \\
+python examples/rl/grpo_helmet_crosseval.py --device cuda --model ${MODEL} \\
     --dataset-key ${task} --max-length ${MAXLEN} \\
     --checkpoints base rloo_h2o=\$OUT/final.pt \\
     --h2o-cache-length ${CACHE_LEN} --n-eval 50 --disable-flashinfer \\

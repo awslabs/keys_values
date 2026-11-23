@@ -30,7 +30,7 @@ OOMs. OOMs are caught and reported rather than crashing the sweep.
 
 Example (A10G, 23 GB):
 
-    python examples/grpo_context_sweep.py --device cuda \
+    python examples/rl/grpo_context_sweep.py --device cuda \
         --model Qwen/Qwen2.5-0.5B-Instruct \
         --context-lengths 2048,8192,16384,32768 --h2o-cache-length 4096
 """

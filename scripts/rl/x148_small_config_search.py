@@ -13,7 +13,7 @@ script does that). Each config runs one forward/backward through
 `LongContextGradientModel` with the GRPO loss head and records: OK,
 ADJACENCY (the #148 error), or OTHER (any other exception).
 
-    python scripts/x148_small_config_search.py --device cuda --out results.csv
+    python scripts/rl/x148_small_config_search.py --device cuda --out results.csv
 """
 
 from __future__ import annotations

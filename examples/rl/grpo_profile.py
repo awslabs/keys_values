@@ -29,10 +29,10 @@ cost grows with sequence length -- which is exactly what this sweep shows.
 Real model + real prompts (this is not a synthetic benchmark):
 
     # quick run on an A10
-    python examples/grpo_profile.py --device cuda --max-new-tokens 64,128,256
+    python examples/rl/grpo_profile.py --device cuda --max-new-tokens 64,128,256
 
     # longer sweep
-    python examples/grpo_profile.py --device cuda \
+    python examples/rl/grpo_profile.py --device cuda \
         --max-new-tokens 128,256,512,1024 --group-size 8 --iters 5
 
 Prompts come from a real dataset (``trl-lib/tldr`` by default) when the

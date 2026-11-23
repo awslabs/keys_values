@@ -13,7 +13,7 @@
 # limitations under the License.
 """
 Overlong-rollout detection and penalty of the RLVR driver
-(`examples/grpo_rlvr.py --overlong-penalty`).
+(`examples/rl/grpo_rlvr.py --overlong-penalty`).
 """
 
 import importlib.util
@@ -25,7 +25,7 @@ import torch
 def _load_driver():
     # `examples/` is not a package (and the name clashes with an installed
     # module), so load the driver by file path.
-    path = Path(__file__).resolve().parents[3] / "examples" / "grpo_rlvr.py"
+    path = Path(__file__).resolve().parents[3] / "examples" / "rl" / "grpo_rlvr.py"
     spec = importlib.util.spec_from_file_location("grpo_rlvr_driver", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

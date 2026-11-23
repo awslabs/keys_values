@@ -41,7 +41,7 @@ the prompt, accuracy equals dense at ~half the memory. Under genuine
 eviction the gap is real and degrades gracefully (~25% retention costs
 ~9pp EM on trivia).
 
-**Memory frontier, 7B on 48GB L40S** (`docs/GRPO_CONTEXT_SCALING.md`):
+**Memory frontier, 7B on 48GB L40S** (`docs/rl/GRPO_CONTEXT_SCALING.md`):
 dense GRPO OOMs at 24k context. Full-coverage sparse OOMs at 32k. Bounded
 evicting cache (q8@8192): flat ~35.7GB from 24k to **65k** -- the only
 configuration that trains at all in this regime.

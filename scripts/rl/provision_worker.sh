@@ -4,7 +4,7 @@
 # Assumes: Deep Learning Base AMI (Ubuntu 24.04), IAM instance profile
 # `kv-worker` attached (S3 read: canonical splits; S3 write: results).
 #
-#   curl -sL https://raw.githubusercontent.com/mmjerge/keys_values/experiments/scripts/provision_worker.sh | bash -s -- <branch>
+#   curl -sL https://raw.githubusercontent.com/mmjerge/keys_values/experiments/scripts/rl/provision_worker.sh | bash -s -- <branch>
 #
 # Idempotent: safe to re-run.
 set -euo pipefail
@@ -28,7 +28,7 @@ source "$HOME/venv/bin/activate"
 pip install -q --upgrade pip
 # The package's own install_requires is minimal; the full runtime stack is
 # frozen from the known-good reference worker (grpo-bench).
-pip install -q -r scripts/requirements-worker.txt
+pip install -q -r scripts/rl/requirements-worker.txt
 pip install -q -e .
 pip install -q awscli
 

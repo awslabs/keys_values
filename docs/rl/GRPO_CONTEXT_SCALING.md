@@ -5,7 +5,7 @@ length grows: full attention (`dense-default`, cache holds every token) vs. H2O
 (`h2o-torch-quantized8`, cache capped at a fixed budget so it evicts once the
 prompt exceeds it).
 
-Reproduce with `examples/grpo_context_sweep.py`.
+Reproduce with `examples/rl/grpo_context_sweep.py`.
 
 ## Setup
 
@@ -77,7 +77,7 @@ cache means memory does not grow with context.
 ## Command
 
 ```bash
-python examples/grpo_context_sweep.py --device cuda \
+python examples/rl/grpo_context_sweep.py --device cuda \
     --model Qwen/Qwen2.5-3B-Instruct \
     --context-lengths 2048,8192,16384,24576,32768 \
     --h2o-cache-length 4096 --warmup 1 --iters 3 --no-reset
@@ -115,4 +115,4 @@ Takeaways:
 - Step times grow with context (the chunked gradient pass is linear in
   prompt length): ~105 s/step at 32k, ~221 s/step at 65k, group 2. A 300-step
   run at 32k, group 8, is a multi-day single-GPU job — hence the worker
-  fleet (`terraform/`, `scripts/worker_loop.sh`).
+  fleet (`terraform/`, `scripts/rl/worker_loop.sh`).

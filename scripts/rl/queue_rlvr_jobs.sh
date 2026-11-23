@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Queue RLVR (Sparrow-protocol) jobs for the single-GPU worker fleet.
 #
-#   scripts/queue_rlvr_jobs.sh probe  <model> <arm>            [prefix]
-#   scripts/queue_rlvr_jobs.sh train  <model> <arm> <seeds>    [prefix]
+#   scripts/rl/queue_rlvr_jobs.sh probe  <model> <arm>            [prefix]
+#   scripts/rl/queue_rlvr_jobs.sh train  <model> <arm> <seeds>    [prefix]
 #
 #   arm = h2o<K>   bounded evicting bf16 cache, K slots (e.g. h2o4096)
 #       | q8h2o<K> same with int8 KV (slower decode, smaller)
@@ -70,7 +70,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # Use the FlashInfer kernels if this worker has them built (provision_worker.sh);
 # otherwise say so loudly rather than silently running eager.
 if python -c "import torch, keys_values._flashinfer_ops" 2>/dev/null; then FI=""; else FI="--disable-flashinfer"; echo "WARNING: FlashInfer not built on this worker, running eager SDPA"; fi
-python examples/grpo_rlvr.py --device cuda --model ${MODEL} \\
+python examples/rl/grpo_rlvr.py --device cuda --model ${MODEL} \\
     ${CACHE_ARGS} --max-new-tokens ${MAXNEW} --chunk-size 1024 \\
     ${RUN_ARGS} \$FI ${EXTRA} --out-dir \$OUT
 EOF

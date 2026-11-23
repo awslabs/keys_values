@@ -30,7 +30,7 @@ Setup: clone LongProc next to the repo (data ships in-repo, ~100MB):
 Example (7B on a 48GB card, known-good memory recipe):
 
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-    python examples/grpo_longproc.py --device cuda \
+    python examples/rl/grpo_longproc.py --device cuda \
         --model Qwen/Qwen2.5-7B-Instruct --dataset html_to_tsv_2k \
         --kv-cache-name h2o-torch-quantized8 --cache-length 8192 \
         --group-size 4 --prompts-per-update 2 --optimizer paged_adamw8bit \

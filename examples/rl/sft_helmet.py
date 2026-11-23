@@ -23,7 +23,7 @@ Uses the repo's existing SFT machinery (:class:`CrossEntropyOnLogits` +
 :class:`LongContextGradientModel`); this driver only adds the HELMET plumbing
 and matched evaluation.
 
-    python examples/sft_helmet.py --device cuda --dataset-key nq \
+    python examples/rl/sft_helmet.py --device cuda --dataset-key nq \
         --kv-cache-name h2o-torch-quantized8 --cache-length 4096 \
         --steps 400 --out-dir runs/nq_sft_h2o
 """

@@ -66,7 +66,7 @@ path. So the table measures eager-vs-eager; the *shape* of the result (dense
 grows with context then OOMs, bounded cache flat) stands, the absolute
 tokens/s do not.
 
-Fixed: `scripts/provision_worker.sh` now builds the extension with the host
+Fixed: `scripts/rl/provision_worker.sh` now builds the extension with the host
 GPU's arch (L40S is sm_89; build_ext.py only listed sm_80/sm_90), both idle
 workers have it, and `queue_rlvr_jobs.sh` only passes `--disable-flashinfer`
 when the kernels are missing. `decode_bench.py` has `--attn

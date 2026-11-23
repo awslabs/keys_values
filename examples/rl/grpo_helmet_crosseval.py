@@ -23,7 +23,7 @@ two effects that a plain per-arm eval conflates:
 - Does sparse *inference* cost accuracy, independent of training?
   (compare columns for the same checkpoint)
 
-    python examples/grpo_helmet_crosseval.py --device cuda --dataset-key nq \
+    python examples/rl/grpo_helmet_crosseval.py --device cuda --dataset-key nq \
         --checkpoints base h2o=runs/nq_h2o/final.pt dense=runs/nq_dense/final.pt \
         --h2o-cache-length 4096 --n-eval 100 --disable-flashinfer \
         --out runs/crosseval_nq.json

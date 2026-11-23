@@ -2,9 +2,9 @@
 
 Install the `rl-longproc` branch and run the GRPO arms we compare (dense cache
 vs. bounded H2O cache) on a p4d/p4de (8 x A100, 40 or 80 GB, sm_80, Ubuntu).
-One run uses one GPU. This is what `scripts/provision_worker.sh` and the job
-snippets from `scripts/queue_rlvr_jobs.sh` do, minus our S3 job queue. The
-driver is `examples/grpo_rlvr.py`; `-h` is the reference for every flag here.
+One run uses one GPU. This is what `scripts/rl/provision_worker.sh` and the job
+snippets from `scripts/rl/queue_rlvr_jobs.sh` do, minus our S3 job queue. The
+driver is `examples/rl/grpo_rlvr.py`; `-h` is the reference for every flag here.
 
 ## 1. Install
 
@@ -13,7 +13,7 @@ git clone https://github.com/mmjerge/keys_values.git ~/keys_values
 cd ~/keys_values && git checkout rl-longproc
 python3 -m venv ~/venv && source ~/venv/bin/activate   # Python 3.12 on Ubuntu 24.04
 pip install --upgrade pip
-pip install -r scripts/requirements-worker.txt          # frozen known-good stack (torch 2.13.0, CUDA 13 wheels)
+pip install -r scripts/rl/requirements-worker.txt          # frozen known-good stack (torch 2.13.0, CUDA 13 wheels)
 pip install -e .
 pip install bitsandbytes==0.49.1 math-verify==0.8.0    # paged AdamW 8-bit; symbolic answer verifier
 ```
@@ -77,7 +77,7 @@ independent processes on a p4d is the intended way to use the machine, e.g.
 ```bash
 for g in 0 1 2 3 4 5 6 7; do
   OUT=~/runs/<name>_gpu$g; mkdir -p $OUT
-  CUDA_VISIBLE_DEVICES=$g nohup python examples/grpo_rlvr.py ... --seed $g --out-dir $OUT > $OUT/job.log 2>&1 &
+  CUDA_VISIBLE_DEVICES=$g nohup python examples/rl/grpo_rlvr.py ... --seed $g --out-dir $OUT > $OUT/job.log 2>&1 &
 done
 ```
 
@@ -150,7 +150,7 @@ COMMON="--device cuda --model Qwen/Qwen3-1.7B \
 Dense baseline (cache sized to prompt + generation; 1024 covers the prompt):
 
 ```bash
-python examples/grpo_rlvr.py $COMMON \
+python examples/rl/grpo_rlvr.py $COMMON \
   --kv-cache-name dense-default --cache-length 33792 --dense-baseline \
   --seed 1 --out-dir ~/runs/aa3z32k_dense_s1
 ```
@@ -158,7 +158,7 @@ python examples/grpo_rlvr.py $COMMON \
 H2O with K = 16384 slots (half the cutoff):
 
 ```bash
-python examples/grpo_rlvr.py $COMMON \
+python examples/rl/grpo_rlvr.py $COMMON \
   --kv-cache-name h2o-default --cache-length 16384 --grad-micro-batch 2 \
   --seed 1 --out-dir ~/runs/aa3z32k_h2o16384_s1
 ```
@@ -167,7 +167,7 @@ H2O with K = 32768 (bounded cache as large as the cutoff; eviction only
 happens once prompt + generation exceed K):
 
 ```bash
-python examples/grpo_rlvr.py $COMMON \
+python examples/rl/grpo_rlvr.py $COMMON \
   --kv-cache-name h2o-default --cache-length 32768 --grad-micro-batch 1 \
   --seed 1 --out-dir ~/runs/aa3z32k_h2o32768_s1
 ```
