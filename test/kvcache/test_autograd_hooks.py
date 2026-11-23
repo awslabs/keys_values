@@ -221,16 +221,13 @@ def test_unpack_walks_multi_chunk_annotation_chain(device, num_states):
         config=config,
         batch_size=batch_size,
     )
-    token_kwargs = dict(dtype=torch.int64, device=device)
-    ch_sizes = [cache_length] + [chunk_size] * num_states
-    token_chunks = [torch.zeros(batch_size, sz, **token_kwargs) for sz in ch_sizes]
     hooks.initialize_cell(
         eff_num_layers=1,
         num_chunks=num_states + 1,
         first_layer_idx=layer_idx,
         first_chunk_idx=0,
         cache_lengths=[cache_length],
-        token_chunks=token_chunks,
+        chunk_lengths=[cache_length] + [chunk_size] * num_states,
     )
 
     # Ground-truth buffer states 1, ..., num_states. State `c + 1` arises
@@ -351,16 +348,13 @@ def test_unpack_out_of_order_request_after_walking_past(device):
         config=config,
         batch_size=batch_size,
     )
-    token_kwargs = dict(dtype=torch.int64, device=device)
-    ch_sizes = [cache_length] + [chunk_size] * num_states
-    token_chunks = [torch.zeros(batch_size, sz, **token_kwargs) for sz in ch_sizes]
     hooks.initialize_cell(
         eff_num_layers=1,
         num_chunks=num_states + 1,
         first_layer_idx=layer_idx,
         first_chunk_idx=0,
         cache_lengths=[cache_length],
-        token_chunks=token_chunks,
+        chunk_lengths=[cache_length] + [chunk_size] * num_states,
     )
 
     buffer_kwargs = dict(dtype=dtype, device=device)
@@ -476,16 +470,13 @@ def test_parked_memory_is_bounded_and_released(device):
         dtype=dtype,
     )
     hooks = CellComputationAutogradHooks(config=config, batch_size=batch_size)
-    token_kwargs = dict(dtype=torch.int64, device=device)
-    ch_sizes = [cache_length] + [chunk_size] * num_states
-    token_chunks = [torch.zeros(batch_size, sz, **token_kwargs) for sz in ch_sizes]
     hooks.initialize_cell(
         eff_num_layers=1,
         num_chunks=num_states + 1,
         first_layer_idx=layer_idx,
         first_chunk_idx=0,
         cache_lengths=[cache_length],
-        token_chunks=token_chunks,
+        chunk_lengths=[cache_length] + [chunk_size] * num_states,
     )
 
     buffer_kwargs = dict(dtype=dtype, device=device)
@@ -550,7 +541,7 @@ def test_parked_memory_is_bounded_and_released(device):
         first_layer_idx=layer_idx,
         first_chunk_idx=0,
         cache_lengths=[cache_length],
-        token_chunks=token_chunks,
+        chunk_lengths=[cache_length] + [chunk_size] * num_states,
     )
     ids = {}
     for chunk_idx, annot in annotations.items():
@@ -637,16 +628,13 @@ def test_late_ext_request_served_from_parked_state(device):
         dtype=dtype,
     )
     hooks = CellComputationAutogradHooks(config=config, batch_size=batch_size)
-    token_kwargs = dict(dtype=torch.int64, device=device)
-    ch_sizes = [cache_length] + [chunk_size] * num_states
-    token_chunks = [torch.zeros(batch_size, sz, **token_kwargs) for sz in ch_sizes]
     hooks.initialize_cell(
         eff_num_layers=1,
         num_chunks=num_states + 1,
         first_layer_idx=layer_idx,
         first_chunk_idx=0,
         cache_lengths=[cache_length],
-        token_chunks=token_chunks,
+        chunk_lengths=[cache_length] + [chunk_size] * num_states,
     )
 
     buffer_kwargs = dict(dtype=dtype, device=device)
@@ -772,16 +760,13 @@ def test_in_order_ext_first_ordering_parks_nothing(device):
         dtype=dtype,
     )
     hooks = CellComputationAutogradHooks(config=config, batch_size=batch_size)
-    token_kwargs = dict(dtype=torch.int64, device=device)
-    ch_sizes = [cache_length] + [chunk_size] * num_states
-    token_chunks = [torch.zeros(batch_size, sz, **token_kwargs) for sz in ch_sizes]
     hooks.initialize_cell(
         eff_num_layers=1,
         num_chunks=num_states + 1,
         first_layer_idx=layer_idx,
         first_chunk_idx=0,
         cache_lengths=[cache_length],
-        token_chunks=token_chunks,
+        chunk_lengths=[cache_length] + [chunk_size] * num_states,
     )
 
     buffer_kwargs = dict(dtype=dtype, device=device)

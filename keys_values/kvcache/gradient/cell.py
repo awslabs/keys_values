@@ -287,9 +287,6 @@ class CellComputation(nn.Module):
             (outputs, k_buffers, v_buffers)
 
         """
-        token_idxs = get_chunks_from_log(self.replay_logs[0])[
-            first_chunk_idx : (first_chunk_idx + num_chunks)
-        ]
         num_layers = self.model_part.num_layers
         if first_chunk_idx > 0:
             if k_buffers is None or v_buffers is None:
@@ -348,6 +345,8 @@ class CellComputation(nn.Module):
 
         try:
             # Initialize autograd hooks
+            token_chunks = get_chunks_from_log(self.replay_logs[0])
+            chunk_lengths = [ch.shape[-1] for ch in token_chunks]
             if self.autograd_hooks is not None:
                 self.autograd_hooks.initialize_cell(
                     eff_num_layers=num_layers,
@@ -355,12 +354,12 @@ class CellComputation(nn.Module):
                     first_layer_idx=self.model_part.first_layer_idx,
                     first_chunk_idx=first_chunk_idx,
                     cache_lengths=list(cache_lengths),
-                    token_chunks=token_idxs,
+                    chunk_lengths=chunk_lengths,
                 )
 
             # Outer loop over chunks
             output_parts = cell_computation(
-                token_idxs=token_idxs,
+                token_idxs=token_chunks[first_chunk_idx: (first_chunk_idx + num_chunks)],
                 model_part=self.model_part,
                 get_inputs_slice=get_inputs_slice,
                 input_pos=self.get_input_pos(first_chunk_idx),

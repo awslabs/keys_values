@@ -518,7 +518,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self.num_chunks = None
         self.first_layer_idx = None
         self.first_chunk_idx = None
-        self.token_chunks = None
+        self.chunk_lengths = None
         # This set contains shapes to look out for
         self._shapes_to_match = None
         # Maintains list of pack hook arguments not yet matched
@@ -565,7 +565,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         first_layer_idx,
         first_chunk_idx,
         cache_lengths: List[int],
-        token_chunks: List[torch.Tensor],
+        chunk_lengths: List[int],
         grace_period: int = 0,
     ):
         """
@@ -577,7 +577,8 @@ class CellComputationAutogradHooks(AutogradHooks):
             first_layer_idx: Index of first layer in this cell
             first_chunk_idx: Index of first chunk in this cell
             cache_lengths: List of cache lengths, size `eff_num_layers`
-            token_chunks: Tokens for each chunk
+            chunk_lengths: Chunk sizes of complete row (not just those
+                starting with `first_chunk_idx`)
             grace_period: Grace period for KV cache logic. Defaults to 0
 
         """
@@ -598,7 +599,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self.num_chunks = num_chunks
         self.first_layer_idx = first_layer_idx
         self.first_chunk_idx = first_chunk_idx
-        self.token_chunks = token_chunks
+        self.chunk_lengths = chunk_lengths
         self.cache_lengths = cache_lengths.copy()
         self.grace_period = grace_period
         self._node_annotations.clear()
@@ -692,7 +693,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._unmatched_pack_args = None
         self._remaining_annotations = None
         self._shapes_counter = None
-        self.token_chunks = None
+        self.chunk_lengths = None
         self.cache_lengths = None
         self.grace_period = None
         self._node_annotations.clear()
@@ -723,9 +724,7 @@ class CellComputationAutogradHooks(AutogradHooks):
         self._shapes_to_match: Set[Tuple[int, ...]] = set()
         # Only "cat" arguments >= this length can happen with this value
         # of `first_chunk_idx`
-        min_cat_length = sum(
-            chunk.shape[-1] for chunk in self.token_chunks[:first_chunk_idx]
-        )
+        min_cat_length = sum(self.chunk_lengths[:first_chunk_idx])
         key_shape = [
             self.batch_size,
             self.n_query_groups,
@@ -738,8 +737,8 @@ class CellComputationAutogradHooks(AutogradHooks):
             # "cat" has smaller shapes
             if min_cat_length < cache_length:
                 cat_length = 0
-                for chunk in self.token_chunks:
-                    cat_length += chunk.shape[-1]
+                for chunk_size in self.chunk_lengths:
+                    cat_length += chunk_size
                     if cat_length >= cache_length:
                         break
                     if cat_length >= min_cat_length:
