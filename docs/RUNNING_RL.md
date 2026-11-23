@@ -175,10 +175,11 @@ python examples/grpo_rlvr.py $COMMON \
 Repeat with `--seed 2` (and more) for paired comparisons; seeds also shuffle
 the training problems, so arms with the same seed see the same problem order.
 
-Observed cost on our 48 GB L40S: dense 32k peaks at ~32 GiB and a step takes
-1 to 4 h (growing with completion length); H2O K=16384 with micro-batching
-runs at ~30 GB and ~1 h per step at 11k mean length. 200 steps plus two eval
-passes is on the order of one to two weeks per run; A100s should be faster.
+Observed cost on our L40S (44 GiB usable): dense 32k peaks at ~32 GiB and a
+step takes 1.5 to 4 h (growing with completion length); H2O K=16384 with
+`--grad-micro-batch 2` peaks at ~22 GiB and takes 1.5 to 2.5 h per step; H2O
+K=32768 with `--grad-micro-batch 1` peaks at ~22.5 GiB. 200 steps plus two
+eval passes is one to two weeks per run; A100s should be somewhat faster.
 
 ### Memory levers
 
@@ -223,9 +224,9 @@ passes is on the order of one to two weeks per run; A100s should be faster.
 
 | priority | run | GPU memory |
 |---|---|---|
-| 1 | 1.7B, 32k cutoff, dense, seeds 1 and 2 | 40 GB ok (~32 GiB peak) |
-| 1 | 1.7B, 32k cutoff, H2O K=16384 `--grad-micro-batch 2`, seeds 1 and 2 | 40 GB ok (~30 GB) |
-| 2 | 1.7B, 32k cutoff, H2O K=32768 `--grad-micro-batch 1`, seeds 1 and 2 | 80 GB preferred (fits 44 GiB; untested at 40 GB) |
+| 1 | 1.7B, 32k cutoff, dense, seeds 1 and 2 | 40 GB tight (~32 GiB peak); 80 GB preferred |
+| 1 | 1.7B, 32k cutoff, H2O K=16384 `--grad-micro-batch 2`, seeds 1 and 2 | 40 GB ok (~22 GiB) |
+| 2 | 1.7B, 32k cutoff, H2O K=32768 `--grad-micro-batch 1`, seeds 1 and 2 | 40 GB ok (~22.5 GiB) |
 | 2 | Qwen3-4B, 32k cutoff, dense vs. H2O K=16384 `--grad-micro-batch 1`, seed 1 | 80 GB |
 | 3 | 1.7B, 64k cutoff: dense (`--cache-length 66560`) vs. H2O K=32768 | 80 GB |
 
