@@ -264,11 +264,15 @@ class DenseKVCachePolicy(DefaultKVCachePolicy):
         if positions is None:
             np = self._input_pos
             num = key.shape[2]
-            positions = torch.arange(
-                np,
-                np + num,
-                device=query.device,
-                dtype=torch.int,
+            positions = index_to_3d(
+                torch.arange(
+                    np,
+                    np + num,
+                    device=query.device,
+                    dtype=torch.int,
+                ),
+                self._batch_size,
+                self.n_query_groups,
             )
         return positions
 
@@ -372,7 +376,11 @@ class LastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
                 device=device,
             )
             if isinstance(positions, tuple):
-                positions = torch.arange(positions[0], positions[1], **ind_kwargs)
+                positions = index_to_3d(
+                    torch.arange(positions[0], positions[1], **ind_kwargs),
+                    self.batch_size,
+                    self.n_query_groups,
+                )
         np = self.next_position
         num1 = min(num, self.cache_length - np)
         diff = num - num1
