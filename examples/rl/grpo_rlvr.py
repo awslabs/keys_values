@@ -332,12 +332,13 @@ def main() -> None:
         "--attn",
         default="auto",
         choices=ATTN_BACKENDS,
-        help="Attention backend. auto: FlashInfer decode if built (else eager "
-        "with a loud warning) and FlexAttention in the gradient cells on CUDA "
-        "(C-long queries, no K^2/C memory term); flex: FlexAttention "
-        "everywhere, decode recompiles per kv_len (experiments only); eager: "
-        "eager decode and query-padded PyTorch SDPA in the gradient cells "
-        "(the pre-Flex path, A/B baseline).",
+        help="Attention backend. auto: FlashInfer decode if built, else "
+        "FlexAttention decode with kv_lens padding (bounded compiles), and "
+        "FlexAttention in the gradient cells on CUDA (C-long queries, no "
+        "K^2/C memory term); flex: FlexAttention everywhere, decode with "
+        "kv_lens padding; eager: eager decode and query-padded PyTorch SDPA "
+        "in the gradient cells (the pre-Flex path, A/B baseline). "
+        "--disable-flashinfer maps auto to eager.",
     )
     p.add_argument("--backward-tmp-gb", type=float, default=2.0)
     p.add_argument("--lora-r", type=int, default=0)
@@ -492,10 +493,11 @@ def main() -> None:
         kv_cache_name=args.kv_cache_name,
         chunk_size=args.chunk_size,
         device=fabric.device,
+        cache_length=args.cache_length,
     )
-    # Gradient cells only: FlexAttention under auto (CUDA), query-padded SDPA
-    # under eager. Reaches TrainingAttnWeightsReplayCache via grpo_step; the
-    # decode MHAs above are not touched.
+    # Gradient cells only: FlexAttention under auto/flex (CUDA, own kv_lens=None
+    # args), query-padded SDPA under eager. Reaches TrainingAttnWeightsReplayCache
+    # via grpo_step; the decode MHAs above are not touched.
     train_cache_kwargs = gradient_train_cache_kwargs(
         backend=attn_backend,
         chunk_size=args.chunk_size,

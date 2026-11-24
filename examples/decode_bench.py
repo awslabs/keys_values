@@ -39,7 +39,8 @@ The attention backend is `--attn` (default) or per config via `attn=`:
   eager      eager SDPA (what runs when FlashInfer is not built)
   flashinfer vendored FlashInfer decode kernel + Triton score sum (needs
              `python build_ext.py`)
-  flex       FlexAttention baseline, 2x call to return LSE for H2O scores
+  flex       FlexAttention baseline with kv_lens padding, 2x call to return
+             LSE for H2O scores
 
 With `--profile`, a torch.profiler trace of the decode loop is taken for each
 config and the top CUDA kernels by self time are printed, which tells us
@@ -75,7 +76,11 @@ from keys_values.kvcache.factory import (
 )
 from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
-from keys_values.attention.flex_attention import FlexAttentionArgs, choose_q_lens
+from keys_values.attention.flex_attention import (
+    FlexAttentionArgs,
+    choose_kv_lens,
+    choose_q_lens,
+)
 from keys_values.rl.grpo.rollout import generate_completions
 from keys_values.utils import VerbosityLevels
 
@@ -230,9 +235,12 @@ def main() -> None:
             elif not flashinfer_built:
                 label = label.replace("[flashinfer]", "[eager: not built]")
             if attn == "flex":
+                # kv_lens padding (upstream #160) bounds the decode compiles
+                # to one graph per bucket instead of one per kv_len.
                 cache_kwargs["flexatt_args"] = FlexAttentionArgs(
                     extend_kv=False,
                     q_lens=choose_q_lens(chunk_size=args.chunk_size, num_q_lens=4),
+                    kv_lens=choose_kv_lens(cache_length=cache_length, num_kv_lens=4),
                     forward_return_lse=needs_weights,
                 )
             elif attn == "eager":

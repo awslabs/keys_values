@@ -61,14 +61,17 @@ def gradient_mha(
 ) -> MultiHeadSelfAttention:
     """
     Returns the :class:`MultiHeadSelfAttention` object a training replay cache
-    should run its chunk SDPA with. If `flexatt_args` is `None`, or `mha`
-    already has FlexAttention configured, this is `mha` itself. Otherwise, a
-    shallow copy of `mha` with `flexatt_args` set is returned. The copy shares
-    `pos_encoding` (and everything else) with `mha`, but `mha` is not mutated,
-    so a model decoding with FlashInfer through `mha` keeps doing so, while
-    the gradient cells use FlexAttention.
+    should run its chunk SDPA with. If `flexatt_args` is `None`, this is `mha`
+    itself (with whatever `flexatt_args` it carries). Otherwise, a shallow copy
+    of `mha` with `flexatt_args` set is returned, even if `mha` already has
+    FlexAttention configured: the decode MHA may carry `kv_lens`-padded args,
+    and the cells need `kv_lens=None` (the `ext-*` annotations do not undo
+    `kv_len` padding). The copy shares `pos_encoding` (and everything else)
+    with `mha`, but `mha` is not mutated, so a model decoding with FlashInfer
+    or padded FlexAttention through `mha` keeps doing so, while the gradient
+    cells use their own FlexAttention arguments.
     """
-    if flexatt_args is None or mha.has_flex_attention:
+    if flexatt_args is None:
         return mha
     result = copy.copy(mha)
     result.flexatt_args = flexatt_args

@@ -28,6 +28,7 @@ from keys_values.attention.base import (
     SDPA_IMPL_FLEXATTENTION,
     SDPA_IMPL_QPADDED_PYTORCH,
 )
+from keys_values.attention import flashinfer_ops
 from keys_values.attention.flex_attention import FlexAttentionArgs, choose_q_lens
 from keys_values.config import Config
 from keys_values.kvcache.factory import KVCacheFactory
@@ -81,8 +82,12 @@ def _make_model_with_caches(batch_size, cache_length, dtype=torch.float32):
 
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
-def test_attention_mha_kwargs_cpu_never_selects_flex(backend):
-    kwargs = attention_mha_kwargs(backend, "h2o-default", 16, CPU, verbose=False)
+@pytest.mark.parametrize("available", [False, True])
+def test_attention_mha_kwargs_cpu_never_selects_flex(backend, available, monkeypatch):
+    monkeypatch.setattr(flashinfer_ops, "_available", available)
+    kwargs = attention_mha_kwargs(
+        backend, "h2o-default", 16, CPU, cache_length=64, verbose=False
+    )
     assert "flexatt_args" not in kwargs
     if backend == "eager":
         assert kwargs["use_flashinfer"] is False
@@ -90,20 +95,74 @@ def test_attention_mha_kwargs_cpu_never_selects_flex(backend):
         assert "use_flashinfer" not in kwargs
 
 
+# The CUDA cases below build kwargs only; FlexAttentionArgs is pure Python
+# until a graph is compiled, so no GPU is needed.
+@pytest.mark.parametrize("kv_cache_name", ["h2o-default", "dense-default"])
+def test_attention_mha_kwargs_cuda_auto_without_flashinfer_selects_padded_flex(
+    kv_cache_name, monkeypatch
+):
+    monkeypatch.setattr(flashinfer_ops, "_available", False)
+    kwargs = attention_mha_kwargs(
+        "auto", kv_cache_name, 1024, CUDA, cache_length=16384, verbose=False
+    )
+    # No use_flashinfer=False: _sdpa_mode ignores FlashInfer when it is not
+    # built, and the kwargs stay valid if it is built later.
+    assert "use_flashinfer" not in kwargs
+    fa = kwargs["flexatt_args"]
+    assert isinstance(fa, FlexAttentionArgs)
+    assert fa.kv_lens == [4096, 8192, 12288, 16384]
+    assert fa.q_lens == choose_q_lens(chunk_size=1024, num_q_lens=4)
+    assert fa.extend_kv is False
+    assert fa.forward_return_lse is (kv_cache_name == "h2o-default")
+
+
+def test_attention_mha_kwargs_cuda_auto_with_flashinfer_has_no_flex(monkeypatch):
+    monkeypatch.setattr(flashinfer_ops, "_available", True)
+    kwargs = attention_mha_kwargs(
+        "auto", "h2o-default", 1024, CUDA, cache_length=16384, verbose=False
+    )
+    assert "flexatt_args" not in kwargs
+    assert "use_flashinfer" not in kwargs
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_attention_mha_kwargs_cuda_flex_is_padded(available, monkeypatch):
+    monkeypatch.setattr(flashinfer_ops, "_available", available)
+    kwargs = attention_mha_kwargs(
+        "flex", "h2o-default", 1024, CUDA, cache_length=16384, verbose=False
+    )
+    assert kwargs["use_flashinfer"] is False
+    fa = kwargs["flexatt_args"]
+    assert fa.kv_lens == [4096, 8192, 12288, 16384]
+    assert fa.forward_return_lse is True
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_attention_mha_kwargs_cuda_eager_never_selects_flex(available, monkeypatch):
+    monkeypatch.setattr(flashinfer_ops, "_available", available)
+    kwargs = attention_mha_kwargs(
+        "eager", "h2o-default", 1024, CUDA, cache_length=16384, verbose=False
+    )
+    assert "flexatt_args" not in kwargs
+    assert kwargs["use_flashinfer"] is False
+
+
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
 def test_gradient_train_cache_kwargs_cpu_is_empty(backend):
     assert gradient_train_cache_kwargs(backend, 16, CPU, verbose=False) == {}
 
 
-@pytest.mark.parametrize("backend", ["eager", "flex"])
-def test_gradient_train_cache_kwargs_cuda_eager_flex_is_empty(backend):
+def test_gradient_train_cache_kwargs_cuda_eager_is_empty():
     # No GPU needed: only the kwargs are built
-    assert gradient_train_cache_kwargs(backend, 16, CUDA, verbose=False) == {}
+    assert gradient_train_cache_kwargs("eager", 16, CUDA, verbose=False) == {}
 
 
-def test_gradient_train_cache_kwargs_cuda_auto_selects_flex():
-    # No GPU needed: FlexAttentionArgs is pure Python until a graph is compiled
-    kwargs = gradient_train_cache_kwargs("auto", 16, CUDA, verbose=False)
+@pytest.mark.parametrize("backend", ["auto", "flex"])
+def test_gradient_train_cache_kwargs_cuda_auto_flex_selects_unpadded_flex(backend):
+    # No GPU needed: FlexAttentionArgs is pure Python until a graph is compiled.
+    # The cells get kv_lens=None under both auto and flex, even though the
+    # decode MHAs may carry kv_lens-padded args.
+    kwargs = gradient_train_cache_kwargs(backend, 16, CUDA, verbose=False)
     assert list(kwargs.keys()) == ["flexatt_args"]
     fa = kwargs["flexatt_args"]
     assert isinstance(fa, FlexAttentionArgs)
@@ -147,10 +206,17 @@ def test_gradient_mha_leaves_decode_mha_untouched():
     assert not mha.has_flex_attention
     assert _decode_mode(mha) == SDPA_IMPL_EAGER_BLOCKS
 
-    # An MHA that already has flexatt_args keeps its own (--attn flex)
-    mha_flex = MultiHeadSelfAttention(config, flexatt_args=fa)
-    assert gradient_mha(mha_flex, FlexAttentionArgs()).flexatt_args is fa
-    assert gradient_mha(mha_flex, FlexAttentionArgs()) is mha_flex
+    # An MHA that already has (kv_lens-padded) flexatt_args, as the decode
+    # MHAs do under --attn flex or the auto fallback without FlashInfer: the
+    # cells still get their own args, and the decode MHA keeps the padded ones
+    fa_padded = FlexAttentionArgs(q_lens=[1, 8, 16], kv_lens=[8, 16, 24, 32])
+    mha_flex = MultiHeadSelfAttention(config, flexatt_args=fa_padded)
+    grad_flex = gradient_mha(mha_flex, fa)
+    assert grad_flex is not mha_flex
+    assert grad_flex.flexatt_args is fa
+    assert grad_flex.flexatt_args.kv_lens is None
+    assert mha_flex.flexatt_args is fa_padded
+    assert gradient_mha(mha_flex, None) is mha_flex
 
 
 def test_select_sdpa_mode():

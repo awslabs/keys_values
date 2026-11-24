@@ -237,15 +237,24 @@ eval passes is one to two weeks per run; A100s should be somewhat faster.
 
 ### `--attn` semantics
 
-- `auto` (default): FlashInfer decode if the extension is built (else eager,
-  with a warning); FlexAttention in the gradient cells.
+- `auto` (default): FlashInfer decode if the extension is built; otherwise
+  FlexAttention decode with `kv_lens` padding (upstream #160: K/V are padded
+  to one of `num_kv_lens=4` buckets of `--cache-length`, so decode compiles
+  at most 4 graphs for dense and 8 for H2O instead of one per `kv_len`; a
+  one-line notice is printed and the first step spends several minutes
+  compiling). FlexAttention in the gradient cells either way. The padded
+  Flex decode has not been benchmarked against FlashInfer or eager
+  (`docs/DECODE_BENCH.md` only measured Flex *without* `kv_lens`, at 7-10
+  tok/s); build the extension for the fast path.
 - `eager`: eager decode and query-padded PyTorch SDPA in the cells, the
   pre-Flex path kept as the A/B baseline. Slower, and far more memory at
   K >= 16384.
-- `flex`: FlexAttention everywhere including decode, which recompiles per
-  `kv_len`; experiments only.
+- `flex`: FlexAttention everywhere including decode, with the same `kv_lens`
+  padding as the `auto` fallback, even if FlashInfer is built. The gradient
+  cells use their own `kv_lens=None` Flex arguments under both `auto` and
+  `flex`.
 - `--disable-flashinfer` forces eager decode even if the extension is built
-  (and, with `--attn auto`, the eager cells too).
+  (and, with `--attn auto`, the eager cells too; it does not select Flex).
 
 ### Larger cutoffs and models (80 GB)
 
