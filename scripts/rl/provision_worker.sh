@@ -37,7 +37,7 @@ pip install -q awscli
 # sm_80/sm_90; add the host GPU's arch (L40S = 8.9) so the kernels are native.
 echo "=== [2b/5] FlashInfer extension ==="
 if ! python -c "import torch, keys_values._flashinfer_ops" 2>/dev/null; then
-    pip install -q flashinfer-python
+    pip install -q "flashinfer-python==0.6.7"
     CC_ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
     unset LD_LIBRARY_PATH
     export PATH=/usr/local/cuda/bin:$PATH

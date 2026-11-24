@@ -123,7 +123,7 @@ SDPA_MODE_NAMES = {
 EAGER_WARNING = (
     "FlashInfer extension is not built: KV cache '{name}' needs attention "
     "weights and will run the EAGER SDPA (several times slower in decode). "
-    "Build it with `pip install flashinfer-python && python build_ext.py` "
+    "Build it with `pip install flashinfer-python==0.6.7 && python build_ext.py` "
     "(see scripts/rl/provision_worker.sh)."
 )
 

@@ -114,7 +114,7 @@ while true; do
             echo "FlashInfer kernels missing or stale: rebuilding"
             CC_ARCH=$(nvidia-smi $SMI_ID --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
             ( unset LD_LIBRARY_PATH; export PATH=/usr/local/cuda/bin:$PATH
-              pip install -q flashinfer-python
+              pip install -q "flashinfer-python==0.6.7"
               sed -i "s/-gencode=arch=compute_90,code=sm_90/-gencode=arch=compute_${CC_ARCH},code=sm_${CC_ARCH}/" build_ext.py
               rm -f keys_values/_flashinfer_ops*.so; rm -rf build
               python build_ext.py > "$HOME/flashinfer_build.log" 2>&1 \

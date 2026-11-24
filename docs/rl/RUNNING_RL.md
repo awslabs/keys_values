@@ -11,15 +11,44 @@ driver is `examples/rl/grpo_rlvr.py`; `-h` is the reference for every flag here.
 ```bash
 git clone https://github.com/mmjerge/keys_values.git ~/keys_values
 cd ~/keys_values && git checkout rl-longproc
-python3 -m venv ~/venv && source ~/venv/bin/activate   # Python 3.12 on Ubuntu 24.04
-pip install --upgrade pip
-pip install -r scripts/rl/requirements-worker.txt          # frozen known-good stack (torch 2.13.0, CUDA 13 wheels)
-pip install -e .
-pip install bitsandbytes==0.49.1 math-verify==0.8.0    # paged AdamW 8-bit; symbolic answer verifier
 ```
 
-The torch pin is a CUDA 13 build: `nvidia-smi` must show `CUDA Version: 13.x`
-or newer (the current Deep Learning Base AMI for Ubuntu 24.04 does).
+The branch needs nothing beyond upstream `main` except `math-verify`
+(`pyproject.toml`, `build_ext.py` and `keys_values/csrc/` are identical to
+upstream). Pick the path that matches the CUDA toolkit on the machine.
+
+**(a) CUDA 12.8 (p4d default).** Reuse a venv that already runs upstream
+`main`, or create one following README.md "Installation with CUDA 12.8"
+(`torch==2.10.0 torchmetrics==1.8.2 torchvision==0.25.0`, then
+`litgpt[all,test,extra]`). Then, in that venv and on this branch:
+
+```bash
+source ~/venv/bin/activate
+pip install -e .                      # re-point the editable install at this checkout
+pip install math-verify==0.8.0        # symbolic answer verifier
+```
+
+`bitsandbytes` (paged AdamW 8-bit) and `datasets` come from `litgpt[extra]`;
+any `0.45.2 <= bitsandbytes < 0.50` works with `PagedAdamW8bit`.
+
+**(b) CUDA 13 image (our L40S workers).** `scripts/rl/requirements-worker.txt`
+is the frozen stack our workers ran (torch 2.13.0, CUDA 13 wheels, Ubuntu
+24.04 Deep Learning Base AMI), not a requirement:
+
+```bash
+python3 -m venv ~/venv && source ~/venv/bin/activate   # Python 3.12
+pip install --upgrade pip
+pip install -r scripts/rl/requirements-worker.txt
+pip install -e .
+pip install math-verify==0.8.0
+```
+
+Either way, check:
+
+```bash
+python -c "import datasets, bitsandbytes, math_verify; print('rl deps OK')"
+```
+
 `math-verify` is optional in the code but not in practice: without it the
 reward falls back to string matching and the driver prints
 `math_verify: NO (string match only)` at start-up. Check for `math_verify: yes`.
@@ -33,12 +62,21 @@ patching is needed (our L40S workers had to add sm_89):
 
 ```bash
 cd ~/keys_values && source ~/venv/bin/activate
-pip install flashinfer-python           # headers only; the kernels are vendored in keys_values/csrc
+# headers only; the kernels are vendored in keys_values/csrc. The constraint
+# stops pip from replacing the installed torch.
+echo "torch==$(python -c 'import torch;print(torch.__version__.split("+")[0])')" > constraints.txt
+pip install flashinfer-python==0.6.7 -c constraints.txt && rm constraints.txt
 unset LD_LIBRARY_PATH
 export PATH=/usr/local/cuda/bin:$PATH   # nvcc from the system CUDA toolkit
+rm -rf build keys_values/_flashinfer_ops*.so   # clean a failed attempt before retrying
 python build_ext.py > ~/flashinfer_build.log 2>&1
 python -c "import torch, keys_values._flashinfer_ops; print('flashinfer OK')"
+pytest test/test_flashinfer_wrapper.py -q
 ```
+
+Why the pin: `flashinfer-python >= 0.6.10` headers use `cuda::fast_mod_div`
+(CCCL 3.1, CUDA 13.1+) and fail to compile under CUDA 12.x nvcc with
+`qualified name is not allowed` in `fastdiv.cuh`; 0.6.7 builds on 12.8 and 13.x.
 
 The `.so` is gitignored and survives `git pull`; rebuild if anything under
 `keys_values/csrc/` changes. Build once per machine, before launching runs
