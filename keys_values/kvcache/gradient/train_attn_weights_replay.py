@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 from dataclasses import replace
 from functools import partial
 from typing import Optional, Tuple, Dict, Any
@@ -22,10 +23,12 @@ from keys_values.config import Config
 from keys_values.attention.base import (
     KeysAndValues,
     DefaultKeysAndValues,
+    MultiHeadSelfAttention,
     SDPA_IMPL_QPADDED_PYTORCH,
     SDPA_IMPL_EAGER_BLOCKS,
     SDPA_IMPL_FLEXATTENTION,
 )
+from keys_values.attention.flex_attention import FlexAttentionArgs
 from keys_values.attention.sdpa_op import (
     scatter_on_buffers,
     cat_on_buffers,
@@ -50,6 +53,47 @@ from keys_values.utils import (
     is_index_1d,
     index_to_3d,
 )
+
+
+def gradient_mha(
+    mha: MultiHeadSelfAttention,
+    flexatt_args: Optional[FlexAttentionArgs],
+) -> MultiHeadSelfAttention:
+    """
+    Returns the :class:`MultiHeadSelfAttention` object a training replay cache
+    should run its chunk SDPA with. If `flexatt_args` is `None`, this is `mha`
+    itself (with whatever `flexatt_args` it carries). Otherwise, a shallow copy
+    of `mha` with `flexatt_args` set is returned, even if `mha` already has
+    FlexAttention configured: the decode MHA may carry `kv_lens`-padded args,
+    and the cells need `kv_lens=None` (the `ext-*` annotations do not undo
+    `kv_len` padding). The copy shares `pos_encoding` (and everything else)
+    with `mha`, but `mha` is not mutated, so a model decoding with FlashInfer
+    or padded FlexAttention through `mha` keeps doing so, while the gradient
+    cells use their own FlexAttention arguments.
+    """
+    if flexatt_args is None:
+        return mha
+    result = copy.copy(mha)
+    result.flexatt_args = flexatt_args
+    return result
+
+
+def select_sdpa_mode(
+    mha: MultiHeadSelfAttention,
+    sliding_window_size: Optional[int],
+) -> int:
+    """
+    SDPA mode used by :class:`TrainingAttnWeightsReplayCache` for its
+    (non-prefill) chunk computations: FlexAttention iff `mha` has
+    `flexatt_args`, otherwise the eager kernel if a sliding window is used,
+    otherwise query-padded PyTorch SDPA.
+    """
+    if mha.has_flex_attention:
+        return SDPA_IMPL_FLEXATTENTION
+    elif sliding_window_size is not None:
+        return SDPA_IMPL_EAGER_BLOCKS
+    else:
+        return SDPA_IMPL_QPADDED_PYTORCH
 
 
 class TrainingAttnWeightsReplayCache(DefaultKVCache):
@@ -98,6 +142,17 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
     since no quantization or dequantization are done. Since
     :class:`InferenceAttnWeightsReplayCache` is easily obtained from
     :class:`AttnWeightsReplayCache`, this is the simpler option.
+
+    SDPA mode of the chunk computations: the cache uses FlexAttention iff its
+    `mha` has `flexatt_args` (see :func:`select_sdpa_mode`), otherwise the
+    query-padded PyTorch SDPA (queries zero-padded to the cache length, which
+    leaves a K-long SDPA output per chunk in the autograd graph). Normally
+    `mha` is the primary KV cache's object, shared with decode. Passing
+    `flexatt_args` here gives FlexAttention to this cache only: `mha` is
+    replaced by a shallow copy with `flexatt_args` set (see
+    :func:`gradient_mha`), and the shared decode object is left untouched.
+    This is how GRPO decodes with FlashInfer and runs the gradient pass with
+    FlexAttention using one model.
     """
 
     def __init__(
@@ -114,6 +169,7 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         debug_print_annotations: bool = False,
         debug_full_args: bool = False,
         debug_intermediates: Optional[Tuple[Dict[str, torch.Tensor], str]] = None,
+        flexatt_args: Optional[FlexAttentionArgs] = None,
         **base_kwargs,
     ):
         if not (0 <= start_input_pos < len(replay_log)):
@@ -134,6 +190,8 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         )
         if len(replay_log) == 0:
             raise ValueError("replay_log must not be empty")
+        # Gradient-only FlexAttention: copy of the (shared) MHA, decode untouched
+        self.mha = gradient_mha(self.mha, flexatt_args)
         if self.mha.use_eager_sdpa_always:
             raise ValueError(
                 "This replay cache does not support mha.use_eager_sdpa_always = True"
@@ -177,9 +235,8 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
         self.debug_print_annotations = debug_print_annotations
         self._debug_full_args = debug_full_args
         sliding_window_size = self.mha._get_sliding_window_size(layer_idx)
-        if self.mha.has_flex_attention:
-            sdpa_mode = SDPA_IMPL_FLEXATTENTION
-        elif sliding_window_size is not None:
+        sdpa_mode = select_sdpa_mode(self.mha, sliding_window_size)
+        if sdpa_mode == SDPA_IMPL_EAGER_BLOCKS:
             print(
                 "WARNING: config.sliding_window_size is used. This means that "
                 "a naive SDPA kernel has to be used, for which computations "
@@ -187,9 +244,6 @@ class TrainingAttnWeightsReplayCache(DefaultKVCache):
                 "config.sliding_window_size, or use FlexAttention by passing "
                 "flexatt_args when creating the MultiHeadSelfAttention object."
             )
-            sdpa_mode = SDPA_IMPL_EAGER_BLOCKS
-        else:
-            sdpa_mode = SDPA_IMPL_QPADDED_PYTORCH
         self._sdpa_kwargs = dict(
             sdpa_mode=sdpa_mode,
             sliding_window_size=sliding_window_size,

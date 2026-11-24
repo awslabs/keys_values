@@ -23,11 +23,11 @@ reward and evaluation measure the same thing.
 Run one arm per invocation; compare a sparse arm against a dense arm:
 
     # sparse (H2O) arm: cache budget < context, so eviction is real
-    python examples/grpo_helmet.py --device cuda --kv-cache-name h2o-torch-quantized8 \
+    python examples/rl/grpo_helmet.py --device cuda --kv-cache-name h2o-torch-quantized8 \
         --cache-length 4096 --steps 150 --out-dir runs/h2o
 
     # dense (full attention) arm at the same settings
-    python examples/grpo_helmet.py --device cuda --kv-cache-name dense-default \
+    python examples/rl/grpo_helmet.py --device cuda --kv-cache-name dense-default \
         --cache-length 0 --steps 150 --out-dir runs/dense   # 0 = fit longest prompt
 
 Metrics stream to ``<out-dir>/metrics.jsonl``; the final weights are saved to
@@ -42,16 +42,16 @@ import random
 import time
 from pathlib import Path
 
-import lightning as L
 import torch
 from litgpt.prompts import PromptStyle, has_prompt_style, load_prompt_style
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     auto_download_checkpoint,
     check_valid_checkpoint_dir,
-    load_checkpoint,
 )
 
+from keys_values.finetune.utils import load_checkpoint
+from keys_values.rl.runtime import SingleDevice
 from keys_values.config import Config
 from keys_values.data.constants import LIT_MODEL_FNAME
 from keys_values.data.load_helmet_dev_eval import load_helmet_dev_eval
@@ -59,6 +59,11 @@ from keys_values.evaluation.metrics import rouge_n_f1, sub_exact_match
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
+from keys_values.rl.grpo.attention import (
+    ATTN_BACKENDS,
+    attention_mha_kwargs,
+    gradient_train_cache_kwargs,
+)
 from keys_values.rl.grpo.loop import grpo_step
 from keys_values.rl.grpo.rollout import generate_completions
 from keys_values.utils import VerbosityLevels
@@ -177,10 +182,35 @@ def main() -> None:
         help="'em_f1' = EM + 0.2*token-F1 (EM-anchored, dense signal); "
         "'f1' = max(EM, F1); 'em' = binary exact match.",
     )
+    p.add_argument(
+        "--adv-mode",
+        choices=["grpo", "rloo"],
+        default="grpo",
+        help="Group advantage: GRPO z-normalization or RLOO leave-one-out.",
+    )
     p.add_argument("--max-new-tokens", type=int, default=32)
     p.add_argument("--steps", type=int, default=150)
     p.add_argument("--lr", type=float, default=1e-6)
+    p.add_argument(
+        "--optimizer",
+        choices=["adamw", "paged_adamw8bit"],
+        default="adamw",
+        help="paged_adamw8bit keeps optimizer states in CPU-paged "
+        "memory (needed for 7B+ full fine-tuning on 48GB).",
+    )
     p.add_argument("--chunk-size", type=int, default=1024)
+    p.add_argument(
+        "--attn",
+        default="auto",
+        choices=ATTN_BACKENDS,
+        help="Attention backend. auto: FlashInfer decode if built, else "
+        "FlexAttention decode with kv_lens padding (bounded compiles), and "
+        "FlexAttention in the gradient cells on CUDA (C-long queries, no "
+        "K^2/C memory term); flex: FlexAttention everywhere, decode with "
+        "kv_lens padding; eager: eager decode and query-padded PyTorch SDPA "
+        "in the gradient cells (the pre-Flex path, A/B baseline). "
+        "--disable-flashinfer maps auto to eager.",
+    )
     p.add_argument("--layers-per-cell", type=int, default=1)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--eval-every", type=int, default=50)
@@ -212,11 +242,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = out_dir / "metrics.jsonl"
     dtype = torch.float32 if args.device == "cpu" else torch.bfloat16
-    fabric = L.Fabric(
-        devices=1,
-        accelerator=args.device,
-        precision="32-true" if args.device == "cpu" else "bf16-true",
-    )
+    fabric = SingleDevice.create(args.device)
 
     checkpoint_dir = auto_download_checkpoint(
         model_name=args.model, access_token=args.access_token
@@ -259,14 +285,34 @@ def main() -> None:
 
     # Model + caches + optimizer.
     check_valid_checkpoint_dir(checkpoint_dir)
+    # Attention backend. Must reach both the model and the caches (the caches
+    # build their own MHA, and the gradient cells reuse kv_cache.mha).
+    attn_backend = (
+        "eager" if args.disable_flashinfer and args.attn == "auto" else args.attn
+    )
+    mha_kwargs = attention_mha_kwargs(
+        backend=attn_backend,
+        kv_cache_name=args.kv_cache_name,
+        chunk_size=args.chunk_size,
+        device=fabric.device,
+        cache_length=cache_length,
+    )
+    # Gradient cells only: FlexAttention under auto/flex (CUDA, own kv_lens=None
+    # args), query-padded SDPA under eager. Reaches TrainingAttnWeightsReplayCache
+    # via grpo_step; the decode MHAs above are not touched.
+    train_cache_kwargs = gradient_train_cache_kwargs(
+        backend=attn_backend,
+        chunk_size=args.chunk_size,
+        device=fabric.device,
+    )
     with fabric.init_module(empty_init=True):
-        gpt_model = GPT(config)
-    load_checkpoint(fabric, gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
+        gpt_model = GPT(config, **mha_kwargs)
+    load_checkpoint(gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
     gpt_model.to(fabric.device)
     # Application-level cache tuning (factory defaults stay simple upstream):
     # for H2O-family caches, protect the recently read tail -- question-at-the-
     # end prompts under tight budgets lose it otherwise (issue #140 discussion).
-    cache_kwargs = {}
+    cache_kwargs = dict(mha_kwargs)
     if (
         args.kv_cache_name.startswith(("h2o", "qh2o"))
         and "orig" not in args.kv_cache_name
@@ -282,7 +328,15 @@ def main() -> None:
             cache_kwargs=cache_kwargs,
         )
     )
-    optimizer = torch.optim.AdamW(gpt_model.parameters(), lr=args.lr)
+    if args.optimizer == "adamw":
+        optimizer = torch.optim.AdamW(gpt_model.parameters(), lr=args.lr)
+    else:
+        # Paged 8-bit AdamW: optimizer states live in CPU-paged memory instead
+        # of ~4x model-size on the GPU. Required for 7B+ full fine-tuning on a
+        # 48GB card (bf16 AdamW states alone are ~30GB for 7B).
+        import bitsandbytes as bnb
+
+        optimizer = bnb.optim.PagedAdamW8bit(gpt_model.parameters(), lr=args.lr)
 
     def reward_fn(
         prompt_ids: torch.Tensor, completion_ids: torch.Tensor
@@ -338,6 +392,8 @@ def main() -> None:
                     zero_grad=(k == 0),
                     optimizer_step=(k == K - 1),
                     grad_scale=1.0 / K,
+                    advantage_mode=args.adv_mode,
+                    train_cache_kwargs=train_cache_kwargs,
                 )
             )
             micro[-1]["prompt_len"] = int(prompt_ids.shape[1])
@@ -348,6 +404,9 @@ def main() -> None:
             "loss": sum(x["loss"] for x in micro) / K,
             "prompt_len": int(sum(x["prompt_len"] for x in micro) / K),
         }
+        if "grad_sdpa_mode" in micro[0]:
+            # SDPA mode of the gradient cells (flexattention / qpadded-pytorch)
+            m["grad_sdpa_mode"] = micro[0]["grad_sdpa_mode"]
         m["step_time_s"] = round(time.perf_counter() - t0, 2)
         # An update where every group has zero reward variance produces zero
         # advantage -> no gradient. Track how often updates carry signal.

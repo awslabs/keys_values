@@ -30,7 +30,7 @@ OOMs. OOMs are caught and reported rather than crashing the sweep.
 
 Example (A10G, 23 GB):
 
-    python examples/grpo_context_sweep.py --device cuda \
+    python examples/rl/grpo_context_sweep.py --device cuda \
         --model Qwen/Qwen2.5-0.5B-Instruct \
         --context-lengths 2048,8192,16384,32768 --h2o-cache-length 4096
 """
@@ -42,15 +42,15 @@ import statistics
 import time
 from typing import Callable
 
-import lightning as L
 import torch
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     auto_download_checkpoint,
     check_valid_checkpoint_dir,
-    load_checkpoint,
 )
 
+from keys_values.finetune.utils import load_checkpoint
+from keys_values.rl.runtime import SingleDevice
 from keys_values.config import Config
 from keys_values.data.constants import LIT_MODEL_FNAME
 from keys_values.kvcache.factory import (
@@ -93,7 +93,7 @@ def build_model(checkpoint_dir, fabric, dtype) -> GPT:
     config = Config.from_file(checkpoint_dir / "model_config.yaml")
     with fabric.init_module(empty_init=True):
         gpt_model = GPT(config)
-    load_checkpoint(fabric, gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
+    load_checkpoint(gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
     return gpt_model
 
 
@@ -204,11 +204,7 @@ def main() -> None:
     lengths = [int(x) for x in args.context_lengths.split(",")]
     caches = [c.strip() for c in args.caches.split(",")]
     dtype = torch.float32 if args.device == "cpu" else torch.bfloat16
-    fabric = L.Fabric(
-        devices=1,
-        accelerator=args.device,
-        precision="32-true" if args.device == "cpu" else "bf16-true",
-    )
+    fabric = SingleDevice.create(args.device)
 
     checkpoint_dir = auto_download_checkpoint(
         model_name=args.model, access_token=args.access_token

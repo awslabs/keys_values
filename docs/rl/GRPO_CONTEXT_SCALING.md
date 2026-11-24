@@ -5,7 +5,7 @@ length grows: full attention (`dense-default`, cache holds every token) vs. H2O
 (`h2o-torch-quantized8`, cache capped at a fixed budget so it evicts once the
 prompt exceeds it).
 
-Reproduce with `examples/grpo_context_sweep.py`.
+Reproduce with `examples/rl/grpo_context_sweep.py`.
 
 ## Setup
 
@@ -77,8 +77,42 @@ cache means memory does not grow with context.
 ## Command
 
 ```bash
-python examples/grpo_context_sweep.py --device cuda \
+python examples/rl/grpo_context_sweep.py --device cuda \
     --model Qwen/Qwen2.5-3B-Instruct \
     --context-lengths 2048,8192,16384,24576,32768 \
     --h2o-cache-length 4096 --warmup 1 --iters 3 --no-reset
 ```
+
+## Qwen2.5-7B on L40S 48GB (flagship regime)
+
+Same protocol (group 2, 32 new tokens, chunk 1024, 1 iter), Qwen2.5-7B-Instruct
+bf16 on a single g6e.2xlarge (L40S, 48 GB):
+
+| context | cache | gen (ms) | grad (ms) | total (ms) | peak (GB) |
+|--------:|-------|---------:|----------:|-----------:|----------:|
+| 8,192  | dense                | 4377  | 8666   | 13363  | 34.99 |
+| 16,384 | dense                | 7754  | 18111  | 26039  | 40.84 |
+| 24,576 | dense                | —     | —      | **OOM** | **OOM** |
+| 16,384 | H2O-q8 (full cover)  | 9138  | 18392  | 27962  | 40.88 |
+| 32,768 | H2O-q8 (full cover)  | —     | —      | **OOM** | **OOM** |
+| 24,576 | H2O-q8 (cl=8192)     | 20101 | 54502  | 75121  | 35.47 |
+| 32,768 | H2O-q8 (cl=8192)     | 27474 | 76942  | 104731 | 35.66 |
+| 49,152 | H2O-q8 (cl=8192)     | 41762 | 120650 | 162854 | 35.68 |
+| 65,536 | H2O-q8 (cl=8192)     | 56181 | 163835 | 220905 | 35.70 |
+| 24,576 | H2O-q8 (cl=12288)    | 22720 | 64646  | 87881  | 38.46 |
+| 32,768 | H2O-q8 (cl=12288)    | 32300 | 95161  | 127729 | 38.47 |
+
+Takeaways:
+
+- **Dense GRPO on 7B dies at 24k** on a 48 GB GPU. A *full-coverage* sparse
+  cache dies soon after (32k) — a big cache costs memory in the gradient pass
+  too. The regime that works is a **bounded, actively evicting cache**.
+- With `cl=8192` the footprint is **flat ~35.7 GB from 24k to 65k** — GRPO on
+  7B at 65k context runs on one L40S, 2.7x past the dense OOM point.
+- Trade-off knob: `cl=12288` costs ~3 GB and ~20% step time over `cl=8192`
+  but retains 50% more of the prompt (accuracy lever per
+  `docs/EVICTION_SWEEP_A2.md`: retention determines accuracy).
+- Step times grow with context (the chunked gradient pass is linear in
+  prompt length): ~105 s/step at 32k, ~221 s/step at 65k, group 2. A 300-step
+  run at 32k, group 8, is a multi-day single-GPU job — hence the worker
+  fleet (`terraform/`, `scripts/rl/worker_loop.sh`).

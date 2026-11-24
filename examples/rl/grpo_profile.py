@@ -29,10 +29,10 @@ cost grows with sequence length -- which is exactly what this sweep shows.
 Real model + real prompts (this is not a synthetic benchmark):
 
     # quick run on an A10
-    python examples/grpo_profile.py --device cuda --max-new-tokens 64,128,256
+    python examples/rl/grpo_profile.py --device cuda --max-new-tokens 64,128,256
 
     # longer sweep
-    python examples/grpo_profile.py --device cuda \
+    python examples/rl/grpo_profile.py --device cuda \
         --max-new-tokens 128,256,512,1024 --group-size 8 --iters 5
 
 Prompts come from a real dataset (``trl-lib/tldr`` by default) when the
@@ -46,16 +46,16 @@ import argparse
 import statistics
 from typing import Callable, List
 
-import lightning as L
 import torch
 from litgpt.prompts import PromptStyle, has_prompt_style, load_prompt_style
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     auto_download_checkpoint,
     check_valid_checkpoint_dir,
-    load_checkpoint,
 )
 
+from keys_values.finetune.utils import load_checkpoint
+from keys_values.rl.runtime import SingleDevice
 from keys_values.config import Config
 from keys_values.data.constants import LIT_MODEL_FNAME
 from keys_values.kvcache.factory import KVCacheFactory
@@ -124,7 +124,7 @@ def build_model(
     config = Config.from_file(checkpoint_dir / "model_config.yaml")
     with fabric.init_module(empty_init=True):
         gpt_model = GPT(config)
-    load_checkpoint(fabric, gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
+    load_checkpoint(gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
     gpt_model.assign_kv_caches(
         KVCacheFactory.create(
             gpt_model=gpt_model,
@@ -257,11 +257,7 @@ def main() -> None:
 
     sweep = [int(x) for x in args.max_new_tokens.split(",")]
     dtype = torch.float32 if args.device == "cpu" else torch.bfloat16
-    fabric = L.Fabric(
-        devices=1,
-        accelerator=args.device,
-        precision="32-true" if args.device == "cpu" else "bf16-true",
-    )
+    fabric = SingleDevice.create(args.device)
 
     checkpoint_dir = auto_download_checkpoint(
         model_name=args.model, access_token=args.access_token

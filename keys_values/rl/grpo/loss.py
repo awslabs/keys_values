@@ -34,7 +34,9 @@ is::
 
 where ``A`` is the per-sequence (group-relative) advantage. The head model
 accumulates the summed loss over completion tokens; normalization is handled
-by :meth:`num_target_entries`.
+by :meth:`num_target_entries` (group-mean token count, the default) or inside
+:meth:`forward` (``per_sequence_norm=True``: each sequence divided by its own
+token count, so a long rollout does not outweigh a short one).
 """
 
 from __future__ import annotations
@@ -63,6 +65,21 @@ class GRPOLossHeadModel(HeadModel):
         Model config (used for vocab size).
     epsilon_low, epsilon_high : float
         Lower/upper clipping bounds for the importance ratio.
+    temperature : float
+        Sampling temperature of the rollout; the policy log-prob is computed
+        under ``softmax(logits / temperature)`` to match it.
+    per_sequence_norm : bool
+        Default ``False``: the summed per-token loss of every sequence is
+        divided by the *group-mean* valid token count (via
+        :meth:`num_target_entries` with ``average_loss_per_batch=True``), so a
+        rollout with 3x the tokens contributes 3x the gradient mass -- the
+        length bias that drives completion-length drift at long cutoffs.
+        ``True``: each sequence's per-token loss is divided by *that*
+        sequence's own valid token count inside :meth:`forward` (requires the
+        completion ``mask`` from :meth:`set_batch`), and
+        :meth:`num_target_entries` returns ones so the downstream
+        normalization is a no-op. Every sequence then contributes equal
+        gradient mass regardless of its length (TRL ``loss_type="grpo"``).
     """
 
     NAME = "grpo_loss"
@@ -72,11 +89,21 @@ class GRPOLossHeadModel(HeadModel):
         config: Config,
         epsilon_low: float = 0.2,
         epsilon_high: float = 0.2,
+        temperature: float = 1.0,
+        per_sequence_norm: bool = False,
     ):
         super().__init__()
         self._vocab_size = config.padded_vocab_size
         self.epsilon_low = epsilon_low
         self.epsilon_high = epsilon_high
+        if temperature <= 0:
+            raise ValueError(f"temperature={temperature}, must be positive")
+        # The rollout samples from softmax(logits / temperature) and records
+        # log-probs under that distribution (rollout.sampled_token_logprobs).
+        # The policy log-prob here must use the same scaling, or the ratio
+        # old/new compares two different distributions whenever T != 1.
+        self.temperature = temperature
+        self.per_sequence_norm = per_sequence_norm
         self._old_logps: Optional[torch.Tensor] = None
         self._advantages: Optional[torch.Tensor] = None
         self._mask: Optional[torch.Tensor] = None
@@ -145,7 +172,9 @@ class GRPOLossHeadModel(HeadModel):
         logits = model_outputs[:, diff:, :]
         num = targets.shape[1]
 
-        log_probs = F.log_softmax(logits, dim=-1)
+        # fp32 for the loss-side softmax: bf16 logits lose precision in the
+        # log-sum-exp over a 150k vocabulary.
+        log_probs = F.log_softmax(logits.float() / self.temperature, dim=-1)
         policy_logp = torch.gather(
             log_probs, dim=-1, index=targets.unsqueeze(-1)
         ).squeeze(-1)
@@ -171,14 +200,33 @@ class GRPOLossHeadModel(HeadModel):
         if self._mask is not None:
             mask = self._mask[:, start : start + num].to(per_token_loss.device)
             per_token_loss = per_token_loss * mask
+            if self.per_sequence_norm:
+                # Divide by this sequence's own valid token count (full
+                # completion, not just this chunk), so that summing over
+                # chunks gives the per-sequence *mean* token loss.
+                # `num_target_entries` returns ones in this mode.
+                per_token_loss = per_token_loss / self._per_sequence_counts().to(
+                    per_token_loss.device
+                ).unsqueeze(1)
         return per_token_loss.sum(dim=-1)
+
+    def _per_sequence_counts(self) -> torch.Tensor:
+        """Valid token count per sequence from the completion mask, >= 1."""
+        return self._mask.sum(dim=-1).clamp_min(1.0).to(dtype=torch.float32)
 
     def num_target_entries(self, targets: torch.Tensor) -> Optional[torch.Tensor]:
         assert 1 <= targets.ndim <= 2
         if self._mask is not None:
+            if self.per_sequence_norm:
+                # Normalization already applied per sequence in `forward`;
+                # make the downstream `scale_factor / num_target_entries`
+                # (and its batch mean) a no-op.
+                return torch.ones(self._mask.shape[0], dtype=torch.float32)
             # Normalize by the number of *real* (non-padding) completion tokens
             # per sequence, clamped to >= 1 to avoid division by zero.
-            return self._mask.sum(dim=-1).clamp_min(1.0).to(dtype=torch.float32)
+            return self._per_sequence_counts()
+        # Without a mask every row has the same length, so the group-mean
+        # count equals the per-sequence count and both modes coincide.
         return torch.full(
             (targets.shape[0],),
             float(targets.shape[-1]),
@@ -192,4 +240,6 @@ class GRPOLossHeadModel(HeadModel):
             config,
             epsilon_low=self.epsilon_low,
             epsilon_high=self.epsilon_high,
+            temperature=self.temperature,
+            per_sequence_norm=self.per_sequence_norm,
         )

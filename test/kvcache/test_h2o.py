@@ -444,3 +444,118 @@ def test_max_chunk_size():
         k_and_vs = [c.kv_buffers.get_keys_values() for c in kv_caches]
         torch.testing.assert_close(k_and_vs[0].keys(), k_and_vs[1].keys())
         torch.testing.assert_close(k_and_vs[0].values(), k_and_vs[1].values())
+
+
+def _run_decode(kv_cache, params, num_prefill, num_insert, vocab_size=128):
+    """Prefill, then insert one token per round; returns (queries, keys, values,
+    list of `index` used per forward after the prefill)."""
+    keys, values = random_keys_values(params, num=num_insert)
+    queries = random_tensor(params, num=num_insert, is_query=True)
+    token_idx = torch.randint(
+        low=0, high=vocab_size, size=(params.max_batch_size, num_insert)
+    )
+    kv_cache.debug_next_positions = []
+    kv_cache(
+        query=queries[:, :, :num_prefill, :],
+        key=keys[:, :, :num_prefill, :],
+        value=values[:, :, :num_prefill, :],
+        token_idx=token_idx[:, :num_prefill],
+    )
+    for pos in range(num_prefill, num_insert):
+        kv_cache(
+            query=queries[:, :, pos : (pos + 1), :],
+            key=keys[:, :, pos : (pos + 1), :],
+            value=values[:, :, pos : (pos + 1), :],
+            token_idx=token_idx[:, pos : (pos + 1)],
+        )
+    return queries, keys, values, kv_cache.debug_next_positions
+
+
+@pytest.mark.parametrize(
+    "name, grace_period",
+    product(["h2o-default", "h2o-torch-quantized8"], [0, 7]),
+)
+def test_evict_every_one_is_default(name, grace_period):
+    """`evict_every=1` must reproduce the default cache decision for decision."""
+    params = KVCacheParams(
+        max_batch_size=2,
+        n_query_groups=4,
+        cache_length=48,
+        head_size=8,
+        n_head=4,
+        dtype=torch.bfloat16,
+    )
+    num_prefill, num_insert = 20, 3 * params.cache_length
+    results = []
+    for kwargs in (dict(), dict(evict_every=1)):
+        torch.random.manual_seed(31415927)
+        kv_cache = create_kv_cache(name, params, grace_period=grace_period, **kwargs)
+        results.append(_run_decode(kv_cache, params, num_prefill, num_insert))
+    idx0, idx1 = results[0][3], results[1][3]
+    assert len(idx0) == len(idx1) == num_insert - num_prefill
+    for a, b in zip(idx0, idx1):
+        torch.testing.assert_close(a, b)
+
+
+@pytest.mark.parametrize(
+    "name, grace_period, evict_every",
+    product(["h2o-default", "h2o-torch-quantized8"], [0, 7], [4, 16]),
+)
+def test_evict_every_block(name, grace_period, evict_every):
+    """Block eviction: distinct slots within a block, valid token positions,
+    and the victims chosen at a block boundary are the lowest-score slots."""
+    torch.random.manual_seed(31415927)
+    params = KVCacheParams(
+        max_batch_size=2,
+        n_query_groups=4,
+        cache_length=48,
+        head_size=8,
+        n_head=4,
+        dtype=torch.bfloat16,
+    )
+    cache_length = params.cache_length
+    prefix = cache_length - grace_period
+    num_prefill = 20
+    num_insert = 4 * cache_length
+    kv_cache = create_kv_cache(
+        name, params, grace_period=grace_period, evict_every=evict_every
+    )
+    # Instrument: scores as seen at each block boundary
+    boundary_scores = {}
+    orig = kv_cache._block_next_positions
+
+    def spy(num):
+        refresh = (
+            kv_cache._block_ranking is None
+            or kv_cache._block_offset + num > kv_cache._block_ranking.shape[-1]
+        )
+        if refresh and kv_cache._last_scores is not None:
+            boundary_scores[len(kv_cache.debug_next_positions)] = (
+                kv_cache._last_scores.detach().clone()
+            )
+        return orig(num)
+
+    kv_cache._block_next_positions = spy
+    _, _, _, indices = _run_decode(kv_cache, params, num_prefill, num_insert)
+    assert len(indices) == num_insert - num_prefill
+    assert boundary_scores, "block ranking was never computed"
+    for start, scores in boundary_scores.items():
+        block = indices[start : start + evict_every]
+        # Distinct victims within one block, all outside the grace region
+        stacked = torch.cat(block, dim=-1)  # (bs, n_qg, <=B)
+        for b in range(params.max_batch_size):
+            for g in range(params.n_query_groups):
+                row = stacked[b, g].tolist()
+                assert len(set(row)) == len(row), row
+                assert all(0 <= x < prefix for x in row), row
+        # The victims are the `len(block)` smallest scores at the boundary
+        k = stacked.shape[-1]
+        expected = scores.topk(k=k, dim=-1, largest=False, sorted=True)[1].cpu()
+        torch.testing.assert_close(stacked, expected)
+    # Token positions remain a set of distinct positions, bounded by input_pos
+    token_positions = kv_cache.token_positions()
+    for b in range(params.max_batch_size):
+        for g in range(params.n_query_groups):
+            row = token_positions[b, g].tolist()
+            assert len(set(row)) == cache_length
+            assert max(row) == num_insert - 1

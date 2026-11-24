@@ -19,7 +19,7 @@ the same set of long-context QA examples under a full (dense) KV cache vs H2O
 at several cache budgets. If H2O already degrades accuracy at inference, RL
 won't fix it; if it holds, the dense-vs-H2O GRPO comparison is worth running.
 
-    python examples/longqa_quality.py --device cuda \
+    python examples/rl/longqa_quality.py --device cuda \
         --model Qwen/Qwen2.5-0.5B-Instruct \
         --context-len 8192 --n-examples 40 --h2o-budgets 1024,2048,4096
 """
@@ -30,19 +30,19 @@ import argparse
 import sys
 from pathlib import Path
 
-import lightning as L
 import torch
 from litgpt.prompts import PromptStyle, has_prompt_style, load_prompt_style
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     auto_download_checkpoint,
     check_valid_checkpoint_dir,
-    load_checkpoint,
 )
 
 sys.path.insert(0, str(Path(__file__).parent))
 from longqa_task import build_dataset, left_pad  # noqa: E402
 
+from keys_values.finetune.utils import load_checkpoint
+from keys_values.rl.runtime import SingleDevice
 from keys_values.config import Config
 from keys_values.data.constants import LIT_MODEL_FNAME
 from keys_values.evaluation.metrics import sub_exact_match
@@ -157,11 +157,7 @@ def main() -> None:
     task_modes = [t.strip() for t in args.tasks.split(",")]
     sparse_caches = [c.strip() for c in args.caches.split(",")]
     dtype = torch.float32 if args.device == "cpu" else torch.bfloat16
-    fabric = L.Fabric(
-        devices=1,
-        accelerator=args.device,
-        precision="32-true" if args.device == "cpu" else "bf16-true",
-    )
+    fabric = SingleDevice.create(args.device)
 
     checkpoint_dir = auto_download_checkpoint(
         model_name=args.model, access_token=args.access_token
@@ -181,7 +177,7 @@ def main() -> None:
     with fabric.init_module(empty_init=True):
         gpt_model = GPT(config)
     check_valid_checkpoint_dir(checkpoint_dir)
-    load_checkpoint(fabric, gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
+    load_checkpoint(gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
     gpt_model.to(fabric.device)
 
     print(

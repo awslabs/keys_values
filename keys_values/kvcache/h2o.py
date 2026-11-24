@@ -673,6 +673,7 @@ REMOVE_ARG_NAMES = (
     "detach_attn_weights",
     "keep_initial_fraction",
     "max_chunk_size",
+    "evict_every",
 )
 
 

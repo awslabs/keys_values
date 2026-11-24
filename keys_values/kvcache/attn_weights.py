@@ -442,6 +442,20 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
     order to process score values by `torch.topk` instead of `torch.argsort` in
     :meth:`_update`, which can be significantly faster.
 
+    Block eviction (`evict_every`):
+
+    By default (`evict_every == 1`), the slot ranking (argsort or topk of the
+    scores) that determines eviction victims is recomputed after every
+    :meth:`forward` call, i.e. after every generated token. With
+    `evict_every = B > 1`, the ranking is computed once and then consumed
+    over the next `B` tokens (one victim per token in decoding): scores are
+    still accumulated every round, but the sort runs once per block. Tokens
+    written within a block are not candidates until the next ranking, so a
+    block acts like a sliding grace period of up to `B` tokens. The ranking
+    is refreshed early if a chunked :meth:`forward` needs more victims than
+    remain in the block. Replay logging and the gradient replay are
+    unaffected (they record the slot decisions, not how they were made).
+
     Debugging/testing with `debug_next_positions`:
 
     If this is set, it must be a list. Then, `index` used in
@@ -460,6 +474,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         detach_attn_weights: bool = False,
         keep_initial_fraction: Optional[float] = None,
         max_chunk_size: Optional[int] = None,
+        evict_every: int = 1,
         **base_kwargs,
     ):
         """
@@ -478,6 +493,8 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             max_chunk_size: If given, any :meth:`forward` call with
                 `input_pos > 0`, argument lengths must be `<= max_chunk_size`.
                 This is used to speed up :meth:`_update`.
+            evict_every: Block eviction, see header comment. Defaults to 1
+                (rank slots after every round).
 
         """
         super().__init__(config, buffers, block_idx=block_idx, **base_kwargs)
@@ -513,6 +530,16 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                 )
                 max_chunk_size = None
         self.max_chunk_size = max_chunk_size
+        if not isinstance(evict_every, int) or evict_every < 1:
+            raise ValueError(f"evict_every = {evict_every}, must be a positive int")
+        self.evict_every = evict_every
+        # Block eviction state (only used if `evict_every > 1` and the cache
+        # is full): `_block_ranking` holds the slots ranked by score at the
+        # last block boundary, `_block_offset` how many have been consumed,
+        # `_last_scores` the scores from the most recent :meth:`_update`.
+        self._block_ranking = None
+        self._block_offset = 0
+        self._last_scores = None
         shape = (buffers.max_batch_size, self.n_query_groups, cache_length)
         device = self._default_device_for_new_params()
         self.register_buffer(
@@ -546,9 +573,29 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             call are written to, shape `(batch_size, n_query_groups, num)`,
             where `num <= max_forward_length()`, the remaining ones are not used.
         """
-        return (
-            None if self._next_positions is None else self._next_positions[:, :, :num]
-        )
+        if self._next_positions is not None:
+            return self._next_positions[:, :, :num]
+        if self.evict_every > 1 and self.current_length == self.cache_length:
+            return self._block_next_positions(num)
+        return None
+
+    def _block_next_positions(self, num: int) -> Optional[torch.Tensor]:
+        """
+        Block eviction: returns the next `num` victims from the ranking
+        computed at the last block boundary, refreshing the ranking from
+        `_last_scores` if the block is exhausted (or cannot cover `num`).
+        Does not consume; :meth:`_forward_internal` advances the offset.
+        """
+        ranking = self._block_ranking
+        offset = self._block_offset
+        if ranking is None or offset + num > ranking.shape[-1]:
+            if self._last_scores is None:
+                return None
+            k = min(self._last_scores.shape[-1], max(self.evict_every, num))
+            ranking = self._last_scores.topk(k=k, dim=-1, largest=False, sorted=True)[1]
+            self._block_ranking = ranking
+            self._block_offset = offset = 0
+        return ranking[:, :, offset : (offset + num)]
 
     def max_forward_length(self) -> int:
         diff = self.cache_length - self.current_length
@@ -683,6 +730,9 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                     index=index,
                     input_pos=self.input_pos,
                 )
+        if self._next_positions is None:
+            # `index` came from the block ranking: consume it
+            self._block_offset += num
         self._next_positions = None  # Set by next :meth:`update` call
         return k_and_v
 
@@ -822,6 +872,10 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
         scores = self._compute_scores(attn_weights, query_length)
         if self.current_length < self.cache_length:
             self._set_next_positions_to_free_slots()
+        elif self.evict_every > 1:
+            # Block eviction: no sort here. The ranking is (re)computed
+            # lazily in `_block_next_positions` once per block.
+            self._last_scores = scores
         elif self.max_chunk_size is None:
             self._next_positions = scores.argsort(dim=-1)
         else:
@@ -908,6 +962,9 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
             grace_period=self.grace_period,
         )
         self._use_initial_rule = self.current_length == self.cache_length
+        self._block_ranking = None
+        self._block_offset = 0
+        self._last_scores = None
         if not self._use_initial_rule:
             self._set_next_positions_to_free_slots()
         if self.grace_period > 0:
@@ -1076,6 +1133,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
                 detach_attn_weights=self._detach_attn_weights,
                 keep_initial_fraction=self._keep_initial_fraction,
                 max_chunk_size=self.max_chunk_size,
+                evict_every=self.evict_every,
             )
         )
         return base_kwargs

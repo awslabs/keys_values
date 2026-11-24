@@ -235,7 +235,11 @@ def create_ext_annotations(
             device=buffer.device,
             dtype=torch.int32,
         )
-        delta = buffer.gather(2, index)
+        # Detached: this gather is bookkeeping only (its backward never runs),
+        # and with autograd on it would save `buffer` a second time, keeping
+        # the reconstructed expanded K/V of every finished chunk alive for the
+        # rest of the cell.
+        delta = buffer.detach().gather(2, index)
         if not extra_info:
             extra_info = None
         annotation = NodeAnnotation(

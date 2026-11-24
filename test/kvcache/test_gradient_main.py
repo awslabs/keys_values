@@ -49,8 +49,25 @@ def gradcomp_mha_kwargs() -> Dict[str, Any]:
     return mha_kwargs
 
 
+@pytest.fixture(scope="session")
+def gradcomp_train_cache_kwargs() -> Dict[str, Any]:
+    # FlexAttention for the gradient cells only (GRPO: decode MHAs untouched)
+    if torch.cuda.is_available():
+        kwargs = dict(flexatt_args=FlexAttentionArgs(q_lens=[8, 32, 96, 128]))
+    else:
+        kwargs = dict()
+    return kwargs
+
+
+# SDPA mode of the gradient cells: "mha-flex" = flexatt_args on all MHAs
+# (finetune), "cells-flex" = flexatt_args via train_cache_kwargs only (GRPO
+# --attn auto), "qpadded" = query-padded PyTorch SDPA (--attn eager). Flex
+# needs CUDA; on CPU only "qpadded" is run.
+GRAD_ATTN_MODES = ("mha-flex", "cells-flex", "qpadded")
+
+
 def _append_name(case: tuple) -> tuple:
-    cache_name, cache_kwargs, cache_lengths, device = case
+    cache_name, cache_kwargs, cache_lengths, device, grad_attn = case
     gp = cache_kwargs.get("grace_period")
     if gp is not None:
         cache_name += f"_gp{gp}"
@@ -58,14 +75,15 @@ def _append_name(case: tuple) -> tuple:
         cache_name,
         str(cache_lengths[0]),
         "cpu" if device.type == "cpu" else "cuda",
+        grad_attn,
     )
     return case + ("-".join(parts),)
 
 
 def args_complete_gradient_computation():
     cases = [
-        b + (c, a)
-        for a, b, c in product(
+        b + (c, a, d)
+        for a, b, c, d in product(
             available_backends(),
             [
                 ("lastrec", dict()),
@@ -76,22 +94,26 @@ def args_complete_gradient_computation():
                 [128, 128],
                 [96, 128],
             ],
+            GRAD_ATTN_MODES,
         )
+        if a.type == "cuda" or d == "qpadded"
     ]
     return [_append_name(case) for case in cases]
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize(
-    "cache_name, cache_kwargs, cache_lengths, device, case_name",
+    "cache_name, cache_kwargs, cache_lengths, device, grad_attn, case_name",
     args_complete_gradient_computation(),
 )
 def test_complete_gradient_computation(
     gradcomp_mha_kwargs,
+    gradcomp_train_cache_kwargs,
     cache_name,
     cache_kwargs,
     cache_lengths,
     device,
+    grad_attn,
     case_name,
 ):
     seed = 31415927
@@ -129,11 +151,16 @@ def test_complete_gradient_computation(
         cache_length=cache_lengths[0],
         dtype=dtype,
     )
-    if device.type == "cpu":
-        mha_kwargs = dict()
-    else:
+    if grad_attn == "mha-flex" and device.type == "cuda":
         mha_kwargs = gradcomp_mha_kwargs
-    cache_kwargs.update(mha_kwargs)
+    else:
+        mha_kwargs = dict()
+    if grad_attn == "cells-flex" and device.type == "cuda":
+        train_cache_kwargs = gradcomp_train_cache_kwargs
+    else:
+        train_cache_kwargs = dict()
+    # Copy: the parametrized dict is shared between the grad_attn cases
+    cache_kwargs = dict(cache_kwargs, **mha_kwargs)
     with torch.device(device):
         gpt_model = GPT(config, **mha_kwargs)
         gpt_model.apply(gpt_model._init_weights)  # Initialization
@@ -190,7 +217,7 @@ def test_complete_gradient_computation(
             chunk_size=chunk_size,
             layercp_qname=qname,
             cachecp_qname=qname,
-            train_cache_kwargs=dict(),
+            train_cache_kwargs=dict(train_cache_kwargs),
             autograd_hooks_kwargs=autograd_hooks_kwargs,
             debug_single_cell_per_row=debug_flag,
             debug_dont_use_autograd_hooks=debug_flag,

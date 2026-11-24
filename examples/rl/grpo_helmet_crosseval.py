@@ -23,7 +23,7 @@ two effects that a plain per-arm eval conflates:
 - Does sparse *inference* cost accuracy, independent of training?
   (compare columns for the same checkpoint)
 
-    python examples/grpo_helmet_crosseval.py --device cuda --dataset-key nq \
+    python examples/rl/grpo_helmet_crosseval.py --device cuda --dataset-key nq \
         --checkpoints base h2o=runs/nq_h2o/final.pt dense=runs/nq_dense/final.pt \
         --h2o-cache-length 4096 --n-eval 100 --disable-flashinfer \
         --out runs/crosseval_nq.json
@@ -36,19 +36,19 @@ import json
 import sys
 from pathlib import Path
 
-import lightning as L
 import torch
 from litgpt.prompts import PromptStyle, has_prompt_style, load_prompt_style
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     auto_download_checkpoint,
     check_valid_checkpoint_dir,
-    load_checkpoint,
 )
 
 sys.path.insert(0, str(Path(__file__).parent))
 from grpo_helmet import decode_row, targets_of  # noqa: E402
 
+from keys_values.finetune.utils import load_checkpoint
+from keys_values.rl.runtime import SingleDevice
 from keys_values.config import Config
 from keys_values.data.constants import LIT_MODEL_FNAME
 from keys_values.data.load_helmet_dev_eval import load_helmet_dev_eval
@@ -144,11 +144,7 @@ def main() -> None:
         flashinfer_ops._available = False
 
     dtype = torch.float32 if args.device == "cpu" else torch.bfloat16
-    fabric = L.Fabric(
-        devices=1,
-        accelerator=args.device,
-        precision="32-true" if args.device == "cpu" else "bf16-true",
-    )
+    fabric = SingleDevice.create(args.device)
     checkpoint_dir = auto_download_checkpoint(
         model_name=args.model, access_token=args.access_token
     )
@@ -200,7 +196,7 @@ def main() -> None:
     check_valid_checkpoint_dir(checkpoint_dir)
     with fabric.init_module(empty_init=True):
         gpt_model = GPT(config)
-    load_checkpoint(fabric, gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
+    load_checkpoint(gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
     gpt_model.to(fabric.device)
     base_sd = {k: v.detach().cpu().clone() for k, v in gpt_model.state_dict().items()}
 

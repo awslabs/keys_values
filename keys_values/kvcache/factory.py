@@ -564,6 +564,7 @@ SMART_LASTREC_REMKEYS = (
 
 ATTN_WEIGHTS_REMKEYS = (
     "detach_attn_weights",
+    "evict_every",
     "grace_period",
     "keep_initial_fraction",
     "max_chunk_size",

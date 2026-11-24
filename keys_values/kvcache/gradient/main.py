@@ -450,6 +450,9 @@ class LongContextGradientModel(LongContextInferenceModel):
             )
         # Annotation usage logs
         self._annotation_usage_logs: Dict[Tuple[int, int], AnnotationUsageLog] = dict()
+        # Peak parked-state memory (CPU) over the cells of the last backward
+        self._last_parked_peak_bytes = 0
+        self._last_parked_peak_count = 0
         # Status is "init" or "forward_done"
         self._status = "init"
         self.layer_checkpoints = None
@@ -643,12 +646,37 @@ class LongContextGradientModel(LongContextInferenceModel):
             self.autograd_hooks.clear()
             del self.autograd_hooks
             self.autograd_hooks = None
+        # Keep a cheap summary of the parked-state memory across all cells of
+        # this backward (the per-cell logs are cleared just below). This is the
+        # measured number behind the memory bound claimed in issue #148.
+        if self._annotation_usage_logs:
+            # getattr: tolerate hooks builds without parked-state accounting
+            # (used for pre-fix A/B memory measurements)
+            self._last_parked_peak_bytes = max(
+                getattr(log, "parked_peak_bytes", 0)
+                for log in self._annotation_usage_logs.values()
+            )
+            self._last_parked_peak_count = max(
+                getattr(log, "parked_peak_count", 0)
+                for log in self._annotation_usage_logs.values()
+            )
         self._annotation_usage_logs = dict()
         gc.collect()
         torch.cuda.empty_cache()
 
     def profile_records(self) -> Optional[List[Dict[str, float]]]:
         return self._profile_records
+
+    @property
+    def last_parked_peak(self) -> Tuple[int, int]:
+        """
+        Returns:
+            `(peak_bytes, peak_count)`: Maximum, over the cells of the last
+            backward, of memory (CPU) retained by buffer states that the
+            autograd hooks reconstructed ahead of their unpack request, and of
+            the number of such states held at once. See issue #148.
+        """
+        return self._last_parked_peak_bytes, self._last_parked_peak_count
 
     def annotation_usage_logs(self) -> Dict[Tuple[int, int], AnnotationUsageLog]:
         """

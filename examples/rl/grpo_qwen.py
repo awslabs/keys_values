@@ -61,8 +61,8 @@ Run
 ---
 ::
 
-    python examples/grpo_qwen.py --max-steps 20
-    python examples/grpo_qwen.py --device cuda --kv-cache-name h2o-torch-quantized8
+    python examples/rl/grpo_qwen.py --max-steps 20
+    python examples/rl/grpo_qwen.py --device cuda --kv-cache-name h2o-torch-quantized8
 
 A small built-in prompt list is used by default so the script is self
 contained. Swap in a real dataset (e.g. ``trl-lib/tldr``) by editing
@@ -74,16 +74,16 @@ from __future__ import annotations
 import argparse
 from typing import Callable, List
 
-import lightning as L
 import torch
 from litgpt.prompts import PromptStyle, has_prompt_style, load_prompt_style
 from litgpt.tokenizer import Tokenizer
 from litgpt.utils import (
     auto_download_checkpoint,
     check_valid_checkpoint_dir,
-    load_checkpoint,
 )
 
+from keys_values.finetune.utils import load_checkpoint
+from keys_values.rl.runtime import SingleDevice
 from keys_values.config import Config
 from keys_values.data.constants import LIT_MODEL_FNAME
 from keys_values.kvcache.factory import KVCacheFactory
@@ -150,7 +150,7 @@ def make_reward_len(
 
 def build_model(
     checkpoint_dir,
-    fabric: L.Fabric,
+    fabric: SingleDevice,
     batch_size: int,
     cache_length: int,
     kv_cache_name: str,
@@ -162,7 +162,7 @@ def build_model(
 
     with fabric.init_module(empty_init=True):
         gpt_model = GPT(config)
-    load_checkpoint(fabric, gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
+    load_checkpoint(gpt_model, checkpoint_dir / LIT_MODEL_FNAME)
 
     # Non-dense caches are required by the gradient pass.
     gpt_model.assign_kv_caches(
@@ -205,11 +205,7 @@ def main() -> None:
     args = parser.parse_args()
 
     dtype = torch.float32 if args.device == "cpu" else torch.bfloat16
-    fabric = L.Fabric(
-        devices=1,
-        accelerator=args.device,
-        precision="32-true" if args.device == "cpu" else "bf16-true",
-    )
+    fabric = SingleDevice.create(args.device)
 
     # 1. Download + convert the HF checkpoint to litgpt format.
     checkpoint_dir = auto_download_checkpoint(
