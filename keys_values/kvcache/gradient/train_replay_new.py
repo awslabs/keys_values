@@ -37,11 +37,6 @@ from keys_values.kvcache.gradient.annotation import (
 )
 from keys_values.kvcache.new.basics import PositionsNewEntriesType
 from keys_values.kvcache.new.driver import DefaultKVCacheDriver
-from keys_values.kvcache.test_shadow import (
-    KVCacheReplayLog_oldornew,
-    use_new_replay_log,
-    get_chunks_from_log,
-)
 from keys_values.tools.debug_utils import for_debug
 from keys_values.utils import expand_index, shape_to_tuple
 
@@ -81,9 +76,9 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         config: Config,
         batch_size: int,
         cache_length: int,
-        replay_log: KVCacheReplayLog_oldornew,
         start_input_pos: int,
         layer_idx: int,
+        first_chunk_idx: int,
         num_chunks: int,
         node_annotations: Optional[Annotations] = None,
         dtype: Optional[torch.dtype] = None,
@@ -95,9 +90,9 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         debug_intermediates: Optional[Tuple[Dict[str, torch.Tensor], str]] = None,
         **mha_kwargs,
     ):
-        if not (0 <= start_input_pos < len(replay_log)):
+        if start_input_pos < 0:
             raise ValueError(
-                f"start_input_pos {start_input_pos}, must be in [0, {len(replay_log)})"
+                f"start_input_pos = {start_input_pos}, must be nonnegative"
             )
         if layer_idx < 0:
             raise ValueError(f"layer_idx {layer_idx}, must be nonnegative")
@@ -114,7 +109,6 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
             **mha_kwargs,
         )
 
-        self._use_new_code = use_new_replay_log(replay_log)
         if self.mha.use_eager_sdpa_always:
             raise ValueError(
                 "This replay cache does not support mha.use_eager_sdpa_always = True"
@@ -130,19 +124,15 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
                 "softcapping, or use FlexAttention by passing flexatt_args "
                 "when creating the MultiHeadSelfAttention object."
             )
-        self.token_chunks = get_chunks_from_log(replay_log)
         self.kv_buffers = None
         self.layer_idx = layer_idx
-        self.num_chunks = num_chunks
+        self.first_chunk_idx = first_chunk_idx
+        self._chunk_idx = first_chunk_idx
+        self._last_chunk_idx = first_chunk_idx + num_chunks - 1
         self._node_annotations = node_annotations
-        self.input_pos = start_input_pos  # Will be validated
-        # These are initialized in `_initialize_replay`:
-        self._token_chunk_pos = None
-        self._start_token_chunk_pos = None
-        self._end_token_chunk_pos = None
-        self._current_length = 0
+        self._input_pos = start_input_pos
+        self._current_length = min(start_input_pos, cache_length)
         self._annotation_callback = None
-        self._initialize_replay()
         # For debugging
         self._debug_tensors = debug_tensors
         self.debug_print_annotations = debug_print_annotations
@@ -162,39 +152,6 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
     def batch_size(self) -> Optional[int]:
         return self.max_batch_size
 
-    def _initialize_replay(self):
-        # Initialize `_token_chunk_pos`, `_start_token_chunk_pos`,
-        # `_end_token_chunk_pos`, `input_pos`
-        input_pos = self.input_pos  # target value to reach
-        self.input_pos = 0
-        self._token_chunk_pos = 0
-        self.prefill_length = None
-        for chunk in self.token_chunks:
-            if self.input_pos >= input_pos:
-                break
-            # This advances `_token_chunk_pos`
-            num = chunk.shape[-1]
-            self._process_token_chunk(chunk)
-            self.input_pos += num
-            if self.current_length < self.cache_length:
-                self._current_length += num
-                if self.current_length > self.cache_length:
-                    raise ValueError(
-                        f"current_length from {self.current_length - num} to {self.current_length}, jumps over cache_length = {self.cache_length}"
-                    )
-            if self.prefill_length is None:
-                self.prefill_length = num
-        if self.input_pos != input_pos:
-            raise ValueError(
-                f"start_input_pos = {input_pos} does not map to start of a token chunk"
-            )
-        self._start_token_chunk_pos = self._token_chunk_pos
-        self._end_token_chunk_pos = self._token_chunk_pos + self.num_chunks
-        if self._end_token_chunk_pos > len(self.token_chunks):
-            raise ValueError(
-                f"token_chunk_pos = {self._token_chunk_pos}, num_chunks = {self.num_chunks}, sum must be <= {len(self.token_chunks)}"
-            )
-
     def initialize_buffers(self, kv_buffers: KeysAndValues):
         shape = (
             self.batch_size,
@@ -207,10 +164,9 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
             raise ValueError(
                 f"kv_buffers.keys().shape = {kv_buffers.keys().shape}, must be {shape}"
             )
-        if keys.device != self._device:
-            raise ValueError(
-                f"kv_buffers.device = {keys.device}, must be {self._device}"
-            )
+        # If `self._device` not yet set, it is set here. Otherwise, must be equal
+        # to `keys.device`
+        self.set_or_check_device(keys.device)
         self.kv_buffers = kv_buffers
 
     def deallocate_buffers(self):
@@ -224,7 +180,6 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
-        input_pos: int,
         positions: Optional[PositionsNewEntriesType],
         token_positions: Optional[torch.Tensor],
         return_attn_weights,
@@ -278,9 +233,9 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
             raise ValueError(
                 f"query.shape[0] = {query.shape[0]}, batch_size = {self.batch_size}, must be equal"
             )
-        self._process_token_chunk(token_idx)
         attn_outputs = super().prefill(query, key, value, token_idx)
         self._append_debug_intermediates(query, key, value, token_idx, attn_outputs)
+        self._chunk_idx = 1
         return attn_outputs
 
     def _prefill(
@@ -294,8 +249,9 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
                 f"input_pos = {self.input_pos}, can only be called if this is 0"
             )
         # Sanity checks
+        assert self.first_chunk_idx == 0
+        assert self._chunk_idx == 0
         assert self.current_length == 0
-        assert self._token_chunk_pos == 0
         assert key.shape == value.shape
         init_length = token_idx.shape[-1]
         assert key.shape[2] == init_length
@@ -319,18 +275,12 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         token_idx: torch.Tensor,
         positions: PositionsNewEntriesType,
         token_positions: torch.Tensor,
-        input_pos: int,
         return_attn_weights: bool,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         if query.shape[0] != self.batch_size:
             raise ValueError(
                 f"query.shape[0] = {query.shape[0]}, batch_size = {self.batch_size}, must be equal"
             )
-        if input_pos != self.input_pos:
-            raise ValueError(
-                f"Internal error: input_pos = {self.input_pos} internal, but {input_pos} as argument"
-            )
-        self._process_token_chunk(token_idx)
         attn_outputs, attn_weights = super().forward(
             query,
             key,
@@ -338,10 +288,10 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
             token_idx,
             positions,
             token_positions,
-            input_pos,
             return_attn_weights,
         )
         self._append_debug_intermediates(query, key, value, token_idx, attn_outputs)
+        self._chunk_idx += 1
         return attn_outputs, attn_weights
 
     def _forward(
@@ -351,6 +301,7 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         positions: PositionsNewEntriesType,
     ) -> KeysAndValues:
         assert self.input_pos > 0  # Not to be used for prefill
+        assert self._chunk_idx > 0
         if isinstance(positions, list):
             # Note: `index` may be non-unique, see header comment
             index = torch.cat([x[0] for x in positions], dim=-1)
@@ -477,7 +428,7 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
                 NodeAnnotation(
                     kind="padded-query",
                     layer_idx=self.layer_idx,
-                    chunk_idx=self._token_chunk_pos - 1,
+                    chunk_idx=self._chunk_idx,
                     shape=shape,
                     index=index,
                     delta=delta,
@@ -536,11 +487,11 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         positions: Optional[torch.Tensor] = None,
         debug_msg: Optional[str] = None,
     ):
-        chunk_idx = self._token_chunk_pos - 1  # Counter has already been advanced
+        chunk_idx = self._chunk_idx
         # If this is the first cell and `chunk_idx == 1`, we do not have to create
         # an annotation, because the corresponding "ext" annotation does not need
         # to be supported.
-        thres_idx = max(self._start_token_chunk_pos, 1)
+        thres_idx = max(self.first_chunk_idx, 1)
         if self._node_annotations is not None and chunk_idx > thres_idx:
             # This annotation is for `x` before the node is created, so the
             # chunk index is `chunk_idx - 1`.
@@ -575,10 +526,10 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
         value: torch.Tensor,
         kind: str,
     ) -> Optional[ReorderAnnotationCallback]:
-        chunk_idx = self._token_chunk_pos - 1  # Counter has already been advanced
+        chunk_idx = self._chunk_idx
         annotation_callback = None
         if self._node_annotations is not None:
-            if chunk_idx == self._end_token_chunk_pos - 1:
+            if chunk_idx == self._last_chunk_idx:
                 # We need to store the final node in order to start the
                 # reconstruction of all earlier ones.
                 self._node_annotations.set_final(
@@ -604,31 +555,12 @@ class TrainingReplayKVCacheDriver(DefaultKVCacheDriver):
                 verbose=self.debug_print_annotations,
             )
         if self._debug_tensors is not None:
-            name = f"c{self._token_chunk_pos - 1}-l{self.layer_idx}-{kind}"
+            name = f"c{chunk_idx}-l{self.layer_idx}-{kind}"
             if name in self._debug_tensors:
                 raise IndexError(f"Entry {name} already in debug_tensor!")
             self._debug_tensors[name + "-key"] = key.clone()
             self._debug_tensors[name + "-value"] = value.clone()
         return annotation_callback
-
-    def _process_token_chunk(
-        self,
-        token_idx: torch.Tensor,
-    ):
-        """
-        Processes token chunk, comparing `token_idx` against the current chunk
-        in the replay log, and advancing `token_chunk_pos`.
-
-        Args:
-            token_idx: Token chunk to process
-
-        """
-        other = self.token_chunks[self._token_chunk_pos]
-        if not token_idx.equal(other):
-            raise ValueError(
-                f"token_idx:\n{token_idx}\nreplay_log.token_chunks[{self._token_chunk_pos}]:\n{other}\nShould be the same!"
-            )
-        self._token_chunk_pos += 1
 
     def _reset(self):
         raise NotImplementedError("This type of cache is not meant to be reset")

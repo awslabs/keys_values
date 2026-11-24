@@ -206,7 +206,7 @@ class SmartInitialLastRecentlyInsertedKVCachePolicy(DefaultKVCachePolicy):
     ) -> List[bool]:
         batch_size, max_range_length = token_idx.shape
         # Note that for batch positions where the range is not yet determined,
-        # the current cache position is `self.input_pos % self.cache_length`.
+        # the current cache position is `self._input_pos % self.cache_length`.
         max_range_length = max(
             min(
                 max_range_length,

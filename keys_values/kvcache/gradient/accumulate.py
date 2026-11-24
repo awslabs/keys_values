@@ -600,10 +600,13 @@ class GradientAccumulator:
                     raise TypeError(f"Layer {block_idx}: Cache must have driver of type KVCacheDriverWithBuffers")
                 policy = kv_cache.policy
                 policy.reset(replay_log_status="play")
+                # Clone the driver, plugging in `buffers` to be used in place of
+                # `driver.kv_buffers`
                 ir_cache = GenericKVCache(
                     policy=policy,
                     driver=driver.clone_with_buffers(buffers),
                 )
+                ir_cache.driver.reset()
                 # Set hook to write checkpoints
                 ir_cache.driver.set_checkpoint_hook(
                     checkpoint_hook=partial(checkpoint_hook, checkpoints=checkpoint),

@@ -69,7 +69,7 @@ class DefaultKVCachePolicy(KVCachePolicy):
         self._replay_log_nextpos = None
         if use_replay_logging:
             if replay_log is None:
-                self._replay_log = []
+                self._replay_log = KVCacheReplayLog()
                 self._replay_log_status = "record"
             else:
                 self._replay_log = replay_log
@@ -130,7 +130,7 @@ class DefaultKVCachePolicy(KVCachePolicy):
             self._replay_log_nextpos = 0
         elif replay_log_status == "record":
             self._replay_log_nextpos = None
-            self._replay_log = []
+            self._replay_log = KVCacheReplayLog()
         self._input_pos = 0
 
     def get_replay_log(self) -> Optional[KVCacheReplayLog]:
@@ -138,9 +138,9 @@ class DefaultKVCachePolicy(KVCachePolicy):
 
     def _get_next_replay_entry(self) -> Optional[KVCacheReplayLogEntry]:
         if self._replay_log_status == "play":
-            if self._replay_log_nextpos >= len(self._replay_log):
+            if self._replay_log_nextpos >= self._replay_log.num_chunks:
                 raise IndexError(
-                    f"replay_log_nextpos = {self._replay_log_nextpos}, len(replay_log) = {len(self._replay_log)}: Not enough entries to replay!"
+                    f"replay_log_nextpos = {self._replay_log_nextpos}, replay_log.num_chunks = {self._replay_log.num_chunks}: Not enough entries to replay!"
                 )
             return self._replay_log[self._replay_log_nextpos]
         else:
@@ -190,7 +190,10 @@ class DefaultKVCachePolicy(KVCachePolicy):
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
+        input_pos: int,
     ) -> PositionsNewEntriesType:
+        if input_pos != self._input_pos:
+            raise ValueError(f"input_pos = {input_pos}, self._input_pos = {self._input_pos}: Must be the same")
         if self._replay_log_status == "play":
             entry = self._validate_token_idx(token_idx)
             positions = entry.positions.to(device=query.device)
@@ -210,6 +213,30 @@ class DefaultKVCachePolicy(KVCachePolicy):
         self._input_pos += token_idx.shape[-1]
         return positions
 
+    def skip_replay_until(self, input_pos: int):
+        assert input_pos >= 0
+        if self._replay_log_status != "play":
+            raise IndexError("Need replay_log_status == 'play'. Use 'reset'")
+        if input_pos < self._input_pos:
+            raise ValueError(f"input_pos = {input_pos}, self._input_pos = {self._input_pos}")
+        while self._input_pos < input_pos:
+            next_entry = self._get_next_replay_entry()
+            token_idx = next_entry.token_idx
+            self._forward(
+                query=None,
+                key=None,
+                value=None,
+                token_idx=token_idx,
+                positions=next_entry.positions,
+            )
+            self._input_pos += token_idx.shape[-1]
+            if self._replay_log_nextpos >= self._replay_log.num_chunks:
+                break
+        if self._input_pos != input_pos:
+            raise ValueError(
+                f"input_pos = {input_pos} does not map to start of a token chunk"
+            )
+
     def _append_to_replay_log(
         self,
         token_idx: torch.Tensor,
@@ -225,16 +252,18 @@ class DefaultKVCachePolicy(KVCachePolicy):
 
     def _forward(
         self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        query: Optional[torch.Tensor],
+        key: Optional[torch.Tensor],
+        value: Optional[torch.Tensor],
         token_idx: torch.Tensor,
-        positions: Optional[PositionsNewEntriesType] = None,
+        positions: Optional[PositionsNewEntriesType],
     ) -> PositionsNewEntriesType:
         """
         If `positions is None`, this does the work of :meth:`forward`.
         Otherwise, `positions` are passed in and returned as is, and the
-        state changes *other* than determining `positions` is done.
+        state changes *other* than determining `positions` is done. In
+        the latter case, `query, key, value` are ignored and `None` can
+        be passed for them.
 
         """
         raise NotImplementedError

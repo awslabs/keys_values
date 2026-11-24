@@ -63,6 +63,7 @@ class DefaultKVCacheDriver(KVCacheDriver):
         self._head_size = head_size
         self.n_head = config.n_head
         self._dtype = dtype
+        self._input_pos = 0
         if mha is None:
             self.mha = MultiHeadSelfAttention(
                 config,
@@ -103,6 +104,10 @@ class DefaultKVCacheDriver(KVCacheDriver):
     def block_idx(self) -> int:
         return self._block_idx
 
+    @property
+    def input_pos(self) -> int:
+        return self._input_pos
+
     def prefill(
         self,
         query: torch.Tensor,
@@ -110,12 +115,13 @@ class DefaultKVCacheDriver(KVCacheDriver):
         value: torch.Tensor,
         token_idx: torch.Tensor,
     ) -> torch.Tensor:
+        if self.input_pos != 0:
+            raise IndexError(f"input_pos = {self.input_pos}. Must be 0 for prefill")
         return self._prefill_or_forward_mha(
             query=query,
             key=key,
             value=value,
             token_idx=token_idx,
-            input_pos=0,
         )[0]
 
     def forward(
@@ -126,17 +132,16 @@ class DefaultKVCacheDriver(KVCacheDriver):
         token_idx: torch.Tensor,
         positions: PositionsNewEntriesType,
         token_positions: torch.Tensor,
-        input_pos: int,
         return_attn_weights: bool,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        assert input_pos > 0  # Sanity check
+        if self.input_pos <= 0:
+            raise IndexError(f"input_pos = {self.input_pos}. Must be positive for forward")
         self.check_positions_for_forward(positions, key.shape[2])
         return self._prefill_or_forward_mha(
             query=query,
             key=key,
             value=value,
             token_idx=token_idx,
-            input_pos=input_pos,
             positions=positions,
             token_positions=token_positions,
             return_attn_weights=return_attn_weights,
@@ -148,12 +153,11 @@ class DefaultKVCacheDriver(KVCacheDriver):
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
-        input_pos: int,
         positions: Optional[PositionsNewEntriesType] = None,
         token_positions: Optional[torch.Tensor] = None,
         return_attn_weights: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if input_pos == 0:
+        if self.input_pos == 0:
             self._prefill(key, value, token_idx)
             k_and_v = DefaultKeysAndValues(key, value)
         else:
@@ -168,7 +172,6 @@ class DefaultKVCacheDriver(KVCacheDriver):
             key=key,
             value=value,
             token_idx=token_idx,
-            input_pos=input_pos,
             positions=positions,
             token_positions=token_positions,
             return_attn_weights=return_attn_weights,
@@ -177,11 +180,12 @@ class DefaultKVCacheDriver(KVCacheDriver):
             query=query,
             k_and_v=k_and_v,
             block_idx=self.block_idx,
-            input_pos=input_pos,
+            input_pos=self.input_pos,
             return_attn_weights=return_attn_weights,
             token_positions=token_positions,
             **mha_kwargs,
         )
+        self._input_pos += query.shape[2]
 
         return attn_outputs, attn_weights
 
@@ -191,7 +195,6 @@ class DefaultKVCacheDriver(KVCacheDriver):
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
-        input_pos: int,
         positions: Optional[PositionsNewEntriesType],
         token_positions: Optional[torch.Tensor],
         return_attn_weights,

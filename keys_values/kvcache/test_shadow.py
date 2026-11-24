@@ -532,7 +532,7 @@ def get_chunks_from_log(log: KVCacheReplayLog_oldornew) -> List[torch.Tensor]:
     if isinstance(log, KVCacheReplayLog_old):
         return log.token_chunks
     else:
-        return [c.token_idx for c in log]
+        return [c.token_idx for c in log.entries]
 
 
 _GENERAL_STATE_NAMES = [

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Union, List, Tuple, Optional, Dict, Literal
 
 import torch
@@ -29,7 +29,25 @@ class KVCacheReplayLogEntry:
     positions: Optional[PositionsNewEntriesType]
 
 
-KVCacheReplayLog = List[KVCacheReplayLogEntry]
+@dataclass(frozen=False)
+class KVCacheReplayLog:
+    entries: List[KVCacheReplayLogEntry] = field(default_factory=list)
+
+    def __getitem__(self, item):
+        return self.entries[item]
+
+    def __len__(self) -> int:
+        return sum(e.token_idx.shape[-1] for e in self.entries)
+
+    @property
+    def num_chunks(self) -> int:
+        return len(self.entries)
+
+    def append(self, new_entry: KVCacheReplayLogEntry):
+        self.entries.append(new_entry)
+
+    def copy(self) -> "KVCacheReplayLog":
+        return KVCacheReplayLog(entries=self.entries.copy())
 
 
 KVCacheReplayLogStatus = Literal["none", "record", "play"]
@@ -97,6 +115,7 @@ class KVCachePolicy(torch.nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
         token_idx: torch.Tensor,
+        input_pos: int,
     ) -> PositionsNewEntriesType:
         """
         Given new information `key`, `value`, `query`, `token_idx`, returns
@@ -107,8 +126,7 @@ class KVCachePolicy(torch.nn.Module):
         :class:`KVCacheDriver` for the semantics of slot positions, and how
         they are used to update the KV cache buffers.
 
-        The arguments are the same as in
-        :meth:`keys_values.kvcache.base.KVCache.forward`.
+        `input_pos` is the number of tokens processed before this new chunk.
 
         """
         raise NotImplementedError
@@ -261,6 +279,16 @@ class KVCachePolicy(torch.nn.Module):
         """
         raise NotImplementedError
 
+    def skip_replay_until(self, input_pos: int):
+        """
+        Step over chunks in the replay log until `input_pos` tokens have
+        been processed. Requires `replay_log_status == "play"` and current
+        input position `<= input_pos`. The target position must be attained
+        exactly.
+
+        """
+        raise NotImplementedError
+
 
 class KVCacheDriver(torch.nn.Module):
     """
@@ -391,6 +419,15 @@ class KVCacheDriver(torch.nn.Module):
     def block_idx(self) -> int:
         raise NotImplementedError
 
+    @property
+    def input_pos(self) -> int:
+        """
+        Returns:
+            Number of tokens processed so far. :meth:`reset` resets this to 0
+
+        """
+        raise NotImplementedError
+
     def prefill(
         self,
         query: torch.Tensor,
@@ -423,7 +460,6 @@ class KVCacheDriver(torch.nn.Module):
         token_idx: torch.Tensor,
         positions: PositionsNewEntriesType,
         token_positions: torch.Tensor,
-        input_pos: int,
         return_attn_weights: bool,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
@@ -450,8 +486,6 @@ class KVCacheDriver(torch.nn.Module):
                 of :meth:`KVCachePolicy.forward`.
             token_positions: Token positions for KV buffer after update,
                 obtained from :meth:`KVCachePolicy.token_positions`.
-            input_pos: Input positions for the new entries. This is the number
-                of tokens processed before the current update
             return_attn_weights: If `True`, the attention weights summed over
                 the query axis are returned as well.
 
@@ -575,7 +609,6 @@ class GenericKVCache(KVCache):
         )
         self.policy = policy
         self.driver = driver
-        self._input_pos = 0
 
     @staticmethod
     def _check_compatible(policy: KVCachePolicy, driver: KVCacheDriver):
@@ -599,7 +632,7 @@ class GenericKVCache(KVCache):
 
     @property
     def input_pos(self) -> int:
-        return self._input_pos
+        return self.driver.input_pos
 
     @property
     def batch_size(self) -> Optional[int]:
@@ -614,7 +647,6 @@ class GenericKVCache(KVCache):
     ) -> torch.Tensor:
         self._forward_check_args(query, key, value, token_idx)
         for_prefill = self.input_pos == 0
-        num = query.shape[2]
 
         if for_prefill:
             # Prefill: `input_pos == 0`
@@ -624,7 +656,9 @@ class GenericKVCache(KVCache):
             requires_attn_weights = False
         else:
             # Forward: `input_pos > 0`
-            positions = self.policy.forward(query, key, value, token_idx)
+            positions = self.policy.forward(
+                query, key, value, token_idx, self.input_pos,
+            )
             requires_attn_weights = self.policy.requires_attn_weights()
             attn_outputs, attn_weights = self.driver.forward(
                 query,
@@ -633,11 +667,9 @@ class GenericKVCache(KVCache):
                 token_idx,
                 positions,
                 token_positions=self.policy.token_positions(),
-                input_pos=self.input_pos,
                 return_attn_weights=requires_attn_weights,
             )
         # Cache has been extended:
-        self._input_pos += num
         if requires_attn_weights:
             # Pass summed attention weights to policy
             self.policy.pass_attn_weights(
@@ -673,7 +705,6 @@ class GenericKVCache(KVCache):
         # Note: `self.policy` does not need to be reset. This is done when
         # `self.policy.prefill` is called
         self.driver.reset()
-        self._input_pos = 0
 
     def set_seq_length(self, seq_length: int) -> None:
         self.policy.set_seq_length(seq_length)

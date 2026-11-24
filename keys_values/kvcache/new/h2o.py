@@ -132,7 +132,7 @@ class H2OKVCachePolicy(AttnWeightsKVCachePolicy):
                 ).expand(*token_pos.shape)
                 token_pos = token_pos.maximum(other)
                 # Note: `input_pos` has been increased already
-                denom = (self.input_pos - token_pos).to(torch.float32)
+                denom = (self._input_pos - token_pos).to(torch.float32)
                 scores = scores / denom
             # Subclasses may modify the scores:
             scores = self._modify_scores(scores)

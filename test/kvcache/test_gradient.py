@@ -267,8 +267,8 @@ def test_gradient_row_of_cells(
             kv_cache.switch_replay_logging(False)
     else:
         for replay_log in replay_logs:
-            assert len(replay_log) == num_chunks
-            assert sum(log.token_idx.shape[-1] for log in replay_log) == seq_len
+            assert len(replay_log) == seq_len
+            assert replay_log.num_chunks == num_chunks
     # Check on layer inputs
     assert set(layer_inputs.keys()) == {0, n_layer}
     shape = (batch_size, seq_len, config.n_embd)

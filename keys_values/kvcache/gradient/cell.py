@@ -241,8 +241,9 @@ class CellComputation(nn.Module):
         num_chunks: int,
         use_new_code: bool = False,
     ) -> List[Union[TrainingAttnWeightsReplayCache, GenericKVCache]]:
+        start_input_pos = self._token_pos_per_chunk[first_chunk_idx]
         more_kwargs = dict(
-            start_input_pos=self._token_pos_per_chunk[first_chunk_idx],
+            start_input_pos=start_input_pos,
             num_chunks=num_chunks,
             debug_tensors=self._debug_tensors,
         )
@@ -349,20 +350,27 @@ class CellComputation(nn.Module):
             v_buffers = [None] * num_layers
         # Hook training replay caches into self attention blocks, and assign
         # buffers.
+        kv_caches_copy = self.model_part.get_kv_caches()
+        cache_lengths = [c.cache_length for _, c in kv_caches_copy]
+        first_cache = kv_caches_copy[0][1]
+        grace_period = get_grace_period(first_cache)
+        use_new_code = use_new_kvcache_code(first_cache)
         train_replay_caches = self._create_train_replay_caches(
             first_chunk_idx,
             num_chunks,
+            use_new_code=use_new_code,
         )
-        kv_caches_copy = self.model_part.get_kv_caches()
-        cache_lengths = [c.cache_length for _, c in kv_caches_copy]
-        grace_period = get_grace_period(kv_caches_copy[0][1])
         if first_chunk_idx > 0:
             for rc, keys, values in zip(
                 train_replay_caches,
                 k_buffers,
                 v_buffers,
             ):
-                rc.initialize_buffers(DefaultKeysAndValues(keys=keys, values=values))
+                kv_buffers = DefaultKeysAndValues(keys=keys, values=values)
+                if use_new_code:
+                    rc.driver.initialize_buffers(kv_buffers)
+                else:
+                    rc.initialize_buffers(kv_buffers)
         self.model_part.assign_kv_caches(train_replay_caches)
 
         try:
