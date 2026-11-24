@@ -33,6 +33,7 @@ from keys_values.kvcache.buffers import (
     DefaultKVCacheBuffers,
 )
 from keys_values.kvcache.consts import SUPPORTED_QUANTIZERS
+from keys_values.kvcache.new import GenericKVCache, KVCacheDriverWithBuffers
 from keys_values.kvcache.quant_buffers import create_quantized_kv_buffers
 from keys_values.kvcache.gradient.autograd_hooks import (
     AutogradHooks,
@@ -419,7 +420,6 @@ class GradientAccumulator:
         # How many checkpointers per cache length?
         num_required = self._get_num_required()
         if self.qname == "default":
-            num_entries = sum(num_required.values())
             self._checkpoints_per_length = {
                 cache_length: [
                     KVCacheBufferDefaultCheckpoints(
@@ -456,7 +456,6 @@ class GradientAccumulator:
                 dequant_kwargs=dequant_kwargs,
                 allocate_buffers=False,
             )[0]
-            num_entries = sum(num_required.values())
             self._checkpoints_per_length = {
                 cache_length: [
                     KVCacheBufferQuantizedCheckpoints(
@@ -557,10 +556,10 @@ class GradientAccumulator:
         This method works both for old and new KV cache implementations. The
         new implementations use :class:`GenericKVCache`.
 
-        For new implementations, no extra KV cache objects are created, but the
-        existing ones are switched to "play" mode. They need to be switched
-        back to "record" after use here. Also, replay logs are the ones recorded
-        just before, they need not be assigned.
+        For new implementations, no extra KV cache policy objects are created,
+        but the existing ones are switched to "play" mode. They need to be switched
+        back to "record" after use here. For both old/new, new KV cache objects
+        are created, using the buffers in `self._buffers_per_length`.
 
         """
         assert self.do_checkpointing
@@ -576,7 +575,7 @@ class GradientAccumulator:
             # Use the same MHA object. Ensures that properties like position
             # encoding are transferred
             if not use_new_kvcache_code(kv_cache):
-                # Old code: Replay cache is separate object created here
+                # Old code
                 if isinstance(kv_cache, DefaultKVCache):
                     extra_kwargs = dict(mha=kv_cache.mha)
                 else:
@@ -595,10 +594,16 @@ class GradientAccumulator:
                     checkpoint_hook=partial(checkpoint_hook, checkpoints=checkpoint),
                 )
             else:
-                # New implementation: We just switch `kv_cache` to "play"
-                # mode
-                ir_cache = kv_cache
-                ir_cache.policy.reset(replay_log_status="play")
+                # New implementation
+                driver = kv_cache.driver
+                if not isinstance(driver, KVCacheDriverWithBuffers):
+                    raise TypeError(f"Layer {block_idx}: Cache must have driver of type KVCacheDriverWithBuffers")
+                policy = kv_cache.policy
+                policy.reset(replay_log_status="play")
+                ir_cache = GenericKVCache(
+                    policy=policy,
+                    driver=driver.clone_with_buffers(buffers),
+                )
                 # Set hook to write checkpoints
                 ir_cache.driver.set_checkpoint_hook(
                     checkpoint_hook=partial(checkpoint_hook, checkpoints=checkpoint),
@@ -776,9 +781,8 @@ class GradientAccumulator:
                     # Note that this resets the replay logs, so they have to
                     # be copied first to `self.replay_logs`.
                     cache.policy.reset(replay_log_status="record")
-                else:
-                    # Old code: This is a copy, which can be deleted
-                    del cache
+                # This is a copy, which can be deleted
+                del cache
 
         try:
             # Loop over cells from right to left

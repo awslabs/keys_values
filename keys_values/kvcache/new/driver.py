@@ -453,8 +453,6 @@ class KVCacheDriverWithBuffers(DefaultKVCacheDriver):
             Keyword arguments for calling the constructor in :meth:`clone`
 
         """
-        if self.kv_buffers.buffers_are_allocated:
-            raise ValueError(f"Buffers must be deallocated, use `deallocate_buffers`")
         result = super()._base_kwargs_for_clone()
         for name in NOT_NEEDED_ARGS:
             del result[name]
@@ -463,6 +461,11 @@ class KVCacheDriverWithBuffers(DefaultKVCacheDriver):
 
     def clone(self) -> "KVCacheDriver":
         return KVCacheDriverWithBuffers(**self._base_kwargs_for_clone())
+
+    def clone_with_buffers(self, buffers: KVCacheBuffers) -> "KVCacheDriver":
+        kwargs = self._base_kwargs_for_clone()
+        kwargs["buffers"] = buffers
+        return KVCacheDriverWithBuffers(**kwargs)
 
     def size_estimate(self) -> Tuple[int, Dict[str, int]]:
         return self.kv_buffers.size_estimate()

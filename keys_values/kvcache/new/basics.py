@@ -48,17 +48,15 @@ class KVCachePolicy(torch.nn.Module):
 
     Recording and replaying log:
 
-    If a cache is configured for replaying (decided at construction of
-    policy), `(token_idx, positions)` values encountered in :meth:`forward`
-    and :meth:`prefill` are recorded in a log (if
-    `replay_log_status == "record"`). If `replay_log_status == "play"`, then
-    these entries are replayed: `token_idx` is compared to what is passed
-    to the methods (must be the same), and `positions` is taken from the
-    record, instead of being determined in `forward`. If a KV cache logic
-    computes scores in order to determine `positions` in :meth:`forward`, this
-    effort is skipped when replaying. See :class:`DefaultKVCachePolicy` for
-    a concrete implementation.
-
+    If a policy is configured for replaying (decided at construction),
+    `(token_idx, positions)` values encountered in :meth:`forward` and
+    :meth:`prefill` are recorded in a log (if `replay_log_status == "record"`).
+    If `replay_log_status == "play"`, then these entries are replayed:
+    `token_idx` is compared to what is passed to the methods (must be the same),
+    and `positions` is taken from the record, instead of being determined in
+    `forward`. If a KV cache logic computes scores in order to determine
+    `positions` in :meth:`forward`, this effort is skipped when replaying.
+    See :class:`DefaultKVCachePolicy` for a concrete implementation.
     """
 
     def __init__(self):
