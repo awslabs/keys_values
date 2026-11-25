@@ -20,6 +20,7 @@ from tokenizers import Tokenizer as HFTokenizer
 import torch
 
 from keys_values.attention import KeysAndValues
+from keys_values.config import Config
 from keys_values.constants import DEFAULT_PAD_ID
 from keys_values.kvcache.base import (
     KVCache,
@@ -34,7 +35,7 @@ from keys_values.kvcache.buffers import (
     KVCacheBuffersParams,
     positions_wrap_around,
 )
-from keys_values.config import Config
+from keys_values.kvcache.next_positions import NextPositionsMixin
 from keys_values.utils import bits_for_torch_dtype, bitsize_of, encode, index_to_3d
 
 
@@ -326,7 +327,10 @@ class SmartInitialLastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
             return torch.cat([x[0] for x in indexes], dim=-1)
 
 
-class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
+class SmartInitialLastRecentlyInsertedKVCache(
+    KVCacheWithBuffers,
+    NextPositionsMixin,
+):
     """
     Advanced variant of :class:`LastRecentlyInsertedKVCache`. For each batch
     dimension, there is a protected range of cache positions, KV information
@@ -770,3 +774,28 @@ class SmartInitialLastRecentlyInsertedKVCache(KVCacheWithBuffers):
 
     def clone(self) -> KVCache:
         return SmartInitialLastRecentlyInsertedKVCache(**self._base_kwargs_for_clone())
+
+    # TODO!
+    def next_positions(self, num: int) -> torch.Tensor:
+        # Cannot call this:
+        use_range = self._update_protected_ranges(token_idx)
+
+        # If a protected range has just been set in `_update_protected_ranges`,
+        # it must not be used in `extract_index`
+        pstart_copy = [
+            ps if ur else None for ps, ur in zip(self.protected_start, use_range)
+        ]
+        pend_copy = [
+            pe if ur else None for pe, ur in zip(self.protected_end, use_range)
+        ]
+        index_kwargs = dict(device=self.device, dtype=torch.int)
+        indexes = extract_index(
+            num=num,
+            cache_length=self.cache_length,
+            protected_start=pstart_copy,
+            protected_end=pend_copy,
+            next_position=self.next_position,
+            n_query_groups=self.n_query_groups,
+            **index_kwargs,
+        )
+        return torch.cat([index for index, _, _ in indexes], dim=-1)

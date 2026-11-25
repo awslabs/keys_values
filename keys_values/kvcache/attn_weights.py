@@ -35,6 +35,7 @@ from keys_values.kvcache.buffers import (
     positions_wrap_around,
     PositionsType,
 )
+from keys_values.kvcache.next_positions import NextPositionsMixin
 from keys_values.utils import (
     index_to_3d,
     bits_for_torch_dtype,
@@ -374,7 +375,7 @@ class AttnWeightsKVCacheState(KVCacheWithBuffersState):
         )
 
 
-class AttnWeightsKVCache(KVCacheWithBuffers):
+class AttnWeightsKVCache(KVCacheWithBuffers, NextPositionsMixin):
     """
     Base class for key-value caches which need attention weights (summeed over
     the query axis) to be passed (via :meth:`_update`) in every round. In
@@ -539,16 +540,16 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
     def _parameter_names(cls) -> List[str]:
         return super()._parameter_names() + ["token_pos"]
 
-    def next_positions(self, num: int) -> Optional[torch.Tensor]:
+    def next_positions(self, num: int) -> torch.Tensor:
         """
         Returns:
             Batched positions where key and value tensors in next :meth:`forward`
             call are written to, shape `(batch_size, n_query_groups, num)`,
-            where `num <= max_forward_length()`, the remaining ones are not used.
+            where `num <= max_forward_length()`.
         """
-        return (
-            None if self._next_positions is None else self._next_positions[:, :, :num]
-        )
+        if self._next_positions is None:
+            raise IndexError("next_positions not initialized")
+        return self._next_positions[:, :, :num]
 
     def max_forward_length(self) -> int:
         diff = self.cache_length - self.current_length
@@ -567,7 +568,7 @@ class AttnWeightsKVCache(KVCacheWithBuffers):
     ) -> KeysAndValues:
         num = key.shape[2]
         if self._use_initial_rule is None or (
-            not self._use_initial_rule and self.next_positions(num=1) is None
+            not self._use_initial_rule and self._next_positions is None
         ):
             raise IndexError(
                 "Cache needs to be initialized with 'prefill' before being used"

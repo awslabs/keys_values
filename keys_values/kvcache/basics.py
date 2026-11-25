@@ -17,6 +17,7 @@ from typing import Optional, Tuple, Dict, Callable, List, Any, Union
 import torch
 
 from keys_values.attention import KeysAndValues
+from keys_values.config import Config
 from keys_values.kvcache.base import (
     KVCache,
     DefaultKVCache,
@@ -30,7 +31,7 @@ from keys_values.kvcache.buffers import (
     KVCacheBuffersParams,
     positions_wrap_around,
 )
-from keys_values.config import Config
+from keys_values.kvcache.next_positions import NextPositionsMixin
 from keys_values.utils import index_to_3d, bits_for_torch_dtype, bitsize_of
 
 NOT_NEEDED_ARGS = ("max_batch_size", "cache_length", "dtype")
@@ -427,7 +428,7 @@ class KVCacheWithBuffers(DefaultKVCache):
         return result
 
 
-class DenseKVCache(KVCacheWithBuffers):
+class DenseKVCache(KVCacheWithBuffers, NextPositionsMixin):
     """
     Key-value cache for dense attention. Key and value tensors for all
     past tokens are maintained. This cache can only process as many tokens
@@ -578,6 +579,15 @@ class DenseKVCache(KVCacheWithBuffers):
         super().switch_buffers(new_buffers, cache_state)
         self._replay_log = None
 
+    def next_positions(self, num: int) -> torch.Tensor:
+        device = torch.get_default_device() if self.device is None else self.device
+        np = self.input_pos
+        return index_to_3d(
+            torch.arange(np, np + num, device=device),
+            self.batch_size,
+            self.n_query_groups,
+        )
+
 
 class LastRecentlyInsertedKVCacheReplayLog(DefaultKVCacheReplayLog):
     """
@@ -675,7 +685,7 @@ class LastRecentlyInsertedKVCacheState(KVCacheWithBuffersState):
         return self._is_compatible(state_or_buffers, ("init_grace_tokens",))
 
 
-class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
+class LastRecentlyInsertedKVCache(KVCacheWithBuffers, NextPositionsMixin):
     """
     Baseline key-value cache which stores the last recently inserted
     `cache_length` key and value tensors. When the cache is full, those slots
@@ -947,3 +957,16 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers):
             self.next_position = cache_state.next_position
             self._create_token_pos()
         self._replay_log = None
+
+    def next_positions(self, num: int) -> torch.Tensor:
+        start = self.init_grace_tokens
+        return positions_wrap_around(
+            num=num,
+            current=self.next_position,
+            start=start,
+            end=self.cache_length,
+            batch_size=self.batch_size,
+            n_query_groups=self.n_query_groups,
+            device=self.device,
+            return_tensor=True,
+        )
