@@ -406,7 +406,6 @@ class DefaultKVCache(KVCache):
     :meth:`forward` using scaled dot product attention. Most KV caches will
     inherit from this class. If a cache uses buffers, use the base class
     :class:`KVCacheWithBuffers`.
-
     """
 
     def __init__(

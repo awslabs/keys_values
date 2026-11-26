@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from functools import partial
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple
 
 import torch
 
 from keys_values.config import Config
 from keys_values.attention.attention_utils import range_from_input_pos
 from keys_values.attention.base import (
+    MultiHeadSelfAttention,
     DefaultKeysAndValues,
     SDPA_IMPL_QPADDED_PYTORCH,
     SDPA_IMPL_EAGER_BLOCKS,
@@ -54,7 +55,7 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
         next_positions: torch.Tensor,
         input_pos: torch.Tensor,
         layer_idx: int,
-        **base_kwargs,
+        mha: MultiHeadSelfAttention,
     ):
         assert keys.ndim == 4
         assert keys.shape == values.shape
@@ -74,7 +75,7 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
             cache_length=cache_length,
             block_idx=layer_idx,
             dtype=keys.dtype,
-            **base_kwargs,
+            mha=mha,
         )
         self._orig_keys = keys
         self._orig_values = values
@@ -160,21 +161,29 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
             positions=positions,
         )
         # Update `token_positions`
-        # TODO: positions != None case
-        new_ind = range_from_input_pos(
-            self._input_pos,
-            0,
-            num,
-            device=self._orig_token_positions.device,
-            dtype=self._orig_token_positions.dtype,
+        new_tps = index_to_3d(
+            range_from_input_pos(
+                self._input_pos,
+                0,
+                num,
+                device=self._orig_token_positions.device,
+                dtype=self._orig_token_positions.dtype,
+            ),
+            *self._orig_token_positions.shape[:2],
         )
+        if positions is not None:
+            new_tps = torch.cat(
+                (
+                    self._orig_token_positions.gather(-1, positions),
+                    new_tps,
+                ),
+                dim=-1,
+            )
+            index = self._next_positions
         self._new_token_positions = self._orig_token_positions.scatter(
             -1,
-            self._next_positions,
-            index_to_3d(
-                new_ind,
-                *self._orig_token_positions.shape[:2],
-            ),
+            index,
+            new_tps,
         )
         attn_outputs, _ = self.mha.scaled_dot_product_attention(
             query=query,
@@ -187,9 +196,6 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
         return attn_outputs.reshape(self.batch_size, num, -1)
 
 
-# TODO:
-# - Can `base_kwargs` be taken from `model` somehow?
-# - Is `model` the right way to do this, or rather like with training replay?
 def single_token_forward(
     token_idx: torch.Tensor,
     keys: torch.Tensor,
@@ -198,7 +204,6 @@ def single_token_forward(
     next_positions: torch.Tensor,
     input_pos: torch.Tensor,
     model: GPT,
-    **base_kwargs,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Expression to be compiled in :class:`SingleTokenFastInference`.
@@ -231,21 +236,19 @@ def single_token_forward(
     config = model.config
     assert config.n_layer == n_layer
     # Create replacement KV caches
-    common_kwargs = {
-        "config": config,
-        "input_pos": input_pos,
-        **base_kwargs,
-    }
+    orig_kv_caches = model.get_kv_caches()
     kv_caches = [
         SingleTokenInferenceKVCache(
+            config=config,
             keys=keys[layer_idx],
             values=values[layer_idx],
             token_positions=token_positions[layer_idx],
             next_positions=next_positions[layer_idx],
+            input_pos=input_pos,
             layer_idx=layer_idx,
-            **common_kwargs,
+            mha=cache.mha,
         )
-        for layer_idx in range(n_layer)
+        for layer_idx, cache in enumerate(orig_kv_caches)
     ]
     orig_kv_caches = model.get_kv_caches()
     model.assign_kv_caches(kv_caches)
@@ -268,8 +271,6 @@ def single_token_forward(
     return logits, new_keys, new_values, new_token_positions
 
 
-# TODO:
-# - base_kwargs: Make explicit. Can this be obtained from `model`?
 class SingleTokenFastInference:
     """
     Driver for fast inference in a single new token. This is needed during
@@ -300,13 +301,25 @@ class SingleTokenFastInference:
       a chunk update of KV caches is cheap anyways.
       TODO: If the added time for the extra update is significant, we could
       explore this in the future.
+
+    Usage:
+    - Pass GPT model and chunk size at construction. The graph is compiled if
+      the KV caches of the model have allocated buffers already. Otherwise,
+      graph compilation is delayed until the first :meth:`initialize` call.
+    - Call :meth:`initialize` once the prompt for a new sequence batch has
+      been processed and token generation is to be started.
+    - Call :meth:`forward` up to `chunk_size` times. This method can be
+      called as long as `num_tokens_left_in_chunk > 0`.
+    - Once `num_tokens_left_in_chunk == 0`, call :meth:`update` and pass
+      the `(batch_size, chunk_size)` tokens generated. This updates the
+      original KV cache buffers and determines `next_positions` for the next
+      chunk.
     """
 
     def __init__(
         self,
         model: GPT,
         chunk_size: int,
-        base_kwargs: Dict[str, Any],
     ):
         self.model = model
         self.chunk_size = chunk_size
@@ -319,15 +332,12 @@ class SingleTokenFastInference:
         self._token_positions = None
         self._input_pos = None
         self._inference_graph = None
-        self._base_kwargs = base_kwargs
         if model.get_kv_caches()[0].batch_size is not None:
             # If KV caches are already initialized and allocated, we can compile
             # the graph here. Otherwise, it is compiled with the first call of
             # :meth:`initialize`
             self._init_buffers_and_compile_graph()
 
-    # - All caches must implement NextPositionsMixin
-    # - All caches must have the same length (current restriction)
     def _check_init_args(self):
         cache_length = None
         for block_idx, cache in enumerate(self.model.get_kv_caches()):
@@ -382,11 +392,7 @@ class SingleTokenFastInference:
             torch._dynamo.reset()
             torch.compiler.reset()
             self._inference_graph = torch.compile(
-                partial(
-                    single_token_forward,
-                    model=self.model,
-                    **self._base_kwargs,
-                ),
+                partial(single_token_forward, model=self.model),
                 fullgraph=True,
                 dynamic=False,
             )
