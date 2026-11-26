@@ -579,7 +579,7 @@ class DenseKVCache(KVCacheWithBuffers, NextPositionsMixin):
         super().switch_buffers(new_buffers, cache_state)
         self._replay_log = None
 
-    def next_positions(self, num: int) -> torch.Tensor:
+    def next_positions_ext(self, num: int) -> torch.Tensor:
         device = torch.get_default_device() if self.device is None else self.device
         np = self.input_pos
         return index_to_3d(
@@ -958,7 +958,7 @@ class LastRecentlyInsertedKVCache(KVCacheWithBuffers, NextPositionsMixin):
             self._create_token_pos()
         self._replay_log = None
 
-    def next_positions(self, num: int) -> torch.Tensor:
+    def next_positions_ext(self, num: int) -> torch.Tensor:
         start = self.init_grace_tokens
         return positions_wrap_around(
             num=num,

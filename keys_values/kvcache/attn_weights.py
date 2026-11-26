@@ -223,6 +223,7 @@ def update_token_positions(
     index: Optional[torch.Tensor],
     grace_period: int = 0,
     next_grace_pos: Optional[int] = None,
+    dont_update: bool = False,
 ) -> Optional[UpdateTokenPositionsGracePeriod]:
     """
     `token_positions` of shape `(bs, n_query_groups, cache_length)`
@@ -250,7 +251,7 @@ def update_token_positions(
     dtype = token_positions.dtype
     arange_kwargs = dict(dtype=dtype, device=device)
     result = None
-    if not cache_full:
+    if not cache_full and not dont_update:
         start = input_pos
         end = input_pos + num
         new_tps = torch.arange(start, end, **arange_kwargs)
@@ -294,11 +295,12 @@ def update_token_positions(
                 **arange_kwargs,
             )
             pos_flat = positions[0, 0, :]
-            if tp_is_1d:
-                # Note: We keep `token_positions` 1D even if `batch_size < bs`
-                token_positions[0, 0, pos_flat] = new_pos
-            else:
-                token_positions[:batch_size, :, pos_flat] = new_pos.view(1, 1, -1)
+            if not dont_update:
+                if tp_is_1d:
+                    # Note: We keep `token_positions` 1D even if `batch_size < bs`
+                    token_positions[0, 0, pos_flat] = new_pos
+                else:
+                    token_positions[:batch_size, :, pos_flat] = new_pos.view(1, 1, -1)
             start_token_pos = input_pos - grace_period
             result = UpdateTokenPositionsGracePeriod(
                 positions=positions,
@@ -308,16 +310,19 @@ def update_token_positions(
         else:
             start_token_pos = input_pos
 
-        new_tps = torch.arange(start_token_pos, start_token_pos + num, **arange_kwargs)
-        if tp_is_1d and index_is_1d:
-            # Note: We keep `token_positions` 1D even if `batch_size < bs`
-            token_positions[0, 0, index[0, 0, :]] = new_tps
-        else:
-            token_positions[:batch_size, ...].scatter_(
-                -1,
-                index,
-                index_to_3d(new_tps, batch_size, n_query_groups),
+        if not dont_update:
+            new_tps = torch.arange(
+                start_token_pos, start_token_pos + num, **arange_kwargs
             )
+            if tp_is_1d and index_is_1d:
+                # Note: We keep `token_positions` 1D even if `batch_size < bs`
+                token_positions[0, 0, index[0, 0, :]] = new_tps
+            else:
+                token_positions[:batch_size, ...].scatter_(
+                    -1,
+                    index,
+                    index_to_3d(new_tps, batch_size, n_query_groups),
+                )
     return result
 
 
@@ -541,15 +546,26 @@ class AttnWeightsKVCache(KVCacheWithBuffers, NextPositionsMixin):
         return super()._parameter_names() + ["token_pos"]
 
     def next_positions(self, num: int) -> torch.Tensor:
-        """
-        Returns:
-            Batched positions where key and value tensors in next :meth:`forward`
-            call are written to, shape `(batch_size, n_query_groups, num)`,
-            where `num <= max_forward_length()`.
-        """
         if self._next_positions is None:
             raise IndexError("next_positions not initialized")
         return self._next_positions[:, :, :num]
+
+    def next_positions_ext(self, num: int) -> torch.Tensor:
+        index = self.next_positions(num)
+        update_result = update_token_positions(
+            token_positions=self.token_pos,
+            input_pos=self.input_pos,
+            num=num,
+            batch_size=self.batch_size,
+            index=index,
+            grace_period=self.grace_period,
+            next_grace_pos=self.next_grace_pos,
+            dont_update=True,
+        )
+        if update_result is not None:
+            positions = update_result.positions
+            index = torch.cat((index, positions), dim=-1)
+        return index
 
     def max_forward_length(self) -> int:
         diff = self.cache_length - self.current_length

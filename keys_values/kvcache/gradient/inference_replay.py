@@ -203,7 +203,7 @@ class InferenceAttnWeightsReplayCache(AttnWeightsKVCache, InferenceReplayCacheMi
     def n_query_groups(self) -> int:
         return super().n_query_groups
 
-    def next_positions(self, num: int) -> torch.Tensor:
+    def next_positions_ext(self, num: int) -> torch.Tensor:
         return InferenceReplayCacheMixin.next_positions(self, num)
 
     def _update(self, *args, **kwargs):
@@ -287,7 +287,7 @@ class InferenceDenseReplayCache(DenseKVCache, InferenceReplayCacheMixin):
     def n_query_groups(self) -> int:
         return super().n_query_groups
 
-    def next_positions(self, num: int) -> torch.Tensor:
+    def next_positions_ext(self, num: int) -> torch.Tensor:
         return InferenceReplayCacheMixin.next_positions(self, num)
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
@@ -352,7 +352,7 @@ class InferenceLastRecentlyInsertedReplayCache(
     def n_query_groups(self) -> int:
         return super().n_query_groups
 
-    def next_positions(self, num: int) -> torch.Tensor:
+    def next_positions_ext(self, num: int) -> torch.Tensor:
         return InferenceReplayCacheMixin.next_positions(self, num)
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
@@ -425,7 +425,7 @@ class InferenceSmartInitialLastRecentlyInsertedReplayCache(
     def n_query_groups(self) -> int:
         return super().n_query_groups
 
-    def next_positions(self, num: int) -> torch.Tensor:
+    def next_positions_ext(self, num: int) -> torch.Tensor:
         return InferenceReplayCacheMixin.next_positions(self, num)
 
     def _validate_token_idx(self, token_idx: torch.Tensor):

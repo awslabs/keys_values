@@ -28,11 +28,20 @@ class NextPositionsMixin:
     :class:`SingleTokenFastInference`.
     """
 
-    def next_positions(self, num: int) -> torch.Tensor:
+    def next_positions_ext(self, num: int) -> torch.Tensor:
         """
+        If the length `num_ext` of the returned index is larger than `num`,
+        the final part starting from `num` is an additional index, as used
+        in :class:`AttnWeightsKVCache`.
+
+        Args:
+            num: Length of inputs to next :meth:`forward` call, must be
+                `<= max_forward_length`
+
         Returns:
             Batched positions where key and value tensors in next :meth:`forward`
-            call are written to, shape `(batch_size, n_query_groups, num)`,
-            where `num <= max_forward_length()`.
+            call are written to, shape `(batch_size, n_query_groups, num_ext)`,
+            where `num_ext >= num`.
+
         """
         raise NotImplementedError

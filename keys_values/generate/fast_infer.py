@@ -31,8 +31,6 @@ from keys_values.model import GPT
 from keys_values.utils import index_to_3d
 
 
-# TODO:
-# - Special case: positions != None. Also with new code!
 class SingleTokenInferenceKVCache(DefaultKVCache):
     """
     Specific :class:`DefaultKVCache` implementation used to build the single
@@ -141,21 +139,28 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
             raise IndexError("'forward' can be called only once")
         self._forward_check_args(query, key, value, token_idx)
         num = token_idx.shape[-1]
-        if self._next_positions.shape[-1] != num:
-            raise ValueError(
-                f"Number of tokens {num} != {self._next_positions.shape[-1]} = next_positions.shape[-1]"
-            )
         # "scatter" update of KV cache buffers
-        # HIER: Deal with positions != None case
+        index = self._next_positions
+        if index.shape[-1] > num:
+            assert index.shape[-1] == num + 1, (index.shape, num)
+            positions = index[..., num:]
+            index = index[..., :num]
+        else:
+            if index.shape[-1] < num:
+                raise ValueError(
+                    f"Number of tokens {num} != {index.shape[-1]} = next_positions.shape[-1]"
+                )
+            positions = None
         self._new_keys, self._new_values = scatter_on_buffers(
             key,
             value,
             self._orig_keys,
             self._orig_values,
-            self._next_positions,
-            positions=None,
+            index,
+            positions=positions,
         )
         # Update `token_positions`
+        # TODO: positions != None case
         new_ind = range_from_input_pos(
             self._input_pos,
             0,
@@ -341,7 +346,7 @@ class SingleTokenFastInference:
                     f"Block {block_idx}: cache_length = {cache.cache_length}, must all be the same (but also {cache_length})"
                 )
 
-    def _init_buffers_and_compile_graph(self, recreate_graph: bool = False):
+    def _init_buffers_and_compile_graph(self, recreate_graph: bool = True):
         fst_cache = self.model.get_kv_caches()[0]
         batch_size = fst_cache.batch_size
         cache_length = fst_cache.cache_length
@@ -403,25 +408,35 @@ class SingleTokenFastInference:
         Sets `_next_positions` and `_input_pos` from current caches
 
         """
-        self._next_positions = torch.cat(
-            [
-                cache.next_positions(self.chunk_size).clone().unsqueeze(0)
-                for cache in self.model.get_kv_caches()
-            ],
-            dim=0,
-        )
+        parts = [
+            cache.next_positions(self.chunk_size).clone().unsqueeze(0)
+            for cache in self.model.get_kv_caches()
+        ]
+        shapes = {tuple(p.shape) for p in parts}
+        if len(shapes) > 1:
+            raise IndexError(
+                f"next_positions: Shapes must be the same for all layers, but: {shapes}"
+            )
+        self._next_positions = torch.cat(parts, dim=0)
         self._input_pos[0] = self.model.get_kv_caches()[0].input_pos
 
-    def initialize(self, recreate_graph: bool = False):
+    def initialize(self, recreate_graph: bool = True):
         """
         This method initializes the object, in that current KV cache buffers
         are replicated into tensor nodes, and the single token inference
         graph is built and compiled.
 
+        NOTE: If this is called with `recreate_graph=False`, the graph is not
+        recompiled (unless the batch size changed). Use this only as long as
+        the same batch sequence is processed. Reasons for the graph to become
+        stale:
+
+        - Model weights have changed
+        - Sequence length changed: Position encoding changed
+
         Args:
-            recreate_graph: If `True`, the graph is recreated here in any case.
-                Otherwise, it is recreated only if the batch size changed.
-                NOTE: Pass `True` here if the model weights have changed.
+            recreate_graph: If `False` and the batch size stays the same,
+                the graph is not recreated. Use this with care.
 
         """
         fst_cache = self.model.get_kv_caches()[0]

@@ -776,7 +776,7 @@ class SmartInitialLastRecentlyInsertedKVCache(
         return SmartInitialLastRecentlyInsertedKVCache(**self._base_kwargs_for_clone())
 
     # TODO!
-    def next_positions(self, num: int) -> torch.Tensor:
+    def next_positions_ext(self, num: int) -> torch.Tensor:
         # Cannot call this:
         use_range = self._update_protected_ranges(token_idx)
 
