@@ -24,6 +24,10 @@ from torch.nn.attention.flex_attention import (
     AuxRequest,
 )
 
+from keys_values.attention.attention_utils import (
+    InputPosType,
+    InputPosNoFlagType,
+)
 from keys_values.attention.sdpa_wrapper import (
     sdpa_check_args,
     reorder_key_value,
@@ -290,7 +294,8 @@ def prepare_lens(
 
 class FlexAttnForPrefillManager(FlexAttnManager):
     """
-    FlexAttention manager for prefill case (`q_len == kv_len, input_pos == 0`).
+    FlexAttention manager for prefill case
+    (`q_len == kv_len, is_prefill == True`).
 
     Note that `flex_attention` is often not used for the prefill calls, because
     standard PyTorch SDPA is faster. It is used only with non-standard SDPA.
@@ -609,7 +614,7 @@ class FlexAttentionArgs:
     does not hurt. You can use :func:`choose_kv_lens`.
 
     Note: If `q_lens` is used, the expression returned by :meth:`attn_fn` for
-    `input_pos > 0` must be used with `query` tensors of length
+    `is_prefill == False` must be used with `query` tensors of length
     `transform_q_len(q_len)`, which may be larger than `q_len`. The padding
     must be done by the caller.
 
@@ -619,11 +624,11 @@ class FlexAttentionArgs:
             is mapped to the smallest entry `>= kv_len`.
         q_lens: If given, this is a list of `q_len` chunk lengths for which
             graphs are created. Any `q_len` passed to :meth:`attn_fn` with
-            `input_pos > 0` is mapped to the smallest entry `>= q_len`.
+            `is_prefill == False` is mapped to the smallest entry `>= q_len`.
         extend_kv: If `True` we always extend `key, value` to `n_head`. This
             needs more memory, only use if the default does not work.
         forward_return_lse: If `True`, the forward graphs also return the
-            `lse` tensors. This is done for `input_pos > 0` only.
+            `lse` tensors. This is done for `is_prefill == False` only.
         separate_compile_caches: If `True`, each graph is compiled with a
             `torch.compile` cache of its own and with static shapes (see
             :func:`compile_with_own_cache`). Results then do not depend on the
@@ -665,17 +670,17 @@ class FlexAttentionArgs:
         requires_grad: bool,
         sliding_window_size: Optional[int],
         attention_logit_softcapping: Optional[float],
-        input_pos: int,
+        is_prefill: bool,
         reverse: bool = False,
     ) -> Tuple[FlexAttnWithBlockMask, bool]:
         """
-        If `forward_return_lse == True`, `input_pos > 0`, and
+        If `forward_return_lse == True`, `is_prefill == False`, and
         `requires_grad == False`, the returned graph outputs two arguments:
         `attn_outputs` as usual, and `aux` of type `AuxOutput`, with the
         `lse` attribute being set.
 
         """
-        if input_pos == 0:
+        if is_prefill:
             return (
                 self.attn_prefill_manager(
                     kv_len=kv_len,
@@ -773,7 +778,7 @@ def _reorder_key_value(
     value: torch.Tensor,
     token_positions: Optional[torch.Tensor],
     q_len: int,
-    input_pos: int,
+    input_pos: InputPosNoFlagType,
     sort_if_3d: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any], bool]:
     do_reorder = token_positions is not None and q_len > 1
@@ -835,7 +840,7 @@ def scaled_dot_product_attention_flexatt(
     scale_factor: Optional[float],
     sliding_window_size: Optional[int],
     attention_logit_softcapping: Optional[float],
-    input_pos: int,
+    input_pos: InputPosType,
     token_positions: Optional[torch.Tensor],
     annotation_callback: Optional[ReorderAnnotationCallback] = None,
     sort_if_3d: bool = True,
@@ -875,7 +880,8 @@ def scaled_dot_product_attention_flexatt(
         attention_logit_softcapping: Attention logit softcapping threshold,
             optional. Note that this value is quantized so the manager can
             cache compiled graphs
-        input_pos: Position in input sequence
+        input_pos: Position in input sequence. Can be passed as tensor, see
+            comments for `InputPosType`
         token_positions: Only if `input_pos > 0`. Contains token positions
             in KV cache, shape `(batch_size, n_query_groups, kv_len)`. If not
             given for `input_pos > 0`, it is equivalent to `arange(kv_len)`.
@@ -892,7 +898,11 @@ def scaled_dot_product_attention_flexatt(
         key,
         value,
     )
-    is_prefill = input_pos == 0
+    input_pos_explicit = not isinstance(input_pos, tuple)
+    if input_pos_explicit:
+        is_prefill = input_pos == 0
+    else:
+        input_pos, is_prefill = input_pos
     if is_prefill:
         if q_len != kv_len:
             raise ValueError(
@@ -926,7 +936,7 @@ def scaled_dot_product_attention_flexatt(
         requires_grad=requires_grad,
         sliding_window_size=sliding_window_size,
         attention_logit_softcapping=attention_logit_softcapping,
-        input_pos=input_pos,
+        is_prefill=is_prefill,
     )
     # KV extension, padding, deal with `scale_factor`
     query, key, value, extend_kv, enable_gqa, pad_q, _ = _sdpa_flexatt_helper(
@@ -951,7 +961,7 @@ def scaled_dot_product_attention_flexatt(
         scale=None,
         enable_gqa=enable_gqa,
     )
-    if flexatt_args.forward_return_lse and not requires_grad and input_pos > 0:
+    if flexatt_args.forward_return_lse and not requires_grad and not is_prefill:
         assert isinstance(result, tuple), (
             type(result),
             flexatt_args.forward_return_lse,
@@ -1032,7 +1042,7 @@ def sdpa_flexatt_with_attn_weights(
     value: torch.Tensor,
     scale_factor: Optional[float],
     attention_logit_softcapping: Optional[float],
-    input_pos: int,
+    input_pos: InputPosType,
     token_positions: Optional[torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -1077,7 +1087,12 @@ def sdpa_flexatt_with_attn_weights(
     dtype = query.dtype
     if query.requires_grad or key.requires_grad or value.requires_grad:
         raise ValueError("Cannot be used with autograd")
-    if input_pos <= 0:
+    input_pos_explicit = not isinstance(input_pos, tuple)
+    if input_pos_explicit:
+        is_prefill = input_pos == 0
+    else:
+        input_pos, is_prefill = input_pos
+    if is_prefill:
         raise ValueError("input_pos must be positive")
     if not flexatt_args.forward_return_lse:
         raise ValueError("flexatt_args.forward_return_lse must be True")
@@ -1103,7 +1118,7 @@ def sdpa_flexatt_with_attn_weights(
         requires_grad=False,
         sliding_window_size=None,
         attention_logit_softcapping=attention_logit_softcapping,
-        input_pos=input_pos,
+        is_prefill=False,
     )
     attn_fn, extend_kv = flexatt_args.attn_fn(
         q_len=q_len,

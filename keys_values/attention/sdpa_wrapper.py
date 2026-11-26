@@ -17,7 +17,11 @@ from typing import List, Optional, Union, Tuple, Callable, Dict, Any
 import torch
 from torch.nn.attention import SDPBackend
 
-from keys_values.attention.attention_utils import pytorch_scaled_dot_product_attention
+from keys_values.attention.attention_utils import (
+    pytorch_scaled_dot_product_attention,
+    InputPosType,
+    InputPosNoFlagType,
+)
 from keys_values.utils import expand_index, is_index_1d, index_to_3d
 
 
@@ -79,7 +83,7 @@ def scaled_dot_product_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     scale_factor: float,
-    input_pos: int,
+    input_pos: InputPosType,
     token_positions: Optional[torch.Tensor],
     sdpa_kernels: Optional[Union[SDPBackend, List[SDPBackend]]] = None,
     do_filter_kernels: bool = False,
@@ -112,7 +116,8 @@ def scaled_dot_product_attention(
         key: Keys, shape `(batch_size, n_query_groups, kv_len, head_size)`
         value: Values, shape `(batch_size, n_query_groups, kv_len, head_size)`
         scale_factor: Scale factor for attention
-        input_pos: Position in input sequence
+        input_pos: Position in input sequence. Can also be passed as tensor,
+            see `InputPosType` comments
         token_positions: Contains token positions in KV cache, shape
             `(batch_size, n_query_groups, kv_len)`. See above. If not given,
             we must have `input_pos + q_len == kv_len`, and the new KV
@@ -133,10 +138,15 @@ def scaled_dot_product_attention(
         key,
         value,
     )
+    input_pos_explicit = not isinstance(input_pos, tuple)
+    if input_pos_explicit:
+        is_prefill = input_pos == 0
+    else:
+        input_pos, is_prefill = input_pos
     if sdpa_kernels is None:
         sdpa_kernels = []
     if token_positions is None:
-        if input_pos + q_len != kv_len:
+        if input_pos_explicit and input_pos + q_len != kv_len:
             raise ValueError(
                 f"Without token_positions, must have input_pos + q_len = {input_pos + q_len} == {kv_len} = kv_len"
             )
@@ -149,7 +159,7 @@ def scaled_dot_product_attention(
         # We implemented an alternative which exchanges smaller parts of
         # `key`, `value`, but this does not end up being faster
         # (see `sdpa_wrapper_old` module).
-        if input_pos == 0:
+        if is_prefill:
             raise ValueError("For input_pos=0, token_positions must be None")
         if token_positions.shape != key.shape[:-1]:
             raise ValueError(
@@ -195,7 +205,7 @@ def scaled_dot_product_attention(
 
 def _extract_index_gather_scatter(
     token_positions: torch.Tensor,
-    input_pos: int,
+    input_pos: InputPosNoFlagType,
     q_len: int,
     check_token_pos: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -220,7 +230,8 @@ def _extract_index_gather_scatter(
 
     Args:
         token_positions: Token positions in KV cache
-        input_pos: Position in input sequence, must be `> 0`
+        input_pos: Position in input sequence, must be `> 0`. Can also
+            be provided as a tensor
         q_len: Length of query sequence
         check_token_pos: If `True`, check that `token_positions` is valid.
             Use this for testing. Must be `False` if this is used as part
@@ -232,6 +243,10 @@ def _extract_index_gather_scatter(
 
     """
     batch_size, n_query_groups, _ = token_positions.shape
+    input_pos_explicit = not isinstance(input_pos, torch.Tensor)
+    if not input_pos_explicit:
+        # Checking induces graph breaks
+        check_token_pos = False
     new_entries_mask = token_positions >= input_pos
     if check_token_pos:
         dummy = new_entries_mask.sum(dim=-1)
@@ -256,7 +271,7 @@ def _extract_index_gather_scatter(
         )
         if not nz1.equal(nz1_should_be):
             raise ValueError(f"nz1 = {nz1}, must equal to {nz1_should_be}")
-    elif nz2.numel() != batch_size * n_query_groups * q_len:
+    elif input_pos_explicit and nz2.numel() != batch_size * n_query_groups * q_len:
         raise ValueError(
             f"Invalid token_positions: Number of entries in [{input_pos}, {input_pos + q_len}) must be {batch_size * n_query_groups * q_len}, but is {nz2.numel()}"
         )
@@ -343,7 +358,7 @@ def reorder_key_value(
     key: torch.Tensor,
     value: Optional[torch.Tensor],
     token_positions: torch.Tensor,
-    input_pos: int,
+    input_pos: InputPosNoFlagType,
     q_len: int,
     sort_if_3d: bool = True,
     check_token_pos: bool = False,

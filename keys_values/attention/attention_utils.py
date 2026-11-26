@@ -32,6 +32,18 @@ SDPA_KERNELS_BEST_ORDERING = [
     SDPBackend.MATH,
 ]
 
+# Our SDPA implementations allow for `input_pos` to be passed in two different
+# ways:
+# 1. `input_pos` is an int value, in which case `is_prefill = input_pos == 0`
+# 2. `input_pos` is a scalar tensor (1D, size 1), and `is_prefill` is passed
+#    explicitly
+# Option (2.) can be used if an expression with the SDPA call inside is meant
+# to be compiled as a graph, which takes `input_pos` as argument. Using option
+# (1.) in this case would lead to different graphs for each value of `input_pos`.
+InputPosType = Union[int, Tuple[torch.Tensor, bool]]
+
+InputPosNoFlagType = Union[int, torch.Tensor]
+
 
 def filter_sdpa_kernels(
     sdpa_kernels: List[SDPBackend],
@@ -202,8 +214,22 @@ def build_mask_cache(
     return mask
 
 
+def range_from_input_pos(
+    input_pos: InputPosNoFlagType,
+    a: int,
+    b: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    kwargs = dict(device=device, dtype=dtype)
+    if isinstance(input_pos, torch.Tensor):
+        return torch.arange(a, b, **kwargs) + input_pos.to(**kwargs)
+    else:
+        return torch.arange(a + input_pos, b + input_pos, **kwargs)
+
+
 def mask_slice_bool(
-    input_pos: int,
+    input_pos: InputPosNoFlagType,
     num: int,
     token_positions: torch.Tensor,
     n_head: int,
@@ -236,22 +262,14 @@ def mask_slice_bool(
     )
     kwargs = dict(device=token_positions.device, dtype=token_positions.dtype)
     bool_mask = (
-        torch.arange(
-            input_pos,
-            input_pos + num,
-            **kwargs,
-        )
+        range_from_input_pos(input_pos, 0, num, **kwargs)
         .view(1, 1, -1, 1)
         .expand_as(token_positions)
         < token_positions
     )
     if sliding_window_size is not None:
         extra_mask = (
-            torch.arange(
-                input_pos - sliding_window_size,
-                input_pos + num - sliding_window_size,
-                **kwargs,
-            )
+            range_from_input_pos(input_pos, -sliding_window_size, num -sliding_window_size, **kwargs)
             .view(1, 1, -1, 1)
             .expand_as(token_positions)
             >= token_positions
@@ -261,7 +279,7 @@ def mask_slice_bool(
 
 
 def build_mask_slice(
-    input_pos: int,
+    input_pos: InputPosNoFlagType,
     num: int,
     token_positions: torch.Tensor,
     n_head: int,
@@ -385,7 +403,7 @@ def sdpa_attention_weights(
     key: torch.Tensor,
     tmp_array: torch.Tensor,
     token_positions: Optional[torch.Tensor],
-    input_pos: int,
+    input_pos: InputPosNoFlagType,
     scale_factor: float,
     sliding_window_size: Optional[int],
 ) -> torch.Tensor:

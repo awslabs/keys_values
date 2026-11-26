@@ -28,6 +28,8 @@ from keys_values.attention.attention_utils import (
     sdpa_attention_weights,
     slice_as_flat,
     pytorch_scaled_dot_product_attention,
+    InputPosType,
+    InputPosNoFlagType,
 )
 from keys_values.attention.flashinfer_wrapper import can_do_flashinfer
 from keys_values.attention.flex_attention import (
@@ -291,7 +293,7 @@ class MultiHeadSelfAttention:
         query: torch.Tensor,
         k_and_v: KeysAndValues,
         block_idx: int,
-        input_pos: Optional[int] = None,
+        input_pos: Optional[InputPosType] = None,
         return_attn_weights: bool = False,
         token_positions: Optional[torch.Tensor] = None,
         annotation_callback: Optional[ReorderAnnotationCallback] = None,
@@ -322,8 +324,12 @@ class MultiHeadSelfAttention:
         # We need the attention mask if there is sliding window attention.
         # Our eager implementation with blocking has masking built in, so
         # a mask is not needed then.
-        for_prefill = input_pos == 0
-        is_causal = input_pos is None or for_prefill
+        if input_pos is None:
+            input_pos = 0
+        if not isinstance(input_pos, tuple):
+            is_causal = input_pos == 0
+        else:
+            is_causal = input_pos[1]
         if not is_causal and token_positions is None:
             raise ValueError("token_positions must be given if input_pos > 0")
         sliding_window_size = self._get_sliding_window_size(block_idx)
@@ -337,6 +343,7 @@ class MultiHeadSelfAttention:
             sliding_window_size=sliding_window_size,
             dtype=query.dtype,
             device=query.device,
+            input_pos=input_pos,
         )
         if sdpa_mode in (SDPA_IMPL_PYTORCH, SDPA_IMPL_EAGER_NO_BLOCKS):
             sdpa_is_eager = sdpa_mode == SDPA_IMPL_EAGER_NO_BLOCKS
@@ -369,7 +376,7 @@ class MultiHeadSelfAttention:
         attn_outputs, attn_weights = self.scaled_dot_product_attention(
             query=query,
             k_and_v=k_and_v,
-            input_pos=input_pos if input_pos is not None else 0,
+            input_pos=input_pos,
             token_positions=token_positions,
             sdpa_mode=sdpa_mode,
             sliding_window_size=sliding_window_size,
@@ -399,6 +406,7 @@ class MultiHeadSelfAttention:
         sliding_window_size: Optional[int],
         dtype: torch.dtype,
         device: torch.device,
+        input_pos: InputPosType,
     ) -> int:
         """
         Decides on what SDPA implementation can be used, depending on
@@ -411,6 +419,7 @@ class MultiHeadSelfAttention:
             kv_len: Length of keys, values
             sliding_window_size: Sliding window size
             dtype: Data type of inputs
+            input_pos: Either `int` scalar or tuple, see `InputPosType`
 
         Returns:
             Type of SDPA implementation: See `SDPA_IMPL_*` constants
@@ -419,6 +428,8 @@ class MultiHeadSelfAttention:
         device_cuda = device.type == "cuda"
         must_eager = self.use_eager_sdpa_always
         sws_given = sliding_window_size is not None
+        # Note: If `input_pos` is not `int`, we cannot use FlashInfer at the
+        # moment
         has_flashinfer = (
             can_do_flashinfer(
                 head_size=self.config.head_size,
@@ -430,6 +441,7 @@ class MultiHeadSelfAttention:
             and _get_flashinfer_sdpa() is not None
             and device_cuda
             and not sws_given
+            and not isinstance(input_pos, tuple)
         )
         has_flexatt = self.flexatt_args is not None and device_cuda and not sws_given
         use_flex_att = has_flexatt and not must_eager
@@ -480,7 +492,7 @@ class MultiHeadSelfAttention:
         self,
         query: torch.Tensor,
         k_and_v: KeysAndValues,
-        input_pos: int,
+        input_pos: InputPosType,
         token_positions: Optional[torch.Tensor],
         sdpa_mode: Optional[int],
         sliding_window_size: Optional[int],
@@ -489,6 +501,11 @@ class MultiHeadSelfAttention:
         transpose_result: bool = True,
         annotation_callback: Optional[ReorderAnnotationCallback] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        input_pos_explicit = not isinstance(input_pos, tuple)
+        if input_pos_explicit:
+            is_prefill = input_pos == 0
+        else:
+            is_prefill = input_pos[1]
         scale_factor = self.get_scale_factor()
         # We cannot call PyTorch scaled_dot_product_attention if:
         # - Attention scores need to be returned; or
@@ -498,15 +515,17 @@ class MultiHeadSelfAttention:
         if sdpa_mode is None:
             sdpa_mode = self._sdpa_mode(
                 return_attn_weights=return_attn_weights,
-                is_causal=input_pos == 0,
+                is_causal=is_prefill,
                 q_len=query.shape[2],
                 kv_len=k_and_v.keys().shape[2],
                 sliding_window_size=sliding_window_size,
                 dtype=query.dtype,
                 device=query.device,
+                input_pos=input_pos,
             )
         if sdpa_mode == SDPA_IMPL_FLASHINFER:
             assert sliding_window_size is None
+            assert not isinstance(input_pos, tuple)
             flashinfer = _get_flashinfer_sdpa()
             attn_outputs, attn_weights = flashinfer.scaled_dot_product_attention(
                 query=query,
@@ -586,6 +605,8 @@ class MultiHeadSelfAttention:
             use_blocking = sdpa_mode == SDPA_IMPL_EAGER_BLOCKS
             if not use_blocking:
                 assert mask is not None or query.shape[2] == 1
+            if not input_pos_explicit:
+                input_pos = input_pos[0]
             attn_outputs, attn_weights = eager_scaled_dot_product_attention(
                 query=query,
                 k_and_v=k_and_v,
@@ -618,7 +639,7 @@ def eager_scaled_dot_product_attention(
     scale_factor: float,
     use_blocking: bool,
     return_attn_weights: bool,
-    input_pos: int,
+    input_pos: InputPosNoFlagType,
     token_positions: Optional[torch.Tensor],
     sliding_window_size: Optional[int],
     mask: Optional[torch.Tensor] = None,
@@ -670,7 +691,7 @@ def scaled_dot_product_attention_in_blocks(
     k_and_v: KeysAndValues,
     scale_factor: float,
     return_attn_weights: bool,
-    input_pos: int,
+    input_pos: InputPosNoFlagType,
     token_positions: Optional[torch.Tensor],
     sliding_window_size: Optional[int],
     tmp_array_limit_gb: Optional[float] = None,

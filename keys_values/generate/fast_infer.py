@@ -16,15 +16,22 @@ from typing import Optional, Tuple
 import torch
 
 from keys_values.config import Config
-from keys_values.kvcache.attn_weights import (
-    update_token_positions,
-    UpdateTokenPositionsGracePeriod,
+from keys_values.attention.attention_utils import range_from_input_pos
+from keys_values.attention.base import (
+    DefaultKeysAndValues,
+    SDPA_IMPL_QPADDED_PYTORCH,
+    SDPA_IMPL_EAGER_BLOCKS,
+    SDPA_IMPL_FLEXATTENTION,
 )
+from keys_values.attention.sdpa_op import scatter_on_buffers
 from keys_values.kvcache.base import DefaultKVCache
 from keys_values.kvcache.next_positions import NextPositionsMixin
 from keys_values.model import GPT
+from keys_values.utils import index_to_3d
 
 
+# TODO:
+# - Special case: positions != None. Also with new code!
 class SingleTokenInferenceKVCache(DefaultKVCache):
     """
     Specific :class:`DefaultKVCache` implementation used to build the single
@@ -44,9 +51,9 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
         config: Config,
         keys: torch.Tensor,
         values: torch.Tensor,
-        next_positions: torch.Tensor,
         token_positions: torch.Tensor,
-        input_pos: int,
+        next_positions: torch.Tensor,
+        input_pos: torch.Tensor,
         layer_idx: int,
         **base_kwargs,
     ):
@@ -58,7 +65,10 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
         assert n_query_groups == config.n_query_groups
         assert head_size == config.head_size
         if input_pos < cache_length:
-            raise ValueError(f"input_pos = {input_pos}, must be >= cache_length = {cache_length}")
+            raise ValueError(
+                f"input_pos = {input_pos}, must be >= cache_length = {cache_length}"
+            )
+        assert input_pos.ndim == 1 and input_pos.numel() == 1
         super().__init__(
             config=config,
             max_batch_size=batch_size,
@@ -75,10 +85,33 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
         self._new_keys = None
         self._new_values = None
         self._new_token_positions = None
+        sliding_window_size = self.mha._get_sliding_window_size(layer_idx)
+        if self.mha.has_flex_attention:
+            sdpa_mode = SDPA_IMPL_FLEXATTENTION
+        elif sliding_window_size is not None:
+            print(
+                "WARNING: config.sliding_window_size is used. This means that "
+                "a naive SDPA kernel has to be used, for which computations "
+                "can be slow. Consider switching to a model which does not use "
+                "config.sliding_window_size, or use FlexAttention by passing "
+                "flexatt_args when creating the MultiHeadSelfAttention object."
+            )
+            sdpa_mode = SDPA_IMPL_EAGER_BLOCKS
+        else:
+            sdpa_mode = SDPA_IMPL_QPADDED_PYTORCH
+        self._sdpa_kwargs = dict(
+            sdpa_mode=sdpa_mode,
+            sliding_window_size=sliding_window_size,
+        )
 
     @property
     def batch_size(self) -> Optional[int]:
         return self._orig_keys.shape[0]
+
+    @property
+    def input_pos(self) -> int:
+        # Calling self._input_pos.item() would break the graph
+        raise NotImplementedError
 
     def token_positions(self) -> torch.Tensor:
         if self._new_token_positions is None:
@@ -104,13 +137,60 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
         token_idx: torch.Tensor,
     ) -> torch.Tensor:
         if self._new_keys is not None:
-            raise IndexError("'forward' can be called once only")
+            raise IndexError("'forward' can be called only once")
         self._forward_check_args(query, key, value, token_idx)
         num = token_idx.shape[-1]
         if self._next_positions.shape[-1] != num:
-            raise ValueError(f"Number of tokens {num} != {self._next_positions.shape[-1]} = next_positions.shape[-1]")
-        # HIER! What about index, positions?
-        # ==> Would not have trouble with new_kvcache3 !
+            raise ValueError(
+                f"Number of tokens {num} != {self._next_positions.shape[-1]} = next_positions.shape[-1]"
+            )
+        # "scatter" update of KV cache buffers
+        # HIER: Deal with positions != None case
+        self._new_keys, self._new_values = scatter_on_buffers(
+            key,
+            value,
+            self._orig_keys,
+            self._orig_values,
+            self._next_positions,
+            positions=None,
+        )
+        # Update `token_positions`
+        new_ind = range_from_input_pos(
+            self._input_pos,
+            0,
+            num,
+            device=self._orig_token_positions.device,
+            dtype=self._orig_token_positions.dtype,
+        )
+        self._new_token_positions = self._orig_token_positions.scatter(
+            -1,
+            self._next_positions,
+            index_to_3d(
+                new_ind,
+                *self._orig_token_positions.shape[:2],
+            ),
+        )
+        attn_outputs, _ = self.mha.scaled_dot_product_attention(
+            query=query,
+            k_and_v=DefaultKeysAndValues(self._new_keys, self._new_values),
+            input_pos=(self._input_pos, False),
+            token_positions=self._new_token_positions,
+            return_attn_weights=False,
+            **self._sdpa_kwargs,
+        )
+        return attn_outputs.reshape(self.batch_size, num, -1)
+
+
+def single_token_forward(
+    token_idx: torch.Tensor,
+    keys: torch.Tensor,
+    values: torch.Tensor,
+    token_positions: torch.Tensor,
+    next_positions: torch.Tensor,
+    input_pos: int,
+    model: GPT,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    pass
 
 
 class SingleTokenFastInference:
@@ -166,11 +246,15 @@ class SingleTokenFastInference:
         cache_length = None
         for block_idx, cache in enumerate(self.model.get_kv_caches()):
             if not isinstance(cache, NextPositionsMixin):
-                raise TypeError(f"Block {block_idx}: type(cache) = {type(cache)}, must inherit from NextPositionsMixin")
+                raise TypeError(
+                    f"Block {block_idx}: type(cache) = {type(cache)}, must inherit from NextPositionsMixin"
+                )
             if cache_length is None:
                 cache_length = cache.cache_length
             elif cache.cache_length != cache_length:
-                raise ValueError(f"Block {block_idx}: cache_length = {cache.cache_length}, must all be the same (but also {cache_length})")
+                raise ValueError(
+                    f"Block {block_idx}: cache_length = {cache.cache_length}, must all be the same (but also {cache_length})"
+                )
 
     def _check_is_initialized(self):
         if self.batch_size is None:
@@ -206,8 +290,11 @@ class SingleTokenFastInference:
             token_idx: New token indices, `(batch_size, num)`
 
         """
+        self._check_is_initialized()
         if token_idx.ndim != 2 or token_idx.shape[0] != self.batch_size:
-            raise ValueError(f"token_idx.shape = {token_idx.shape}: Must be 2D and first axis {self.batch_size}")
+            raise ValueError(
+                f"token_idx.shape = {token_idx.shape}: Must be 2D and first axis {self.batch_size}"
+            )
         # Run forward pass. This updates all KV caches
         logits = self.model(token_idx)
         self._next_positions = [
