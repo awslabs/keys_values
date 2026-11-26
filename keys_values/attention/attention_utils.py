@@ -269,7 +269,9 @@ def mask_slice_bool(
     )
     if sliding_window_size is not None:
         extra_mask = (
-            range_from_input_pos(input_pos, -sliding_window_size, num -sliding_window_size, **kwargs)
+            range_from_input_pos(
+                input_pos, -sliding_window_size, num - sliding_window_size, **kwargs
+            )
             .view(1, 1, -1, 1)
             .expand_as(token_positions)
             >= token_positions

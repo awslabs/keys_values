@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Tuple
+from functools import partial
+from typing import Optional, Tuple, Dict, Any
 
 import torch
 
@@ -181,18 +182,89 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
         return attn_outputs.reshape(self.batch_size, num, -1)
 
 
+# TODO:
+# - Can `base_kwargs` be taken from `model` somehow?
+# - Is `model` the right way to do this, or rather like with training replay?
 def single_token_forward(
     token_idx: torch.Tensor,
     keys: torch.Tensor,
     values: torch.Tensor,
     token_positions: torch.Tensor,
     next_positions: torch.Tensor,
-    input_pos: int,
+    input_pos: torch.Tensor,
     model: GPT,
+    **base_kwargs,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    pass
+    """
+    Expression to be compiled in :class:`SingleTokenFastInference`.
+
+    Args:
+        token_idx: New input tokens, `(batch_size, num)`
+        keys: Keys buffers for all layers,
+            `(n_layer, batch_size, n_query_groups, cache_length, head_size)`
+        values: Values buffers for all layers,
+            `(n_layer, batch_size, n_query_groups, cache_length, head_size)`
+        token_positions: Indexes for all layers,
+            `(n_layer, batch_size, n_query_groups, cache_length)`
+        next_positions: Indexes for all layers,
+            `(n_layer, batch_size, n_query_groups, num)`
+        input_pos: Current input position as tensor, `(1,)`
+        model: Model, whose KV caches are temporarily replaced by
+            :class:`SingleTokenInferenceKVCache` objects
+
+    Returns:
+         `(logits, new_keys, new_values, new_token_positions)`
+
+    """
+    assert (
+        keys.ndim == 5
+        and values.ndim == 5
+        and token_positions.ndim == 4
+        and next_positions.ndim == 4
+    )
+    n_layer = keys.shape[0]
+    config = model.config
+    assert config.n_layer == n_layer
+    # Create replacement KV caches
+    common_kwargs = {
+        "config": config,
+        "input_pos": input_pos,
+        **base_kwargs,
+    }
+    kv_caches = [
+        SingleTokenInferenceKVCache(
+            keys=keys[layer_idx],
+            values=values[layer_idx],
+            token_positions=token_positions[layer_idx],
+            next_positions=next_positions[layer_idx],
+            layer_idx=layer_idx,
+            **common_kwargs,
+        )
+        for layer_idx in range(n_layer)
+    ]
+    orig_kv_caches = model.get_kv_caches()
+    model.assign_kv_caches(kv_caches)
+    # Run forward pass
+    logits = model(token_idx)
+    # Collect new tensors to be returned
+    model.assign_kv_caches(orig_kv_caches)
+    new_keys = torch.cat(
+        [cache.keys().unsqueeze(0) for cache in kv_caches],
+        dim=0,
+    )
+    new_values = torch.cat(
+        [cache.values().unsqueeze(0) for cache in kv_caches],
+        dim=0,
+    )
+    new_token_positions = torch.cat(
+        [cache.token_positions().unsqueeze(0) for cache in kv_caches],
+        dim=0,
+    )
+    return logits, new_keys, new_values, new_token_positions
 
 
+# TODO:
+# - base_kwargs: Make explicit. Can this be obtained from `model`?
 class SingleTokenFastInference:
     """
     Driver for fast inference in a single new token. This is needed during
@@ -223,22 +295,31 @@ class SingleTokenFastInference:
       a chunk update of KV caches is cheap anyways.
       TODO: If the added time for the extra update is significant, we could
       explore this in the future.
-
-    TODO:
-    - Method to create graph from current KV cache buffers and model weights:
-      Batch size can be determined there as well
     """
 
     def __init__(
         self,
         model: GPT,
         chunk_size: int,
+        base_kwargs: Dict[str, Any],
     ):
         self.model = model
-        self.batch_size = None
         self.chunk_size = chunk_size
+        self._check_init_args()
+        self.batch_size = None
         self._next_positions = None
-        self._num_tokens_left_in_chunk = 0
+        self._pos_in_chunk = None
+        self._keys_buffers = None
+        self._values_buffers = None
+        self._token_positions = None
+        self._input_pos = None
+        self._inference_graph = None
+        self._base_kwargs = base_kwargs
+        if model.get_kv_caches()[0].batch_size is not None:
+            # If KV caches are already initialized and allocated, we can compile
+            # the graph here. Otherwise, it is compiled with the first call of
+            # :meth:`initialize`
+            self._init_buffers_and_compile_graph()
 
     # - All caches must implement NextPositionsMixin
     # - All caches must have the same length (current restriction)
@@ -249,6 +330,10 @@ class SingleTokenFastInference:
                 raise TypeError(
                     f"Block {block_idx}: type(cache) = {type(cache)}, must inherit from NextPositionsMixin"
                 )
+            if not isinstance(cache, DefaultKVCache):
+                raise TypeError(
+                    f"Block {block_idx}: type(cache) = {type(cache)}, must inherit from DefaultKVCache"
+                )
             if cache_length is None:
                 cache_length = cache.cache_length
             elif cache.cache_length != cache_length:
@@ -256,25 +341,152 @@ class SingleTokenFastInference:
                     f"Block {block_idx}: cache_length = {cache.cache_length}, must all be the same (but also {cache_length})"
                 )
 
+    def _init_buffers_and_compile_graph(self, recreate_graph: bool = False):
+        fst_cache = self.model.get_kv_caches()[0]
+        batch_size = fst_cache.batch_size
+        cache_length = fst_cache.cache_length
+        device = fst_cache.device
+        dtype = fst_cache.dtype
+        tp_dtype = fst_cache.token_positions().dtype
+        if (
+            device is not None
+            and dtype is not None
+            and (
+                recreate_graph
+                or self.batch_size is None
+                or self.batch_size != batch_size
+            )
+        ):
+            # Create buffers
+            self.batch_size = batch_size
+            config = self.model.config
+            shape = (
+                config.n_layer,
+                batch_size,
+                config.n_query_groups,
+                cache_length,
+                config.head_size,
+            )
+            kwargs = dict(device=device, dtype=dtype)
+            self._keys_buffers = torch.zeros(shape, **kwargs)
+            self._values_buffers = torch.zeros(shape, **kwargs)
+            kwargs["dtype"] = tp_dtype
+            self._token_positions = torch.zeros(shape[:-1], **kwargs)
+            self._input_pos = torch.zeros((1,), **kwargs)
+            # Compile the graph
+            torch._dynamo.reset()
+            torch.compiler.reset()
+            self._inference_graph = torch.compile(
+                partial(
+                    single_token_forward,
+                    model=self.model,
+                    **self._base_kwargs,
+                ),
+                fullgraph=True,
+                dynamic=False,
+            )
+
     def _check_is_initialized(self):
         if self.batch_size is None:
             raise IndexError("Call 'initialize' to initialize the object")
 
-    # TODO!
-    # - Take batch_size from caches
-    # - Check that all cache buffers are full
-    def initialize(self):
+    def _copy_from_caches(self):
+        kv_caches = self.model.get_kv_caches()
+        for block_idx, cache in enumerate(kv_caches):
+            self._token_positions[block_idx] = cache.token_positions()
+            k_and_v = cache.get_keys_values()
+            self._keys_buffers[block_idx] = k_and_v.keys()
+            self._values_buffers[block_idx] = k_and_v.values()
+
+    def _set_next_positions(self):
+        """
+        Sets `_next_positions` and `_input_pos` from current caches
+
+        """
+        self._next_positions = torch.cat(
+            [
+                cache.next_positions(self.chunk_size).clone().unsqueeze(0)
+                for cache in self.model.get_kv_caches()
+            ],
+            dim=0,
+        )
+        self._input_pos[0] = self.model.get_kv_caches()[0].input_pos
+
+    def initialize(self, recreate_graph: bool = False):
         """
         This method initializes the object, in that current KV cache buffers
         are replicated into tensor nodes, and the single token inference
         graph is built and compiled.
 
+        Args:
+            recreate_graph: If `True`, the graph is recreated here in any case.
+                Otherwise, it is recreated only if the batch size changed.
+                NOTE: Pass `True` here if the model weights have changed.
+
         """
-        pass
+        fst_cache = self.model.get_kv_caches()[0]
+        self.batch_size = fst_cache.batch_size
+        self._input_pos = fst_cache.input_pos
+        if self._input_pos < fst_cache.cache_length:
+            raise IndexError("Can only initialize when all caches are full")
+        for cache in self.model.get_kv_caches():
+            assert cache.input_pos == self._input_pos, (
+                cache.input_pos,
+                self._input_pos,
+            )
+            assert cache.batch_size == self.batch_size, (
+                cache.batch_size,
+                self.batch_size,
+            )
+            assert cache.device is not None
+            assert cache.dtype is not None
+        # Allocate buffers and compile graph if not yet done before, or if
+        # batch size has changed
+        self._init_buffers_and_compile_graph(recreate_graph)
+        # Copy buffers/indexes from current caches and set `next_positions`
+        self._copy_from_caches()
+        self._set_next_positions()
+        self._pos_in_chunk = 0
+
+    def forward(self, token_idx: torch.Tensor) -> torch.Tensor:
+        """
+        Inference for batch of single tokens, using the compiled graph.
+        Works only if `num_tokens_left_in_chunk > 0`. If the chunk has
+        been processed, call :meth:`update`.
+
+        Args:
+            token_idx: Batch of single tokens, `(batch_size, 1)`
+
+        Returns:
+              Logits for single token batch
+
+        """
+        self._check_is_initialized()
+        if self.num_tokens_left_in_chunk <= 0:
+            raise IndexError(f"Call 'update' for another {self.chunk_size} tokens")
+        if token_idx.shape != (self.batch_size, 1):
+            raise ValueError(
+                f"token_idx.shape = {token_idx.shape}, must be {(self.batch_size, 1)}"
+            )
+        cp = self._pos_in_chunk
+        next_positions = self._next_positions[:, :, :, cp : (cp + 1)]
+        logits, self._keys_buffers, self._values_buffers, self._token_positions = (
+            self._inference_graph(
+                token_idx=token_idx,
+                keys=self._keys_buffers,
+                values=self._values_buffers,
+                token_positions=self._token_positions,
+                next_positions=next_positions,
+                input_pos=self._input_pos,
+            )
+        )
+        self._input_pos[0] += 1
+        self._pos_in_chunk += 1
+        return logits
 
     @property
     def num_tokens_left_in_chunk(self) -> int:
-        return self._num_tokens_left_in_chunk
+        return self.chunk_size - self._pos_in_chunk
 
     def update(self, token_idx: torch.Tensor):
         """
@@ -297,8 +509,7 @@ class SingleTokenFastInference:
             )
         # Run forward pass. This updates all KV caches
         logits = self.model(token_idx)
-        self._next_positions = [
-            cache.next_positions(self.chunk_size).clone()
-            for cache in self.model.get_kv_caches()
-        ]
-        self._num_tokens_left_in_chunk = self.chunk_size
+        # Copy new buffer/index contents from caches, set `next_positions`
+        self._copy_from_caches()
+        self._set_next_positions()
+        self._pos_in_chunk = 0
