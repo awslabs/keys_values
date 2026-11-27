@@ -18,7 +18,10 @@ import torch
 
 from litgpt.model import build_rope_cache, apply_rope as apply_rope_litgpt
 
-from keys_values.attention.attention_utils import InputPosType
+from keys_values.attention.attention_utils import (
+    InputPosType,
+    range_from_input_pos,
+)
 from keys_values.config import Config
 
 # Opt-in fused Triton RoPE. Toggled via `set_fused_rope_enabled(True)` during
@@ -225,11 +228,12 @@ class LinearPositionEncoding(PositionEncoding):
             self._cos = self._cos.to(device=self._device)
             self._sin = self._sin.to(device=self._device)
         if not input_pos_explicit:
-            input_pos = input_pos[0]
-            ind_kwargs = dict(device=self._cos.device, dtype=input_pos.dtype)
-            indices = (
-                torch.arange(x_len, **ind_kwargs)
-                + input_pos.to(**ind_kwargs)
+            indices = range_from_input_pos(
+                input_pos[0],
+                a=0,
+                b=x_len,
+                device=self._cos.device,
+                dtype=input_pos.dtype,
             )
             if self.rope_local_base_freq is None:
                 cos = self._cos[indices, :].unsqueeze(0)

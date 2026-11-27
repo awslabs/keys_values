@@ -52,6 +52,20 @@ def is_prefill(input_pos: InputPosType) -> bool:
         return input_pos == 0
 
 
+def range_from_input_pos(
+    input_pos: InputPosNoFlagType,
+    a: int,
+    b: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    kwargs = dict(device=device, dtype=dtype)
+    if isinstance(input_pos, torch.Tensor):
+        return torch.arange(a, b, **kwargs) + input_pos.to(**kwargs)
+    else:
+        return torch.arange(a + input_pos, b + input_pos, **kwargs)
+
+
 def filter_sdpa_kernels(
     sdpa_kernels: List[SDPBackend],
     query: torch.Tensor,
@@ -219,20 +233,6 @@ def build_mask_cache(
     mask = mask_cache_bool(max_seq_length, sliding_window_size, device, dtype)
     mask.masked_fill_(mask.bool(), minus_infinity(dtype))
     return mask
-
-
-def range_from_input_pos(
-    input_pos: InputPosNoFlagType,
-    a: int,
-    b: int,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    kwargs = dict(device=device, dtype=dtype)
-    if isinstance(input_pos, torch.Tensor):
-        return torch.arange(a, b, **kwargs) + input_pos.to(**kwargs)
-    else:
-        return torch.arange(a + input_pos, b + input_pos, **kwargs)
 
 
 def mask_slice_bool(

@@ -31,7 +31,7 @@ from keys_values.evaluation.evaluation import (
     extract_value_token,
 )
 from keys_values.generate.base import batched_generate_fn
-from keys_values.long_context import LongContextInferenceModel
+from keys_values.generate.single_token import SingleTokenLongContextInference
 
 METRICS_FOR_HELMET_TASKS = {
     "banking77": "exact_match",
@@ -224,7 +224,7 @@ class SampleBasedMetricsEvaluator:
 
     def __call__(
         self,
-        model: LongContextInferenceModel,
+        inference: SingleTokenLongContextInference,
         prompts: torch.Tensor,
         targets: List[TargetType],
         return_samples: bool = False,
@@ -234,7 +234,8 @@ class SampleBasedMetricsEvaluator:
         metrics to be computed are in `metrics`.
 
         Args:
-            model: LongContextInferenceModel
+            inference: Driver for single token inference, wraps long context
+                model as `inference.model`
             prompts: Prompts, `(batch_size, prompt_len)`. Aligned on the
                 right (if there is padding, it is on the left)
             targets: List of targets of length `batch_size`. Each entry is a
@@ -265,7 +266,7 @@ class SampleBasedMetricsEvaluator:
         generated_tokens = torch.cat(
             list(
                 batched_generate_fn(
-                    model=model,
+                    inference=inference,
                     prompts=prompts,
                     max_returned_tokens=self.max_generated_tokens,
                     ignore_index=self._eos_id,

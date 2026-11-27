@@ -24,6 +24,7 @@ import torch
 from keys_values.config import Config
 from keys_values.attention.flex_attention import FlexAttentionArgs
 from keys_values.generate.base import batched_generate_fn
+from keys_values.generate.single_token import DefaultSingleTokenInference
 from keys_values.head_model import CrossEntropyOnLogits
 from keys_values.head_model_factory import HeadModelFactory
 from keys_values.kvcache.base import KVCacheParams
@@ -182,7 +183,7 @@ def test_loss_after_replay(
         wrapper.switch_status(True)
         _ = list(
             batched_generate_fn(
-                model=model,
+                inference=DefaultSingleTokenInference(model),
                 prompts=logits,
                 input_pos=inputs.shape[-1] - targets.shape[-1],
                 max_returned_tokens=8,
@@ -240,7 +241,7 @@ def test_generate_several_times(
             with mock.patch("keys_values.generate.base.batched_sample", forced_sample):
                 list(
                     batched_generate_fn(
-                        model=model,
+                        inference=DefaultSingleTokenInference(model),
                         prompts=init_logits,
                         input_pos=inputs.shape[-1] - num_targets,
                         max_returned_tokens=num_targets,
@@ -305,7 +306,7 @@ def test_generate_old_new(
         with mock.patch("keys_values.generate.base.batched_sample", forced_sample):
             list(
                 batched_generate_fn(
-                    model=model,
+                    inference=DefaultSingleTokenInference(model),
                     prompts=init_logits,
                     input_pos=inputs.shape[-1] - num_targets,
                     max_returned_tokens=num_targets,
@@ -346,7 +347,7 @@ def test_generate_old_new(
         with mock.patch("keys_values.generate.base.batched_sample", forced_sample):
             list(
                 batched_generate_fn(
-                    model=model2,
+                    inference=DefaultSingleTokenInference(model2),
                     prompts=inputs[:, :-num_targets],
                     max_returned_tokens=num_targets,
                     sample_args={},

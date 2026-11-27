@@ -30,6 +30,7 @@ from typing import Optional
 import torch
 
 from keys_values.generate.base import batched_generate_fn
+from keys_values.generate.single_token import DefaultSingleTokenInference
 from keys_values.long_context import LongContextInferenceModel
 
 
@@ -120,7 +121,7 @@ def generate_completions(
 
     chunks = []
     for token_batch in batched_generate_fn(
-        model=model,
+        inference=DefaultSingleTokenInference(model),
         prompts=prompt_ids,
         max_returned_tokens=max_new_tokens,
         sample_args=sample_args,
@@ -198,7 +199,7 @@ def generate_completions_with_logprobs(
     logp_chunks = []
     mask_chunks = []
     for tokens, logps, active in batched_generate_fn(
-        model=model,
+        inference=DefaultSingleTokenInference(model),
         prompts=prompt_ids,
         max_returned_tokens=max_new_tokens,
         sample_args=sample_args,
