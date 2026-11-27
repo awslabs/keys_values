@@ -22,17 +22,27 @@ import torch._inductor.config
 from litgpt.generate.base import sample
 
 from keys_values.constants import DEFAULT_IGNORE_INDEX
+from keys_values.generate.single_token import SingleTokenLongContextInference
 from keys_values.kvcache.factory import deallocate_kv_cache_buffers_of_model
-from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
 
 
+def _single_token_logits(
+    model_or_inference: Union[GPT, SingleTokenLongContextInference],
+    x: torch.Tensor,
+) -> torch.Tensor:
+    if isinstance(model_or_inference, GPT):
+        return model_or_inference.model(x)
+    else:
+        return model_or_inference.inference_for_token(x)
+
+
 def next_token(
-    gpt_model: GPT,
+    model_or_inference: Union[GPT, SingleTokenLongContextInference],
     x: torch.Tensor,
     **sample_kwargs: Dict[str, Any],
 ) -> torch.Tensor:
-    logits = gpt_model(x)
+    logits = _single_token_logits(model_or_inference, x)
     _next = sample(logits, **sample_kwargs).to(dtype=torch.int64)
     return _next
 
@@ -56,7 +66,7 @@ def batched_sample(
 
 
 def batched_next_token(
-    gpt_model: GPT,
+    model_or_inference: Union[GPT, SingleTokenLongContextInference],
     x: torch.Tensor,
     kwargs: Union[dict, list[dict]],
 ) -> torch.Tensor:
@@ -73,7 +83,7 @@ def batched_next_token(
 
     """
     # Run the model on the batch.
-    logits_stack = gpt_model(x)
+    logits_stack = _single_token_logits(model_or_inference, x)
 
     # Return the next token for each sample in the batch.
     return batched_sample(logits_stack, kwargs=kwargs)
@@ -81,7 +91,7 @@ def batched_next_token(
 
 @torch.inference_mode()
 def generate_fn(
-    model: LongContextInferenceModel,
+    inference: SingleTokenLongContextInference,
     prompt: torch.Tensor,
     max_returned_tokens: int,
     *,
@@ -97,8 +107,8 @@ def generate_fn(
     Generates tokens for a single prompt.
 
     Args:
-        model: The model to use. Must be :class:`LongContextInferenceModel`,
-            defining the chunking to be used.
+        inference: Driver for prompt processing and single token inference.
+            Wraps model as `inference.model`.
         prompt: The tokenized prompt to generate from.
         max_returned_tokens: The maximum number of new tokens to return. Does not include the prompt tokens.
         temperature: The temp to pass to sample().
@@ -124,7 +134,8 @@ def generate_fn(
     assert (
         max_returned_tokens > prompt_size
     ), f"Not enough space for {prompt_size} prompt tokens in a context length of {max_returned_tokens}."
-    model.gpt_model.max_seq_length = max_returned_tokens
+    gpt_model = inference.model.gpt_model
+    gpt_model.max_seq_length = max_returned_tokens
 
     # Yield the prompt if include_prompt is True
     if include_prompt:
@@ -135,8 +146,7 @@ def generate_fn(
     # KV caches permit, subsequent ones (if any) chosen by the model.
     # We need the logits for the final position in order to generate the
     # first token below.
-    gpt_model = model.gpt_model
-    logits_final_position = model(prompt.unsqueeze(0), targets=None)
+    logits_final_position = inference.process_prompt(prompt.unsqueeze(0))
     assert logits_final_position.ndim == 3 and logits_final_position.shape[1] == 1, (
         logits_final_position.shape,
     )
@@ -155,7 +165,7 @@ def generate_fn(
             logits_final_position = None
         else:
             token = next_token(
-                gpt_model=gpt_model,
+                model_or_inference=inference,
                 x=token.view(1, -1),
                 **sample_kwargs,
             )
@@ -193,11 +203,11 @@ def generate_fn(
         yield from tokens[yielded_idx:]
 
     if deallocate_cache_buffers:
-        deallocate_kv_cache_buffers_of_model(model.gpt_model)
+        deallocate_kv_cache_buffers_of_model(gpt_model)
 
 
 def batched_generate_fn(
-    model: LongContextInferenceModel,
+    inference: SingleTokenLongContextInference,
     prompts: torch.Tensor,
     max_returned_tokens: int,
     *,
@@ -226,7 +236,7 @@ def batched_generate_fn(
     ctx = torch.no_grad() if no_inference_mode else torch.inference_mode()
     with ctx:
         yield from _batched_generate_impl(
-            model,
+            inference,
             prompts,
             max_returned_tokens,
             ignore_index=ignore_index,
@@ -239,7 +249,7 @@ def batched_generate_fn(
 
 
 def _batched_generate_impl(
-    model: LongContextInferenceModel,
+    inference: SingleTokenLongContextInference,
     prompts: torch.Tensor,
     max_returned_tokens: int,
     *,
@@ -268,8 +278,8 @@ def _batched_generate_impl(
     Note: Semantics have changed from `LitGPT` code!
 
     Args:
-        model: The model to use. Must be :class:`LongContextInferenceModel`,
-            defining the chunking to be used.
+        inference: The single token inference driver to be used. Wraps
+            class:`LongContextInferenceModel` as `inference.model`.
         prompts: Token IDs or logits for the final prompt position, see above
         max_returned_tokens: The maximum number of tokens returned
         ignore_index: Token index returned for batch dimensions where generation
@@ -344,13 +354,13 @@ def _batched_generate_impl(
     # KV caches permit, subsequent ones (if any) chosen by the model.
     # We need the logits for the final chunk in order to generate the
     # first token below. Chunk size does not matter, just must be nonzero.
-    gpt_model = model.gpt_model
+    gpt_model = inference.model.gpt_model
     if is_logits:
         gpt_model.max_seq_length = input_pos + max_returned_tokens
         logits_final_position = prompts
     else:
         gpt_model.max_seq_length = prompt_len + max_returned_tokens
-        logits_final_position = model(prompts, targets=None)
+        logits_final_position = inference.process_prompt(prompts)
     assert logits_final_position.ndim == 3 and logits_final_position.shape[1] == 1, (
         logits_final_position.shape,
     )
@@ -378,7 +388,7 @@ def _batched_generate_impl(
             logits_stack = logits_final_position
             logits_final_position = None
         else:
-            logits_stack = gpt_model(tokens)
+            logits_stack = inference.inference_for_token(tokens)
         tokens = batched_sample(logits_stack, kwargs=sample_args)
         int_tokens = [token.item() for token in tokens]
 
@@ -430,12 +440,12 @@ def _batched_generate_impl(
             break
 
     if deallocate_cache_buffers:
-        deallocate_kv_cache_buffers_of_model(model.gpt_model)
+        deallocate_kv_cache_buffers_of_model(gpt_model)
 
 
 @torch.inference_mode()
 def generate(
-    model: LongContextInferenceModel,
+    inference: SingleTokenLongContextInference,
     prompt: torch.Tensor,
     max_returned_tokens: int,
     *,
@@ -451,7 +461,7 @@ def generate(
     as many tokens as requested. The implementation of this function is
     modified from A. Karpathy's nanoGPT.
 
-    `model` must be of type :class:`LongContextInferenceModel`, which
+    `inference` must be of type :class:`SingleTokenLongContextInference`, which
     deals with chunking `prompt` into parts if it is too long. For example:
 
     ```python
@@ -460,16 +470,18 @@ def generate(
         head_model=None,
         chunk_size=chunk_size,
     )
+    inference = DefaultSingleTokenInference(model)
     ```
 
     creates the `model` argument from a :class:`GPT` `gpt_model` and
-    chunk size `chunk_size`. The first chunk will be as long as KV
-    caches support, subsequent chunks will be of length `chunk_size`.
-    Here, `gpt_model` must have KV caches assigned.
+    chunk size `chunk_size`, then a default `inference` from the model.
+    The first chunk will be as long as KV caches support, subsequent chunks
+    will be of length `chunk_size`. Here, `gpt_model` must have KV caches
+    assigned.
 
     Args:
-        model: The model to use. Must be :class:`LongContextInferenceModel`,
-            defining the chunking to be used.
+        inference: The single token inference driver to be used. Wraps
+            class:`LongContextInferenceModel` as `inference.model`.
         prompt: Tensor of shape (T) with indices of the prompt sequence.
         max_returned_tokens: The maximum number of tokens to return (given plus generated).
         temperature: Scales the predicted logits by 1 / temperature.
@@ -498,7 +510,7 @@ def generate(
         generate_fn(
             include_prompt=include_prompt,
             include_eos=True,
-            model=model,
+            inference=inference,
             prompt=prompt,
             max_returned_tokens=max_returned_tokens,
             temperature=temperature,

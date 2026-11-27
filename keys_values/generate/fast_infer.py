@@ -26,8 +26,10 @@ from keys_values.attention.base import (
     SDPA_IMPL_FLEXATTENTION,
 )
 from keys_values.attention.sdpa_op import scatter_on_buffers
+from keys_values.generate.single_token import SingleTokenLongContextInference
 from keys_values.kvcache.base import DefaultKVCache
 from keys_values.kvcache.next_positions import NextPositionsMixin
+from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
 from keys_values.utils import index_to_3d
 
@@ -35,7 +37,7 @@ from keys_values.utils import index_to_3d
 class SingleTokenInferenceKVCache(DefaultKVCache):
     """
     Specific :class:`DefaultKVCache` implementation used to build the single
-    token inference graph in :class:`SingleTokenFastInference`. What is
+    token inference graph in :class:`SingleTokenFastInferenceDriver`. What is
     special here:
 
     - `input_pos >= cache_length`, KV buffers must be full
@@ -64,9 +66,9 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
         batch_size, n_query_groups, cache_length, head_size = keys.shape
         assert n_query_groups == config.n_query_groups
         assert head_size == config.head_size
-        if input_pos < cache_length:
+        if not torch.compiler.is_compiling() and input_pos.item() < cache_length:
             raise ValueError(
-                f"input_pos = {input_pos}, must be >= cache_length = {cache_length}"
+                f"input_pos = {input_pos.item()}, must be >= cache_length = {cache_length}"
             )
         assert input_pos.ndim == 1 and input_pos.numel() == 1
         super().__init__(
@@ -110,8 +112,14 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
 
     @property
     def input_pos(self) -> int:
-        # Calling self._input_pos.item() would break the graph
-        raise NotImplementedError
+        if not torch.compiler.is_compiling():
+            return self._input_pos.item()
+        else:
+            raise IndexError("Method not supported when compiling a graph!")
+
+    def _forward_check_args(self, query, key, value, token_idx):
+        if not torch.compiler.is_compiling():
+            super()._forward_check_args(query, key, value, token_idx)
 
     def token_positions(self) -> torch.Tensor:
         if self._new_token_positions is None:
@@ -206,7 +214,7 @@ def single_token_forward(
     model: GPT,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Expression to be compiled in :class:`SingleTokenFastInference`.
+    Expression to be compiled in :class:`SingleTokenFastInferenceDriver`.
 
     Args:
         token_idx: New input tokens, `(batch_size, num)`
@@ -271,7 +279,7 @@ def single_token_forward(
     return logits, new_keys, new_values, new_token_positions
 
 
-class SingleTokenFastInference:
+class SingleTokenFastInferenceDriver:
     """
     Driver for fast inference in a single new token. This is needed during
     token generation.
@@ -528,9 +536,72 @@ class SingleTokenFastInference:
             raise ValueError(
                 f"token_idx.shape = {token_idx.shape}: Must be 2D and first axis {self.batch_size}"
             )
-        # Run forward pass. This updates all KV caches
+        # TODO: CC replaces this by the code below:
         logits = self.model(token_idx)
+        # ==> CHECK!!! Not what I want!
+        # Sequential single-token forward passes, writing each token to the
+        # same cache slot the compiled graph used (frozen positions from
+        # self._next_positions). This keeps H2O attention scores single-token
+        # so the resulting _next_positions matches sequential inference exactly.
+        #kv_caches = self.model.get_kv_caches()
+        #num = token_idx.shape[1]
+        #for i in range(num):
+        #    for layer_idx, cache in enumerate(kv_caches):
+        #        cache._next_positions = self._next_positions[layer_idx, :, :, i : i + 1].clone()
+        #    self.model(token_idx[:, i : i + 1])
         # Copy new buffer/index contents from caches, set `next_positions`
         self._copy_from_caches()
         self._set_next_positions()
         self._pos_in_chunk = 0
+
+
+class FastSingleTokenInference(SingleTokenLongContextInference):
+    """
+    Wraps :class:`SingleTokenFastInferenceDriver`. The driver object is
+    created here.
+    """
+
+    def __init__(
+        self,
+        model: LongContextInferenceModel,
+        chunk_size: int,
+        recreate_graph: bool = True,
+    ):
+        self._model = model
+        self._driver = SingleTokenFastInferenceDriver(
+            model=model.gpt_model,
+            chunk_size=chunk_size,
+        )
+        self._recreate_graph = recreate_graph
+        self._token_idx_since_last_update = None
+
+    @property
+    def model(self) -> LongContextInferenceModel:
+        return self._model
+
+    def process_prompt(self, prompt: torch.Tensor) -> torch.Tensor:
+        logits = self._model(prompt, targets=None)
+        self._driver.initialize(recreate_graph=self._recreate_graph)
+        self._token_idx_since_last_update = []
+        return logits
+
+    def inference_for_token(self, token_idx: torch.Tensor) -> torch.Tensor:
+        if self._driver.num_tokens_left_in_chunk == 0:
+            self.update_model_with_remaining_tokens()
+        self._token_idx_since_last_update.append(token_idx)
+        return self._driver.forward(token_idx)
+
+    def update_model_with_remaining_tokens(self):
+        """
+        Can be called to update `model` with tokens returned by
+        :meth:`inference_for_token` since the last recent update due to the
+        chunk being completed.
+
+        """
+        if self._token_idx_since_last_update:
+            token_idx_since_last_update = torch.cat(
+                [x.view(-1, 1) for x in self._token_idx_since_last_update],
+                dim=-1,
+            )
+            self._driver.update(token_idx_since_last_update)
+            self._token_idx_since_last_update = []
