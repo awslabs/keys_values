@@ -18,6 +18,7 @@ import torch
 
 from litgpt.model import build_rope_cache, apply_rope as apply_rope_litgpt
 
+from keys_values.attention.attention_utils import InputPosType
 from keys_values.config import Config
 
 # Opt-in fused Triton RoPE. Toggled via `set_fused_rope_enabled(True)` during
@@ -54,13 +55,17 @@ class PositionEncoding:
     def __call__(
         self,
         x: torch.Tensor,
-        input_pos: int,
+        input_pos: InputPosType,
         block_idx: int,
         **kwargs,
     ) -> torch.Tensor:
         """
         Encodes `x` (queries, keys) corresponding to token positions
         `range(input_pos, input_pos + x_len)`, where `x_len = x.shape[2]`.
+
+        Note: If to be used inside a compiled graph where `input_pos` is an
+        input tensor, `input_pos` has type `Tuple[torch.Tensor, bool]`, see
+        comments for `InputPosType`.
 
         Args:
             x (torch.Tensor): Input tensor, shape
@@ -201,7 +206,7 @@ class LinearPositionEncoding(PositionEncoding):
     def __call__(
         self,
         x: torch.Tensor,
-        input_pos: int,
+        input_pos: InputPosType,
         block_idx: int,
         **kwargs,
     ) -> torch.Tensor:
@@ -210,7 +215,8 @@ class LinearPositionEncoding(PositionEncoding):
                 f"x.shape = {x.shape}, must be at least 2D, and last dimension must be {self.n_elem}"
             )
         x_len = x.shape[-2]
-        if input_pos < 0 or input_pos + x_len > self.context_width:
+        input_pos_explicit = not isinstance(input_pos, tuple)
+        if input_pos_explicit and (input_pos < 0 or input_pos + x_len > self.context_width):
             raise ValueError(
                 f"input_pos = {input_pos}, x_len = {x_len} (x.shape = {x.shape}), must have 0 <= input_pos, input_pos + x_len <= {self.context_width}"
             )
@@ -218,7 +224,21 @@ class LinearPositionEncoding(PositionEncoding):
             self._device = x.device
             self._cos = self._cos.to(device=self._device)
             self._sin = self._sin.to(device=self._device)
-        if self.rope_local_base_freq is None:
+        if not input_pos_explicit:
+            input_pos = input_pos[0]
+            ind_kwargs = dict(device=self._cos.device, dtype=input_pos.dtype)
+            indices = (
+                torch.arange(x_len, **ind_kwargs)
+                + input_pos.to(**ind_kwargs)
+            )
+            if self.rope_local_base_freq is None:
+                cos = self._cos[indices, :].unsqueeze(0)
+                sin = self._sin[indices, :].unsqueeze(0)
+            else:
+                ind = self.rope_indices[block_idx]
+                cos = self._cos[indices, :, ind].unsqueeze(0)
+                sin = self._sin[indices, :, ind].unsqueeze(0)
+        elif self.rope_local_base_freq is None:
             cos = self._cos[input_pos : (input_pos + x_len), :].unsqueeze(0)
             sin = self._sin[input_pos : (input_pos + x_len), :].unsqueeze(0)
         else:

@@ -16,6 +16,7 @@ from typing import Optional, Dict, Tuple, List, Iterable, Any
 import torch
 
 from keys_values.attention import KeysAndValues
+from keys_values.attention.attention_utils import InputPosType
 from keys_values.config import Config
 from keys_values.kvcache.attn_weights import (
     AttnWeightsKVCache,
@@ -64,7 +65,7 @@ class InferenceReplayCacheMixin:
         self.token_chunk_pos = 0
 
     @property
-    def input_pos(self) -> int:
+    def input_pos(self) -> InputPosType:
         raise NotImplementedError
 
     @property
@@ -180,7 +181,7 @@ class InferenceAttnWeightsReplayCache(AttnWeightsKVCache, InferenceReplayCacheMi
         self.replay_log = replay_log
 
     @property
-    def input_pos(self) -> int:
+    def input_pos(self) -> InputPosType:
         return super().input_pos
 
     @property
@@ -264,7 +265,7 @@ class InferenceDenseReplayCache(DenseKVCache, InferenceReplayCacheMixin):
         self.replay_log = replay_log
 
     @property
-    def input_pos(self) -> int:
+    def input_pos(self) -> InputPosType:
         return super().input_pos
 
     @property
@@ -329,7 +330,7 @@ class InferenceLastRecentlyInsertedReplayCache(
         self.replay_log = replay_log
 
     @property
-    def input_pos(self) -> int:
+    def input_pos(self) -> InputPosType:
         return super().input_pos
 
     @property
@@ -402,7 +403,7 @@ class InferenceSmartInitialLastRecentlyInsertedReplayCache(
         self.replay_log = replay_log
 
     @property
-    def input_pos(self) -> int:
+    def input_pos(self) -> InputPosType:
         return super().input_pos
 
     @property

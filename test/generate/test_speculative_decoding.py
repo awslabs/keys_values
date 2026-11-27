@@ -13,7 +13,7 @@
 # limitations under the License.
 import itertools
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import pytest
 import torch
@@ -21,7 +21,6 @@ from scipy.stats import chi2
 
 from litgpt.generate.base import sample_top_p
 
-from keys_values.config import Config
 from keys_values.generate.base import generate, generate_fn
 import keys_values.generate.speculative_decoding as spec
 from keys_values.generate.speculative_decoding import (
@@ -31,75 +30,13 @@ from keys_values.generate.speculative_decoding import (
     speculative_generate,
     speculative_generate_fn,
 )
+from keys_values.generate.test_utils import _gpt, _inference_model
 from keys_values.kvcache.buffers import DefaultKVCacheBuffers
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.quant_buffers import QuantizedKVCacheBuffers
 from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
 from keys_values.utils import VerbosityLevels
-
-
-def _config(vocab_size: int) -> Config:
-    return Config(
-        block_size=128,
-        vocab_size=vocab_size,
-        padded_vocab_size=vocab_size,
-        n_layer=2,
-        n_head=4,
-        n_embd=32,
-        rotary_percentage=1.0,
-    )
-
-
-def _gpt(seed: int, vocab_size: int, noise: float = 0.0) -> GPT:
-    """
-    Random model in double precision, so that greedy decisions do not depend
-    on how tokens are chunked. If `noise > 0`, parameters are perturbed,
-    which is used to create draft models agreeing partially with the target.
-
-    """
-    torch.random.manual_seed(seed)
-    gpt_model = GPT(_config(vocab_size)).to(dtype=torch.float64).eval()
-    if noise > 0:
-        gen = torch.Generator().manual_seed(seed + 9999)
-        with torch.no_grad():
-            for param in gpt_model.parameters():
-                scale = noise * param.std().clamp_min(1e-3)
-                param.add_(scale * torch.randn(param.shape, generator=gen).to(param))
-    return gpt_model
-
-
-def _inference_model(
-    gpt_model: GPT,
-    max_seq_length: int,
-    cache_name: str = "dense",
-    cache_length: Optional[int] = None,
-) -> LongContextInferenceModel:
-    gpt_model.max_seq_length = max_seq_length
-    if cache_name == "dense":
-        gpt_model.set_kv_caches(batch_size=1, dtype=torch.float64)
-    else:
-        gpt_model.assign_kv_caches(
-            KVCacheFactory.create(
-                gpt_model=gpt_model,
-                name=cache_name,
-                max_batch_size=1,
-                cache_length=max_seq_length if cache_length is None else cache_length,
-                dtype=torch.float64,
-                cache_kwargs=(
-                    dict(init_grace_tokens=2)
-                    if cache_name.startswith("lastrec")
-                    else None
-                ),
-            )
-        )
-    return LongContextInferenceModel(
-        gpt_model=gpt_model,
-        head_model=None,
-        chunk_size=4,
-        verbose=VerbosityLevels.NONE,
-    )
-
 
 # Draft models: identical weights, partially agreeing, unrelated
 DRAFT_KINDS = {
@@ -267,7 +204,7 @@ def test_accept_or_reject_greedy():
     [
         (cache_name, draft_kind, speculative_k, sample_kwargs)
         for cache_name, draft_kind, speculative_k, sample_kwargs in itertools.product(
-            ["dense", "lastrec-default"],
+            ["dense-default", "lastrec-default"],
             list(DRAFT_KINDS.keys()),
             [1, 4],
             [dict(temperature=0.0), dict(temperature=1.0, top_k=1)],
@@ -467,7 +404,7 @@ def test_lastrec_with_eviction(draft_kind, sample_kwargs):
         _gpt(vocab_size=vocab_size, **DRAFT_KINDS[draft_kind]),
         max_returned_tokens,
         "lastrec-default",
-        cache_length,
+        cache_length=cache_length,
     )
     stats = SpeculativeDecodingStats()
     output = speculative_generate(
@@ -709,7 +646,7 @@ def test_errors():
     vocab_size, max_returned_tokens = 32, 20
     prompt = _prompt(5, 5, vocab_size)
 
-    def models(target_cache="dense", draft_cache="dense", draft_vocab=vocab_size):
+    def models(target_cache="dense-default", draft_cache="dense-default", draft_vocab=vocab_size):
         return (
             _inference_model(_gpt(1, vocab_size), max_returned_tokens, target_cache),
             _inference_model(_gpt(2, draft_vocab), max_returned_tokens, draft_cache),

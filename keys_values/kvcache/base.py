@@ -23,6 +23,7 @@ from keys_values.attention import (
     KeysAndValues,
     MultiHeadSelfAttention,
 )
+from keys_values.attention.attention_utils import InputPosType, is_prefill
 from keys_values.attention.use_eager_kernel import transform_mha_kwargs
 
 
@@ -182,8 +183,13 @@ class KVCache(torch.nn.Module):
         return self._n_query_groups
 
     @property
-    def input_pos(self) -> int:
+    def input_pos(self) -> InputPosType:
         """
+        In general, the return type is `int`. But if the cache is to be used
+        in a compiled graph where `input_pos` is a `torch.Tensor` input, the
+        return type is `Tuple[torch.Tensor, bool]` (see comments for
+        `InputPosType`).
+
         Returns:
             Number of tokens for which KV information has been cached,
             since the last recent :meth:`reset` call. Each time :meth:`forward`
@@ -446,7 +452,7 @@ class DefaultKVCache(KVCache):
         self._input_pos = 0
 
     @property
-    def input_pos(self) -> int:
+    def input_pos(self) -> InputPosType:
         return self._input_pos
 
     @property
@@ -474,7 +480,7 @@ class DefaultKVCache(KVCache):
         specified.
 
         """
-        for_prefill = self.input_pos == 0
+        for_prefill = is_prefill(self.input_pos)
         if query.ndim != 4:
             raise ValueError("query, key, value must be 4D tensors")
         batch_size, _, num, _ = query.shape
@@ -559,7 +565,7 @@ class DefaultKVCache(KVCache):
     ) -> torch.Tensor:
         self._forward_check_args(query, key, value, token_idx)
         input_pos = self.input_pos  # Value before increase
-        for_prefill = input_pos == 0
+        for_prefill = is_prefill(input_pos)
         num = query.shape[2]
 
         # Call :meth:`_forward` or :meth:`_prefill`, depending on `for_prefill`

@@ -45,6 +45,13 @@ InputPosType = Union[int, Tuple[torch.Tensor, bool]]
 InputPosNoFlagType = Union[int, torch.Tensor]
 
 
+def is_prefill(input_pos: InputPosType) -> bool:
+    if isinstance(input_pos, tuple):
+        return input_pos[1]
+    else:
+        return input_pos == 0
+
+
 def filter_sdpa_kernels(
     sdpa_kernels: List[SDPBackend],
     query: torch.Tensor,

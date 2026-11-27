@@ -17,7 +17,10 @@ from typing import Optional, Tuple
 import torch
 
 from keys_values.config import Config
-from keys_values.attention.attention_utils import range_from_input_pos
+from keys_values.attention.attention_utils import (
+    range_from_input_pos,
+    InputPosType,
+)
 from keys_values.attention.base import (
     MultiHeadSelfAttention,
     DefaultKeysAndValues,
@@ -111,11 +114,8 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
         return self._orig_keys.shape[0]
 
     @property
-    def input_pos(self) -> int:
-        if not torch.compiler.is_compiling():
-            return self._input_pos.item()
-        else:
-            raise IndexError("Method not supported when compiling a graph!")
+    def input_pos(self) -> InputPosType:
+        return self._input_pos, False
 
     def _forward_check_args(self, query, key, value, token_idx):
         if not torch.compiler.is_compiling():
@@ -196,7 +196,7 @@ class SingleTokenInferenceKVCache(DefaultKVCache):
         attn_outputs, _ = self.mha.scaled_dot_product_attention(
             query=query,
             k_and_v=DefaultKeysAndValues(self._new_keys, self._new_values),
-            input_pos=(self._input_pos, False),
+            input_pos=self.input_pos,
             token_positions=self._new_token_positions,
             return_attn_weights=False,
             **self._sdpa_kwargs,
@@ -455,13 +455,13 @@ class SingleTokenFastInferenceDriver:
         """
         fst_cache = self.model.get_kv_caches()[0]
         self.batch_size = fst_cache.batch_size
-        self._input_pos = fst_cache.input_pos
-        if self._input_pos < fst_cache.cache_length:
+        input_pos = fst_cache.input_pos
+        if input_pos < fst_cache.cache_length:
             raise IndexError("Can only initialize when all caches are full")
         for cache in self.model.get_kv_caches():
-            assert cache.input_pos == self._input_pos, (
+            assert cache.input_pos == input_pos, (
                 cache.input_pos,
-                self._input_pos,
+                input_pos,
             )
             assert cache.batch_size == self.batch_size, (
                 cache.batch_size,
@@ -536,19 +536,8 @@ class SingleTokenFastInferenceDriver:
             raise ValueError(
                 f"token_idx.shape = {token_idx.shape}: Must be 2D and first axis {self.batch_size}"
             )
-        # TODO: CC replaces this by the code below:
+        # Forward pass: Updates all KV caches
         logits = self.model(token_idx)
-        # ==> CHECK!!! Not what I want!
-        # Sequential single-token forward passes, writing each token to the
-        # same cache slot the compiled graph used (frozen positions from
-        # self._next_positions). This keeps H2O attention scores single-token
-        # so the resulting _next_positions matches sequential inference exactly.
-        #kv_caches = self.model.get_kv_caches()
-        #num = token_idx.shape[1]
-        #for i in range(num):
-        #    for layer_idx, cache in enumerate(kv_caches):
-        #        cache._next_positions = self._next_positions[layer_idx, :, :, i : i + 1].clone()
-        #    self.model(token_idx[:, i : i + 1])
         # Copy new buffer/index contents from caches, set `next_positions`
         self._copy_from_caches()
         self._set_next_positions()
