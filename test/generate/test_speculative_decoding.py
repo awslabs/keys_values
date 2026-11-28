@@ -30,10 +30,11 @@ from keys_values.generate.speculative_decoding import (
     speculative_generate,
     speculative_generate_fn,
 )
-from keys_values.generate.test_utils import _gpt, _inference_model
+from keys_values.generate.test_utils import _gpt, _inference_model, _prompt
 from keys_values.kvcache.buffers import DefaultKVCacheBuffers
 from keys_values.kvcache.factory import KVCacheFactory
 from keys_values.kvcache.quant_buffers import QuantizedKVCacheBuffers
+from keys_values.kvcache.test_utils import product_with_devices
 from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
 from keys_values.utils import VerbosityLevels
@@ -46,17 +47,10 @@ DRAFT_KINDS = {
     "unrelated": dict(seed=2, noise=0.0),
 }
 
-
 # Greedy decoding with plain generation, for all LitGPT versions. Up to LitGPT
 # 0.5.12, `sample` with `temperature=0` and `top_p > 0` does not pick the most
 # probable token, but samples from `softmax(logits)`, see `is_greedy`.
 GREEDY_REFERENCE = dict(temperature=1.0, top_k=1)
-
-
-def _prompt(seed: int, length: int, vocab_size: int) -> torch.Tensor:
-    return torch.randint(
-        0, vocab_size, (length,), generator=torch.Generator().manual_seed(seed)
-    )
 
 
 @pytest.mark.parametrize(
@@ -200,18 +194,20 @@ def test_accept_or_reject_greedy():
 
 
 @pytest.mark.parametrize(
-    "cache_name, draft_kind, speculative_k, sample_kwargs",
-    [
-        (cache_name, draft_kind, speculative_k, sample_kwargs)
-        for cache_name, draft_kind, speculative_k, sample_kwargs in itertools.product(
-            ["dense-default", "lastrec-default"],
-            list(DRAFT_KINDS.keys()),
-            [1, 4],
-            [dict(temperature=0.0), dict(temperature=1.0, top_k=1)],
-        )
-    ],
+    *product_with_devices(
+        [
+            (cache_name, draft_kind, speculative_k, sample_kwargs)
+            for cache_name, draft_kind, speculative_k, sample_kwargs in itertools.product(
+                ["dense-default", "lastrec-default"],
+                list(DRAFT_KINDS.keys()),
+                [1, 4],
+                [dict(temperature=0.0), dict(temperature=1.0, top_k=1)],
+            )
+        ],
+        "cache_name, draft_kind, speculative_k, sample_kwargs",
+    )
 )
-def test_greedy_matches_generate(cache_name, draft_kind, speculative_k, sample_kwargs):
+def test_greedy_matches_generate(device, cache_name, draft_kind, speculative_k, sample_kwargs):
     """
     Greedy speculative decoding must produce the greedy output of the target
     model, whatever the draft model. For `lastrec`, the cache is large enough
@@ -220,9 +216,9 @@ def test_greedy_matches_generate(cache_name, draft_kind, speculative_k, sample_k
     """
     vocab_size, prompt_len, max_returned_tokens = 32, 6, 32
     for prompt_seed in range(2):
-        prompt = _prompt(100 + prompt_seed, prompt_len, vocab_size)
+        prompt = _prompt(100 + prompt_seed, prompt_len, vocab_size, device=device)
         expected = generate(
-            _inference_model(_gpt(1, vocab_size), max_returned_tokens),
+            _inference_model(_gpt(1, vocab_size, device=device), max_returned_tokens, device=device),
             prompt,
             max_returned_tokens,
             **GREEDY_REFERENCE,
@@ -230,7 +226,7 @@ def test_greedy_matches_generate(cache_name, draft_kind, speculative_k, sample_k
         stats = SpeculativeDecodingStats()
         output = speculative_generate(
             target_model=_inference_model(
-                _gpt(1, vocab_size), max_returned_tokens, cache_name
+                _gpt(1, vocab_size, device=device), max_returned_tokens, cache_name, device=device,
             ),
             draft_model=_inference_model(
                 _gpt(vocab_size=vocab_size, **DRAFT_KINDS[draft_kind]),
@@ -324,13 +320,15 @@ def _exact_joint_distribution(
 
 
 @pytest.mark.parametrize(
-    "cache_name, sample_kwargs, draft_noise",
-    [
-        ("dense", dict(temperature=0.7, top_k=2, top_p=0.95), 1.5),
-        ("lastrec-default", dict(temperature=1.2), 0.5),
-    ],
+    *product_with_devices(
+        [
+            ("dense", dict(temperature=0.7, top_k=2, top_p=0.95), 1.5),
+            ("lastrec-default", dict(temperature=1.2), 0.5),
+        ],
+        "cache_name, sample_kwargs, draft_noise",
+    )
 )
-def test_sampling_is_lossless(cache_name, sample_kwargs, draft_noise):
+def test_sampling_is_lossless(device, cache_name, sample_kwargs, draft_noise):
     """
     End-to-end Monte Carlo test: The joint distribution of the first four
     generated tokens must be the one of the target model. With
@@ -340,14 +338,14 @@ def test_sampling_is_lossless(cache_name, sample_kwargs, draft_noise):
 
     """
     vocab_size, num_new, num_samples = 3, 4, 1500
-    prompt = _prompt(7, 5, vocab_size)
+    prompt = _prompt(7, 5, vocab_size, device=device)
     max_returned_tokens = prompt.numel() + num_new
-    target_gpt = _gpt(1, vocab_size)
-    draft_gpt = _gpt(1, vocab_size, noise=draft_noise)
+    target_gpt = _gpt(1, vocab_size, device=device)
+    draft_gpt = _gpt(1, vocab_size, noise=draft_noise, device=device)
     exact = _exact_joint_distribution(target_gpt, prompt, num_new, sample_kwargs)
     exact_draft = _exact_joint_distribution(draft_gpt, prompt, num_new, sample_kwargs)
-    target_model = _inference_model(target_gpt, max_returned_tokens, cache_name)
-    draft_model = _inference_model(draft_gpt, max_returned_tokens, cache_name)
+    target_model = _inference_model(target_gpt, max_returned_tokens, cache_name, device=device)
+    draft_model = _inference_model(draft_gpt, max_returned_tokens, cache_name, device=device)
     torch.random.manual_seed(12345)
     counts = torch.zeros_like(exact)
     stats = SpeculativeDecodingStats()

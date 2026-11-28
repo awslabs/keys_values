@@ -88,3 +88,18 @@ def _inference_model(
         chunk_size=chunk_size,
         verbose=VerbosityLevels.NONE,
     )
+
+
+def _prompt(
+    seed: int,
+    length: int,
+    vocab_size: int,
+    device: torch.device = torch.device("cpu"),
+) -> torch.Tensor:
+    return torch.randint(
+        0,
+        vocab_size,
+        (length,),
+        generator=torch.Generator().manual_seed(seed),
+        device=device,
+    )

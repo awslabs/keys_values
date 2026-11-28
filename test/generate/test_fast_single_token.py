@@ -23,23 +23,12 @@ from keys_values.generate.single_token import (
     DefaultSingleTokenInference,
     SingleTokenLongContextInference,
 )
-from keys_values.generate.test_utils import _gpt, _inference_model
+from keys_values.generate.test_utils import _gpt, _inference_model, _prompt
 from keys_values.kvcache.basics import LastRecentlyInsertedKVCache
 from keys_values.kvcache.h2o import H2OKVCache
 from keys_values.kvcache.test_utils import product_with_devices
 from keys_values.long_context import LongContextInferenceModel
 from keys_values.model import GPT
-
-
-def _prompt(
-    seed: int,
-    length: int,
-    vocab_size: int,
-    device: torch.device = torch.device("cpu"),
-) -> torch.Tensor:
-    return torch.randint(
-        0, vocab_size, (length,), generator=torch.Generator().manual_seed(seed), device=device,
-    )
 
 
 class _LogitsRecorder(SingleTokenLongContextInference):
@@ -253,7 +242,9 @@ def args_fast_matches_default_with_frozen_positions() -> Tuple[str, List[tuple]]
             ["lastrec-default", "h2o-default"],
         )
     )
-    return product_with_devices(list_no_devices, "chunk_size, batch_size, prompt_size, cache_name")
+    return product_with_devices(
+        list_no_devices, "chunk_size, batch_size, prompt_size, cache_name"
+    )
 
 
 @pytest.mark.parametrize(*args_fast_matches_default_with_frozen_positions())
