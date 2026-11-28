@@ -230,8 +230,9 @@ class LinearPositionEncoding(PositionEncoding):
             self._cos = self._cos.to(device=self._device)
             self._sin = self._sin.to(device=self._device)
         if not input_pos_explicit:
+            input_pos = input_pos[0]
             indices = range_from_input_pos(
-                input_pos[0],
+                input_pos,
                 a=0,
                 b=x_len,
                 device=self._cos.device,

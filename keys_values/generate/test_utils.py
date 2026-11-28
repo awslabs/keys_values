@@ -34,7 +34,12 @@ def _config(vocab_size: int) -> Config:
     )
 
 
-def _gpt(seed: int, vocab_size: int, noise: float = 0.0) -> GPT:
+def _gpt(
+    seed: int,
+    vocab_size: int,
+    noise: float = 0.0,
+    device: torch.device = torch.device("cpu"),
+) -> GPT:
     """
     Random model in double precision, so that greedy decisions do not depend
     on how tokens are chunked. If `noise > 0`, parameters are perturbed,
@@ -42,7 +47,7 @@ def _gpt(seed: int, vocab_size: int, noise: float = 0.0) -> GPT:
 
     """
     torch.random.manual_seed(seed)
-    gpt_model = GPT(_config(vocab_size)).to(dtype=torch.float64).eval()
+    gpt_model = GPT(_config(vocab_size)).to(dtype=torch.float64, device=device).eval()
     if noise > 0:
         gen = torch.Generator().manual_seed(seed + 9999)
         with torch.no_grad():
@@ -59,6 +64,7 @@ def _inference_model(
     batch_size: int = 1,
     chunk_size: int = 4,
     cache_length: Optional[int] = None,
+    device: torch.device = torch.device("cpu"),
 ) -> LongContextInferenceModel:
     if cache_name is None:
         cache_name = "dense-default"
@@ -70,6 +76,7 @@ def _inference_model(
             max_batch_size=batch_size,
             cache_length=max_seq_length if cache_length is None else cache_length,
             dtype=torch.float64,
+            device=device,
             cache_kwargs=(
                 dict(init_grace_tokens=2) if cache_name.startswith("lastrec") else None
             ),

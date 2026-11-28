@@ -329,7 +329,6 @@ class SingleTokenFastInferenceDriver:
         self,
         model: GPT,
         chunk_size: int,
-        debug_for_testing: bool = False,
     ):
         self.model = model
         self.chunk_size = chunk_size
@@ -342,7 +341,6 @@ class SingleTokenFastInferenceDriver:
         self._token_positions = None
         self._input_pos = None
         self._inference_graph = None
-        self._debug_for_testing = debug_for_testing
         if model.get_kv_caches()[0].batch_size is not None:
             # If KV caches are already initialized and allocated, we can compile
             # the graph here. Otherwise, it is compiled with the first call of
@@ -530,6 +528,15 @@ class SingleTokenFastInferenceDriver:
         called also if `num_tokens_left_in_chunk > 0`, and `token_idx` can
         have a length different from `chunk_size - num_tokens_left_in_chunk`.
 
+        Note: Importantly, this update of KV cache states is not the same as
+        what is obtained by single token updates done with each :meth:`forward`
+        call, for several reasons:
+        - The KV cache buffers may use quantization, whereas the replicas
+          updated in :meth:`forward` are exact
+        - More important: A sequence of `chunk_size` single token updates is
+          not the same as a single update with `chunk_size` tokens (i.e., what
+          is done here)
+
         Args:
             token_idx: New token indices, `(batch_size, num)`
 
@@ -539,22 +546,8 @@ class SingleTokenFastInferenceDriver:
             raise ValueError(
                 f"token_idx.shape = {token_idx.shape}: Must be 2D and first axis {self.batch_size}"
             )
-        if not self._debug_for_testing:
-            logits = self.model(token_idx)
-        else:
-            # Sequential single-token forward passes, writing each token to the
-            # same cache slot the compiled graph used (frozen positions from
-            # self._next_positions). This keeps H2O attention scores single-token
-            # so the resulting _next_positions matches sequential inference exactly.
-            kv_caches = self.model.get_kv_caches()
-            num = token_idx.shape[1]
-            for i in range(num):
-                for layer_idx, cache in enumerate(kv_caches):
-                    assert isinstance(cache, AttnWeightsKVCache)
-                    cache._next_positions = self._next_positions[
-                        layer_idx, :, :, i : i + 1
-                    ].clone()
-                self.model(token_idx[:, i : i + 1])
+        # Forward pass: Update all KV caches
+        logits = self.model(token_idx)
         # Copy new buffer/index contents from caches, set `next_positions`
         self._copy_from_caches()
         self._set_next_positions()
@@ -572,13 +565,11 @@ class FastSingleTokenInference(SingleTokenLongContextInference):
         model: LongContextInferenceModel,
         chunk_size: int,
         recreate_graph: bool = True,
-        debug_for_testing: bool = False,
     ):
         self._model = model
         self._driver = SingleTokenFastInferenceDriver(
             model=model.gpt_model,
             chunk_size=chunk_size,
-            debug_for_testing=debug_for_testing,
         )
         self._recreate_graph = recreate_graph
         self._token_idx_since_last_update = None
