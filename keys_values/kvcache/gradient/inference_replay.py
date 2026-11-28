@@ -88,7 +88,7 @@ class InferenceReplayCacheMixin:
     def n_query_groups(self) -> int:
         raise NotImplementedError
 
-    def next_positions(self, num: int) -> torch.Tensor:
+    def next_positions_ext(self, num: int) -> torch.Tensor:
         kwargs = {"dtype": torch.int64, "device": self.device}
         if self.current_length < self.cache_length:
             assert num <= self.cache_length - self.current_length
@@ -205,7 +205,7 @@ class InferenceAttnWeightsReplayCache(AttnWeightsKVCache, InferenceReplayCacheMi
         return super().n_query_groups
 
     def next_positions_ext(self, num: int) -> torch.Tensor:
-        return InferenceReplayCacheMixin.next_positions(self, num)
+        return InferenceReplayCacheMixin.next_positions_ext(self, num)
 
     def _update(self, *args, **kwargs):
         pass
@@ -289,7 +289,7 @@ class InferenceDenseReplayCache(DenseKVCache, InferenceReplayCacheMixin):
         return super().n_query_groups
 
     def next_positions_ext(self, num: int) -> torch.Tensor:
-        return InferenceReplayCacheMixin.next_positions(self, num)
+        return InferenceReplayCacheMixin.next_positions_ext(self, num)
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
         InferenceReplayCacheMixin._validate_token_idx(self, token_idx)
@@ -354,7 +354,7 @@ class InferenceLastRecentlyInsertedReplayCache(
         return super().n_query_groups
 
     def next_positions_ext(self, num: int) -> torch.Tensor:
-        return InferenceReplayCacheMixin.next_positions(self, num)
+        return InferenceReplayCacheMixin.next_positions_ext(self, num)
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
         InferenceReplayCacheMixin._validate_token_idx(self, token_idx)
@@ -427,7 +427,7 @@ class InferenceSmartInitialLastRecentlyInsertedReplayCache(
         return super().n_query_groups
 
     def next_positions_ext(self, num: int) -> torch.Tensor:
-        return InferenceReplayCacheMixin.next_positions(self, num)
+        return InferenceReplayCacheMixin.next_positions_ext(self, num)
 
     def _validate_token_idx(self, token_idx: torch.Tensor):
         InferenceReplayCacheMixin._validate_token_idx(self, token_idx)

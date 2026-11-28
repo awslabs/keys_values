@@ -219,7 +219,9 @@ class LinearPositionEncoding(PositionEncoding):
             )
         x_len = x.shape[-2]
         input_pos_explicit = not isinstance(input_pos, tuple)
-        if input_pos_explicit and (input_pos < 0 or input_pos + x_len > self.context_width):
+        if input_pos_explicit and (
+            input_pos < 0 or input_pos + x_len > self.context_width
+        ):
             raise ValueError(
                 f"input_pos = {input_pos}, x_len = {x_len} (x.shape = {x.shape}), must have 0 <= input_pos, input_pos + x_len <= {self.context_width}"
             )

@@ -71,9 +71,7 @@ def _inference_model(
             cache_length=max_seq_length if cache_length is None else cache_length,
             dtype=torch.float64,
             cache_kwargs=(
-                dict(init_grace_tokens=2)
-                if cache_name.startswith("lastrec")
-                else None
+                dict(init_grace_tokens=2) if cache_name.startswith("lastrec") else None
             ),
         )
     )

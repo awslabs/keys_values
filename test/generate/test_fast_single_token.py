@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from contextlib import nullcontext
 import itertools
 from typing import List, Tuple
 from unittest.mock import patch
@@ -75,8 +76,8 @@ def _chunk_frozen_next_positions(chunk_size: int, start_input_pos: int):
             ``self.input_pos < start_input_pos`` are passed through.
     """
     original = AttnWeightsKVCache.next_positions
-    call_counts: dict = {}   # id(cache) -> int call count within generation
-    frozen: dict = {}        # id(cache) -> Tensor[..., chunk_size]
+    call_counts: dict = {}  # id(cache) -> int call count within generation
+    frozen: dict = {}  # id(cache) -> Tensor[..., chunk_size]
 
     def mocked(self, num: int) -> torch.Tensor:
         # Pass through during prompt processing or for chunk-sized batch calls
@@ -94,6 +95,7 @@ def _chunk_frozen_next_positions(chunk_size: int, start_input_pos: int):
 
 
 # --- Generation runner ---
+
 
 def _run_generation(
     inference: SingleTokenLongContextInference,
@@ -130,17 +132,24 @@ def _run_generation(
 
 # --- Test ---
 
+
 @pytest.mark.parametrize(
-    "chunk_size, batch_size, prompt_size",
+    "chunk_size, batch_size, prompt_size, cache_name",
     list(
         itertools.product(
-            [2, 3, 4],   # chunk_size
-            [1, 2],      # batch_size
-            [10, 12],    # prompt_size (must be >= cache_length below)
+            [2, 3, 4],  # chunk_size
+            [1, 2],  # batch_size
+            [10, 12],  # prompt_size (must be >= cache_length below)
+            ["lastrec-default", "h2o-default"],
         )
-    ),
+    )[0:1],
 )
-def test_fast_matches_default_with_frozen_positions(chunk_size, batch_size, prompt_size):
+def test_fast_matches_default_with_frozen_positions(
+    chunk_size,
+    batch_size,
+    prompt_size,
+    cache_name,
+):
     """
     ``FastSingleTokenInference`` must produce the same logits and sampled
     tokens as ``DefaultSingleTokenInference`` when the latter's
@@ -162,6 +171,7 @@ def test_fast_matches_default_with_frozen_positions(chunk_size, batch_size, prom
     assert prompt_size >= cache_length
     num_tokens = 3 * chunk_size
     max_seq_length = prompt_size + num_tokens
+    do_attn_weights_cache = "h2o" in cache_name
 
     prompt = _prompt(prompt_seed, prompt_size, vocab_size)
     # top_k=1 gives deterministic sampling without depending on the random seed
@@ -172,14 +182,21 @@ def test_fast_matches_default_with_frozen_positions(chunk_size, batch_size, prom
     lc_fast = _inference_model(
         gpt_model=gpt_fast,
         max_seq_length=max_seq_length,
-        cache_name="h2o-default",
+        cache_name=cache_name,
         batch_size=batch_size,
         chunk_size=chunk_size,
         cache_length=cache_length,
     )
     fast_recorder, fast_tokens = _run_generation(
-        FastSingleTokenInference(lc_fast, chunk_size=chunk_size),
-        prompt, batch_size, num_tokens, sample_kwargs,
+        FastSingleTokenInference(
+            lc_fast,
+            chunk_size=chunk_size,
+            debug_for_testing=do_attn_weights_cache,
+        ),
+        prompt,
+        batch_size,
+        num_tokens,
+        sample_kwargs,
     )
 
     # --- DefaultSingleTokenInference path with frozen position mock ---
@@ -187,16 +204,24 @@ def test_fast_matches_default_with_frozen_positions(chunk_size, batch_size, prom
     lc_default = _inference_model(
         gpt_model=gpt_default,
         max_seq_length=max_seq_length,
-        cache_name="h2o-default",
+        cache_name=cache_name,
         batch_size=batch_size,
         chunk_size=chunk_size,
         cache_length=cache_length,
     )
     mocked = _chunk_frozen_next_positions(chunk_size, start_input_pos=prompt_size)
-    with patch.object(AttnWeightsKVCache, "next_positions", new=mocked):
+    ctx = (
+        patch.object(AttnWeightsKVCache, "next_positions", new=mocked)
+        if do_attn_weights_cache
+        else nullcontext()
+    )
+    with ctx:
         default_recorder, default_tokens = _run_generation(
             DefaultSingleTokenInference(lc_default),
-            prompt, batch_size, num_tokens, sample_kwargs,
+            prompt,
+            batch_size,
+            num_tokens,
+            sample_kwargs,
         )
 
     # Both paths must yield the same number of logit tensors
@@ -209,7 +234,8 @@ def test_fast_matches_default_with_frozen_positions(chunk_size, batch_size, prom
     # inputs; differences would indicate the frozen-positions emulation is wrong.
     for step, (fl, dl) in enumerate(zip(fast_recorder.logits, default_recorder.logits)):
         torch.testing.assert_close(
-            fl, dl,
+            fl,
+            dl,
             msg=(
                 f"chunk_size={chunk_size}, batch_size={batch_size}, "
                 f"prompt_size={prompt_size}, step={step}"

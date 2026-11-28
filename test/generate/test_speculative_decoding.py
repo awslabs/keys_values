@@ -646,7 +646,11 @@ def test_errors():
     vocab_size, max_returned_tokens = 32, 20
     prompt = _prompt(5, 5, vocab_size)
 
-    def models(target_cache="dense-default", draft_cache="dense-default", draft_vocab=vocab_size):
+    def models(
+        target_cache="dense-default",
+        draft_cache="dense-default",
+        draft_vocab=vocab_size,
+    ):
         return (
             _inference_model(_gpt(1, vocab_size), max_returned_tokens, target_cache),
             _inference_model(_gpt(2, draft_vocab), max_returned_tokens, draft_cache),
