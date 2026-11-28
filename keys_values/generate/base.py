@@ -22,7 +22,11 @@ import torch._inductor.config
 from litgpt.generate.base import sample
 
 from keys_values.constants import DEFAULT_IGNORE_INDEX
-from keys_values.generate.single_token import SingleTokenLongContextInference
+from keys_values.generate.single_token import (
+    SingleTokenLongContextInference,
+    DefaultSingleTokenInference,
+)
+from keys_values.long_context import LongContextInferenceModel
 from keys_values.kvcache.factory import deallocate_kv_cache_buffers_of_model
 from keys_values.model import GPT
 
@@ -89,9 +93,21 @@ def batched_next_token(
     return batched_sample(logits_stack, kwargs=kwargs)
 
 
+ModelOrSingleTokenInference = Union[LongContextInferenceModel, SingleTokenLongContextInference]
+
+
+def _get_inference(
+    inference_or_model: ModelOrSingleTokenInference,
+) -> SingleTokenLongContextInference:
+    if isinstance(inference_or_model, LongContextInferenceModel):
+        return DefaultSingleTokenInference(inference_or_model)
+    else:
+        return inference_or_model
+
+
 @torch.inference_mode()
 def generate_fn(
-    inference: SingleTokenLongContextInference,
+    inference_or_model: ModelOrSingleTokenInference,
     prompt: torch.Tensor,
     max_returned_tokens: int,
     *,
@@ -107,8 +123,9 @@ def generate_fn(
     Generates tokens for a single prompt.
 
     Args:
-        inference: Driver for prompt processing and single token inference.
-            Wraps model as `inference.model`.
+        inference_or_model: Driver for prompt processing and single token
+            inference. Wraps model as `inference.model`. If a model is passed,
+            it is wrapped with `DefaultSingleTokenInference`.
         prompt: The tokenized prompt to generate from.
         max_returned_tokens: The maximum number of new tokens to return. Does not include the prompt tokens.
         temperature: The temp to pass to sample().
@@ -130,6 +147,7 @@ def generate_fn(
         top_k=top_k,
         top_p=top_p,
     )
+    inference = _get_inference(inference_or_model)
 
     assert (
         max_returned_tokens > prompt_size
@@ -207,7 +225,7 @@ def generate_fn(
 
 
 def batched_generate_fn(
-    inference: SingleTokenLongContextInference,
+    inference_or_model: ModelOrSingleTokenInference,
     prompts: torch.Tensor,
     max_returned_tokens: int,
     *,
@@ -233,6 +251,7 @@ def batched_generate_fn(
     forward/backward. Eval and generation-only callers keep the default (faster)
     inference mode.
     """
+    inference = _get_inference(inference_or_model)
     ctx = torch.no_grad() if no_inference_mode else torch.inference_mode()
     with ctx:
         yield from _batched_generate_impl(
@@ -445,7 +464,7 @@ def _batched_generate_impl(
 
 @torch.inference_mode()
 def generate(
-    inference: SingleTokenLongContextInference,
+    inference_or_model: ModelOrSingleTokenInference,
     prompt: torch.Tensor,
     max_returned_tokens: int,
     *,
@@ -461,27 +480,15 @@ def generate(
     as many tokens as requested. The implementation of this function is
     modified from A. Karpathy's nanoGPT.
 
-    `inference` must be of type :class:`SingleTokenLongContextInference`, which
-    deals with chunking `prompt` into parts if it is too long. For example:
-
-    ```python
-    model = LongContextInferenceModel(
-        gpt_model=gpt_model,
-        head_model=None,
-        chunk_size=chunk_size,
-    )
-    inference = DefaultSingleTokenInference(model)
-    ```
-
-    creates the `model` argument from a :class:`GPT` `gpt_model` and
-    chunk size `chunk_size`, then a default `inference` from the model.
-    The first chunk will be as long as KV caches support, subsequent chunks
-    will be of length `chunk_size`. Here, `gpt_model` must have KV caches
-    assigned.
+    `inference_or_model` must be of type :class:`SingleTokenLongContextInference`,
+    which deals with chunking `prompt` into parts if it is too long. If a
+    `LongContextInferenceModel` object is passed, it is wrapped into
+    `DefaultSingleTokenInference`.
 
     Args:
-        inference: The single token inference driver to be used. Wraps
-            class:`LongContextInferenceModel` as `inference.model`.
+        inference_or_model: Driver for prompt processing and single token
+            inference. Wraps model as `inference.model`. If a model is passed,
+            it is wrapped with `DefaultSingleTokenInference`.
         prompt: Tensor of shape (T) with indices of the prompt sequence.
         max_returned_tokens: The maximum number of tokens to return (given plus generated).
         temperature: Scales the predicted logits by 1 / temperature.
@@ -510,7 +517,7 @@ def generate(
         generate_fn(
             include_prompt=include_prompt,
             include_eos=True,
-            inference=inference,
+            inference_or_model=inference_or_model,
             prompt=prompt,
             max_returned_tokens=max_returned_tokens,
             temperature=temperature,
